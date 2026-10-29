@@ -70,7 +70,7 @@ type gitReviewAgents struct {
 // bounded pages of other sessions, then New session when the host offers it.
 func (m *appModel) openGitReviewTargetPicker(msg view.PreviewDraftMsg) tea.Cmd {
 	ws := m.gitReviews[msg.Owner]
-	if ws == nil || len(ws.draft.Snapshot().Comments) == 0 || ws.draft.Snapshot().Status == reviewdraft.StatusSending {
+	if ws == nil || (len(ws.draft.Snapshot().Comments) == 0 && ws.draft.Snapshot().General == "") || ws.draft.Snapshot().Status == reviewdraft.StatusSending {
 		return nil
 	}
 	if attempt, pending := ws.draft.Attempt(); pending {
@@ -88,7 +88,6 @@ func (m *appModel) openGitReviewTargetPicker(msg view.PreviewDraftMsg) tea.Cmd {
 		return nil
 	}
 	if ws.mode == view.ModeChanges {
-		// Git reviews go to the current agent only.
 		return m.previewCurrentAgent(ws, msg.Revision)
 	}
 	m.closeGitReviewPicker()
@@ -96,16 +95,15 @@ func (m *appModel) openGitReviewTargetPicker(msg view.PreviewDraftMsg) tea.Cmd {
 	choice := &gitReviewTargetChoice{owner: msg.Owner, revision: msg.Revision, options: map[string]gitReviewCandidate{}, ctx: ctx, cancel: cancel}
 	m.gitReviewPicker = choice
 	var targets []dialog.ReviewTarget
-	for _, c := range m.gitReviewCandidates(msg.Owner) {
-		choice.options[c.sessionID] = c
-		targets = append(targets, dialog.ReviewTarget{ID: c.sessionID, Label: c.label, Detail: c.detail})
+	for _, candidate := range m.gitReviewCandidates(msg.Owner) {
+		choice.options[candidate.sessionID] = candidate
+		targets = append(targets, dialog.ReviewTarget{ID: candidate.sessionID, Label: candidate.label, Detail: candidate.detail})
 	}
 	if m.reviewSessionFactory != nil {
 		targets = append(targets, dialog.ReviewTarget{ID: gitReviewNewTarget, Label: "New session…", Detail: "choose an agent", New: true})
 	}
-	pager := m.gitReviewCatalogPager()
 	open := core.CmdHandler(dialog.OpenDialogMsg{Model: dialog.NewReviewTargetDialog(dialog.ReviewTargetConfig{
-		DialogID: gitReviewTargetDialogID, Title: "Send review to…", Targets: targets, Default: m.gitReviewDefaultRecipient(msg.Owner), More: pager != nil, Context: choice,
+		DialogID: gitReviewTargetDialogID, Title: "Send review to…", Targets: targets, Default: m.gitReviewDefaultRecipient(msg.Owner), More: m.gitReviewCatalogPager() != nil, Context: choice,
 	})})
 	return open
 }
@@ -386,7 +384,7 @@ func (m *appModel) applyGitReviewNewSession(choice *gitReviewTargetChoice, agent
 	}
 	target := reviewdraft.Target{Kind: reviewdraft.TargetNewSession, SessionID: sessionID, AgentName: agent.Name, WorkingDir: ws.workingDir, Source: source}
 	label := "new " + agent.Name + " session in " + ws.workingDir + " · " + source + " (opens in background)"
-	ws.setPreview(&gitReviewPreview{token: token, revision: snap.Revision, label: label, target: target, payload: reviewdraft.Serialize(snap.Comments)})
+	ws.setPreview(&gitReviewPreview{token: token, revision: snap.Revision, label: label, target: target, payload: reviewdraft.SerializeWithGeneral(snap.Comments, snap.General), general: snap.General})
 	ws.pushDraft()
 	m.viewCacheValid = false
 	return nil
@@ -402,7 +400,7 @@ func newGitReviewSessionID() (string, error) {
 
 // submitGitReviewNewSession creates the session and admits the review as its
 // first input through the host factory; retries reuse both IDs.
-func (m *appModel) submitGitReviewNewSession(owner string, attempt reviewdraft.Attempt) tea.Cmd {
+func (m *appModel) submitGitReviewNewSession(owner string, attempt reviewdraft.Attempt, commentInput *reviewCommentInput) tea.Cmd {
 	factory := m.reviewSessionFactory
 	if factory == nil {
 		return nil
@@ -411,13 +409,13 @@ func (m *appModel) submitGitReviewNewSession(owner string, attempt reviewdraft.A
 	t := attempt.Target
 	return func() tea.Msg {
 		if t.Source == "" {
-			return gitReviewSendResult{owner: owner, requestID: attempt.RequestID, err: errors.New("new session source is unknown")}
+			return gitReviewSendResult{owner: owner, requestID: attempt.RequestID, commentInput: commentInput, err: errors.New("new session source is unknown")}
 		}
 		result, err := factory.CreateAndSubmit(ctx, ReviewSessionRequest{SessionID: t.SessionID, RequestID: attempt.RequestID, AgentName: t.AgentName, WorkingDir: t.WorkingDir, Source: t.Source, Body: attempt.Payload})
 		if err == nil && (!result.Accepted || result.SessionID != t.SessionID) {
 			err = errors.New("new session did not accept the review")
 		}
-		return gitReviewSendResult{owner: owner, requestID: attempt.RequestID, receipt: app.ReviewSubmitReceipt{Submission: runtime.Submission{SessionID: result.SessionID, TurnID: result.TurnID}, Durable: result.Durable}, newTitle: result.Title, err: err}
+		return gitReviewSendResult{owner: owner, requestID: attempt.RequestID, commentInput: commentInput, receipt: app.ReviewSubmitReceipt{Submission: runtime.Submission{SessionID: result.SessionID, TurnID: result.TurnID}, Durable: result.Durable}, newTitle: result.Title, err: err}
 	}
 }
 

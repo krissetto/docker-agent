@@ -9,10 +9,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
+
+// setUsageReadyForTest records a legitimate zero-valued live snapshot so tests
+// of usage layout/actions exercise the ready state without fabricating metrics.
+func setUsageReadyForTest(m *model) {
+	m.SetTokenUsage(&runtime.TokenUsageEvent{
+		SessionID:    "usage-ready-test",
+		AgentContext: runtime.AgentContext{AgentName: "root"},
+		Usage:        &runtime.Usage{},
+	})
+}
 
 // dollarOffset returns the index of "$" within a rendered (ANSI-stripped)
 // usage reading line, i.e. the start of the cost segment.
@@ -40,6 +51,7 @@ func TestSidebar_HandleClickType_Usage_Vertical(t *testing.T) {
 	m.sessionTitle = "Test"
 	m.width = 40
 	m.height = 50
+	setUsageReadyForTest(m)
 
 	// Force a render to record the usage click zone
 	_ = sb.View()
@@ -76,6 +88,7 @@ func TestSidebar_HandleClickType_Usage_Vertical_Compacting(t *testing.T) {
 	m.width = 40
 	m.height = 50
 	m.compacting = true
+	setUsageReadyForTest(m)
 
 	_ = sb.View()
 
@@ -104,6 +117,7 @@ func TestSidebar_HandleClickType_Usage_Vertical_Capped(t *testing.T) {
 	m.width = 40
 	m.height = 50
 	m.agentCompactionModel = "some/model"
+	setUsageReadyForTest(m)
 
 	_ = sb.View()
 
@@ -161,6 +175,7 @@ func TestSidebar_HandleClickType_Usage_Vertical_ScrollbarNotUsage(t *testing.T) 
 	m.sessionTitle = "Test"
 	m.width = 40
 	m.height = 4 // force overflow with real queued content below usage
+	setUsageReadyForTest(m)
 	m.SetQueuedMessages([]QueuedMessage{{ID: "one", Text: "queued one"}, {ID: "two", Text: "queued two"}, {ID: "three", Text: "queued three"}, {ID: "four", Text: "queued four"}})
 
 	_ = sb.View()
@@ -194,6 +209,7 @@ func TestSidebar_HandleClickType_Usage_Collapsed_SharedLine(t *testing.T) {
 	m.width = 80
 	m.sessionTitle = "Hi"
 	m.workingDirectory = "~/projects/myapp"
+	setUsageReadyForTest(m)
 
 	vm := m.computeCollapsedViewModel(m.contentWidth(false))
 	require.True(t, vm.WdAndUsageOnOneLine, "path and usage must share one line at this width")
@@ -231,6 +247,7 @@ func TestSidebar_HandleClickType_Usage_Collapsed_OwnLine(t *testing.T) {
 	m.width = 50
 	m.sessionTitle = "Hi"
 	m.workingDirectory = ""
+	setUsageReadyForTest(m)
 
 	vm := m.computeCollapsedViewModel(m.contentWidth(false))
 	require.NotEmpty(t, vm.UsageSummary)
@@ -265,6 +282,7 @@ func TestSidebar_HandleClickType_Usage_Collapsed_Capped(t *testing.T) {
 	m.sessionTitle = "Hi"
 	m.workingDirectory = ""
 	m.agentCompactionModel = "some/model"
+	setUsageReadyForTest(m)
 
 	vm := m.computeCollapsedViewModel(m.contentWidth(false))
 	require.NotEmpty(t, vm.UsageSummary)

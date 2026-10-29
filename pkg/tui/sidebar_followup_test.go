@@ -4,6 +4,7 @@ import (
 	"context"
 	"image/color"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	tuiinput "github.com/docker/docker-agent/pkg/tui/input"
+	"github.com/docker/docker-agent/pkg/tui/internal/clipboardhook"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -161,15 +163,19 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				x, y = sidebarProgramPoint(t, selected.content, "NestedReviewer")
 				program.Send(tea.MouseMotionMsg{X: x, Y: y})
 				var hovered shellSnapshot
+				hoveredAge := func(content string) bool {
+					rows := strings.Split(ansi.Strip(content), "\n")
+					return y < len(rows) && strings.Contains(rows[y], "ago")
+				}
 				require.Eventually(t, func() bool {
 					hovered = sidebarProgramSnapshot(t, program)
-					return hovered.activeID == child.ID && hovered.active == 0 && strings.Contains(ansi.Strip(hovered.content), "NestedReviewer")
+					return hovered.activeID == child.ID && hovered.active == 0 && hoveredAge(hovered.content)
 				}, 3*time.Second, time.Millisecond)
 				// This test selects canonical identities, not a moving row. The
 				// independent animation/hit tests exercise transient coordinates.
-				x, y = sidebarProgramPoint(t, hovered.content, "NestedReviewer")
+				// Hover reveals the node's age in place of its name; the row stays the same canonical row at the pre-hover coordinates.
 				row := strings.Split(ansi.Strip(hovered.content), "\n")[y]
-				require.Contains(t, row, "NestedReviewer", "click targets the currently painted canonical label")
+				require.Contains(t, row, "ago", "hover reveals the canonical row's age")
 				require.NotContains(t, row, "⌄", "genuine grandchild leaf has no branch action")
 				program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				var lastGrandchildSnapshot shellSnapshot
@@ -362,25 +368,26 @@ func TestRootSidebarDirectoryClickEmitsFullPathFeedback(t *testing.T) {
 	application := app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	root := newSidebarProgramRoot(t, application)
 	root.editor.SetValue("DRAFT-UNCHANGED")
+	var platformWrites []string
+	restore := clipboardhook.Swap(func(text string) error {
+		platformWrites = append(platformWrites, text)
+		return nil
+	})
+	t.Cleanup(restore)
 	x, y := sidebarProgramPoint(t, root.View().Content, "sidebar-workspace")
 	_, cmd := root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.NotNil(t, cmd)
-	sequence := reflect.ValueOf(cmd())
-	require.Equal(t, reflect.Slice, sequence.Kind())
-	require.Equal(t, reflect.TypeFor[tea.Cmd](), sequence.Type().Elem())
-	require.Equal(t, 3, sequence.Len(), "directory click retains platform clipboard, OSC52, then feedback sequence")
-	// Do not execute the platform clipboard closure in a host-independent test.
-	require.False(t, sequence.Index(0).IsNil())
-	osc52, ok := sequence.Index(1).Interface().(tea.Cmd)
-	require.True(t, ok)
-	require.Equal(t, tea.SetClipboard(sess.WorkingDir)(), osc52(), "terminal clipboard receives the full path")
-	feedback, ok := sequence.Index(2).Interface().(tea.Cmd)
-	require.True(t, ok)
-	note, ok := feedback().(notification.ShowMsg)
-	require.True(t, ok)
-	require.Equal(t, notification.TypeSuccess, note.Type)
-	require.Equal(t, "Working directory copied to clipboard: "+sess.WorkingDir, note.Text)
-	_, _ = root.Update(note)
+	msgs := collectMsgs(cmd)
+	require.Equal(t, []string{sess.WorkingDir}, platformWrites, "platform clipboard receives the full path once")
+	osc52 := slices.IndexFunc(msgs, func(msg tea.Msg) bool { return reflect.DeepEqual(msg, tea.SetClipboard(sess.WorkingDir)()) })
+	require.NotEqual(t, -1, osc52, "terminal clipboard receives the full path")
+	feedback := slices.IndexFunc(msgs, func(msg tea.Msg) bool {
+		note, ok := msg.(notification.ShowMsg)
+		return ok && note.Type == notification.TypeSuccess && note.Text == "Working directory copied to clipboard: "+sess.WorkingDir
+	})
+	require.NotEqual(t, -1, feedback, "success feedback names the full path")
+	require.Less(t, osc52, feedback, "terminal clipboard precedes feedback")
+	_, _ = root.Update(msgs[feedback])
 	require.Equal(t, "DRAFT-UNCHANGED", root.editor.Value(), "path feedback never enters composer")
 	require.Contains(t, ansi.Strip(root.View().Content), sess.WorkingDir)
 }
@@ -402,9 +409,12 @@ func (m *sidebarDoubleClickProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func TestActualProgramSidebarBranchToggleTwiceRetainsControlIdentity(t *testing.T) {
 	sess := session.New(session.WithID("branch-root-session"), session.WithAgentName("root"))
+	sess.SetAttribute(runtime.SessionAgentAttribute, "root")
 	tree := subagent.Snapshot{Root: subagent.SessionRootID(sess.ID), Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: subagent.SessionRootID(sess.ID), Agent: "root", SessionID: sess.ID}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "branch-full-node", Agent: "worker", Name: "BranchWorker", SessionID: "branch-child", State: subagent.NodeIdle}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "leaf-full-node", Agent: "reviewer", Name: "VisibleNestedLeaf", SessionID: "branch-grand", State: subagent.NodeCompleted}}}}}}}}
 	sess.SetSubagentTree(&tree)
-	child := session.New(session.WithID("branch-child"), session.WithAgentName("worker"))
+	child := session.New(session.WithID("branch-child"), session.WithAgentName("worker"), session.WithParentID(sess.ID))
+	// Attach restore validates the child's bound agent against the store; the attached-tree fixture binds it too.
+	child.SetAttribute(runtime.SessionAgentAttribute, "worker")
 	child.SetSubagentTree(&tree)
 	services := &sidebarAttachRuntime{closeTabRuntime: newCloseTabRuntime("root", false), infos: map[subagent.NodeID]runtime.SubagentAttachInfo{"branch-full-node": {NodeID: "branch-full-node", Session: child, Agent: "worker", ParentSessionID: sess.ID, ParentAgent: "root"}}}
 	views := services.preparedViews(sess)
@@ -416,6 +426,20 @@ func TestActualProgramSidebarBranchToggleTwiceRetainsControlIdentity(t *testing.
 	coalescer.SetSender(program.Send)
 	frame := expandProgramSubagents(t, program, "BranchWorker")
 	x, y := sidebarProgramPoint(t, frame.content, "BranchWorker")
+	// Idle branches start collapsed (syncDefaultBranchExpansion). Open it once through
+	// its own disclosure cell so the hover and double toggle below start expanded.
+	program.Send(tea.MouseMotionMsg{X: x, Y: y})
+	var collapsedRow string
+	require.Eventually(t, func() bool {
+		collapsedRow = ansi.Strip(strings.Split(sidebarProgramSnapshot(t, program).content, "\n")[y])
+		return strings.Contains(collapsedRow, "›")
+	}, time.Second, time.Millisecond, "hover reveals the collapsed branch control")
+	openX := ansi.StringWidth(collapsedRow[:strings.LastIndex(collapsedRow, "›")])
+	program.Send(tea.MouseClickMsg{X: openX, Y: y, Button: tea.MouseLeft})
+	require.Eventually(t, func() bool {
+		expanded := ansi.Strip(strings.Split(sidebarProgramSnapshot(t, program).content, "\n")[y])
+		return strings.Contains(expanded, "⌄")
+	}, time.Second, time.Millisecond, "one disclosure click expands the branch")
 	program.Send(tea.MouseMotionMsg{X: x, Y: y})
 	var index int
 	var row string
@@ -431,11 +455,12 @@ func TestActualProgramSidebarBranchToggleTwiceRetainsControlIdentity(t *testing.
 	require.Eventually(t, func() bool {
 		s := sidebarProgramSnapshot(t, program)
 		cells := layoutTerminalCells(s.content)
-		return s.active == 0 && cells[y][x].Style.Fg != nil && color.NRGBAModel.Convert(cells[y][x].Style.Fg) != color.NRGBAModel.Convert(layoutTerminalCells(frame.content)[y][x].Style.Fg)
+		return s.active == 0 && cells[y][chevronX].Style.Fg != nil && color.NRGBAModel.Convert(cells[y][chevronX].Style.Fg) != color.NRGBAModel.Convert(layoutTerminalCells(frame.content)[y][chevronX].Style.Fg)
 	}, time.Second, time.Millisecond)
 	hovered := sidebarProgramSnapshot(t, program)
 	beforeCells, hoverCells := layoutTerminalCells(frame.content), layoutTerminalCells(hovered.content)
-	require.NotEqual(t, beforeCells[y][x].Style.Fg, hoverCells[y][x].Style.Fg, "chevron hover highlights its own name")
+	require.NotEqual(t, beforeCells[y][chevronX].Style.Fg, hoverCells[y][chevronX].Style.Fg, "chevron hover changes the chevron cell's style")
+	require.Equal(t, beforeCells[y][x].Style.Fg, hoverCells[y][x].Style.Fg, "chevron hover leaves the name at its resting foreground")
 	require.Equal(t, beforeCells[y][x].Style.Bg, hoverCells[y][x].Style.Bg)
 	beforeLookups := services.lookups.Load()
 	program.Send(sidebarDoubleClickMsg{click: tea.MouseClickMsg{X: chevronX, Y: y, Button: tea.MouseLeft}})

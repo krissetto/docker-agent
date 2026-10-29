@@ -209,13 +209,9 @@ func TestInteractiveShellUsesHandoffAndKeepsDraftOnFailure(t *testing.T) {
 }
 
 func TestSettingsPersistAndApplyWithoutUserConfiguration(t *testing.T) {
-	m := bareModel(100)
+	m, _ := sessionModel(t)
 	config := &userconfig.Config{}
 	m.settingsSave = func(mutate func(*userconfig.Config) error) error { return mutate(config) }
-	m.handleSettings("send-mode queue")
-	require.NotNil(t, config.Settings)
-	assert.Equal(t, "queue", config.Settings.BusySendMode)
-	assert.True(t, m.queueSendMode)
 	m.handleSettings("interrupt-confirmation always")
 	assert.Equal(t, "always", m.interruptMode)
 	m.handleSettings("render-images false")
@@ -224,8 +220,8 @@ func TestSettingsPersistAndApplyWithoutUserConfiguration(t *testing.T) {
 	require.NotNil(t, config.Settings.Snapshot)
 	assert.True(t, *config.Settings.Snapshot)
 	m.settingsSave = func(func(*userconfig.Config) error) error { return errors.New("fixture write denied") }
-	m.handleSettings("send-mode steer")
-	assert.True(t, m.queueSendMode, "failed persistence does not partially apply settings")
+	m.handleSettings("sound true")
+	assert.False(t, m.soundEnabled, "failed persistence does not partially apply settings")
 }
 
 func TestNotificationSoundUsesCanonicalSettlementsAndThreshold(t *testing.T) {
@@ -259,12 +255,9 @@ func TestGlobalSettingsBroadcastWithoutChangingViewerState(t *testing.T) {
 	hidden.interruptPending = true
 	hidden.screen.Transcript.AddUser("hidden history")
 	screen, transcript := hidden.screen, hidden.screen.Transcript
-	m.handleSettings("send-mode queue")
 	m.handleSettings("sound true")
 	m.handleSettings("interrupt-confirmation double-tap")
 	m.handleSettings("render-images false")
-	assert.True(t, m.queueSendMode)
-	assert.True(t, hidden.queueSendMode)
 	assert.True(t, hidden.soundEnabled)
 	assert.Equal(t, "double-tap", hidden.interruptMode)
 	assert.False(t, hidden.renderImages)
@@ -399,9 +392,9 @@ func TestDormancyUsesCanonicalSnapshotAndAddressedEvents(t *testing.T) {
 		m.handleEvent(t.Context(), &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: m.app.Session(), Status: runtime.SessionStatus{SessionID: handle.id, Dormant: true, Pending: pending}}})
 		lines, _, _ := m.buildLines()
 		text := strings.Join(lines, "\n")
-		assert.Contains(t, text, "Restored · paused")
+		assert.Contains(t, text, "Restored · dormant · message or /resume")
 		assert.Contains(t, text, "/resume")
-		assert.Contains(t, text, "Any queued work or reports will wait until you resume this session.")
+		assert.Contains(t, text, "New messages wake this session; queued work and reports wait for /resume.")
 		assert.NotContains(t, text, "reports queued", "no report count or presence is inferred")
 		m.handleEvent(t.Context(), &runtime.DormancyChangedEvent{SessionID: "relative", Dormant: false})
 		assert.True(t, m.status.Dormant)

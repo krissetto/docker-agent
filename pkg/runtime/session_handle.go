@@ -299,6 +299,10 @@ func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session,
 	if sess == nil || sess.ID == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
 	}
+	// A read-only reservation check precedes claims, pruning, and child conflicts.
+	if r.sessionDrivers.restoreReserved(sess.ID) {
+		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: sess.ID, Operation: "restore_reserved"}
+	}
 	if err := r.sessionDrivers.beginClaim(sess.ID); err != nil {
 		return nil, err
 	}
@@ -366,6 +370,11 @@ func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session,
 				return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ID, Operation: "resolve_creation_agent_id"}
 			}
 			storedBoundName := storedBound.Name()
+			// Creation identity is immutable: a template naming another creation agent conflicts.
+			// Active-agent switches are not compared, and an absent template attribute never conflicts.
+			if templateCreation := sess.AttributesSnapshot()[SessionAgentAttribute]; templateCreation != "" && templateCreation != stored.AttributesSnapshot()[SessionAgentAttribute] {
+				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "create_session"}
+			}
 			if binding.AgentName == "" {
 				boundAgent = storedBoundName
 			}
@@ -778,7 +787,7 @@ func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission,
 		return Submission{}, err
 	}
 	msg := QueuedMessage{InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, RequestID: turnID, InputMode: "steer"}
-	queued, err := h.driver.postSteer(ctx, msg)
+	queued, err := h.driver.postManualSteer(ctx, msg)
 	if err != nil {
 		return Submission{}, h.inputError(err, SessionOperationSteer, turnID)
 	}
@@ -808,7 +817,12 @@ func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation s
 			return Submission{SessionID: h.sessionID, TurnID: requestID}, nil
 		}
 	}
-	queued, err := h.driver.post(ctx, msg, true)
+	var queued bool
+	if operation == "submit" && !input.Retry {
+		queued, err = h.driver.postManualSubmit(ctx, msg)
+	} else {
+		queued, err = h.driver.post(ctx, msg, true)
+	}
 	if err != nil {
 		var sessionErr *SessionError
 		if errors.As(err, &sessionErr) && (sessionErr.Operation == "post" || sessionErr.Operation == "") {
@@ -1303,6 +1317,9 @@ func (h *sessionHandle) Cancel(ctx context.Context, turnID string) (CancelResult
 // Observe atomically registers replay/tail delivery before cloning the
 // transcript. Transcript positions let consumers discard any overlap.
 func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Observation, error) {
+	if options.HistoryTail != nil {
+		return h.observeTail(ctx, options)
+	}
 	if options.Tree {
 		return h.observeTree(ctx, options)
 	}
@@ -1343,9 +1360,40 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	}
 	presentation := h.observationPresentation(ctx, observed)
 	return Observation{
-		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position, Presentation: presentation, TitleStatus: observed.titleStatus}},
+		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, BackgroundProcesses: observed.backgroundProcesses, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position, Presentation: presentation, TitleStatus: observed.titleStatus}},
 		Replay:  replay, Events: observed.live, Cancel: cancel,
 	}, nil
+}
+
+func (h *sessionHandle) observeTail(ctx context.Context, options ObserveOptions) (Observation, error) {
+	limits, err := NormalizeHistoryLimits(*options.HistoryTail)
+	if err != nil {
+		return Observation{}, err
+	}
+	buffer := options.Buffer
+	if buffer <= 0 {
+		buffer = defaultEventChannelCapacity
+	}
+	observed, tail, err := h.driver.observeTail(ctx, limits, buffer)
+	if err != nil {
+		return Observation{}, err
+	}
+	obsCtx, cancelCtx := context.WithCancel(ctx)
+	var once sync.Once
+	cancel := func() { once.Do(func() { cancelCtx(); observed.cancel() }) }
+	go func() {
+		select {
+		case <-obsCtx.Done():
+			observed.cancel()
+		case <-observed.done:
+			cancelCtx()
+		}
+	}()
+	replay := make([]SessionEvent, len(observed.seed))
+	for i, item := range observed.seed {
+		replay[i] = sessionEnvelope(h.sessionID, item)
+	}
+	return Observation{Initial: []SessionSnapshot{tail}, Replay: replay, Events: observed.live, Cancel: cancel}, nil
 }
 
 func sessionEnvelope(sessionID string, item SequencedSessionEvent) SessionEvent {

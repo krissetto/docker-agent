@@ -31,7 +31,7 @@ agents:
       <preparation>
       Before the game, you must prepare an html page that visually represents the Tic-Tac-Toe board.
       - Make it retro and super flashy!
-      - Serve this page on a local web server that you runs as a background job. (Stop it at the end of the game.)
+      - Serve this page on a local web server using the shell tool; the server continues in the background. Use kill_running_process when finished.
       - Always work in /tmp
       - IMPORTANT: Make sure you can ping the page before starting the game. We don't want users to miss the game!
       - The page shows the user the current state of the board and is updated live with javascript and live-reload.
@@ -42,7 +42,6 @@ agents:
     add_environment_info: true
     toolsets:
       - type: shell
-      - type: background_jobs
       - type: filesystem
       - type: mcp
         remote:

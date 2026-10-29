@@ -64,12 +64,14 @@ type Node struct {
 	Error          string    `json:"error,omitempty"`
 	// Metrics are cumulative for this node/session only; callers may sum a
 	// returned subtree for aggregate totals.
-	Cost         float64   `json:"cost,omitempty"`
-	InputTokens  int64     `json:"input_tokens,omitempty"`
-	OutputTokens int64     `json:"output_tokens,omitempty"`
-	ToolCalls    int64     `json:"tool_calls,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Cost         float64 `json:"cost,omitempty"`
+	InputTokens  int64   `json:"input_tokens,omitempty"`
+	OutputTokens int64   `json:"output_tokens,omitempty"`
+	ToolCalls    int64   `json:"tool_calls,omitempty"`
+	// BackgroundProcesses is the ephemeral count of currently running retained shell jobs.
+	BackgroundProcesses int       `json:"background_processes,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // DisplayName returns the model-facing name for the node.

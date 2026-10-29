@@ -39,6 +39,8 @@ const (
 	rowDimInactivePanes
 	rowSplitDiff
 	rowGitDiffLayout
+	rowCompactWorkLog
+	rowVisibleReplies
 	rowExpandThinking
 	rowHideToolResults
 	rowRenderImages
@@ -46,6 +48,8 @@ const (
 	rowPosition
 	rowSpacing
 	rowInfoMode
+	rowAlignInputWithMessages
+	rowAgentContext
 	rowSessionPath
 	rowUsage
 	rowAgents
@@ -56,8 +60,7 @@ const (
 )
 
 const (
-	rowSendMode = iota
-	rowInterruptConfirmation
+	rowInterruptConfirmation = iota
 	rowYOLO
 	rowSnapshot
 	rowCacheStablePrompts
@@ -107,7 +110,16 @@ var gitDiffLayoutLabels = map[messages.GitDiffLayout]string{
 	messages.GitDiffSplit:   "Split",
 }
 
-var sendModes = []messages.SendMode{messages.SendModeSteer, messages.SendModeQueue}
+var visibleRepliesOptions = []messages.VisibleReplies{
+	messages.VisibleRepliesLatest, messages.VisibleRepliesThree, messages.VisibleRepliesFive, messages.VisibleRepliesAll,
+}
+
+var visibleRepliesLabels = map[messages.VisibleReplies]string{
+	messages.VisibleRepliesLatest: "Latest only",
+	messages.VisibleRepliesThree:  "Last 3",
+	messages.VisibleRepliesFive:   "Last 5",
+	messages.VisibleRepliesAll:    "All",
+}
 
 var interruptConfirmationModes = []messages.InterruptMode{
 	messages.InterruptModeAlways, messages.InterruptModeDoubleTap, messages.InterruptModeNone,
@@ -216,6 +228,7 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool, trans
 	preferences.Layout.SidebarPosition = messages.ParseSidebarPosition(string(preferences.Layout.SidebarPosition))
 	preferences.Layout.SectionSpacing = messages.ParseSectionSpacing(string(preferences.Layout.SectionSpacing))
 	preferences.Layout.SidebarInfoMode = messages.ParseSidebarInfoMode(string(preferences.Layout.SidebarInfoMode))
+	preferences.VisibleReplies = messages.ParseVisibleReplies(string(preferences.VisibleReplies))
 	preferences.GitDiffLayout = messages.ParseGitDiffLayout(string(preferences.GitDiffLayout))
 	preferences.SendMode = messages.ParseSendMode(string(preferences.SendMode))
 	preferences.CloseTabChoice = messages.ParseCloseTabChoice(string(preferences.CloseTabChoice))
@@ -481,8 +494,8 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (d *settingsDialog) adjustable(row int) bool {
-	return (d.tab == tabAppearance && (row >= rowPosition && row <= rowInfoMode || row == rowGitDiffLayout)) ||
-		(d.tab == tabBehavior && (row == rowSendMode || row == rowInterruptConfirmation || row == rowTabTitleLength || row == rowCloseTabChoice)) ||
+	return (d.tab == tabAppearance && (row >= rowPosition && row <= rowInfoMode || row == rowGitDiffLayout || row == rowVisibleReplies)) ||
+		(d.tab == tabBehavior && (row == rowInterruptConfirmation || row == rowTabTitleLength || row == rowCloseTabChoice)) ||
 		(d.tab == tabNotifications && row == rowSoundThreshold)
 }
 
@@ -505,6 +518,10 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Layout.SectionSpacing = cycleValue(sectionSpacings, d.current.Layout.SectionSpacing, delta)
 		case rowInfoMode:
 			d.current.Layout.SidebarInfoMode = cycleValue(sidebarInfoModes, d.current.Layout.SidebarInfoMode, delta)
+		case rowAlignInputWithMessages:
+			d.current.Layout.AlignInputWithMessages = !d.current.Layout.AlignInputWithMessages
+		case rowAgentContext:
+			d.current.ShowAgentContext = !d.current.ShowAgentContext
 		case rowSessionPath:
 			d.current.Layout.HideSessionPath = !d.current.Layout.HideSessionPath
 		case rowUsage:
@@ -527,6 +544,10 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.SplitDiffView = !d.current.SplitDiffView
 		case rowGitDiffLayout:
 			d.current.GitDiffLayout = cycleValue(gitDiffLayouts, d.current.GitDiffLayout, delta)
+		case rowCompactWorkLog:
+			d.current.CompactWorkLog = !d.current.CompactWorkLog
+		case rowVisibleReplies:
+			d.current.VisibleReplies = cycleValue(visibleRepliesOptions, d.current.VisibleReplies, delta)
 		case rowExpandThinking:
 			d.current.ExpandThinking = !d.current.ExpandThinking
 		case rowHideToolResults:
@@ -539,8 +560,6 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 		return d.preview()
 	case tabBehavior:
 		switch d.selected[d.tab] {
-		case rowSendMode:
-			d.current.SendMode = cycleValue(sendModes, d.current.SendMode, delta)
 		case rowYOLO:
 			switch {
 			case d.current.YOLO:
@@ -729,6 +748,8 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 	d.addToggle(body, rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)
 	d.addToggle(body, rowSplitDiff, "Split diff view", d.current.SplitDiffView)
 	d.addControl(body, rowGitDiffLayout, "Git diff layout", gitDiffLayoutLabels[d.current.GitDiffLayout], false, false)
+	d.addToggle(body, rowCompactWorkLog, "Compact work log", d.current.CompactWorkLog)
+	d.addControl(body, rowVisibleReplies, "Visible replies", visibleRepliesLabels[d.current.VisibleReplies], false, false)
 	d.addToggle(body, rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)
 	d.addToggle(body, rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	d.addToggle(body, rowRenderImages, "Render images", d.current.RenderImages)
@@ -738,6 +759,8 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 		d.addControl(body, rowPosition, "Sidebar position", positionLabels[d.current.Layout.SidebarPosition], false, false)
 		d.addControl(body, rowSpacing, "Section spacing", spacingLabels[d.current.Layout.SectionSpacing], false, false)
 		d.addControl(body, rowInfoMode, "Sidebar info mode", infoModeLabels[d.current.Layout.SidebarInfoMode], false, false)
+		d.addToggle(body, rowAlignInputWithMessages, "Align input with messages", d.current.Layout.AlignInputWithMessages)
+		d.addToggle(body, rowAgentContext, "Agent context %", d.current.ShowAgentContext)
 		body.section("Sidebar sections")
 		d.addToggle(body, rowSessionPath, "Session path", !d.current.Layout.HideSessionPath)
 		d.addToggle(body, rowUsage, "Token usage", !d.current.Layout.HideUsage)
@@ -827,12 +850,7 @@ func (d *settingsDialog) reorderPanel(delta int) tea.Cmd {
 
 func (d *settingsDialog) renderBehaviorTab(body *settingsBody) {
 	body.section("Interaction")
-	mode, description := "Steer", "Send to the working agent mid-turn."
-	if d.current.SendMode == messages.SendModeQueue {
-		mode, description = "Queue", "Hold until the current turn ends."
-	}
-	d.addControl(body, rowSendMode, "While agent is working", mode, false, false)
-	body.add(styles.MutedStyle.Render(description))
+	body.add(styles.MutedStyle.Render("While working: Enter queues; Alt+Enter steers into the active turn."))
 	d.addControl(body, rowInterruptConfirmation, "Interrupt confirmation", interruptConfirmationLabels[d.current.InterruptConfirmation], false, false)
 	body.section("Automation")
 	d.addToggle(body, rowYOLO, "Auto-approve tools by default", d.current.YOLO)

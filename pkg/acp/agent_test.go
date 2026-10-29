@@ -544,11 +544,12 @@ func TestACPCloseRacingStopDrainsOnceAndHonorsWaiterDeadline(t *testing.T) {
 
 func TestACPAttachAndLoadUsesBorrowedCanonicalTranscript(t *testing.T) {
 	t.Parallel()
-	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(&realACPProvider{})))), runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	workingDir := t.TempDir()
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(&realACPProvider{})))), runtime.WithSessionStore(session.NewInMemorySessionStore()), runtime.WithWorkingDir(workingDir))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
-	sess := session.New(session.WithAgentName("root"), session.WithWorkingDir(t.TempDir()))
+	sess := session.New(session.WithAgentName("root"), session.WithWorkingDir(workingDir))
 	sess.AddMessage(session.UserMessage("historical user"))
 	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "historical assistant"}))
 	handle, err := owner.Runtime().CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})

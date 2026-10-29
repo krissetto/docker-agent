@@ -544,6 +544,87 @@ agents:
 	})
 }
 
+func TestCompactionPromptResolution(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "dummy")
+
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "agent prompt overrides model prompt",
+			yaml: `models:
+  primary:
+    provider: anthropic
+    model: claude-sonnet-4-5
+    compaction_prompt: model prompt
+agents:
+  root:
+    model: primary
+    compaction_prompt: agent prompt
+    instruction: test
+`,
+			want: "agent prompt",
+		},
+		{
+			name: "model prompt overrides provider prompt",
+			yaml: `providers:
+  corp:
+    provider: anthropic
+    compaction_prompt: provider prompt
+models:
+  primary:
+    provider: corp
+    model: claude-sonnet-4-5
+    compaction_prompt: model prompt
+agents:
+  root:
+    model: primary
+    instruction: test
+`,
+			want: "model prompt",
+		},
+		{
+			name: "provider prompt default",
+			yaml: `providers:
+  corp:
+    provider: anthropic
+    compaction_prompt: provider prompt
+models:
+  primary:
+    provider: corp
+    model: claude-sonnet-4-5
+agents:
+  root:
+    model: primary
+    instruction: test
+`,
+			want: "provider prompt",
+		},
+		{
+			name: "omitted prompt keeps default",
+			yaml: `agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    instruction: test
+`,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ANTHROPIC_API_KEY", "dummy")
+			tm, err := Load(t.Context(), config.NewBytesSource("compaction-prompt.yaml", []byte(tt.yaml)), &config.RuntimeConfig{}, withTestProviderRegistry()...)
+			require.NoError(t, err)
+			root, err := tm.Agent("root")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, root.CompactionPrompt())
+		})
+	}
+}
+
 func TestCompactionThresholdResolution(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
 	t.Setenv("ANTHROPIC_API_KEY", "dummy")

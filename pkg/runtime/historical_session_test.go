@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
@@ -64,7 +65,7 @@ func TestHistoricalRemovedChildViewDoesNotRestoreOrHydrateSiblings(t *testing.T)
 			if withDefinition {
 				defs, err := teamdef.NewDefinitionSnapshot("old-team", []teamdef.AgentDefinition{
 					{TeamID: "old-team", AgentID: "root-id", AgentKey: "root", Name: "root", Description: "Old root"},
-					{TeamID: "old-team", AgentID: "worker-id", AgentKey: "worker", Name: "worker", Description: "Old researcher", Instruction: "Authored instructions", Unavailable: []string{"models"}},
+					{TeamID: "old-team", AgentID: "worker-id", AgentKey: "worker", Name: "worker", Description: "Old researcher", Instruction: "Authored instructions", SubagentAccess: &latest.SubagentAccessConfig{ListAgents: latest.SubagentAccessTree, SendMessage: latest.SubagentAccessTree}, Unavailable: []string{"models"}},
 				})
 				require.NoError(t, err)
 				entry, _ := defs.AgentDefinition("worker")
@@ -133,6 +134,9 @@ func TestHistoricalRemovedChildViewDoesNotRestoreOrHydrateSiblings(t *testing.T)
 			if withDefinition {
 				require.NotNil(t, config.Definition)
 				assert.Equal(t, "Authored instructions", config.Definition.Instruction)
+				require.NotNil(t, config.Definition.SubagentAccess)
+				assert.Equal(t, latest.SubagentAccessTree, config.Definition.SubagentAccess.ListAgents)
+				assert.Equal(t, latest.SubagentAccessTree, config.Definition.SubagentAccess.SendMessage)
 				assert.Equal(t, "partial_definition: models", config.HistoryReason)
 			} else {
 				require.Nil(t, config.Definition)

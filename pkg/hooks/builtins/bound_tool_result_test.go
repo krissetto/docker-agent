@@ -12,13 +12,13 @@ import (
 
 func TestBoundToolResultAllowList(t *testing.T) {
 	t.Parallel()
-	for _, category := range []string{"filesystem", "shell", "mcp", "a2a", "background_jobs", "memory", "fetch", "skills", "", "custom"} {
+	for _, category := range []string{"filesystem", "shell", "mcp", "a2a", "memory", "fetch", "skills", "", "custom"} {
 		t.Run(category, func(t *testing.T) {
 			t.Parallel()
 			payload := strings.Repeat("世", 50*1024)
 			got := builtins.BoundToolResult(category, "test", payload, "Output could not be saved.")
 			switch category {
-			case "filesystem", "shell", "mcp", "a2a", "background_jobs":
+			case "filesystem", "shell", "mcp", "a2a":
 				assert.LessOrEqual(t, len(got), 50*1024)
 				assert.True(t, utf8.ValidString(got))
 				assert.Contains(t, got, "Output could not be saved")

@@ -35,9 +35,8 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamdef"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
-	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shellprocess"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
@@ -92,8 +91,8 @@ func WithPromptFiles(files []string) Opt {
 	}
 }
 
-// WithToolsetLeasePool opts a single source/runtime owner into conservative
-// sharing of selected raw background_jobs owners across derived environments.
+// WithToolsetLeasePool opts a source/runtime owner into sharing internal
+// resources across derived environments.
 func WithToolsetLeasePool(pool *ToolsetLeasePool, sourceRuntimeScope string) Opt {
 	return func(opts *loadOptions) error {
 		if pool == nil || sourceRuntimeScope == "" {
@@ -105,54 +104,62 @@ func WithToolsetLeasePool(pool *ToolsetLeasePool, sourceRuntimeScope string) Opt
 }
 
 func createToolset(ctx context.Context, registry ToolsetRegistry, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string, opts *loadOptions) (tools.ToolSet, error) {
-	if toolset.Type == "shell_background_jobs" && opts.toolsetPool == nil {
-		effectiveEnv, err := backgroundjobs.ResolveEnvironment(ctx, latest.Toolset{Type: "background_jobs"}, runConfig)
-		if err != nil {
-			return nil, err
+	return registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
+}
+
+// processManagerAttacher is the shell toolset's process-manager hook. Matching
+// it structurally keeps the loader off pkg/tools/builtin/shell, which embedders
+// loading YAML with custom registries must not link.
+type processManagerAttacher interface {
+	AttachProcessManager(manager *shellprocess.Manager, exposeDiagnostics bool)
+}
+
+type shellProcessManagerOwner struct {
+	manager *shellprocess.Manager
+}
+
+func (owner *shellProcessManagerOwner) Tools(context.Context) ([]tools.Tool, error) {
+	if owner.manager == nil {
+		return nil, errors.New("shell process manager owner has no manager")
+	}
+	return owner.manager.ShellInspectionTools()
+}
+
+func createShellProcessManager(ctx context.Context, parentDir, configName string, runConfig *config.RuntimeConfig, opts *loadOptions) (*shellprocess.Manager, error) {
+	if opts.toolsetPool == nil {
+		manager := shellprocess.New()
+		if opts.ownedResources != nil {
+			*opts.ownedResources = append(*opts.ownedResources, manager)
 		}
-		return backgroundjobs.CreateToolSetWithEnvironment(latest.Toolset{Type: "background_jobs"}, runConfig, effectiveEnv), nil
+		return manager, nil
 	}
-	if opts.toolsetPool == nil || toolset.Type != "background_jobs" && toolset.Type != "shell_background_jobs" {
-		return registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
-	}
-	poolToolset := toolset
-	if toolset.Type == "shell_background_jobs" {
-		poolToolset = latest.Toolset{Type: "background_jobs"}
-	}
-	effectiveEnv, err := backgroundjobs.ResolveEnvironment(ctx, poolToolset, runConfig)
+	material, err := makeToolsetPoolKey(configName, parentDir, opts.toolsetPoolScope, runConfig.WorkingDir, "shell-process-manager", nil)
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(poolToolset)
-	if err != nil {
-		return nil, err
-	}
-	material, err := makeToolsetPoolKey(configName, parentDir, opts.toolsetPoolScope, runConfig.WorkingDir, string(encoded), effectiveEnv)
-	if err != nil {
-		return nil, err
-	}
-	lease, leaseCloser, err := opts.toolsetPool.acquire(ctx, material, func() (tools.ToolSet, error) {
-		return backgroundjobs.CreateToolSetWithEnvironment(poolToolset, runConfig, effectiveEnv), nil
+	lease, closer, err := opts.toolsetPool.acquire(ctx, material, func() (tools.ToolSet, error) {
+		return &shellProcessManagerOwner{manager: shellprocess.New()}, nil
 	}, func(ctx context.Context, raw tools.ToolSet) error {
-		owner, ok := tools.As[*backgroundjobs.ToolSet](raw)
+		owner, ok := tools.As[*shellProcessManagerOwner](raw)
 		if !ok {
-			return errors.New("pooled background_jobs owner has unexpected type")
+			return errors.New("pooled shell process manager has unexpected type")
 		}
-		return owner.CloseAll(ctx)
+		return owner.manager.CloseAll(ctx)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &pooledLeaseRegistration{ToolSet: lease, leaseCloser: leaseCloser}, nil
+	owner, ok := tools.As[*shellProcessManagerOwner](lease)
+	if !ok || owner.manager == nil {
+		_ = closer.Close()
+		return nil, errors.New("pooled shell process manager has unexpected type")
+	}
+	manager := owner.manager
+	if opts.ownedResources != nil {
+		*opts.ownedResources = append(*opts.ownedResources, closer)
+	}
+	return manager, nil
 }
-
-type pooledLeaseRegistration struct {
-	tools.ToolSet
-	leaseCloser io.Closer
-}
-
-func (p *pooledLeaseRegistration) Unwrap() tools.ToolSet { return p.ToolSet }
-func (p *pooledLeaseRegistration) Close() error          { return p.leaseCloser.Close() }
 
 // WithToolsetRegistry allows using a custom toolset registry instead of the default.
 func WithToolsetRegistry(registry ToolsetRegistry) Opt {
@@ -531,6 +538,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithCommands(expander.ExpandCommands(ctx, agentConfig.Commands)),
 			agent.WithHooks(config.MergeHooks(config.MergeHooks(agentConfig.Hooks, globalHooks), cliHooks)),
 			agent.WithStructuredOutput(agentConfig.StructuredOutput),
+			agent.WithCompactionPrompt(config.EffectiveCompactionPrompt(cfg, &agentConfig)),
 		}
 
 		if agentConfig.Cache != nil && agentConfig.Cache.Enabled {
@@ -1074,9 +1082,8 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	registry := loadOpts.toolsetRegistry
 
 	var deferredToolset DeferredToolSet
-	var jobManager *backgroundjobs.ToolSet
-	var shellToolsets []*builtinshell.ToolSet
-	var firstShell *builtinshell.ToolSet
+	var shellToolsets []processManagerAttacher
+	var firstShell processManagerAttacher
 
 	for i := range a.Toolsets {
 		toolset := a.Toolsets[i]
@@ -1089,13 +1096,8 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 			continue
 		}
 
-		if toolset.Type == "background_jobs" {
-			if jobManager == nil {
-				jobManager, _ = tools.As[*backgroundjobs.ToolSet](tool)
-			}
-		}
 		if toolset.Type == "shell" {
-			if shellTool, ok := tools.As[*builtinshell.ToolSet](tool); ok {
+			if shellTool, ok := tools.As[processManagerAttacher](tool); ok {
 				shellToolsets = append(shellToolsets, shellTool)
 				if firstShell == nil {
 					firstShell = shellTool
@@ -1150,23 +1152,12 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	}
 
 	if firstShell != nil {
-		declaresBackgroundJobs := jobManager != nil
-		if jobManager == nil {
-			synthetic := latest.Toolset{Type: "shell_background_jobs"}
-			generated, err := createToolset(ctx, registry, synthetic, parentDir, runConfig, configName, loadOpts)
-			if err != nil {
-				return nil, warnings, fmt.Errorf("creating shell background-job manager: %w", err)
-			}
-			jobManager, _ = tools.As[*backgroundjobs.ToolSet](generated)
-			if jobManager == nil {
-				return nil, warnings, errors.New("shell background-job manager has unexpected type")
-			}
-			if closer, ok := tools.As[io.Closer](generated); ok && loadOpts.ownedResources != nil {
-				*loadOpts.ownedResources = append(*loadOpts.ownedResources, closer)
-			}
+		processManager, err := createShellProcessManager(ctx, parentDir, configName, runConfig, loadOpts)
+		if err != nil {
+			return nil, warnings, fmt.Errorf("creating shell process manager: %w", err)
 		}
 		for i, shellTool := range shellToolsets {
-			shellTool.AttachBackgroundJobs(jobManager, i == 0 && !declaresBackgroundJobs)
+			shellTool.AttachProcessManager(processManager, i == 0)
 		}
 	}
 

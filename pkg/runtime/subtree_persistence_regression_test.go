@@ -170,8 +170,8 @@ func TestPublicDeleteSessionReleasesBudgetOnlyAfterSuccessfulDeletion(t *testing
 			}
 			rt.sessionStore = fault
 			err := owner.Runtime().DeleteSession(t.Context(), root.ID())
-			if failure == "preparation" {
-				require.Error(t, err)
+			if failure != "none" {
+				require.ErrorContains(t, err, "delete failure")
 				rt.budgetMu.Lock()
 				_, retained := rt.rootBudgets[root.ID()]
 				rt.budgetMu.Unlock()

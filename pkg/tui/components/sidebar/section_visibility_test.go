@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -321,8 +322,8 @@ func TestSetMirroredPadding_SwapsEdgePadding(t *testing.T) {
 	defaults := DefaultLayoutConfig()
 
 	s.SetMirroredPadding(true)
-	assert.Equal(t, defaults.PaddingRight, s.layoutCfg.PaddingLeft, "left padding moves to the chat side")
-	assert.Equal(t, defaults.PaddingLeft, s.layoutCfg.PaddingRight)
+	assert.Equal(t, defaults.PaddingLeft, s.layoutCfg.PaddingLeft, "left dock keeps terminal-edge padding")
+	assert.Equal(t, defaults.PaddingLeft, s.layoutCfg.PaddingRight, "left dock adds a chat-edge gap")
 
 	s.cacheDirty = false
 	s.SetMirroredPadding(true)
@@ -330,4 +331,25 @@ func TestSetMirroredPadding_SwapsEdgePadding(t *testing.T) {
 
 	s.SetMirroredPadding(false)
 	assert.Equal(t, defaults, s.layoutCfg)
+}
+
+func TestSetScrollbarDecoratorInvalidatesPaintOnly(t *testing.T) {
+	t.Parallel()
+
+	m := newTestSidebar(t).model
+	m.SetMode(ModeVertical)
+	m.SetSize(40, 5)
+	m.View()
+	m.ReconcileLayout()
+	placement := m.placement
+	prepared := m.preparedTrees
+	preparedPointer := fmt.Sprintf("%p", prepared)
+	generation := m.VisualGeneration()
+	invalidations := m.cacheInvalidations
+	decorator := func(view string) string { return view }
+	m.SetScrollbarDecorator(decorator)
+	assert.Same(t, placement, m.placement)
+	assert.Equal(t, preparedPointer, fmt.Sprintf("%p", m.preparedTrees))
+	assert.Equal(t, invalidations, m.cacheInvalidations, "decorator must not rebuild content")
+	assert.Greater(t, m.VisualGeneration(), generation, "decorator updates repaint listeners")
 }

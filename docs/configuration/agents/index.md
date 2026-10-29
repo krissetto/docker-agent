@@ -43,6 +43,7 @@ agents:
     session_compaction: boolean # Optional: disable automatic session compaction (default: true)
     compaction_threshold: float # Optional: context-window fraction that triggers auto-compaction (0–1, default: 0.9)
     compaction_model: string # Optional: model used for session-compaction (summary generation)
+    compaction_prompt: string # Optional: replaces the built-in compaction user prompt (system prompt unchanged)
     use_toolsets: [list] # Optional: names of top-level toolsets to merge into this agent
     readonly: boolean # Optional: restrict all toolsets to read-only tools only
     skills: boolean | [list] # Optional: enable skill discovery (true/false or list of names and/or sources)
@@ -113,6 +114,7 @@ agents:
 | `session_compaction`        | boolean | ✗        | When `false`, disables automatic session compaction for this agent: neither the proactive threshold trigger nor the post-overflow auto-recovery runs. The manual `/compact` command remains available. Default: `true`. See the [Context & Compaction guide](../../guides/compaction/index.md). |
 | `compaction_threshold`      | float   | ✗        | Fraction of the model's context window at which proactive auto-compaction triggers. Must be greater than `0` and at most `1`. A `compaction_threshold` set on the agent's model takes precedence. Default: `0.9`. See the [Context & Compaction guide](../../guides/compaction/index.md). |
 | `compaction_model`          | string  | ✗        | Model used for session compaction (summary generation). Can be a named model or an inline `provider/model` string. This agent-level value takes precedence over a `compaction_model` set on the agent's model or provider; when none is set, the agent's own model compacts. See the [Context & Compaction guide](../../guides/compaction/index.md). |
+| `compaction_prompt`         | string  | ✗        | Replaces the built-in compaction user prompt for this agent. The built-in system prompt is kept. Takes precedence over a `compaction_prompt` set on the agent's model or provider; when none is set, the built-in prompt is used. `/compact <text>` and `pre_compact` hook context are still appended. See [Customizing the Compaction Prompt](../../configuration/models/index.md#customizing-the-compaction-prompt). |
 | `skills`                    | bool/array | ✗     | Enable automatic skill discovery. `true` loads all discovered local skills, `false` disables them. A list can mix skill sources (`local` or `https://…` URLs) and skill names to include — see [Skills](../../features/skills/index.md).                                                     |
 | `commands`                  | object  | ✗        | Named prompts that can be run with `docker agent run config.yaml /command_name`. Can be simple strings or objects with `instruction` and/or `agent` fields for agent switching, or a `url` field to open a link in the browser (TUI only). See [Named Commands](#named-commands) below. |
 | `use_commands`              | list of string | ✗   | Names of top-level `commands` groups to merge into this agent. Inline `commands` entries take precedence on name conflicts. Default: `[]`. |
@@ -616,11 +618,41 @@ agents:
     instruction: Inspect the codebase and report concrete findings.
 ```
 
-Each subagent runs in its own session with its own context window. The parent
-can address a running subagent with `send_message`, inspect its transcript with
-`read_subagent`, and `stop_subagent` it. In the TUI the sidebar shows the live
-subagent tree; a subagent's session can be opened in a tab, and the tree is
-restored when the session is loaded again. See
+Each subagent runs in its own session with its own context window. By default,
+`send_message` can reach the caller's parent and direct children; `list_agents`
+shows direct children when the agent has the legacy async coordination tools.
+Neither default behavior grants sibling or grandchild messaging. `read_subagent`
+and `stop_subagent` remain direct-child capabilities and cannot be widened by
+`subagent_access`.
+
+Agents can opt into tree-wide instance discovery and messaging independently:
+
+```yaml
+agents:
+  coordinator:
+    subagent_access:
+      list_agents: tree
+      send_message: tree
+```
+
+`list_agents: tree` returns a bounded, paginated list of current runtime
+instances (including self and parent metadata) in this root session's tree; it
+never enumerates configured agent definitions or unrelated roots. Listed nodes
+include `messageable` so discovery-only configurations do not imply send
+permission. `send_message: tree` permits messages to other non-stopped instances
+in that same tree, including siblings and grandchildren. The `children` scope
+is also accepted explicitly for each field and preserves the legacy parent and
+direct-child send scope. The scopes are separate: setting only one does not
+grant the other. `children` messaging still includes the existing parent route.
+
+Opting into these scopes does not add transcript-read or stop authority. A
+leaf agent with no `subagents` declaration receives only the explicitly granted
+`list_agents` and/or `send_message` tools. The immutable configuration revision
+captured by a running session governs these grants; editing the team does not
+retroactively widen an existing session's authority.
+
+In the TUI the sidebar shows the live subagent tree; a subagent's session can be
+opened in a tab, and the tree is restored when the session is loaded again. See
 [`examples/async_subagents.yaml`](https://github.com/docker/docker-agent/blob/main/examples/async_subagents.yaml).
 
 **Migration:** `subagents` is not an alias or spelling correction for `sub_agents`.

@@ -116,8 +116,19 @@ func TestNewNormalizesDefaultSessionAgentBinding(t *testing.T) {
 	assert.NotContains(t, sess.AgentModelOverrides, "")
 }
 
+// injectionModelSwitcher resolves explicit model refs through the production
+// switcher, so model-bound sessions do not depend on a live provider.
+func injectionModelSwitcher(models map[string]latest.ModelConfig) *runtime.ModelSwitcherConfig {
+	registry := provider.NewRegistry(map[string]provider.Factory{
+		"test": func(_ context.Context, cfg *latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (provider.Provider, error) {
+			return configuredStubProvider{stubProvider: stubProvider{}, cfg: *cfg}, nil
+		},
+	})
+	return &runtime.ModelSwitcherConfig{Models: models, ProviderRegistry: registry, EnvProvider: environment.NewMapEnvProvider(nil)}
+}
+
 func TestNewUsesInjectedSharedSessionRuntimeAndImmutableBinding(t *testing.T) {
-	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(replyProvider{})))))
+	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(replyProvider{})))), runtime.WithModelSwitcherConfig(injectionModelSwitcher(map[string]latest.ModelConfig{"provider/model": {Provider: "test", Model: "model"}})))
 	require.NoError(t, err)
 
 	sess := session.New(session.WithID("shared-session"), session.WithAgentName("worker"))
@@ -138,7 +149,7 @@ func TestNewUsesInjectedSharedSessionRuntimeAndImmutableBinding(t *testing.T) {
 }
 
 func TestNewDerivesBindingModelFromPinnedAgentOverride(t *testing.T) {
-	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(stubProvider{})))))
+	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(stubProvider{})))), runtime.WithModelSwitcherConfig(injectionModelSwitcher(map[string]latest.ModelConfig{"provider/derived": {Provider: "test", Model: "derived"}})))
 	require.NoError(t, err)
 	sess := session.New(session.WithID("derived-binding"), session.WithAgentName("worker"))
 	sess.AgentModelOverrides = map[string]string{"worker": "provider/derived"}

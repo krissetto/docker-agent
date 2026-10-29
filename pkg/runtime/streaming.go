@@ -120,6 +120,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var openAIResponse *chat.OpenAIResponse
 	var toolCalls []tools.ToolCall
 	var presentation []chat.AssistantPart
+	var presentationText chat.AssistantTextAppender
 	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
 	var providerFinishReason chat.FinishReason
@@ -151,12 +152,12 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		if !xmlToolCallGate {
 			tagIdx := strings.Index(content, "<tool_call>")
 			if tagIdx < 0 {
-				presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content})
+				presentation = presentationText.Append(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content})
 				events.Emit(AgentChoice(a.Name(), sess.ID, content))
 			} else {
 				xmlToolCallGate = true
 				if tagIdx > 0 {
-					presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content[:tagIdx]})
+					presentation = presentationText.Append(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content[:tagIdx]})
 					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx]))
 				}
 			}
@@ -348,7 +349,7 @@ mainLoop:
 			}
 
 			if choice.Delta.ReasoningContent != "" {
-				presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: choice.Delta.ReasoningContent})
+				presentation = presentationText.Append(presentation, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: choice.Delta.ReasoningContent})
 				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent))
 				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
 			}

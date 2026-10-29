@@ -5,7 +5,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tools"
 	bgagent "github.com/docker/docker-agent/pkg/tools/builtin/agent"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 )
 
 func TestLoopDetector(t *testing.T) {
@@ -131,7 +130,7 @@ func TestLoopDetector(t *testing.T) {
 		{
 			name:        "mixed batch with exempt and non exempt tools still counts",
 			threshold:   2,
-			exemptTools: []string{bgagent.ToolNameViewBackgroundAgent, backgroundjobs.ToolNameViewBackgroundJob},
+			exemptTools: []string{bgagent.ToolNameViewBackgroundAgent},
 			batches: [][]tools.ToolCall{
 				makeCalls(bgagent.ToolNameViewBackgroundAgent, `{"task_id":"agent_task_123"}`, "read_file", `{"path":"a.txt"}`),
 				makeCalls(bgagent.ToolNameViewBackgroundAgent, `{"task_id":"agent_task_123"}`, "read_file", `{"path":"a.txt"}`),
@@ -139,17 +138,18 @@ func TestLoopDetector(t *testing.T) {
 			wantTrip:  true,
 			wantCount: 2,
 		},
+
 		{
-			name:        "exempt shell background job polling does not count as a loop",
-			threshold:   2,
-			exemptTools: []string{backgroundjobs.ToolNameViewBackgroundJob},
+			name:      "running process diagnostics are still loop checked",
+			threshold: 2,
 			batches: [][]tools.ToolCall{
-				makeCalls(backgroundjobs.ToolNameViewBackgroundJob, `{"job_id":"job_1"}`),
-				makeCalls(backgroundjobs.ToolNameViewBackgroundJob, `{"job_id":"job_1"}`),
+				makeCalls("list_running_processes", `{}`),
+				makeCalls("list_running_processes", `{}`),
 			},
-			wantTrip:  false,
-			wantCount: 0,
+			wantTrip:  true,
+			wantCount: 2,
 		},
+
 		{
 			// list_background_agents is zero-arg, so every call is byte-identical.
 			// That makes it the textbook trigger for the consecutive-duplicate

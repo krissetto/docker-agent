@@ -40,6 +40,8 @@ type apiFlags struct {
 	authToken             string
 	authTokenFile         string
 	managedAPI            bool
+	managedAPIListenHost  string
+	managedAPIListenPort  int
 	managedAPIStateDir    string
 	modelOverrides        []string
 	managedState          string
@@ -71,6 +73,10 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.authTokenFile, "auth-token-file", "", "Private file containing the API bearer token")
 	cmd.MarkFlagsMutuallyExclusive("auth-token", "auth-token-file")
 	cmd.PersistentFlags().BoolVar(&flags.managedAPI, "managed-api", false, "Own the private workspace API in this foreground process")
+	cmd.PersistentFlags().StringVar(&flags.managedAPIListenHost, "managed-api-listen-host", "127.0.0.1", "Bind host for the private managed API (127.0.0.1 or 0.0.0.0)")
+	cmd.PersistentFlags().IntVar(&flags.managedAPIListenPort, "managed-api-listen-port", 0, "Bind port for the private managed API (0 selects/reuses an ephemeral port)")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api-listen-host")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api-listen-port")
 	cmd.PersistentFlags().StringVar(&flags.managedAPIStateDir, "managed-api-state-dir", "", "Private managed API state base")
 	cmd.PersistentFlags().StringArrayVar(&flags.modelOverrides, "model", nil, "Override managed team models")
 	_ = cmd.PersistentFlags().MarkHidden("managed-api")
@@ -97,6 +103,9 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"api"}, args...), commandErr)
 	}()
 
+	if (cmd.Flags().Changed("managed-api-listen-host") || cmd.Flags().Changed("managed-api-listen-port")) && (!f.managedAPI || f.managedState != "") {
+		return errors.New("--managed-api-listen-host and --managed-api-listen-port require --managed-api")
+	}
 	if err := f.runConfig.ValidateTeamEditGrant(); err != nil {
 		return err
 	}
@@ -185,6 +194,9 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 
 	ln, lnCleanup, err := newListener(ctx, f.listenAddr)
 	if err != nil {
+		if f.manifest != nil {
+			return fmt.Errorf("managed API could not bind %s; the configured port may be occupied (no existing listener was stopped): %w", f.listenAddr, err)
+		}
 		return err
 	}
 	defer lnCleanup()

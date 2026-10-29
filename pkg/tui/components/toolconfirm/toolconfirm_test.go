@@ -57,16 +57,6 @@ func TestBuildPermissionPattern(t *testing.T) {
 			want: "shell",
 		},
 		{
-			name: "background job extracts the command",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"npm run dev"}`}},
-			want: "run_background_job:cmd=npm*",
-		},
-		{
-			name: "command alias is honoured",
-			call: tools.ToolCall{Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"command":"npm run dev"}`}},
-			want: "run_background_job:cmd=npm*",
-		},
-		{
 			name: "blank cmd falls back to command like the handler",
 			call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"  ","command":"rm -rf /tmp/x"}`}},
 			want: "shell:cmd=rm*",

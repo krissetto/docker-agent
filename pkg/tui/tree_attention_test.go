@@ -78,5 +78,5 @@ func TestSessionSignalsReportFocusedConnectionAndRecovery(t *testing.T) {
 	assert.Equal(t, "Session connection restored", signalText(t, m.observeSessionSignals(m.paneFocus(), restored)))
 
 	reset := messages.SessionRuntimeEventMsg{Event: &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: "root", State: runtime.SessionStateSettled, InterruptedTurns: 2}}}}
-	assert.Contains(t, signalText(t, m.observeSessionSignals(m.paneFocus(), reset)), "Recovery uncertain: 2 turns were interrupted")
+	assert.Contains(t, signalText(t, m.observeSessionSignals(m.paneFocus(), reset)), "Recovery uncertain: 2 accepted inputs have no terminal outcome records. Review the transcript before continuing.")
 }

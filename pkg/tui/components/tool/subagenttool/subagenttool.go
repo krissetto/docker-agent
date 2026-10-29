@@ -210,12 +210,170 @@ func RenderInput(msg *types.Message, width int) string {
 	icon, label := CompletionPresentation(msg.ReportOutcome)
 	ref := msg.InputReference
 	if ref.Name == "" && ref.DisplayID == "" {
-		return icon + " " + styles.MutedStyle.Render("Runtime update received")
+		if msg.ReportOutcome == "" {
+			icon = styles.ToolCompletedIcon.Render("·")
+		}
+		label = "Runtime update received"
+		switch msg.ReportOutcome {
+		case session.ReportOutcomeFinished:
+			label = "Subagent turn finished"
+		case session.ReportOutcomeFailed:
+			label = "Subagent turn failed"
+		}
+		return wrappedNotice(icon+" ", lifecycle.InputReference{}, styles.MutedStyle.Render(label), width)
 	}
 	if ref.Name == "" {
 		ref.Name = "subagent"
 	}
-	return agentidentity.Wrap(icon+" ", ref, styles.MutedStyle.Render(" · "+label), width)
+	return wrappedNotice(icon+" From ", ref, styles.MutedStyle.Render(" · "+label), width)
+}
+
+// RuntimeNoticeHeader builds the expandable runtime completion header. Narrow
+// wrapped lines stay aligned with the shared two-cell tool icon gutter.
+func RuntimeNoticeHeader(msg *types.Message, chevron string, width int) string {
+	icon, label := CompletionPresentation(msg.ReportOutcome)
+	if msg.ReportOutcome == "" {
+		icon = styles.ToolCompletedIcon.Render("·")
+	}
+	ref := msg.InputReference
+	if ref.Name == "" {
+		ref.Name = "subagent"
+	}
+	gutter := min(2, max(0, width-1))
+	innerWidth := max(1, width-gutter)
+	header := agentmessage.CompactHeader(icon+" From ", ref, styles.MutedStyle.Render(" · "+label), chevron, innerWidth)
+	return alignContinuation(header, gutter, width)
+}
+
+// RuntimeNoticeBody returns only user-facing typed runtime details, without
+// the model-only system_info framing. A report status without a response or
+// error detail is a summary, not an expandable message.
+func RuntimeNoticeBody(msg *types.Message) string {
+	if msg == nil || msg.Type != types.MessageTypeRuntimeNotice || msg.InputMode != "steer" || msg.SenderID == "" {
+		return ""
+	}
+	body := strings.TrimSpace(msg.ReceivedBody)
+	framed := strings.HasPrefix(body, "<system_info>")
+	if strings.Contains(body, "<system_info>") || strings.Contains(body, "</system_info>") {
+		if !framed {
+			return ""
+		}
+		body = strings.TrimPrefix(body, "<system_info>")
+		inner, tail, ok := strings.Cut(body, "</system_info>")
+		if !ok || strings.TrimSpace(tail) != "" || strings.Contains(inner, "<system_info>") || strings.Contains(inner, "</system_info>") {
+			return ""
+		}
+		body = strings.TrimSpace(inner)
+	}
+	body = strings.ReplaceAll(body, "\t", "    ")
+	if detail, ok := reportDetail(body, msg.ReportOutcome); ok {
+		return detail
+	}
+	if _, ok := reportSummary(body); ok {
+		return ""
+	}
+	if msg.IsSubagentReply() {
+		return ansi.Strip(body)
+	}
+	return ""
+}
+
+func reportSummary(body string) (string, bool) {
+	rest, ok := strings.CutPrefix(body, "Subagent ")
+	if !ok {
+		return "", false
+	}
+	quoted, err := strconv.QuotedPrefix(rest)
+	if err != nil || !strings.HasPrefix(quoted, `"`) {
+		return "", false
+	}
+	if _, err := strconv.Unquote(quoted); err != nil {
+		return "", false
+	}
+	rest, ok = strings.CutPrefix(rest[len(quoted):], " (")
+	if !ok {
+		return "", false
+	}
+	id, rest, ok := strings.Cut(rest, ") ")
+	if !ok || id == "" || strings.ContainsAny(id, " \t\r\n()") {
+		return "", false
+	}
+	if rest == "finished its turn." {
+		return "Subagent turn finished", true
+	}
+	if rest == "failed." {
+		return "Subagent turn failed", true
+	}
+	return "", false
+}
+
+func reportDetail(body string, outcome session.ReportOutcome) (string, bool) {
+	rest, ok := strings.CutPrefix(body, "Subagent ")
+	if !ok {
+		return "", false
+	}
+	quoted, err := strconv.QuotedPrefix(rest)
+	if err != nil || !strings.HasPrefix(quoted, `"`) {
+		return "", false
+	}
+	if _, err := strconv.Unquote(quoted); err != nil {
+		return "", false
+	}
+	rest, ok = strings.CutPrefix(rest[len(quoted):], " (")
+	if !ok {
+		return "", false
+	}
+	id, rest, ok := strings.Cut(rest, ") ")
+	if !ok || id == "" || strings.ContainsAny(id, " \t\r\n()") {
+		return "", false
+	}
+	label := ""
+	candidates := []struct {
+		outcome session.ReportOutcome
+		prefix  string
+		label   string
+	}{
+		{session.ReportOutcomeFinished, "finished its turn. Full response preview: ", "Full response preview"},
+		{session.ReportOutcomeFinished, "finished its turn. Full response: ", "Full response"},
+		{session.ReportOutcomeFailed, "failed. Error: ", "Error"},
+	}
+	for _, candidate := range candidates {
+		if outcome == "" || candidate.outcome == outcome {
+			if rest, ok = strings.CutPrefix(rest, candidate.prefix); ok {
+				label = candidate.label
+				break
+			}
+		}
+	}
+	if label == "" {
+		return "", false
+	}
+	quoted, err = strconv.QuotedPrefix(rest)
+	if err != nil || !strings.HasPrefix(quoted, `"`) || len(rest) != len(quoted) {
+		return "", false
+	}
+	detail, err := strconv.Unquote(quoted)
+	if err != nil {
+		return "", false
+	}
+	return label + ": " + ansi.Strip(detail), true
+}
+
+func wrappedNotice(prefix string, ref lifecycle.InputReference, suffix string, width int) string {
+	// Tool rows reserve two cells for the icon gutter; keep continuation rows
+	// aligned there as well.
+	gutter := min(2, max(0, width-1))
+	lines := strings.Split(agentidentity.Wrap(prefix, ref, suffix, max(1, width-gutter)), "\n")
+	return alignContinuation(strings.Join(lines, "\n"), gutter, width)
+}
+
+func alignContinuation(header string, gutter, width int) string {
+	lines := strings.Split(header, "\n")
+	for i := 1; i < len(lines); i++ {
+		indent := min(gutter, max(0, width-ansi.StringWidth(lines[i])))
+		lines[i] = strings.Repeat(" ", indent) + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func withError(header string, msg *types.Message, width int) string {

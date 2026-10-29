@@ -23,6 +23,7 @@ func newLegacyParticipantSidebar(t *testing.T) *model {
 	m := New(ar, t.Context(), &service.SessionState{}).(*model)
 	m.treeCollapsed = false // Participant tests exercise visible inspector rows.
 	m.subagentSpinner = &fakeSpinner{m.subagentSpinner}
+	m.SetAgentContextReadings(true) // readings are off by default; this fixture asserts them
 	m.rootSessionID = "collapse"
 	m.SetPosition(5, 3)
 	cmd := m.SetSubagentTree(collapseFixture())

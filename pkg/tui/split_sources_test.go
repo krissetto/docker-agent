@@ -323,7 +323,7 @@ func TestActualProgramDormantResumeFullAndRootLeanUsesCanonicalEdit(t *testing.T
 				root.resizeAll()
 				program := startPaneProgram(t, root)
 				require.Eventually(t, func() bool {
-					return strings.Contains(ansi.Strip(queryPaneProgram(t, program).content), "Restored · paused")
+					return strings.Contains(ansi.Strip(queryPaneProgram(t, program).content), "Restored · dormant · message or /resume")
 				}, 2*time.Second, time.Millisecond)
 				beforeStats := make(chan [3]uint64, 1)
 				program.Send(paneProgramAction{apply: func(m *appModel) tea.Cmd {
@@ -346,7 +346,7 @@ func TestActualProgramDormantResumeFullAndRootLeanUsesCanonicalEdit(t *testing.T
 						return nil
 					}})
 					resumeDiagnostic = <-check
-					return handle.resumes.Load() == 1 && !strings.Contains(ansi.Strip(queryPaneProgram(t, program).content), "Restored · paused")
+					return handle.resumes.Load() == 1 && !strings.Contains(ansi.Strip(queryPaneProgram(t, program).content), "Restored · dormant · message or /resume")
 				}, 2*time.Second, time.Millisecond)
 				require.Equal(t, "preserved draft", queryPaneProgram(t, program).draft)
 				afterStats := make(chan [3]uint64, 1)
@@ -379,7 +379,7 @@ func TestActualProgramResumeKeepsOriginalOwnerAfterFocusChange(t *testing.T) {
 	root.editor.SetValue("A draft")
 	program := startPaneProgram(t, root)
 	require.Eventually(t, func() bool {
-		return strings.Contains(ansi.Strip(queryPaneProgram(t, program).content), "Restored · paused")
+		return strings.Contains(ansi.Strip(queryPaneProgram(t, program).content), "Restored · dormant · message or /resume")
 	}, 2*time.Second, time.Millisecond)
 	program.Send(paneProgramAction{apply: func(m *appModel) tea.Cmd {
 		generation, _ := m.supervisor.RouteGeneration(sess.ID)
@@ -413,7 +413,7 @@ func TestPendingTwoDormancyChangeInvalidatesCachedAndForcedHeaderEqually(t *test
 	// No root Update or recovery click: the canonical key alone must fence the
 	// previous complete frame when the atomic App head changes asynchronously.
 	cached := root.View().Content
-	require.NotContains(t, ansi.Strip(cached), "Restored · paused")
+	require.NotContains(t, ansi.Strip(cached), "Restored · dormant · message or /resume")
 	require.False(t, root.viewPaneStatuses[sess.ID].Dormant)
 	root.viewCacheValid = false
 	forced := root.View().Content

@@ -5,6 +5,7 @@ struct NewSessionSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let initialServerID: UUID?
+    let operationID: UUID
     let onCreated: (SessionRef) -> Void
 
     @State private var serverID: UUID?
@@ -20,15 +21,12 @@ struct NewSessionSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                if model.servers.count > 1 {
-                    Picker("Server", selection: $serverID) {
-                        ForEach(model.servers) { server in
-                            Text(server.name).tag(Optional(server.id))
-                        }
+                Section(model.servers.first(where: { $0.id == serverID })?.name ?? "Server") {
+                    if model.servers.count > 1 {
+                        Text("Switch servers from the sessions list before opening Options…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                }
-
-                Section("Agent Team") {
                     if loading {
                         ProgressView().frame(maxWidth: .infinity)
                     } else if agents.isEmpty && error == nil {
@@ -57,7 +55,7 @@ struct NewSessionSheet: View {
                         .textInputAutocapitalization(.never)
                         #endif
                 } footer: {
-                    Text("A directory on the server, not on this device. Leave empty to start without a workspace.")
+                    Text("A directory on the server, not on this device. Empty uses the server's configured workspace, if any.")
                 }
 
                 if let error {
@@ -101,27 +99,33 @@ struct NewSessionSheet: View {
     private func loadAgents() async {
         guard let serverID else { return }
         loading = true
-        defer { loading = false }
+        defer { if self.serverID == serverID { loading = false } }
         do {
-            agents = try await model.loadAgents(serverID: serverID)
+            let loaded = try await model.loadAgents(serverID: serverID)
+            guard self.serverID == serverID else { return }
+            agents = loaded
             error = nil
             let startable = agents.filter(\.isStartable)
-            if sourceID == nil || !startable.contains(where: { $0.id == sourceID }) {
-                sourceID = startable.count == 1 ? startable.first?.id : nil
+            if let preferred = try? model.resolveSessionSource(agents, serverID: serverID), startable.contains(where: { $0.id == preferred.id }) {
+                sourceID = preferred.id
+            } else if sourceID == nil || !startable.contains(where: { $0.id == sourceID }) {
+                sourceID = nil
             }
         } catch {
+            guard self.serverID == serverID else { return }
             agents = []
             self.error = error.localizedDescription
         }
     }
 
     private func create() async {
-        guard let serverID, let selected else { return }
+        guard let serverID, let selected, serverID == initialServerID else { return }
         creating = true
         defer { creating = false }
         do {
             let directory = workingDir.trimmingCharacters(in: .whitespacesAndNewlines)
-            let ref = try await model.createSession(serverID: serverID, source: selected, title: title, workingDir: directory.isEmpty ? nil : directory)
+            let ref = try await model.createSession(serverID: serverID, source: selected, title: title, workingDir: directory.isEmpty ? nil : directory, operationID: operationID)
+            try model.rememberSessionSource(selected, serverID: serverID)
             onCreated(ref)
             dismiss()
         } catch {

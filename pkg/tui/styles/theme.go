@@ -82,8 +82,8 @@ var defaultRegistry = func() *atomic.Pointer[themeRegistry] {
 // same name — including masking "default" with the embedder's own. Precedence is
 // last-wins: when more than one registered source provides the same ref, a later
 // RegisterBuiltinThemes call overrides an earlier one. An override is still merged
-// onto cagent's pristine DefaultTheme() base, so a registered theme only needs to
-// specify the fields it changes; DefaultTheme() itself stays the bundled merge
+// onto cagent's pristine Old School base, so a registered theme only needs to
+// specify the fields it changes; the Old School base itself stays the bundled merge
 // base, and each name is listed once.
 //
 // Call this at startup, before applying any persisted theme, so that a persisted
@@ -113,8 +113,8 @@ func (r *themeRegistry) RegisterBuiltinThemes(fsys fs.FS) error {
 	// Drop any theme already resolved under a ref this source overrides (a bundled
 	// built-in, or "default"), so the registered override/mask wins even when it
 	// was loaded before registration — built-in cache entries are otherwise treated
-	// as permanently valid. DefaultTheme()'s own cache is separate and untouched, so
-	// it stays the pristine merge base.
+	// as permanently valid. The DefaultTheme() cache is separate and untouched, so
+	// the Old School base stays the pristine merge base.
 	r.InvalidateThemeCache("")
 
 	return nil
@@ -164,7 +164,7 @@ func readThemeData(fsys fs.FS, ref string) ([]byte, bool) {
 // readRegisteredThemeData returns the raw YAML for ref from the most recently
 // registered source that provides it. Registered sources take precedence over
 // cagent's bundled themes, so an embedder can override a built-in — including
-// masking "default" with their own — and a later RegisterBuiltinThemes call wins
+// masking "default" (Old School) or "docker-next-dark" with their own — and a later RegisterBuiltinThemes call wins
 // a name collision with an earlier one (last-wins).
 func (r *themeRegistry) readRegisteredThemeData(ref string) ([]byte, bool) {
 	// Iterate newest-first so a later RegisterBuiltinThemes call wins (last-wins).
@@ -193,8 +193,15 @@ func (r *themeRegistry) InvalidateThemeCache(ref string) {
 	}
 }
 
-// DefaultThemeRef is the reference for the built-in default theme.
-const DefaultThemeRef = "default"
+// DefaultThemeRef is the theme applied when no theme is configured.
+const DefaultThemeRef = "docker-next-dark"
+
+// DockerNextLightThemeRef is the light counterpart of DefaultThemeRef.
+const DockerNextLightThemeRef = "docker-next-light"
+
+// LegacyDefaultThemeRef is the former default palette, kept selectable as "Old School".
+// Explicitly saved "default" selections keep resolving to it.
+const LegacyDefaultThemeRef = "default"
 
 // ThemesDir returns the directory where user themes are stored.
 func ThemesDir() string {
@@ -202,7 +209,7 @@ func ThemesDir() string {
 }
 
 // Theme represents a complete color theme for the TUI.
-// All fields are optional; unset fields use the built-in defaults.
+// All fields are optional; unset fields inherit the Old School base.
 type Theme struct {
 	Version  int           `yaml:"version,omitempty"`
 	Name     string        `yaml:"name,omitempty"`
@@ -290,6 +297,7 @@ type ThemeColors struct {
 	Focus          string `yaml:"focus,omitempty"`
 	Disabled       string `yaml:"disabled,omitempty"`
 	StatusAdjacent string `yaml:"status_adjacent,omitempty"`
+	ScrollbarTrack string `yaml:"scrollbar_track,omitempty"` // Decorative gutter, authored independently of the thumb.
 
 	// Badge colors
 	BadgeAccent  string `yaml:"badge_accent,omitempty"`  // Accent badge (e.g., purple highlights)
@@ -337,39 +345,85 @@ type MarkdownTheme struct {
 	HR         string `yaml:"hr,omitempty"`
 }
 
-// cachedDefaultTheme holds the parsed default.yaml theme (loaded once).
+// cachedDefaultTheme holds the bundled DefaultThemeRef theme (loaded once).
 var (
 	cachedDefaultTheme   *Theme
 	cachedDefaultThemeMu sync.Mutex
+	// cachedLegacyBase is the Old School palette every bundled and user theme merges onto.
+	cachedLegacyBase   *Theme
+	cachedLegacyBaseMu sync.Mutex
 )
 
-// DefaultTheme returns the built-in default theme loaded from embedded default.yaml.
-// The result is cached internally, but a copy is returned to prevent callers from
-// accidentally modifying the cached theme.
+// DefaultTheme returns the bundled default theme (DefaultThemeRef). The result is
+// cached internally, but a copy is returned to prevent callers from accidentally
+// modifying the cached theme.
 func DefaultTheme() *Theme {
 	cachedDefaultThemeMu.Lock()
 	defer cachedDefaultThemeMu.Unlock()
 
 	if cachedDefaultTheme == nil {
-		// Load default.yaml from embedded files
-		data, err := builtinThemes.ReadFile("themes/default.yaml")
+		theme, err := loadBundledTheme(DefaultThemeRef)
 		if err != nil {
-			// This should never happen - default.yaml is embedded at compile time
-			panic(fmt.Sprintf("failed to read embedded default.yaml: %v", err))
+			// This should never happen - the default theme is embedded at compile time
+			panic(fmt.Sprintf("failed to load embedded default theme: %v", err))
 		}
-
-		var theme Theme
-		if err := yaml.Unmarshal(data, &theme); err != nil {
-			panic(fmt.Sprintf("failed to parse embedded default.yaml: %v", err))
-		}
-
-		theme.Ref = DefaultThemeRef
-		cachedDefaultTheme = &theme
+		cachedDefaultTheme = theme
 	}
 
 	// Return a copy to prevent callers from modifying the cached theme
 	themeCopy := *cachedDefaultTheme
 	return &themeCopy
+}
+
+// legacyInheritedName is the display name nameless partial themes inherit from the base.
+const legacyInheritedName = "Default"
+
+// legacyBaseTheme returns the Old School palette used as the merge base for every
+// bundled and user theme, so partial palettes keep their historical inherited values.
+func legacyBaseTheme() *Theme {
+	cachedLegacyBaseMu.Lock()
+	defer cachedLegacyBaseMu.Unlock()
+
+	if cachedLegacyBase == nil {
+		data, err := builtinThemes.ReadFile("themes/" + LegacyDefaultThemeRef + ".yaml")
+		if err != nil {
+			// This should never happen - the legacy base is embedded at compile time
+			panic(fmt.Sprintf("failed to read embedded legacy base theme: %v", err))
+		}
+
+		var theme Theme
+		if err := yaml.Unmarshal(data, &theme); err != nil {
+			panic(fmt.Sprintf("failed to parse embedded legacy base theme: %v", err))
+		}
+
+		theme.Ref = LegacyDefaultThemeRef
+		// Nameless partial themes have always displayed the inherited "Default" name.
+		theme.Name = legacyInheritedName
+		cachedLegacyBase = &theme
+	}
+
+	themeCopy := *cachedLegacyBase
+	return &themeCopy
+}
+
+// loadBundledTheme merges an embedded theme onto the legacy base, bypassing registered sources.
+func loadBundledTheme(ref string) (*Theme, error) {
+	data, ok := readThemeData(builtinThemes, ref)
+	if !ok {
+		return nil, fmt.Errorf("built-in theme %q not found", ref)
+	}
+
+	var override Theme
+	if err := yaml.Unmarshal(data, &override); err != nil {
+		return nil, fmt.Errorf("parsing built-in theme %q: %w", ref, err)
+	}
+
+	merged := mergeTheme(legacyBaseTheme(), &override)
+	merged.Ref = ref
+	if merged.Name == "" {
+		merged.Name = ref
+	}
+	return merged, nil
 }
 
 // UserThemePrefix is used to distinguish user themes from built-in themes
@@ -378,9 +432,9 @@ func DefaultTheme() *Theme {
 const UserThemePrefix = "user:"
 
 // ListThemeRefs returns the list of available theme references.
-// It includes all built-in themes (including "default") and user themes from ~/.cagent/themes/.
+// It includes all built-in themes and user themes from ~/.cagent/themes/.
 // User themes with names matching built-in themes are prefixed with "user:" to distinguish them.
-// The "default" theme is always listed first for UX purposes.
+// The Docker Next pair is listed first for UX purposes; Old School stays in its alphabetical slot.
 func ListThemeRefs() ([]string, error) {
 	return defaultRegistry.Load().ListThemeRefs()
 }
@@ -389,16 +443,17 @@ func (r *themeRegistry) ListThemeRefs() ([]string, error) {
 	// Track built-in refs to detect conflicts with user themes
 	builtinSet := make(map[string]bool)
 
-	// Start with default theme (listed first for UX)
-	refs := []string{DefaultThemeRef}
+	// Start with the Docker Next pair (listed first for UX)
+	refs := []string{DefaultThemeRef, DockerNextLightThemeRef}
 	builtinSet[DefaultThemeRef] = true
+	builtinSet[DockerNextLightThemeRef] = true
 
 	// Reserve the auto sentinel: a user theme named "auto" must not shadow
 	// it, so such a theme lists under the "user:" prefix instead. The
 	// sentinel itself is not listed; pickers add their own entry for it.
 	builtinSet[AutoThemeRef] = true
 
-	// Add built-in themes from embedded files (default.yaml will be skipped since already added)
+	// Add remaining built-in themes from embedded files (includes the Old School "default")
 	builtinRefs, err := r.listBuiltinThemeRefs()
 	if err != nil {
 		return nil, fmt.Errorf("listing built-in themes: %w", err)
@@ -447,8 +502,8 @@ func (r *themeRegistry) listBuiltinThemeRefs() ([]string, error) {
 		return nil, fmt.Errorf("reading embedded themes directory: %w", err)
 	}
 
-	// Append themes contributed by embedders, skipping the reserved "default"
-	// ref and any name that collides with an existing built-in.
+	// Append themes contributed by embedders, skipping any name that collides
+	// with an existing built-in.
 	seen := make(map[string]bool, len(refs))
 	for _, ref := range refs {
 		seen[ref] = true
@@ -459,7 +514,7 @@ func (r *themeRegistry) listBuiltinThemeRefs() ([]string, error) {
 			return nil, fmt.Errorf("reading registered themes: %w", err)
 		}
 		for _, ref := range extraRefs {
-			if ref == DefaultThemeRef || seen[ref] {
+			if seen[ref] {
 				continue
 			}
 			seen[ref] = true
@@ -694,11 +749,11 @@ func loadBuiltinTheme(ref string) (*Theme, error) {
 }
 
 func (r *themeRegistry) loadBuiltinTheme(ref string) (*Theme, error) {
-	base := DefaultTheme()
+	base := legacyBaseTheme()
 
 	// Prefer embedder-registered sources over cagent's bundled themes, so an
 	// embedder can override a built-in — including masking "default" with their
-	// own. The override is still merged onto the bundled DefaultTheme() base, so
+	// own. The override is still merged onto the Old School legacy base, so
 	// a registered theme only needs to specify the fields it changes.
 	data, ok := r.readRegisteredThemeData(ref)
 	if !ok {
@@ -750,7 +805,7 @@ func (r *themeRegistry) IsBuiltinTheme(ref string) bool {
 // loadThemeFrom loads a theme from a specific directory (for testing).
 // Returns an error if the theme file is not found.
 func loadThemeFrom(ref, dir string) (*Theme, error) {
-	base := DefaultTheme()
+	base := legacyBaseTheme()
 
 	// Try .yaml first, then .yml
 	var data []byte
@@ -982,6 +1037,11 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	if override.StatusAdjacent != "" {
 		result.StatusAdjacent = override.StatusAdjacent
 	}
+	if override.ScrollbarTrack != "" {
+		result.ScrollbarTrack = override.ScrollbarTrack
+	} else if override.Background != "" || override.BackgroundAlt != "" || override.EditorBg != "" || override.CardBg != "" || override.ShellBg != "" {
+		result.ScrollbarTrack = deriveScrollbarTrack(result.ShellBg, result.CardBg, result.EditorBg)
+	}
 	// Badge colors
 	if override.BadgeAccent != "" {
 		result.BadgeAccent = override.BadgeAccent
@@ -1129,7 +1189,7 @@ func ApplyTheme(theme *Theme) {
 	TextBright = lipgloss.Color(c.TextBright)
 	TextPrimary = lipgloss.Color(c.TextPrimary)
 	TextSecondary = lipgloss.Color(c.TextSecondary)
-	TextMuted = lipgloss.Color(c.AccentMuted)
+	TextMuted = lipgloss.Color(c.TextMuted)
 	TextMutedGray = lipgloss.Color(c.TextMuted)
 	// Accent & brand colors
 	Accent = lipgloss.Color(c.Accent)
@@ -1143,15 +1203,15 @@ func ApplyTheme(theme *Theme) {
 	// Border colors
 	BorderPrimary = lipgloss.Color(c.Accent)
 	BorderSecondary = lipgloss.Color(c.BorderSecondary)
-	BorderMuted = lipgloss.Color(c.BackgroundAlt)
+	BorderMuted = lipgloss.Color(c.Separator)
 	BorderWarning = lipgloss.Color(c.Warning)
 	// Diff colors
 	DiffAddBg = lipgloss.Color(c.DiffAddBg)
 	DiffRemoveBg = lipgloss.Color(c.DiffRemoveBg)
 	DiffAddFg = lipgloss.Color(c.Success)
 	DiffRemoveFg = lipgloss.Color(c.Error)
-	DiffAddEmphBg = deriveEmphasisBg(c.DiffAddBg)
-	DiffRemoveEmphBg = deriveEmphasisBg(c.DiffRemoveBg)
+	DiffAddEmphBg = deriveDiffEmphasisBg(c.DiffAddBg, c.Success)
+	DiffRemoveEmphBg = deriveDiffEmphasisBg(c.DiffRemoveBg, c.Error)
 	// UI element colors
 	LineNumber = lipgloss.Color(c.LineNumber)
 	Separator = lipgloss.Color(c.Separator)
@@ -1200,6 +1260,11 @@ func ApplyTheme(theme *Theme) {
 	Focus = lipgloss.Color(c.Focus)
 	Disabled = lipgloss.Color(c.Disabled)
 	StatusAdjacent = lipgloss.Color(c.StatusAdjacent)
+	track := c.ScrollbarTrack
+	if track == "" {
+		track = deriveScrollbarTrack(c.ShellBg, c.CardBg, c.EditorBg)
+	}
+	ScrollbarTrack = lipgloss.Color(track)
 
 	// Rebuild all derived styles
 	rebuildStyles()
@@ -1376,8 +1441,8 @@ func rebuildStyles() {
 	ToolNameDim = ToolMessageStyle.Foreground(TextMutedGray).Italic(true)
 	ToolDescription = ToolMessageStyle.Foreground(TextPrimary)
 	ToolCompletedIcon = BaseStyle.MarginLeft(2).Foreground(TextMutedGray)
-	ToolErrorIcon = ToolCompletedIcon.Background(ErrorStrong)
-	ToolPendingIcon = ToolCompletedIcon.Background(Warning)
+	ToolErrorIcon = ToolCompletedIcon.Foreground(bestForeground(ErrorStrong, lipgloss.Color("#000000"), lipgloss.Color("#ffffff"))).Background(ErrorStrong)
+	ToolPendingIcon = ToolCompletedIcon.Foreground(bestForeground(Warning, lipgloss.Color("#000000"), lipgloss.Color("#ffffff"))).Background(Warning)
 	ToolCallArgs = ToolMessageStyle.Padding(0, 0, 0, 2)
 	ToolCallResult = ToolMessageStyle.Padding(0, 0, 0, 2)
 
@@ -1412,7 +1477,7 @@ func rebuildStyles() {
 
 	EditorStyle = BaseStyle.Margin(0, EditorHMargin).Padding(1, AppPadding, 1, AppPadding).Background(EditorBg)
 	SuggestionGhostStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost)).Background(EditorBg)
-	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
+	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(bestForeground(Accent, TextPrimary, lipgloss.Color("#000000"), lipgloss.Color("#ffffff")))
 
 	// Attachment styles
 	AttachmentBannerStyle = BaseStyle.Foreground(TextSecondary)
@@ -1421,9 +1486,9 @@ func rebuildStyles() {
 	AttachmentIconStyle = BaseStyle.Foreground(Info)
 
 	// Scrollbar styles
-	TrackStyle = lipgloss.NewStyle().Foreground(BorderSecondary)
-	ThumbStyle = lipgloss.NewStyle().Foreground(Info).Background(BackgroundAlt)
-	ThumbActiveStyle = lipgloss.NewStyle().Foreground(TextBright).Background(BackgroundAlt)
+	TrackStyle = lipgloss.NewStyle().Foreground(ScrollbarTrack)
+	ThumbStyle = lipgloss.NewStyle().Foreground(Info)
+	ThumbActiveStyle = lipgloss.NewStyle().Foreground(TextBright)
 
 	// Resize handle styles
 	ResizeHandleStyle = BaseStyle.Foreground(Resize)
@@ -1474,6 +1539,11 @@ func rebuildStyles() {
 
 	ThinkingBadgeStyle = BaseStyle.
 		Foreground(TextMuted).
+		Bold(true).
+		Italic(true)
+
+	WorkHeaderStyle = BaseStyle.
+		Foreground(Accent).
 		Bold(true).
 		Italic(true)
 

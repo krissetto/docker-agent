@@ -80,11 +80,11 @@ func TestApplySuggestionOverlay(t *testing.T) {
 			// Test the function
 			if tt.shouldPanic {
 				assert.Panics(t, func() {
-					e.applySuggestionOverlay(baseView)
+					e.applySuggestionOverlay(baseView, 0, 0)
 				})
 			} else {
 				assert.NotPanics(t, func() {
-					result := e.applySuggestionOverlay(baseView)
+					result := e.applySuggestionOverlay(baseView, 0, 0)
 					// Just verify we get some output
 					assert.NotEmpty(t, result)
 				})
@@ -116,7 +116,7 @@ func TestApplySuggestionOverlayScrolledView(t *testing.T) {
 
 	// Should not panic even with scrolled content
 	require.NotPanics(t, func() {
-		result := e.applySuggestionOverlay(baseView)
+		result := e.applySuggestionOverlay(baseView, 0, 0)
 		assert.NotEmpty(t, result)
 	})
 }
@@ -207,7 +207,7 @@ func TestApplySuggestionOverlayWithVariousLineCount(t *testing.T) {
 			e.hasSuggestion = true
 
 			baseView := e.textarea.View()
-			result := e.applySuggestionOverlay(baseView)
+			result := e.applySuggestionOverlay(baseView, 0, 0)
 
 			// Parse the result and verify suggestion position
 			lines := strings.Split(result, "\n")
@@ -287,7 +287,7 @@ func TestApplySuggestionOverlayWithMultiLineSuggestion(t *testing.T) {
 			e.hasSuggestion = true
 
 			baseView := e.textarea.View()
-			result := e.applySuggestionOverlay(baseView)
+			result := e.applySuggestionOverlay(baseView, 0, 0)
 
 			// The function should not panic
 			require.NotEmpty(t, result)
@@ -478,7 +478,7 @@ func TestMultiLineSuggestionWithSmallEditor(t *testing.T) {
 	e.hasSuggestion = true
 
 	baseView := e.textarea.View()
-	result := e.applySuggestionOverlay(baseView)
+	result := e.applySuggestionOverlay(baseView, 0, 0)
 
 	// The old overflow contract extended one allocated row to three. A ghost
 	// preview now stays in its real viewport; accepting it still inserts every
@@ -515,7 +515,7 @@ func TestLongSuggestionWrapping(t *testing.T) {
 	e.hasSuggestion = true
 
 	baseView := e.textarea.View()
-	result := e.applySuggestionOverlay(baseView)
+	result := e.applySuggestionOverlay(baseView, 0, 0)
 
 	resultLines := strings.Split(result, "\n")
 

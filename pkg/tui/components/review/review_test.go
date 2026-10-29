@@ -167,7 +167,7 @@ func TestNavigatorShowsRepositoryWorktreeAndGroupIdentity(t *testing.T) {
 	m.Focus()
 	view := plain(m)
 	t.Log("\n" + view)
-	for _, want := range []string{"Changes  Draft 0", "docker-agent", "● main", "○ shell-wt", "./wt/shell · linked", "Conflicts 1", "Staged 1", "Unstaged 1", "Untracked 1", "⊘ +2 linked outside · not shown", "kit/vendor/foo  ⎇ detached @3e336a8"} {
+	for _, want := range []string{"Changes  Draft 0", "docker-agent", "● ~/dev/ai-dev/docker-agent", "○ ./wt/shell", "⎇ shell-wt · linked", "Conflicts 1", "Staged 1", "Unstaged 1", "Untracked 1", "⊘ +2 linked outside · not shown", "kit/vendor/foo  ⎇ detached @3e336a8"} {
 		assert.Contains(t, view, want)
 	}
 	assert.NotContains(t, view, "pkg/tui/panel.go", "groups start collapsed")
@@ -222,7 +222,7 @@ func TestKeyboardOpensFileAndReadsHunks(t *testing.T) {
 	view := plain(m)
 	t.Log("\n" + view)
 	assert.Contains(t, view, "pkg/tui/panel.go")
-	assert.Contains(t, view, "Unstaged hunk 1/2 +2 −1")
+	assert.Contains(t, view, "Unstaged · hunk 1/2 · +2 −1")
 	assert.Contains(t, view, "+ label, hint")
 
 	keys(t, m, "]")
@@ -298,7 +298,7 @@ func TestCopyTextKeepsMarkersAndPatchCopiesWholeHunks(t *testing.T) {
 	m.SetDocument(sampleDocument(req.Key))
 	m.reader.line = 2
 
-	copied, ok := find[CopyRequestMsg](keys(t, m, "v", "j", "c"))
+	copied, ok := find[CopyRequestMsg](keys(t, m, "v", "j", "x"))
 	require.True(t, ok)
 	assert.Equal(t, CopyText, copied.Kind)
 	assert.Equal(t, "-label := \"\"\n+label, hint := \"\", \"\"\n", copied.Text)
@@ -346,7 +346,7 @@ func TestHiddenWorktreesDiscloseNothing(t *testing.T) {
 			m.cursor = i
 		}
 	}
-	msgs := keys(t, m, "c", "enter")
+	msgs := keys(t, m, "y", "enter")
 	_, copied := find[CopyRequestMsg](msgs)
 	assert.False(t, copied)
 	assert.Contains(t, plain(m), "Outside · hidden")
@@ -407,8 +407,57 @@ func TestFilesModeWorksWithoutGit(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, DocumentKey{Mode: ModeFiles, WorktreeID: "ws-root", Path: "docs/guide.md"}, open.Key)
 	m.SetDocument(Document{Key: open.Key, State: StateReady, Lines: []Line{{New: 1, Text: "# Guide"}}})
-	copied, _ := find[CopyRequestMsg](keys(t, m, "c"))
+	copied, _ := find[CopyRequestMsg](keys(t, m, "x"))
 	assert.Equal(t, "# Guide\n", copied.Text, "file text copies without diff markers")
+}
+
+func TestNavigatorUsesCheckoutPathAsPrimaryWorktreeLabel(t *testing.T) {
+	snap := sampleSnapshot()
+	snap.Repositories[0].Worktrees[0].Path = "."
+	snap.Repositories[0].Worktrees[1].Path = "worktrees/feature"
+	snap.Repositories[0].Worktrees[1].Branch = "feature-branch"
+	snap.Repositories[0].HiddenOutside = 0
+	snap.Repositories[1].Worktrees[0].Path = "nested/checkout"
+	snap.Repositories[1].Worktrees[0].Detached = "3e336a8"
+	m := New("ws")
+	m.SetSize(120, 24)
+	drain(m.SetSnapshot(snap))
+	m.Focus()
+	m.expanded[repoKey("r1")] = true
+	m.expanded[repoKey("r2")] = true
+	m.invalidateRows()
+	view := plain(m)
+	assert.Contains(t, view, "● docker-agent  ⎇ main", "merged dot path falls back to repository name")
+	assert.Contains(t, view, "○ worktrees/feature", "linked checkout path is primary")
+	assert.Contains(t, view, "⎇ feature-br…", "narrow row truncates branch metadata separately")
+	assert.Contains(t, view, "nested/checkout  ⎇ detached @3e336a…", "merged detached checkout path is primary")
+}
+
+func TestWorktreeRowsShowCheckoutPathBeforeBranchMetadata(t *testing.T) {
+	m := New("ws")
+	merged := sampleSnapshot().Repositories[1]
+	wt := merged.Worktrees[0]
+	wt.Path = "nested/checkout"
+	mergedRow := row{merged: true}
+	text := ansi.Strip(m.worktreeCells(mergedRow, merged, wt, styles.BaseStyle))
+	assert.Contains(t, text, "nested/checkout", "checkout is primary")
+	assert.Contains(t, text, "detached @3e336a8", "detached HEAD is secondary")
+	assert.Less(t, strings.Index(text, "nested/checkout"), strings.Index(text, "detached @"))
+
+	repo := sampleSnapshot().Repositories[0]
+	root := repo.Worktrees[0]
+	root.Path = "."
+	rootText := ansi.Strip(m.worktreeCells(mergedRow, repo, root, styles.BaseStyle))
+	assert.Contains(t, rootText, "docker-agent", "dot checkout uses repository name")
+	assert.Contains(t, rootText, "⎇ main")
+
+	child := repo.Worktrees[1]
+	child.Path = "worktrees/shell"
+	childRow := row{merged: false}
+	childText := ansi.Strip(m.worktreeCells(childRow, repo, child, styles.BaseStyle))
+	assert.Contains(t, childText, "worktrees/shell")
+	assert.Contains(t, childText, "⎇ shell-wt")
+	assert.Less(t, strings.Index(childText, "worktrees/shell"), strings.Index(childText, "shell-wt"))
 }
 
 func TestNarrowDrilldownAndEscapeChain(t *testing.T) {
@@ -418,7 +467,7 @@ func TestNarrowDrilldownAndEscapeChain(t *testing.T) {
 	req, _ := find[OpenDocumentRequestMsg](keys(t, m, "enter"))
 	m.SetDocument(sampleDocument(req.Key))
 	assert.True(t, m.drilled)
-	assert.Contains(t, plain(m), "Unstaged hunk 1/2")
+	assert.Contains(t, plain(m), "Unstaged · hunk 1/2")
 	assert.NotContains(t, plain(m), "Changes  Draft 0")
 
 	keys(t, m, "esc")
@@ -426,6 +475,15 @@ func TestNarrowDrilldownAndEscapeChain(t *testing.T) {
 	assert.Contains(t, plain(m), "Changes  Draft 0")
 	_, closed := find[CloseRequestMsg](keys(t, m, "esc"))
 	assert.True(t, closed)
+}
+
+func TestShiftCRemainsPatchCopyShortcut(t *testing.T) {
+	m := openThreeHunks(t, 140, 12, false)
+	msg := tea.KeyPressMsg{Code: 'c', ShiftedCode: 'C', Mod: tea.ModShift, Text: "C"}
+	_, cmd := m.HandleKey(msg)
+	patch, ok := find[CopyRequestMsg](drain(cmd))
+	require.True(t, ok)
+	assert.Equal(t, CopyPatch, patch.Kind)
 }
 
 func TestHostKeysPassThroughAndDestructiveKeysAreInert(t *testing.T) {
@@ -477,7 +535,7 @@ func TestMouseOwnsRectangleAndScrolls(t *testing.T) {
 	}
 	m.SetDocument(doc)
 	m.HandleMouse(tea.MouseWheelMsg{X: 2 + g.readerX + 3, Y: 5, Button: tea.MouseWheelDown})
-	assert.Equal(t, 3, m.reader.top)
+	assert.Equal(t, 2, m.reader.top)
 
 	m.Focus()
 	_, cmd = m.HandleMouse(tea.MouseClickMsg{X: 2 + g.navX + 1, Y: 1, Button: tea.MouseLeft})
@@ -589,6 +647,15 @@ func scrollbarRows(t *testing.T, m *Model) []string {
 	return out
 }
 
+func TestReaderHeaderHasSeparateBlankRowBeforeDiff(t *testing.T) {
+	m := openThreeHunks(t, 80, 12, false)
+	lines := strings.Split(m.View(), "\n")
+	require.GreaterOrEqual(t, len(lines), 3)
+	assert.NotEmpty(t, ansi.Strip(lines[0]), "file name and status stay in the title")
+	assert.Empty(t, strings.TrimSpace(ansi.Strip(lines[1])), "one blank row separates metadata from diff content")
+	assert.Contains(t, ansi.Strip(lines[2]), "@@", "diff starts below the separator")
+}
+
 func TestReaderUsesSharedScrollbarAndFade(t *testing.T) {
 	m := newModel(t, 70, 12)
 	selectPanelFile(t, m)
@@ -603,7 +670,7 @@ func TestReaderUsesSharedScrollbarAndFade(t *testing.T) {
 	plainFirst := m.reader.render(m.readerWidth(), m.readerBodyHeight(), true, matcher{})[0]
 	assert.True(t, strings.HasPrefix(firstRow(), plainFirst), "no top fade at the start")
 
-	keys(t, m, "pgdown", "pgdown")
+	keys(t, m, "pgdown", "pgdown", "pgdown")
 	middle := scrollbarRows(t, m)
 	assert.Equal(t, "track", middle[0])
 	assert.Equal(t, "track", middle[len(middle)-1])
@@ -655,7 +722,7 @@ func TestNavigatorScrollbarAndWheel(t *testing.T) {
 	assert.True(t, strings.HasSuffix(rows[1], thumb), "long lists show the shared scrollbar")
 
 	m.HandleMouse(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
-	assert.Equal(t, 3, m.navTop, "wheel scrolls the navigator")
+	assert.Equal(t, 2, m.navTop, "wheel scrolls the navigator by two rows per tick")
 	for range 40 {
 		m.HandleMouse(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
 	}
@@ -674,7 +741,7 @@ func TestPartialDiscoveryNoteIsQuietAndKeepsData(t *testing.T) {
 	drain(m.SetSnapshot(snap))
 	view := plain(m)
 	assert.Contains(t, view, "Discovery limited; some")
-	assert.Contains(t, view, "● main", "found repositories stay visible")
+	assert.Contains(t, view, "● ~/dev/ai-dev/docker-agent", "found checkouts stay visible")
 	assert.NotContains(t, view, "may be outdated", "a partial result is not stale")
 
 	drain(m.SetSnapshot(sampleSnapshot()))

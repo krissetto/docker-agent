@@ -10,6 +10,8 @@ esac
 export ASYNC_AGENT_KIT_CONNECTION=1
 export DOCKER_AGENT_AUTO_UPDATE=0 DOCKER_AGENT_NO_TOUR=1
 export DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 TELEMETRY_ENABLED=false
+# Enable SSH commit signing if the host forwards an ssh-agent key (no-op otherwise).
+[ -x /opt/async-agent/git-signing.sh ] && /opt/async-agent/git-signing.sh || true
 exec /opt/async-agent/docker-agent run \
     --managed-api --managed-api-attach \
     --managed-api-state-dir "${ASYNC_AGENT_KIT_STATE_DIR:?missing creation-time state directory}" "$@"

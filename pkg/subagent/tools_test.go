@@ -79,15 +79,18 @@ func TestInstructionsExplainDelegationAndLifecycle(t *testing.T) {
 	normalized := strings.Join(strings.Fields(instr), " ")
 	assert.LessOrEqual(t, len(strings.Fields(instr)), 454, "keep parent instructions within the pre-edit word budget")
 	for _, semantic := range []string{
-		// The task is the child's whole world.
-		"sees only your task, not this conversation",
-		"message a capable colleague",
-		"a few plain sentences on what needs doing and what to bring back",
-		"any fact they can't find themselves that would change what they do",
-		"Point at paths rather than pasting",
-		"if something from earlier matters, one sentence covers it",
-		"Mention concurrent work only as a concrete dependency or ownership boundary",
-		"A clear request may be the whole assignment",
+		// The initial task is self-contained; later messages retain context.
+		"sees only its task, not this conversation",
+		"Default to a self-contained 1–3 sentence task",
+		"goal, essential facts, paths, constraints, expected result",
+		"expand only for essential correctness details",
+		"Never refer to above or earlier context, or say \"as discussed,\" without supplying it",
+		"Follow-ups to that child retain context",
+		"Default to 1–3 short report bullets: result, checks, blockers",
+		"expand as needed so no essential detail is omitted",
+		"Skip routine progress, recaps, and roleplay",
+		"Mention concurrent work only for a concrete dependency or ownership boundary",
+		"A clear request can stand alone",
 		"web/src/Login.tsx",
 		// Delegation threshold, parallelism, and ownership.
 		"specialization or substantial independent work justifies the coordination cost",
@@ -96,7 +99,7 @@ func TestInstructionsExplainDelegationAndLifecycle(t *testing.T) {
 		"one owner",
 		"don't redo their work yourself",
 		"avoid unnecessary nested delegation",
-		"don't depend on each other's results, request them together in one response",
+		"Bundle independent reads and commands in one response",
 		// Lifecycle.
 		"If there is no independent work, end your turn without tool calls to delay or check progress",
 		"no sleep, polling, or busywork",
@@ -150,8 +153,27 @@ func TestSpawnDefinitionRequiresSelfContainedTask(t *testing.T) {
 	require.Equal(t, ToolSpawnSubagent, spawn.Name, "spawn definition must be located by name")
 
 	description := strings.Join(strings.Fields(spawn.Description), " ")
-	assert.Contains(t, description, "It sees only task")
-	assert.Contains(t, description, "like a message to a colleague")
+	assert.Contains(t, description, "sees only task, not your conversation")
+	assert.Contains(t, description, "Default to a 1–3 sentence task")
+	assert.Contains(t, description, "goal, essential facts, paths, constraints, and expected result")
+	assert.Contains(t, description, "expand only for essential correctness details")
+	assert.Contains(t, description, "don't refer to above or earlier context without including it")
+	assert.Contains(t, description, "Default to a 1–3 bullet report")
+	assert.Contains(t, description, "expand as needed so no essential detail is omitted")
+	assert.Contains(t, description, "Skip routine progress, recaps, and roleplay")
+	assert.Contains(t, description, "Follow-ups to this child retain context")
+	schema, err := tools.SchemaToMap(spawn.Parameters)
+	require.NoError(t, err)
+	taskDescription := schema["properties"].(map[string]any)["task"].(map[string]any)["description"].(string)
+	assert.Contains(t, taskDescription, "Default to 1–3 short sentences")
+	assert.Contains(t, taskDescription, "goal, essential facts, paths, constraints, and expected result")
+	assert.Contains(t, taskDescription, "expand only for essential correctness details")
+	assert.Contains(t, taskDescription, "The child sees only this task, not your conversation")
+	assert.Contains(t, taskDescription, "don't refer to above or earlier context without including it")
+	assert.Contains(t, taskDescription, "Default to 1–3 report bullets: result, checks, blockers")
+	assert.Contains(t, taskDescription, "expand as needed so no essential detail is omitted")
+	assert.Contains(t, taskDescription, "Skip routine progress, recaps, and roleplay")
+	assert.Contains(t, taskDescription, "Follow-ups to the same child retain context")
 	assert.NotContains(t, description, "everything it needs")
 	assert.NotContains(t, description, "rationale")
 	assert.NotContains(t, description, "validation")
@@ -166,7 +188,9 @@ func TestDefinitionsExplainAddressingAndReports(t *testing.T) {
 		}
 		t.Run(definition.Name, func(t *testing.T) {
 			t.Parallel()
-			assert.Contains(t, definition.Description, "your own direct children")
+			if definition.Name != ToolSendMessage {
+				assert.Contains(t, definition.Description, "your own direct children")
+			}
 			schema, err := tools.SchemaToMap(definition.Parameters)
 			require.NoError(t, err)
 			properties := schema["properties"].(map[string]any)
@@ -174,10 +198,15 @@ func TestDefinitionsExplainAddressingAndReports(t *testing.T) {
 			if definition.Name == ToolSendMessage {
 				idField = "to"
 				assert.Contains(t, definition.Description, "'parent' if you were spawned")
-				assert.Contains(t, definition.Description, "sibling and unrelated ids are not addressable")
+				assert.Contains(t, definition.Description, "by default only your direct children and parent are addressable")
+				assert.Contains(t, definition.Description, "other non-stopped instances in this root session's tree")
 				assert.Contains(t, definition.Description, "not routine progress or nudges")
 			}
-			assert.Contains(t, properties[idField].(map[string]any)["description"], "your own direct children")
+			if definition.Name == ToolSendMessage {
+				assert.Contains(t, properties[idField].(map[string]any)["description"], "by default only your direct children and parent")
+			} else {
+				assert.Contains(t, properties[idField].(map[string]any)["description"], "your own direct children")
+			}
 			if definition.Name == ToolReadSubagent {
 				assert.Contains(t, definition.Description, "latest response without tool calls")
 				assert.Contains(t, definition.Description, "only if none exists, return the newest tool-call response")
@@ -200,6 +229,13 @@ func TestChildInstructionsExplainLifecycle(t *testing.T) {
 		"reported to your parent automatically, often as a truncated preview",
 		"retrieve the full result with read_subagent",
 		"Your session stays open for follow-ups",
+		"You received only its assigned task, not the conversation that led to it",
+		"ask your parent for any essential context you lack",
+		"Later messages from the same parent continue this session and retain its context",
+		"Default to 1–3 short final report bullets",
+		"result, checks, blockers",
+		"expand as needed so no essential detail is omitted",
+		"Skip routine progress, recaps, and roleplay",
 		`your own direct children by id or "parent", not siblings or unrelated agents`,
 		"Do not depend on live supervision",
 		`target "parent" when they can act on it`,
@@ -217,7 +253,7 @@ func TestChildInstructionsExplainLifecycle(t *testing.T) {
 	assert.NotContains(t, prompt, "whenever it would help them")
 }
 
-func TestHarnessPromptIncludesAllowList(t *testing.T) {
+func TestHarnessPromptKeepsAllowListOutOfCoreInstructions(t *testing.T) {
 	t.Parallel()
 	prompt := HarnessPrompt([]AllowedSubagent{
 		{Agent: "worker", Description: "Does work"},
@@ -226,10 +262,10 @@ func TestHarnessPromptIncludesAllowList(t *testing.T) {
 	})
 
 	assert.Contains(t, prompt, Instructions())
-	assert.Contains(t, prompt, "Your subagents")
-	assert.Contains(t, prompt, "- worker: Does work")
-	assert.Contains(t, prompt, "- web: Web research")
-	assert.Contains(t, prompt, "- reviewer: (no description)")
+	assert.NotContains(t, prompt, "Your subagents")
+	assert.NotContains(t, prompt, "Does work")
+	assert.NotContains(t, prompt, "Web research")
+	assert.NotContains(t, prompt, "reviewer")
 }
 
 func TestHarnessPromptWithoutAllowListIsInstructions(t *testing.T) {

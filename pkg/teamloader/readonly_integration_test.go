@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
 	"github.com/docker/docker-agent/pkg/tools/codemode"
+	"io"
 )
 
 // toolNames returns the names of the tools exposed by ts.
@@ -29,89 +30,13 @@ func toolNames(t *testing.T, ts tools.ToolSet) []string {
 	return names
 }
 
-func TestGetToolsForAgent_ToolsetReadOnly(t *testing.T) {
-	t.Parallel()
-
-	a := &latest.AgentConfig{
-		Instruction: "test",
-		Toolsets: []latest.Toolset{
-			{Type: "background_jobs", ReadOnly: true},
-		},
-	}
-
-	runConfig := config.RuntimeConfig{
-		Config:              config.Config{WorkingDir: t.TempDir()},
-		EnvProviderForTests: &noEnvProvider{},
-	}
-	expander := js.NewJsExpander(runConfig.EnvProvider())
-
-	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
+func TestShellDiagnosticsRemainAvailableWithoutStandaloneProcessToolset(t *testing.T) {
+	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}, EnvProviderForTests: &noEnvProvider{}}
+	sets, warnings, err := getToolsForAgent(t.Context(), &latest.AgentConfig{Toolsets: []latest.Toolset{{Type: "shell"}}}, ".", &runConfig, "shell-only", &loadOptions{toolsetRegistry: testToolsetRegistry(), ownedResources: new([]io.Closer)}, js.NewJsExpander(runConfig.EnvProvider()))
 	require.NoError(t, err)
 	require.Empty(t, warnings)
-	require.Len(t, got, 1)
-
-	names := toolNames(t, got[0])
-	assert.ElementsMatch(t, []string{"list_background_jobs", "view_background_job", "wait_background_job"}, names)
-}
-
-func TestGetToolsForAgent_AgentReadOnly(t *testing.T) {
-	t.Parallel()
-
-	// The agent-level flag applies the read-only filter to every toolset,
-	// even though the toolset itself does not set readonly.
-	a := &latest.AgentConfig{
-		Instruction: "test",
-		ReadOnly:    true,
-		Toolsets: []latest.Toolset{
-			{Type: "background_jobs"},
-		},
-	}
-
-	runConfig := config.RuntimeConfig{
-		Config:              config.Config{WorkingDir: t.TempDir()},
-		EnvProviderForTests: &noEnvProvider{},
-	}
-	expander := js.NewJsExpander(runConfig.EnvProvider())
-
-	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
-	require.NoError(t, err)
-	require.Empty(t, warnings)
-	require.Len(t, got, 1)
-
-	names := toolNames(t, got[0])
-	assert.ElementsMatch(t, []string{"list_background_jobs", "view_background_job", "wait_background_job"}, names)
-}
-
-func TestGetToolsForAgent_NoReadOnlyKeepsAllTools(t *testing.T) {
-	t.Parallel()
-
-	a := &latest.AgentConfig{
-		Instruction: "test",
-		Toolsets: []latest.Toolset{
-			{Type: "shell"},
-			{Type: "background_jobs"},
-		},
-	}
-
-	runConfig := config.RuntimeConfig{
-		Config:              config.Config{WorkingDir: t.TempDir()},
-		EnvProviderForTests: &noEnvProvider{},
-	}
-	expander := js.NewJsExpander(runConfig.EnvProvider())
-
-	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
-	require.NoError(t, err)
-	require.Empty(t, warnings)
-	require.Len(t, got, 2)
-
-	shellNames := toolNames(t, got[0])
-	assert.ElementsMatch(t, []string{"shell"}, shellNames)
-
-	backgroundNames := toolNames(t, got[1])
-	assert.ElementsMatch(t, []string{
-		"run_background_job", "list_background_jobs",
-		"view_background_job", "stop_background_job", "wait_background_job",
-	}, backgroundNames)
+	require.Len(t, sets, 1)
+	assert.ElementsMatch(t, []string{"shell", "list_running_processes", "inspect_running_process", "kill_running_process"}, toolNames(t, sets[0]))
 }
 
 func TestGetToolsForAgent_ReadOnlyFinalComposition(t *testing.T) {
@@ -125,7 +50,6 @@ func TestGetToolsForAgent_ReadOnlyFinalComposition(t *testing.T) {
 				Subagents:     latest.SubagentRefs{{Agent: "worker"}},
 				Handoffs:      []string{"worker"},
 				CodeModeTools: codeMode,
-				Toolsets:      []latest.Toolset{{Type: "background_jobs", Defer: latest.DeferConfig{DeferAll: true}}},
 			}
 			runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}, EnvProviderForTests: &noEnvProvider{}}
 			sets, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "readonly", &loadOptions{
@@ -141,22 +65,15 @@ func TestGetToolsForAgent_ReadOnlyFinalComposition(t *testing.T) {
 			for _, tool := range all {
 				assert.True(t, tool.Annotations.ReadOnlyHint, tool.Name)
 			}
-			for _, forbidden := range []string{subagent.ToolSpawnSubagent, subagent.ToolSendMessage, subagent.ToolStopSubagent, "transfer_task", "handoff", "run_background_job"} {
+			for _, forbidden := range []string{subagent.ToolSpawnSubagent, subagent.ToolSendMessage, subagent.ToolStopSubagent, "transfer_task", "handoff", "list_running_processes"} {
 				assert.NotContains(t, namesOf(all), forbidden)
 			}
 			if codeMode {
 				assert.Contains(t, namesOf(all), "run_tools_with_javascript")
-				output := callTool(t, all, "run_tools_with_javascript", codemode.RunToolsWithJavascriptArgs{Script: "return typeof spawn_subagent + ':' + typeof transfer_task + ':' + typeof run_background_job;"})
+				output := callTool(t, all, "run_tools_with_javascript", codemode.RunToolsWithJavascriptArgs{Script: "return typeof spawn_subagent + ':' + typeof transfer_task + ':' + typeof legacy_run_tool;"})
 				assert.Contains(t, output, "undefined:undefined:undefined")
 			} else {
 				assert.Contains(t, namesOf(all), subagent.ToolReadSubagent)
-				search := callTool(t, all, deferred.ToolNameSearchTool, deferred.SearchToolArgs{Query: "background"})
-				assert.Contains(t, search, "list_background_jobs")
-				assert.NotContains(t, search, "run_background_job")
-				callTool(t, all, deferred.ToolNameAddTool, deferred.AddToolArgs{Name: "list_background_jobs"})
-				all, err = ag.Tools(t.Context())
-				require.NoError(t, err)
-				assert.Contains(t, namesOf(all), "list_background_jobs")
 			}
 		})
 	}

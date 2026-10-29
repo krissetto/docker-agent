@@ -68,6 +68,7 @@ func (p *preparedSessionView) discard() {
 		_ = p.environmentLease.Release(context.Background())
 		p.environmentLease = nil
 	}
+	p.releaseGraphsLocked()
 	p.cancel()
 }
 
@@ -408,7 +409,9 @@ func (v *localSessionRuntimeView) prepareHistoricalSessionView(ctx context.Conte
 			if storedTree.Root != subagent.SessionRootID(root.ID) || len(storedTree.Nodes) != 1 || storedTree.Nodes[0].Node.ID != storedTree.Root {
 				return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: selected.ID, Operation: "historical_tree"}
 			}
-			topology = storedTree
+			storedTreeCopy := *storedTree
+			storedTreeCopy.Nodes = clearBackgroundProcessCounts(storedTreeCopy.Nodes)
+			topology = &storedTreeCopy
 		}
 	}
 	if selected.ParentID != "" {
@@ -487,12 +490,6 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 		})
 		return p, nil
 	}
-	restore := m.transition("restore:" + p.root.ID)
-	restore.Lock()
-	defer restore.Unlock()
-	transition := m.transition(p.root.ID)
-	transition.Lock()
-	defer transition.Unlock()
 	stopped := make(map[string]bool)
 	candidates := []*session.Session{p.root}
 	for _, entry := range p.nodes {
@@ -501,46 +498,27 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 			candidates = append(candidates, entry.childSess)
 		}
 	}
-	for _, candidate := range candidates {
-		if err := p.ctx().Err(); err != nil {
-			p.discard()
-			return nil, err
-		}
-		var replaces *sessionDriver
-		if existing, ok := g.Lookup(candidate.ID); ok {
-			projection := existing.registrySnapshot()
-			identityMatches := existing.identityParent == candidate.ParentID && projection.agentName == candidate.AgentName
-			valid := identityMatches && (!projection.stopped || (stopped[candidate.ID] && projection.stoppedView))
-			if !valid && identityMatches && stopped[candidate.ID] && projection.replaceable && driverDrained(existing) {
-				replaces = existing
-			} else if !valid {
-				p.discard()
-				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: candidate.ID, Operation: "prepare_view"}
-			}
-			if replaces == nil {
-				p.existing[candidate.ID] = existing
-				continue
-			}
-		}
-		reservation, err := g.prepareRestore(p.ctx(), candidate, replaces)
+	restore := m.transition("restore:" + p.root.ID)
+	transition := m.transition(p.root.ID)
+	for {
+		// Transition locks cover only the reserve pass. A collision is resolved
+		// with no lock held: release this view's reservations, wait for the
+		// in-flight one, then reserve again from the registry.
+		wait, err := p.reserveUnderTransition(ctx, restore, transition, g, candidates, stopped)
 		if err != nil {
 			p.discard()
 			return nil, err
 		}
-		if err := reservation.driver.ownerCall(p.ctx(), func() error {
-			reservation.driver.viewDormant = true
-			if stopped[candidate.ID] {
-				reservation.driver.stopped = true
-				reservation.driver.stoppedView = true
-				reservation.driver.pending = nil
-			}
-			return nil
-		}); err != nil {
-			reservation.Discard()
-			p.discard()
-			return nil, err
+		if wait == nil {
+			break
 		}
-		p.reservations = append(p.reservations, reservation)
+		p.discardReservations()
+		select {
+		case <-wait.done:
+		case <-p.ctx().Done():
+			p.discard()
+			return nil, p.ctx().Err()
+		}
 	}
 	context.AfterFunc(preparationCtx, func() {
 		p.mu.Lock()
@@ -674,6 +652,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	}
 	for _, entry := range p.nodes {
 		node := entry.snapshot.Node
+		node.BackgroundProcesses = 0
 		if existing, found := m.tree.Node(node.ID); found {
 			if existing.SessionID != node.SessionID || existing.Parent != node.Parent || existing.Agent != node.Agent {
 				m.mu.Unlock()
@@ -800,6 +779,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	for _, reservation := range p.reservations {
 		g.drivers[reservation.id] = reservation.driver
 		delete(g.reservations, reservation.id)
+		reservation.settle()
 	}
 	if rootDriver := g.drivers[p.root.ID]; rootDriver != nil {
 		g.mu.Unlock()
@@ -835,7 +815,8 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		// Copy attach metadata without cloning the stale session it replaces.
 		attach := *info.Attach
 		info.Attach = &attach
-		info.Attach.Session = info.Session.Clone()
+		// Stored committed copies are private and immutable; every public result clones per field.
+		info.Attach.Session = info.Session
 		info.Attach.Agent = info.ActiveAgentName
 	}
 	// Catalog discovery may perform I/O; publication is complete before metadata hydration.
@@ -844,6 +825,11 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	transition.Unlock()
 	restore.Unlock()
 	publicationLocked = false
+	for _, entry := range p.nodes {
+		if driver, ok := p.r.sessionDrivers.Lookup(entry.snapshot.Node.SessionID); ok {
+			driver.projectBackgroundProcessCount()
+		}
+	}
 	for _, reservation := range p.reservations {
 		if reservation != nil {
 			reservation.driver.WakePending()
@@ -853,6 +839,17 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	result := CommittedSessionView{SessionHandle: handle, Info: info, Metadata: metadata, Status: status}
 	p.committed = &result
 	return cloneCommittedSessionView(result), nil
+}
+
+// releaseGraphsLocked runs on every terminal transition (success, failure, abort).
+// Commit serves p.committed and Info serves p.info, so the preparation graphs
+// below are no longer read and must not stay retained by the view.
+func (p *preparedSessionView) releaseGraphsLocked() {
+	p.root = nil
+	p.nodes = nil
+	p.records = nil
+	p.snapshot = subagent.Snapshot{}
+	p.existing = nil
 }
 
 // OpenSessionView acquires a confirmed, ready view without starting execution.
@@ -868,6 +865,99 @@ func OpenSessionView(ctx context.Context, sessions SessionRuntime, id string) (C
 	}
 	defer prepared.Abort()
 	return prepared.Commit(ctx)
+}
+
+// reserveUnderTransition reserves every candidate while holding the root's
+// transition locks. It returns an in-flight reservation to wait on, or nil when
+// all candidates are reserved or shared. The locks are released before return.
+func (p *preparedSessionView) reserveUnderTransition(ctx context.Context, restore, transition *lifecycleTransition, g *sessionDriverRegistry, candidates []*session.Session, stopped map[string]bool) (*restoreDriverReservation, error) {
+	if err := restore.LockContext(ctx); err != nil {
+		return nil, err
+	}
+	defer restore.Unlock()
+	if err := transition.LockContext(ctx); err != nil {
+		return nil, err
+	}
+	defer transition.Unlock()
+	for _, candidate := range candidates {
+		for {
+			inFlight, err := p.tryReserveCandidate(g, candidate, stopped)
+			if errors.Is(err, errRestoreRetry) {
+				if ctxErr := p.ctx().Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if inFlight != nil {
+				return inFlight, nil
+			}
+			break
+		}
+	}
+	return nil, nil
+}
+
+// discardReservations releases this view's reservations without ending the view,
+// so a collision wait never holds another prepared view's reservation.
+func (p *preparedSessionView) discardReservations() {
+	for _, reservation := range p.reservations {
+		reservation.Discard()
+	}
+	p.reservations = nil
+	p.existing = make(map[string]*sessionDriver)
+}
+
+// errRestoreRetry reports that a collision cleared before this prepare could wait.
+var errRestoreRetry = errors.New("restore reservation cleared before wait")
+
+// tryReserveCandidate returns a non-nil in-flight reservation when the caller
+// must wait for it before retrying the same candidate.
+func (p *preparedSessionView) tryReserveCandidate(g *sessionDriverRegistry, candidate *session.Session, stopped map[string]bool) (*restoreDriverReservation, error) {
+	if err := p.ctx().Err(); err != nil {
+		return nil, err
+	}
+	var replaces *sessionDriver
+	if existing, ok := g.Lookup(candidate.ID); ok {
+		projection := existing.registrySnapshot()
+		identityMatches := existing.identityParent == candidate.ParentID && projection.agentName == candidate.AgentName
+		valid := identityMatches && (!projection.stopped || (stopped[candidate.ID] && projection.stoppedView))
+		if !valid && identityMatches && stopped[candidate.ID] && projection.replaceable && driverDrained(existing) {
+			replaces = existing
+		} else if !valid {
+			return nil, &SessionError{Kind: SessionErrorConflict, SessionID: candidate.ID, Operation: "prepare_view"}
+		}
+		if replaces == nil {
+			p.existing[candidate.ID] = existing
+			return nil, nil
+		}
+	}
+	reservation, err := g.prepareRestore(p.ctx(), candidate, replaces)
+	if err != nil {
+		if sessionErr, ok := errors.AsType[*SessionError](err); ok && sessionErr.Operation == "restore_collision" {
+			if inFlight := g.reservationFor(candidate.ID); inFlight != nil {
+				return inFlight, nil
+			}
+			return nil, errRestoreRetry
+		}
+		return nil, err
+	}
+	if err := reservation.driver.ownerCall(p.ctx(), func() error {
+		reservation.driver.viewDormant = true
+		if stopped[candidate.ID] {
+			reservation.driver.stopped = true
+			reservation.driver.stoppedView = true
+			reservation.driver.pending = nil
+		}
+		return nil
+	}); err != nil {
+		reservation.Discard()
+		return nil, err
+	}
+	p.reservations = append(p.reservations, reservation)
+	return nil, nil
 }
 
 // RestoreSessionView delegates to canonical ready acquisition.

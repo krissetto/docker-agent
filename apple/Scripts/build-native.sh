@@ -14,15 +14,31 @@ build_mobile_sdk() {
   name=$1
   sdk=$2
   build_root="$DERIVED_DATA_ROOT/$name"
-  xcodebuild \
-    -project "$PROJECT" \
-    -target "$IOS_TARGET" \
-    -configuration Debug \
-    -sdk "$sdk" \
-    SYMROOT="$build_root/Build/Products" \
-    OBJROOT="$build_root/Build/Intermediates.noindex" \
-    CODE_SIGNING_ALLOWED=NO \
-    build
+  if [ "$name" = ios-simulator ]; then
+    xcodebuild \
+      -project "$PROJECT" \
+      -target "$IOS_TARGET" \
+      -configuration Debug \
+      -sdk "$sdk" \
+      SYMROOT="$build_root/Build/Products" \
+      OBJROOT="$build_root/Build/Intermediates.noindex" \
+      CODE_SIGNING_ALLOWED=YES \
+      CODE_SIGNING_REQUIRED=YES \
+      CODE_SIGN_IDENTITY=- \
+      DEVELOPMENT_TEAM=FAKETEAMID \
+      ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+      build
+  else
+    xcodebuild \
+      -project "$PROJECT" \
+      -target "$IOS_TARGET" \
+      -configuration Debug \
+      -sdk "$sdk" \
+      SYMROOT="$build_root/Build/Products" \
+      OBJROOT="$build_root/Build/Intermediates.noindex" \
+      CODE_SIGNING_ALLOWED=NO \
+      build
+  fi
 }
 
 build_mobile_sdk ios-simulator iphonesimulator

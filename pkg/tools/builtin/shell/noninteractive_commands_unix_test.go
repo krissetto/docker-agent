@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
 )
 
@@ -87,39 +85,6 @@ func checkAgentCommandsWithoutTerminal(t *testing.T) {
 		assert.Contains(t, result.Output, "detached-terminal")
 		assert.Contains(t, result.Output, "captured-stderr")
 		assert.NotContains(t, result.Output, "inherited-terminal")
-	})
-
-	t.Run("background job", func(t *testing.T) {
-		ctx := tools.WithResourceOwner(t.Context(), tools.NewResourceOwner())
-		toolset := backgroundjobs.New(nil, cfg)
-		require.NoError(t, toolset.Start(ctx))
-		t.Cleanup(func() { _ = toolset.Stop(ctx) })
-		all, err := toolset.Tools(ctx)
-		require.NoError(t, err)
-		var run, wait tools.Tool
-		for _, tool := range all {
-			switch tool.Name {
-			case backgroundjobs.ToolNameRunBackgroundJob:
-				run = tool
-			case backgroundjobs.ToolNameWaitBackgroundJob:
-				wait = tool
-			}
-		}
-		result, err := run.Handler(ctx, tools.ToolCall{
-			Function: tools.FunctionCall{Arguments: `{"cmd":"` + probe + `"}`},
-		}, tools.NopRuntime{})
-		require.NoError(t, err)
-		require.False(t, result.IsError, result.Output)
-		const prefix = "Background job started with ID: "
-		jobID, _, _ := strings.Cut(strings.TrimPrefix(result.Output, prefix), "\n")
-		require.NotEmpty(t, jobID)
-		result, err = wait.Handler(ctx, tools.ToolCall{
-			Function: tools.FunctionCall{Arguments: `{"job_id":"` + jobID + `"}`},
-		}, tools.NopRuntime{})
-		require.NoError(t, err)
-		assert.Contains(t, result.Output, "detached-terminal")
-		assert.Contains(t, result.Output, "captured-stderr")
-		assert.Contains(t, result.Output, "Exit Code: 0")
 	})
 
 	t.Run("credential helper", func(t *testing.T) {

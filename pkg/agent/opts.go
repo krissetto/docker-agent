@@ -103,6 +103,13 @@ func WithCompactionModel(model provider.Provider) Opt {
 	}
 }
 
+// WithCompactionPrompt sets a replacement user prompt for session summaries.
+func WithCompactionPrompt(prompt string) Opt {
+	return func(a *Agent) {
+		a.compactionPrompt = prompt
+	}
+}
+
 // WithCompactionThreshold sets the fraction of the context window at which
 // proactive auto-compaction triggers. Values outside (0, 1] are ignored and
 // the default (0.9) applies; config validation rejects them before this

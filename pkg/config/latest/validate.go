@@ -115,6 +115,9 @@ func (t *Config) Validate() error {
 		if err := agent.Safety.Validate(); err != nil {
 			return fmt.Errorf("agents.%s.safety: %w", agent.Name, err)
 		}
+		if err := agent.SubagentAccess.validate(); err != nil {
+			return fmt.Errorf("agents.%s.subagent_access: %w", agent.Name, err)
+		}
 		if err := agent.StructuredOutput.validate(); err != nil {
 			return fmt.Errorf("agents.%s.structured_output: %w", agent.Name, err)
 		}
@@ -221,6 +224,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.CompactionModel != "" {
 		return errors.New("first_available cannot be combined with compaction_model")
 	}
+	if m.CompactionPrompt != "" {
+		return errors.New("first_available cannot be combined with compaction_prompt")
+	}
 	if m.CompactionThreshold != nil {
 		return errors.New("first_available cannot be combined with compaction_threshold")
 	}
@@ -277,6 +283,9 @@ func (a *AgentConfig) validateHarness() error {
 	// ignored.
 	if a.CompactionModel != "" {
 		return errors.New("compaction_model cannot be used with a harness; the harness manages its own context compaction")
+	}
+	if a.CompactionPrompt != "" {
+		return errors.New("compaction_prompt cannot be used with a harness; the harness manages its own context compaction")
 	}
 
 	// Harness agents also skip docker-agent's run loop, so the internal tool
@@ -341,8 +350,8 @@ func (t *Toolset) validate() error {
 	if err := validatePathRootEntries("deny_list", t.DenyList); err != nil {
 		return err
 	}
-	if len(t.Env) > 0 && (t.Type != "shell" && t.Type != "background_jobs" && t.Type != "script" && t.Type != "mcp" && t.Type != "lsp") {
-		return errors.New("env can only be used with type 'shell', 'background_jobs', 'script', 'mcp' or 'lsp'")
+	if len(t.Env) > 0 && (t.Type != "shell" && t.Type != "script" && t.Type != "mcp" && t.Type != "lsp") {
+		return errors.New("env can only be used with type 'shell', 'script', 'mcp' or 'lsp'")
 	}
 	if len(t.FileTypes) > 0 && t.Type != "lsp" {
 		return errors.New("file_types can only be used with type 'lsp'")
@@ -376,9 +385,6 @@ func (t *Toolset) validate() error {
 	}
 	if t.SudoAskpass != nil && t.Type != "shell" {
 		return errors.New("sudo_askpass can only be used with type 'shell'")
-	}
-	if t.Recall != nil && t.Type != "background_jobs" {
-		return errors.New("recall can only be used with type 'background_jobs'")
 	}
 	if len(t.AllowedDomains) > 0 && len(t.BlockedDomains) > 0 {
 		return errors.New("allowed_domains and blocked_domains are mutually exclusive")
@@ -444,8 +450,6 @@ func (t *Toolset) validate() error {
 
 	switch t.Type {
 	case "shell":
-		// no additional validation needed
-	case "background_jobs":
 		// no additional validation needed
 	case "team_edit":
 		// Runtime authority is granted only by trusted startup config/CLI, not YAML.
@@ -521,6 +525,8 @@ func (t *Toolset) validate() error {
 		}
 	case "background_agents":
 		// no additional validation needed
+	case "background_jobs":
+		return errors.New("toolset type 'background_jobs' was removed; configure shell background_after and env instead")
 	}
 
 	return nil

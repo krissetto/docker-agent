@@ -17,6 +17,11 @@ agents:
       parallel, then simply finish your response if you have nothing else to
       do. Do not poll for status; you are resumed automatically when a subagent
       sends a message or finishes.
+    # Instance discovery and messaging are independent. Tree scope only
+    # addresses instances under this root session, not configured agents.
+    subagent_access:
+      list_agents: tree
+      send_message: tree
     subagents:
       - agent: web_researcher
         name: web

@@ -189,10 +189,10 @@ func TestSummaryLabelUsesRegularThemeForeground(t *testing.T) {
 		label := m.treeSummary(60)
 		cells := sidebarCells(label)
 		require.NotEmpty(t, cells)
-		assert.Equal(t, color.NRGBAModel.Convert(styles.TextPrimary), color.NRGBAModel.Convert(cells[0].fg))
+		assert.Equal(t, color.NRGBAModel.Convert(styles.MutedStyle.GetForeground()), color.NRGBAModel.Convert(cells[0].fg), "summary rests muted like the active count")
 		m.hoverValues = map[string]hoverValue{"tree-summary": {value: 1, target: 1}}
 		hover := sidebarCells(m.hoverText(label, "tree-summary"))
-		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(styles.TextPrimary, .25)), color.NRGBAModel.Convert(hover[0].fg))
+		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(styles.MutedStyle.GetForeground(), .25)), color.NRGBAModel.Convert(hover[0].fg))
 		m.hoverValues = nil
 		assert.Equal(t, label, m.hoverText(m.treeSummary(60), "tree-summary"), "exit returns to original regular text role")
 	}

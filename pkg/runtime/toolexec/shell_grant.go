@@ -2,7 +2,7 @@ package toolexec
 
 // This file hardens the session-permissions override of preempt-yolo
 // safety verdicts (see [call.sessionPermissionsAllow]) for the command
-// tools — shell and run_background_job (see [safety.IsCommandTool]).
+// tool — shell (see [safety.IsCommandTool]).
 //
 // The generic permissions matcher treats a trailing-* pattern as a
 // plain prefix match over the whole command string, so the interactive

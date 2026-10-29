@@ -16,7 +16,7 @@ import (
 func TestSteeringAcceptedReceiptPromotesOneCard(t *testing.T) {
 	sess := session.New(session.WithID("s"))
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.messages.SetSize(100, 200)
 	accepted := &runtime.PendingUserMessageAcceptedEvent{SessionID: "s", TurnID: "incoming", Message: "distinct body", InputOrigin: session.InputOriginAgent, InputMode: "steer", SenderID: "child", SenderName: "worker", SessionPosition: 0}
 	p.handleRuntimeEvent(accepted)
@@ -26,13 +26,13 @@ func TestSteeringAcceptedReceiptPromotesOneCard(t *testing.T) {
 	require.NotContains(t, ansi.Strip(p.messages.View()), "sent a message")
 	p.handleRuntimeEvent(&runtime.PendingUserMessagePromotedEvent{SessionID: "s", TurnID: "incoming", Message: accepted.Message, InputOrigin: accepted.InputOrigin, InputMode: accepted.InputMode, SenderID: accepted.SenderID, SenderName: accepted.SenderName, SessionPosition: 0})
 	require.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeAgentInput))
-	require.Contains(t, ansi.Strip(p.messages.View()), "worker (child) sent a message >")
+	require.Contains(t, ansi.Strip(p.messages.View()), "From worker (child) sent a message >")
 }
 
 func TestSteeringReplayLateAcceptanceAndConcurrentWithdrawal(t *testing.T) {
 	sess := session.New(session.WithID("s"))
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.messages.SetSize(100, 200)
 	accepted := func(id string, pos int) *runtime.PendingUserMessageAcceptedEvent {
 		return &runtime.PendingUserMessageAcceptedEvent{SessionID: "s", TurnID: id, Message: "same body", InputOrigin: session.InputOriginAgent, InputMode: "steer", SenderID: "child", SenderName: "worker", SessionPosition: pos}
@@ -62,7 +62,7 @@ func TestSteeringSnapshotPendingReceiptSurvivesResetAndPromotion(t *testing.T) {
 		t.Run(map[bool]string{false: "pending metadata", true: "pending transcript"}[withTranscript], func(t *testing.T) {
 			sess := session.New(session.WithID("s"))
 			a, _ := newSessionTestApp(t, sess, nil, nil)
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 			p.messages.SetSize(100, 200)
 			if withTranscript {
 				input := session.UserMessage("restored payload")
@@ -86,7 +86,7 @@ func TestSteeringAsyncRestoreReconcilesBufferedPromotion(t *testing.T) {
 	input.TurnID, input.Pending, input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = "pending", true, session.InputOriginAgent, "steer", "child", "worker"
 	sess.AddMessage(input)
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.messages.SetSize(100, 200)
 	EnableAsyncReplay(p)
 	snapshot := runtime.SessionSnapshot{Session: sess, Status: runtime.SessionStatus{SessionID: "s"}, PendingInputs: []runtime.PendingInput{{TurnID: "pending", Content: input.Message.Content, InputOrigin: input.InputOrigin, InputMode: input.InputMode, SenderID: input.SenderID, SenderName: input.SenderName, SessionPosition: 0}}}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -256,6 +257,8 @@ type Session struct {
 	// read/write access. Shared-session readers must use the locked accessors.
 	mu         sync.RWMutex `json:"-"`
 	metadataMu sync.Mutex
+	// historyRevision increments for in-place transcript changes, but not appends.
+	historyRevision uint64
 
 	// TurnOutcomes contains committed terminal evidence; absence never proves success.
 	TurnOutcomes     map[string]string `json:"turn_outcomes,omitempty"`
@@ -803,6 +806,15 @@ func (s *Session) snapshotItems() []Item {
 	return items
 }
 
+// CloneMessageParts returns an independent deep copy of chat content parts for
+// history DTOs that outlive the owner lock.
+func CloneMessageParts(parts []chat.MessagePart) []chat.MessagePart {
+	if parts == nil {
+		return nil
+	}
+	return cloneChatMessage(chat.Message{MultiContent: parts}).MultiContent
+}
+
 // cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
 func cloneChatMessage(m chat.Message) chat.Message {
@@ -891,6 +903,9 @@ func cloneToolAnnotations(src tools.ToolAnnotations) tools.ToolAnnotations {
 	return cp
 }
 
+// cloneSchemaValue deep-copies schema values. Each occurrence is copied
+// independently, matching the clone contract that shares no mutable state.
+// Map and slice kinds beyond the common JSON shapes keep their concrete type.
 func cloneSchemaValue(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
@@ -905,9 +920,52 @@ func cloneSchemaValue(v any) any {
 			cp[i] = cloneSchemaValue(v)
 		}
 		return cp
+	case nil, bool, string, float64, int, int64, uint64:
+		return v
+	}
+	return cloneSchemaReflect(reflect.ValueOf(v)).Interface()
+}
+
+// cloneSchemaReflect copies map and slice values of any element type with
+// reflection so every mutable container in the schema is independent.
+// Non-container values are returned unchanged.
+func cloneSchemaReflect(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		cp := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			cp.SetMapIndex(iter.Key(), cloneSchemaElement(iter.Value()))
+		}
+		return cp
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		cp := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := range v.Len() {
+			cp.Index(i).Set(cloneSchemaElement(v.Index(i)))
+		}
+		return cp
 	default:
 		return v
 	}
+}
+
+func cloneSchemaElement(v reflect.Value) reflect.Value {
+	if v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return v
+		}
+		copied := reflect.ValueOf(cloneSchemaValue(v.Interface()))
+		out := reflect.New(v.Type()).Elem()
+		out.Set(copied)
+		return out
+	}
+	return cloneSchemaReflect(v)
 }
 
 // Session helper methods
@@ -1000,6 +1058,7 @@ func (s *Session) promotePendingUserMessageLocked(position int) bool {
 	}
 	copy(s.Messages[position:], s.Messages[position+1:])
 	s.Messages[len(s.Messages)-1] = item
+	s.historyRevision++
 	return true
 }
 
@@ -1128,6 +1187,7 @@ func cloneNodeSnapshots(nodes []subagent.NodeSnapshot) []subagent.NodeSnapshot {
 func (s *Session) ApplyCompaction(inputTokens, outputTokens int64, item Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.historyRevision++
 	s.applyCompactionLocked(inputTokens, outputTokens, s.totalCostLocked()+item.Cost, item)
 }
 
@@ -1315,6 +1375,7 @@ func (s *Session) AddSubSession(subSession *Session) {
 	for i := range s.Messages {
 		if s.Messages[i].SubSession != nil && s.Messages[i].SubSession.ID == subSession.ID {
 			s.Messages[i] = NewSubSessionItem(subSession)
+			s.historyRevision++
 			return
 		}
 	}

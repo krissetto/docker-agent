@@ -29,7 +29,7 @@ func authoredDefinitionSnapshot(cfg *latest.Config, sourceIdentity string, exter
 			TeamID: teamID, AgentID: id, AgentKey: a.Name, Name: a.Name,
 			Description: a.Description, WelcomeMessage: a.WelcomeMessage, Instruction: a.Instruction,
 			Model: safeModelRef(a.Model), Safety: string(a.Safety), ReadOnly: a.ReadOnly, MaxIterations: a.MaxIterations,
-			SubAgents: safeReferences(a.SubAgents), Subagents: safeSubagentRefs(a.Subagents),
+			SubAgents: safeReferences(a.SubAgents), Subagents: safeSubagentRefs(a.Subagents), SubagentAccess: cloneAccess(a.SubagentAccess),
 			Handoffs: safeReferences(a.Handoffs), ForceHandoff: safeReference(a.ForceHandoff),
 		}
 		if a.Harness != nil {
@@ -129,4 +129,12 @@ func safeURL(raw string) string {
 		u.Fragment = "redacted"
 	}
 	return u.String()
+}
+
+func cloneAccess(access *latest.SubagentAccessConfig) *latest.SubagentAccessConfig {
+	if access == nil {
+		return nil
+	}
+	clone := *access
+	return &clone
 }

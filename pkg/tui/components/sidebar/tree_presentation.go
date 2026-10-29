@@ -40,6 +40,7 @@ type preparedTree struct {
 	nodes     []subagent.NodeID
 	controls  map[int][]treeControl
 	agents    map[int]string
+	rowByID   map[subagent.NodeID]int
 }
 
 func (m *model) syncCounters() tea.Cmd {
@@ -93,7 +94,7 @@ func (m *model) subagentsInfo(width int) string {
 	if !ok || prepared.rootCount != len(m.subagentNodes) {
 		m.treeCountsValid = false
 		text := m.prepareTreeInfo(width)
-		prepared = preparedTree{rootCount: len(m.subagentNodes), rows: m.preparingRows, bodyStart: m.subagentRowOffset, nodes: append([]subagent.NodeID(nil), m.subagentLineNodes...), controls: m.treeControls, agents: m.transferAgentLines}
+		prepared = preparedTree{rootCount: len(m.subagentNodes), rows: m.preparingRows, bodyStart: m.subagentRowOffset, nodes: append([]subagent.NodeID(nil), m.subagentLineNodes...), controls: m.treeControls, agents: m.transferAgentLines, rowByID: treeRowIndexes(m.subagentLineNodes, m.subagentRowOffset)}
 		if text != "" {
 			prepared.lines = strings.Split(text, "\n")
 		}
@@ -173,6 +174,7 @@ func (m *model) CancelPresentation() {
 		m.treeCounters[i].alpha = m.treeCounters[i].target
 	}
 	m.CancelHover()
+	m.refreshBranchSpanIndex()
 	if m.placement != nil {
 		changed = changed || m.placement.running
 		m.placement.running = false
@@ -198,10 +200,14 @@ func (m *model) SetPresentationActive(active bool) tea.Cmd {
 		return nil
 	}
 	m.presentationActive = false
+	m.scrollview.SetScrollbarActive(false)
 	m.StopAnimation()
 	m.reconcileDirty = true
 	m.ReconcileLayout()
 	m.presentationActive = active
+	if active {
+		m.scrollview.SetScrollbarActive(m.scrollbarVisible && m.mode == ModeVertical)
+	}
 	if !active {
 		return nil
 	}
@@ -210,6 +216,7 @@ func (m *model) SetPresentationActive(active bool) tea.Cmd {
 		cmds = append(cmds, m.startSpinner())
 	}
 	cmds = append(cmds, m.syncSubagentSpinner())
+	cmds = append(cmds, m.resumeBackgroundAnimation())
 	if _, visible := m.visibleTransfer(); visible {
 		cmds = append(cmds, m.transferAnimation.Start())
 	}
@@ -226,7 +233,7 @@ func (m *model) refreshPreparedTreeRow(item preparedTreeRow, row, width int) pre
 	nameHover := m.hoverValues["node-name:"+string(item.node.ID)]
 	hovered := m.hoveredSubagent == item.node.ID
 	frame := ""
-	if isActiveSubagentState(item.node.State) {
+	if isActiveSubagentState(item.node.State) || hasSubagentBackgroundActivity(item.node) {
 		frame = m.subagentSpinner.RawFrame() + m.spinner.RawFrame()
 	}
 	if item.text != "" && item.hover == hover && item.nameHover == nameHover && item.span == span && item.hovered == hovered && item.frame == frame {
@@ -243,4 +250,12 @@ func (m *model) refreshPreparedTreeRow(item preparedTreeRow, row, width int) pre
 	item.controls = m.treeControls[row]
 	item.hover, item.nameHover, item.span, item.hovered, item.frame = hover, nameHover, span, hovered, frame
 	return item
+}
+
+func treeRowIndexes(nodes []subagent.NodeID, bodyStart int) map[subagent.NodeID]int {
+	indexes := make(map[subagent.NodeID]int, len(nodes))
+	for i, id := range nodes {
+		indexes[id] = bodyStart + i
+	}
+	return indexes
 }

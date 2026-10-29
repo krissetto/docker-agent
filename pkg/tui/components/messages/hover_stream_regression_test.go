@@ -122,6 +122,11 @@ func TestActiveStreamHoverPreservesFollowGeometry(t *testing.T) {
 
 	line := m.totalHeight - 2
 	_, _ = m.handleMouseMotion(tea.MouseMotionMsg{X: 20, Y: line - m.scrollOffset})
+	if tick := m.ar.Continue(); tick != nil {
+		accepted, ok := m.ar.Accept(tick().(animation.TickMsg))
+		require.True(t, ok)
+		m.Update(accepted)
+	}
 	afterViewport := m.View()
 	afterItem := m.renderItem(0, m.views[0])
 

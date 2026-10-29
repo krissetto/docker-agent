@@ -77,7 +77,7 @@ func TestStartupTeamSelection(t *testing.T) {
 		cmd.Env = append(os.Environ(), "WORKSPACE_DIR="+workspace)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
-		expected := []string{workspace, "serve", "api", "--managed-api", "--working-dir", workspace, "--managed-api-state-dir", home + "/private"}
+		expected := []string{workspace, "serve", "api", "--managed-api", "--managed-api-listen-host", "0.0.0.0", "--managed-api-listen-port", "9182", "--working-dir", workspace, "--managed-api-state-dir", home + "/private"}
 		if tc.model != "" {
 			expected = append(expected, "--model", tc.model)
 		}

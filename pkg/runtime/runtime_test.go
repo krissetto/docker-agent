@@ -41,6 +41,11 @@ func TestRunStreamUsesSessionPathWithoutAsyncSubagents(t *testing.T) {
 
 	prov := &mockProvider{id: "test/mock-model", stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()}
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(prov)))))
+	t.Cleanup(func() {
+		if rt != nil {
+			_ = rt.Close()
+		}
+	})
 	require.NoError(t, err)
 
 	sess := session.New(session.WithID("session-root"))
@@ -466,7 +471,7 @@ func TestSimple(t *testing.T) {
 		AgentInfo("root", "test/mock-model", "", ""),
 		AgentChoice("root", sess.ID, "Hello"),
 		MessageAddedAt(sess.ID, msgAdded.Message, "root", msgAdded.SessionPosition),
-		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 3, OutputTokens: 2, ContextLength: 5, LastMessage: &MessageUsage{
+		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 3, OutputTokens: 2, ContextLength: 5, OwnCost: new(0.0), LastMessage: &MessageUsage{
 			Usage:        chat.Usage{InputTokens: 3, OutputTokens: 2},
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
@@ -512,7 +517,7 @@ func TestMultipleContentChunks(t *testing.T) {
 		AgentChoice("root", sess.ID, "are "),
 		AgentChoice("root", sess.ID, "you?"),
 		MessageAddedAt(sess.ID, msgAdded.Message, "root", msgAdded.SessionPosition),
-		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 8, OutputTokens: 12, ContextLength: 20, LastMessage: &MessageUsage{
+		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 8, OutputTokens: 12, ContextLength: 20, OwnCost: new(0.0), LastMessage: &MessageUsage{
 			Usage:        chat.Usage{InputTokens: 8, OutputTokens: 12},
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
@@ -554,7 +559,7 @@ func TestWithReasoning(t *testing.T) {
 		AgentChoiceReasoning("root", sess.ID, " I should respond politely."),
 		AgentChoice("root", sess.ID, "Hello, how can I help you?"),
 		MessageAddedAt(sess.ID, msgAdded.Message, "root", msgAdded.SessionPosition),
-		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 10, OutputTokens: 15, ContextLength: 25, LastMessage: &MessageUsage{
+		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 10, OutputTokens: 15, ContextLength: 25, OwnCost: new(0.0), LastMessage: &MessageUsage{
 			Usage:        chat.Usage{InputTokens: 10, OutputTokens: 15},
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
@@ -598,7 +603,7 @@ func TestMixedContentAndReasoning(t *testing.T) {
 		AgentChoiceReasoning("root", sess.ID, " I should be friendly"),
 		AgentChoice("root", sess.ID, " How can I help you today?"),
 		MessageAddedAt(sess.ID, msgAdded.Message, "root", msgAdded.SessionPosition),
-		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 15, OutputTokens: 20, ContextLength: 35, LastMessage: &MessageUsage{
+		NewTokenUsageEvent(sess.ID, "root", &Usage{InputTokens: 15, OutputTokens: 20, ContextLength: 35, OwnCost: new(0.0), LastMessage: &MessageUsage{
 			Usage:        chat.Usage{InputTokens: 15, OutputTokens: 20},
 			Model:        "test/mock-model",
 			FinishReason: chat.FinishReasonStop,
@@ -3579,8 +3584,7 @@ func TestResolveSessionAgent_InvalidNameFallsBack(t *testing.T) {
 
 	sess := session.New(session.WithAgentName("nonexistent"))
 	resolved := rt.resolveSessionAgent(sess)
-	require.NotNil(t, resolved, "should never return nil")
-	assert.Equal(t, "root", resolved.Name(), "should fall back to currentAgent for unknown AgentName")
+	assert.Nil(t, resolved, "unknown pinned agent fails closed; it must not fall back to currentAgent")
 }
 
 // TestProcessToolCalls_UsesPinnedAgent verifies that tool-call events emitted by
@@ -4166,19 +4170,46 @@ func TestSteer_IdleWindowIsConsumedOnNextTurn(t *testing.T) {
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Enqueue a steer message BEFORE calling RunStream — simulating the
-	// idle-window race where a Steer call lands between two RunStream
-	// invocations.
+	// Create the session through the canonical handle and observe it before
+	// steering, so the steer-started turn is seen from its first emission. The
+	// seeded history message is not pending input, so it does not start a turn
+	// by itself; only the Steer call below does.
 	sess := session.New(session.WithUserMessage("Do the task"))
 	sess.Title = "steer idle-window test"
-	rt.sessionDrivers.Get(sess)
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	observation, err := handle.Observe(t.Context(), ObserveOptions{Buffer: 32})
+	require.NoError(t, err)
+	defer observation.Cancel()
+
 	err = rt.Steer(t.Context(), QueuedMessage{Content: "urgent: change direction"})
 	require.NoError(t, err)
 
-	evCh := rt.runExecution(t.Context(), sess)
+	// Drain this session's observation until the accepted steer turn stops.
+	// The turn is identified by its accepted-input event, and StreamStopped must
+	// carry that same TurnID, so no other turn can end the drain.
 	var events []Event
-	for ev := range evCh {
-		events = append(events, ev)
+	var turnID string
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	for stopped := false; !stopped; {
+		select {
+		case envelope, ok := <-observation.Events:
+			require.True(t, ok, "observation closed before the steered turn stopped")
+			require.False(t, envelope.Gap)
+			if envelope.SessionID != sess.ID {
+				continue
+			}
+			events = append(events, envelope.Event)
+			if accepted, ok := envelope.Event.(*PendingUserMessageAcceptedEvent); ok && turnID == "" && strings.Contains(accepted.Message, "urgent: change direction") {
+				turnID = envelope.TurnID
+			}
+			if _, ok := envelope.Event.(*StreamStoppedEvent); ok && turnID != "" && envelope.TurnID == turnID {
+				stopped = true
+			}
+		case <-ctx.Done():
+			t.Fatal("steered turn did not stop within 20s")
+		}
 	}
 
 	// The run must complete normally (StreamStopped as the last event).
@@ -4276,20 +4307,46 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Enqueue before RunStream — zero messages in the session.
+	// Fresh session with NO messages. Create it through the canonical handle and
+	// observe that same handle before steering, so the bootstrap run's events are
+	// seen from their first emission.
 	sess := session.New()
 	sess.Title = "steer bootstrap test"
-	rt.sessionDrivers.Get(sess)
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	observation, err := handle.Observe(t.Context(), ObserveOptions{Buffer: 32})
+	require.NoError(t, err)
+	defer observation.Cancel()
+
+	// Enqueue before any run starts — zero messages in the session.
 	err = rt.Steer(t.Context(), QueuedMessage{Content: "bootstrap message"})
 	require.NoError(t, err)
 
-	// Fresh session with NO messages (SendUserMessage defaults to true but
-	// there is nothing to send yet).
-
-	evCh := rt.runExecution(t.Context(), sess)
+	// Drain this session's observation until the accepted bootstrap turn stops.
+	// The turn is identified by its accepted-input event, and StreamStopped must
+	// carry that same TurnID, so no other turn can end the drain.
 	var events []Event
-	for ev := range evCh {
-		events = append(events, ev)
+	var turnID string
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	for stopped := false; !stopped; {
+		select {
+		case envelope, ok := <-observation.Events:
+			require.True(t, ok, "observation closed before the bootstrap turn stopped")
+			require.False(t, envelope.Gap)
+			if envelope.SessionID != sess.ID {
+				continue
+			}
+			events = append(events, envelope.Event)
+			if accepted, ok := envelope.Event.(*PendingUserMessageAcceptedEvent); ok && turnID == "" && strings.Contains(accepted.Message, "bootstrap message") {
+				turnID = envelope.TurnID
+			}
+			if _, ok := envelope.Event.(*StreamStoppedEvent); ok && turnID != "" && envelope.TurnID == turnID {
+				stopped = true
+			}
+		case <-ctx.Done():
+			t.Fatal("bootstrap turn did not stop within 20s")
+		}
 	}
 
 	// The run must complete normally.
@@ -4612,6 +4669,15 @@ func TestDrainAndEmitSteered_MultipleMessages(t *testing.T) {
 	// Enqueue three plain-text steer messages before draining.
 	sess := session.New()
 	driver := rt.sessionDrivers.Get(sess)
+	// Establish a live generation so the steering below is accepted as in-run guidance.
+	var liveGeneration uint64
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.phase = sessionRunning
+		driver.activeRequestID = "turn"
+		driver.generation++
+		liveGeneration = driver.generation
+		return nil
+	}))
 
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "first"}))
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "second"}))
@@ -4619,7 +4685,7 @@ func TestDrainAndEmitSteered_MultipleMessages(t *testing.T) {
 
 	events := make(chan Event, 16)
 
-	ctx, scratch, snapshotErr := driver.executionContext(t.Context(), 0)
+	ctx, scratch, snapshotErr := driver.executionContext(t.Context(), liveGeneration)
 	require.NoError(t, snapshotErr)
 	sess = scratch
 	sr := rt.drainAndEmitSteered(ctx, sess, root, NewChannelSink(events))
@@ -4670,6 +4736,15 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 	// Two multi-content messages.
 	sess := session.New()
 	driver := rt.sessionDrivers.Get(sess)
+	// Establish a live generation so the steering below is accepted as in-run guidance.
+	var liveGeneration uint64
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.phase = sessionRunning
+		driver.activeRequestID = "turn"
+		driver.generation++
+		liveGeneration = driver.generation
+		return nil
+	}))
 
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{
 		Content: "first",
@@ -4688,7 +4763,7 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 
 	events := make(chan Event, 16)
 
-	ctx, scratch, snapshotErr := driver.executionContext(t.Context(), 0)
+	ctx, scratch, snapshotErr := driver.executionContext(t.Context(), liveGeneration)
 	require.NoError(t, snapshotErr)
 	sess = scratch
 	sr := rt.drainAndEmitSteered(ctx, sess, root, NewChannelSink(events))
@@ -4850,6 +4925,11 @@ func TestElicitationHandler_NonInteractive(t *testing.T) {
 	tm := team.New(team.WithAgents(root))
 
 	rt, err := NewLocalRuntime(t.Context(), tm, WithNonInteractive(true))
+	t.Cleanup(func() {
+		if rt != nil {
+			_ = rt.Close()
+		}
+	})
 	require.NoError(t, err)
 
 	_, err = rt.CreateSession(t.Context(), session.New(session.WithID("elicitation-test-session")), SessionBinding{AgentName: "root"})
@@ -5235,10 +5315,9 @@ func TestRunAgentRetainsChildUsageOnCancellation(t *testing.T) {
 // TestReasoningOnlyTurnEmitsWarning is a regression test for
 // https://github.com/docker/docker-agent/issues/3145. A thinking-mode model
 // (e.g. Qwen3 via an openai_chatcompletions provider) can stream only reasoning
-// tokens and then stop with no content and no tool calls. recordAssistantMessage
-// skips that empty turn, which previously left the user staring at silence. The
-// runtime must instead surface a Warning explaining that the model produced only
-// reasoning, and must still not persist an assistant message.
+// tokens and then stop with no content and no tool calls. The runtime must
+// surface a Warning explaining that the model produced only reasoning, and keep
+// that turn display-only (never model input).
 func TestReasoningOnlyTurnEmitsWarning(t *testing.T) {
 	stream := newStreamBuilder().
 		AddReasoning("The user wants the file list. ").
@@ -5250,22 +5329,32 @@ func TestReasoningOnlyTurnEmitsWarning(t *testing.T) {
 	events := runSession(t, sess, stream)
 
 	var warn *WarningEvent
-	assistantPersisted := false
+	var modelAssistant bool
+	var displayOnly *session.Message
 	for _, ev := range events {
 		switch e := ev.(type) {
 		case *WarningEvent:
 			warn = e
 		case *MessageAddedEvent:
 			if e.Message != nil && e.Message.Message.Role == chat.MessageRoleAssistant {
-				assistantPersisted = true
+				if e.Message.DisplayOnly {
+					displayOnly = e.Message
+				} else {
+					modelAssistant = true
+				}
 			}
 		}
 	}
 
 	require.NotNil(t, warn, "expected a Warning event for a reasoning-only turn")
 	assert.Contains(t, warn.Message, "only reasoning")
-	assert.False(t, assistantPersisted,
-		"a reasoning-only turn must not persist an assistant message")
+	assert.False(t, modelAssistant,
+		"a reasoning-only turn must not add an assistant message to model input")
+	require.NotNil(t, displayOnly, "a reasoning-only turn is kept as display-only presentation")
+	assert.Empty(t, displayOnly.Message.Content)
+	assert.Empty(t, displayOnly.Message.ToolCalls)
+	require.NotEmpty(t, displayOnly.Message.Presentation)
+	assert.Equal(t, chat.AssistantPartReasoning, displayOnly.Message.Presentation[0].Type)
 }
 
 // TestEmptyTurnEmitsWarning verifies that a wholly empty turn (no content, no

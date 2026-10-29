@@ -24,7 +24,7 @@ func TestHistoricalReportOutcomeLiveAndReplay(t *testing.T) {
 		t.Run(string(tc.outcome), func(t *testing.T) {
 			sess := session.New(session.WithID("s"))
 			a, _ := newSessionTestApp(t, sess, nil, nil)
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 			p.messages.SetSize(100, 40)
 			input := session.UserMessage("private child report")
 			input.InputOrigin, input.InputMode, input.SenderID, input.SenderName, input.TurnID, input.ReportOutcome = session.InputOriginRuntime, "steer", "child", "worker", "report", tc.outcome
@@ -44,7 +44,7 @@ func TestExplicitAgentMessagesAndCompletionStayDistinctLiveAndReplay(t *testing.
 	sess.SetSubagentTree(&tree)
 	a, _ := newSessionTestApp(t, sess, nil, nil)
 	ar := animation.NewRuntime()
-	p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(ar, t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	t.Cleanup(func() { Cleanup(p); ar.Stop() })
 	p.messages.SetSize(120, 40)
 	p.resetProjection(runtime.SessionSnapshot{Session: sess, Status: runtime.SessionStatus{SessionID: sess.ID}})
@@ -74,7 +74,7 @@ func TestExplicitAgentMessagesAndCompletionStayDistinctLiveAndReplay(t *testing.
 		t.Helper()
 		out := ansi.Strip(p.messages.View())
 		assert.Equal(t, 1, strings.Count(out, "engineer (36c92) · turn finished >"))
-		assert.Equal(t, 3, strings.Count(out, "engineer (36c92) sent a message >"))
+		assert.Equal(t, 3, strings.Count(out, "From engineer (36c92) sent a message >"))
 		assert.NotContains(t, out, "has replied")
 		assert.NotContains(t, out, "same body")
 		assert.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeRuntimeNotice))

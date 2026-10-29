@@ -443,6 +443,8 @@ func newPersistedSessionRuntime(t *testing.T, store session.Store) *LocalRuntime
 	return rt
 }
 
+// Known legacy-historical contract: unbound rows open as read-only historical views,
+// and every execution call is typed SessionErrorHistorical (not SessionErrorUnsupported).
 func TestLocalSessionCatalogRejectsLegacyUnboundSessions(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	legacy := session.New(session.WithID("legacy"), session.WithAgentName("root"))
@@ -457,12 +459,26 @@ func TestLocalSessionCatalogRejectsLegacyUnboundSessions(t *testing.T) {
 	assert.Empty(t, rows[0].AgentName)
 
 	loader := NewSessionRuntimeSupervisor(rt).Runtime().(SessionLoader)
-	_, _, err = loader.LoadSession(t.Context(), legacy.ID)
-	require.Error(t, err)
-	var sessionErr *SessionError
-	require.ErrorAs(t, err, &sessionErr)
-	assert.Equal(t, SessionErrorUnsupported, sessionErr.Kind)
-	assert.Equal(t, SessionOperationAttach, sessionErr.Operation)
+	handle, _, err := loader.LoadSession(t.Context(), legacy.ID)
+	require.NoError(t, err)
+	require.True(t, handle.Metadata().Historical)
+	assert.False(t, handle.Metadata().ExecutionAvailable)
+	assertHistoricalExec := func(err error) {
+		t.Helper()
+		var sessionErr *SessionError
+		require.ErrorAs(t, err, &sessionErr)
+		assert.Equal(t, SessionErrorHistorical, sessionErr.Kind)
+	}
+	_, err = handle.Submit(t.Context(), TurnInput{Content: "resume"})
+	assertHistoricalExec(err)
+	_, err = handle.Retry(t.Context())
+	assertHistoricalExec(err)
+	_, err = handle.Steer(t.Context(), TurnInput{Content: "guidance"})
+	assertHistoricalExec(err)
+	assertHistoricalExec(handle.Respond(t.Context(), InteractionResponse{}))
+	_, err = handle.Cancel(t.Context(), "turn")
+	assertHistoricalExec(err)
+	assertHistoricalExec(handle.Compact(t.Context(), "", nil))
 	_, found := rt.sessionDrivers.Lookup(legacy.ID)
 	assert.False(t, found)
 }

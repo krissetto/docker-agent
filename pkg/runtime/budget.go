@@ -110,6 +110,9 @@ type agentBudgetSpend struct {
 }
 
 func (b *budgetTracker) snapshot() budgetSnapshot {
+	if b == nil {
+		return budgetSnapshot{}
+	}
 	return b.snapshotWithLimits(latest.BudgetConfig{MaxCost: b.maxCost, MaxTokens: b.maxTokens, MaxTime: latest.Duration{Duration: b.maxTime}})
 }
 

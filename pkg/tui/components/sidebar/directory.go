@@ -25,8 +25,8 @@ func (m *model) directoryRow(width int) string {
 	name := ansi.Truncate(m.workingDirLine(), width-reserve, "…")
 	progress := m.hoverValues["directory"].value
 	name = styles.HoverText(name, progress, styles.TextPrimary)
-	copyIcon := directoryActionIcon(directoryCopyIcon, m.hoverValues["directory-copy"].value, progress)
-	icon := directoryActionIcon(directoryIcon, m.hoverValues["directory-open"].value, progress)
+	copyIcon := directoryActionIcon(directoryCopyIcon, max(m.hoverValues["directory-copy"].value, progress))
+	icon := directoryActionIcon(directoryIcon, max(m.hoverValues["directory-open"].value, progress))
 	return padRight(name, width-reserve) + " " + copyIcon + "  " + icon + " "
 }
 
@@ -34,10 +34,8 @@ func (m *model) directoryIconHit(x, width int) bool {
 	return width >= directoryReserve()+2 && x >= width-directoryIconWidth()-1 && x < width-1 && (m.hoverTarget == "directory" || m.hoverTarget == "directory-open" || m.hoverValues["directory"].value > 0 || m.hoverValues["directory-open"].value > 0)
 }
 
-// Interpolate between palette colors rather than brightening toward white on light themes.
-func directoryActionIcon(icon string, emphasis, reveal float64) string {
-	r, g, b := styles.ColorToRGB(styles.MutedStyle.GetForeground())
-	pr, pg, pb := styles.ColorToRGB(styles.TextPrimary)
-	foreground := styles.RGBToColor(r+(pr-r)*emphasis, g+(pg-g)*emphasis, b+(pb-b)*emphasis)
-	return hoverAction(styles.BaseStyle.Foreground(foreground).Render(icon), reveal)
+// directoryActionIcon paints a hidden-at-rest action on the shared hover ramp.
+// progress is the single brightness value (own control or its row, whichever is higher).
+func directoryActionIcon(icon string, progress float64) string {
+	return hoverAction(styles.MutedStyle.Render(icon), progress)
 }

@@ -12,7 +12,7 @@ func TestSessionMetadataReadsDoNotHydrateHistory(t *testing.T) {
 	for name, create := range map[string]func() Store{"memory": NewInMemorySessionStore, "sqlite": func() Store { return openMemoryStore(t) }} {
 		t.Run(name, func(t *testing.T) {
 			store := create()
-			root := New(WithID("root"), WithAgentName("root"), WithWorkingDir("/workspace"), WithAttributes(map[string]string{"binding": "root"}))
+			root := New(WithID("root"), WithTitle("root title"), WithAgentName("root"), WithWorkingDir("/workspace"), WithAttributes(map[string]string{"binding": "root"}))
 			child := New(WithID("child"), WithParentID("root"))
 			child.AddMessage(UserMessage("own history"))
 			root.AddSubSession(child)
@@ -20,9 +20,11 @@ func TestSessionMetadataReadsDoNotHydrateHistory(t *testing.T) {
 			metadata, err := ReadSessionMetadata(t.Context(), store, root.ID)
 			require.NoError(t, err)
 			assert.Equal(t, root.ID, metadata.ID)
+			assert.Equal(t, "root title", metadata.TitleSnapshot())
 			assert.Equal(t, "/workspace", metadata.WorkingDir)
 			assert.Equal(t, root.AttributesSnapshot(), metadata.AttributesSnapshot())
 			assert.Empty(t, metadata.Messages)
+			assert.Empty(t, metadata.ItemsSnapshot())
 			assert.Nil(t, metadata.GetSubagentTree())
 			metadata.SetAttribute("binding", "mutated")
 			again, err := ReadSessionMetadata(t.Context(), store, root.ID)

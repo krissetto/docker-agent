@@ -82,6 +82,8 @@ func TestPublicUpdateTitleReleaseNeverWritesAfterOwnerRetirement(t *testing.T) {
 
 func TestSettledReplacementRejectsAcceptedSteeringAndBindingChanges(t *testing.T) {
 	r := newDriverTestRuntime(t)
+	r.team = team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(coordinationReply("unused")))))
+	r.telemetry = defaultTelemetry{}
 	d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
 	h := &sessionHandle{runtime: r, driver: d, sessionID: d.identityID}
 	before, err := d.ownerSnapshot(t.Context())
@@ -96,6 +98,8 @@ func TestSettledReplacementRejectsAcceptedSteeringAndBindingChanges(t *testing.T
 		require.False(t, ReplaceSettledSession(h, next))
 	}
 	require.True(t, ReplaceSettledSession(h, before))
+	// Hold the start gate so accepted guidance stays pending until it is promoted.
+	d.SetPreStartGate(func() bool { return false }, nil)
 	accepted, err := h.Steer(t.Context(), TurnInput{RequestID: "guidance", Content: "keep this"})
 	require.NoError(t, err)
 	require.False(t, ReplaceSettledSession(h, before))

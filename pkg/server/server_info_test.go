@@ -70,6 +70,7 @@ func TestServerIdentityReadinessOnlyUsesBoundedProbe(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			var info api.ServerInfo
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &info))
+			require.Contains(t, info.Capabilities, "session_view_metadata")
 			require.Equal(t, tc.want, info.Ready)
 			require.Equal(t, 1, probe.calls)
 			require.Zero(t, counts.reads)

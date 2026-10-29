@@ -30,7 +30,7 @@ func newTestChatPage(t *testing.T) *chatPage {
 	t.Helper()
 	sess := session.New()
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.working = true
 	return p
 }
@@ -493,9 +493,9 @@ func TestSteerFlow_BusyAgent_UsesSessionSend(t *testing.T) {
 	t.Parallel()
 	sess := session.New()
 	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(messages.SendModeSteer)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.working = true
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context", Steer: true})
 	require.NotNil(t, cmd)
 	assert.IsType(t, steerSentMsg{}, cmd())
 	require.Len(t, handle.sent(), 1)
@@ -506,43 +506,53 @@ func TestSteerFlow_QueuedAdmissionUsesFollowUpToastPath(t *testing.T) {
 	t.Parallel()
 	sess := session.New()
 	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, steerQueued: true})
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(messages.SendModeSteer)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.working = true
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "after compact"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "after compact", Steer: true})
 	require.NotNil(t, cmd)
 	assert.IsType(t, followUpSentMsg{}, cmd())
 	require.Len(t, handle.sent(), 1)
 	assert.Empty(t, handle.submitted(), "queued steer remains a single driver admission")
 }
 
-func TestQueueFlow_DefaultExplicitAndConfiguredQueueSkipSessionSend(t *testing.T) {
+func TestIdleAltEnterStartsANormalTurn(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateSettled})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "start normally", Steer: true})
+	require.NotNil(t, cmd, "idle steering key still starts an ordinary turn")
+	assert.Empty(t, handle.sent(), "an idle session has nothing to steer")
+	assert.True(t, p.working, "normal processing owns the new turn")
+}
+
+func TestQueueFlow_ExplicitBusySendKeysSelectTheDeliveryMode(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name     string
-		mode     messages.SendMode
-		explicit bool
+		name      string
+		steer     bool
+		wantSteer bool
 	}{
-		{name: "unset"},
-		{name: "unknown", mode: "bogus"},
-		{name: "explicit", mode: messages.SendModeSteer, explicit: true},
-		{name: "configured", mode: messages.SendModeQueue},
+		{name: "Enter queues"},
+		{name: "Alt+Enter steers", steer: true, wantSteer: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sess := session.New()
 			a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
-			var opts []PageOption
-			if tc.mode != "" {
-				opts = append(opts, WithSendMode(tc.mode))
-			}
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), opts...).(*chatPage)
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 			p.working = true
-			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: tc.explicit})
+			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: !tc.steer, Steer: tc.steer})
 			require.NotNil(t, cmd)
-			assert.IsType(t, followUpSentMsg{}, cmd())
-			require.Len(t, handle.submitted(), 1)
-			assert.Equal(t, "for later", handle.submitted()[0].Content)
+			if tc.wantSteer {
+				assert.IsType(t, steerSentMsg{}, cmd())
+				require.Len(t, handle.sent(), 1)
+				assert.Empty(t, handle.submitted())
+			} else {
+				assert.IsType(t, followUpSentMsg{}, cmd())
+				require.Len(t, handle.submitted(), 1)
+				assert.Empty(t, handle.sent())
+			}
 			assert.Empty(t, p.messageQueue, "session-backed queue is projected only after admission")
-			assert.Empty(t, handle.sent())
 		})
 	}
 }
@@ -552,9 +562,9 @@ func TestSteerFlow_SessionSendRejectedDoesNotSubmitOrQueueLocally(t *testing.T) 
 	sess := session.New()
 	rejected := &runtime.SessionError{Kind: runtime.SessionErrorCapacity, SessionID: sess.ID, Operation: "send", Limit: 1}
 	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, sendErr: rejected})
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(messages.SendModeSteer)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.working = true
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context", Steer: true})
 	failed, ok := cmd().(steerFailedMsg)
 	require.True(t, ok)
 	require.ErrorIs(t, failed.err, rejected)

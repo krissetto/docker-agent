@@ -4,8 +4,8 @@ colors:
   # Text colors
   text_bright: "#f8f8f2"
   text_primary: "#f8f8f2"
-  text_secondary: "#6272a4"
-  text_muted: "#6272a4"
+  text_secondary: "#959fc5"
+  text_muted: "#959fc5"
   text_faint: "#44475a"
   
   # Accent colors
@@ -14,14 +14,14 @@ colors:
   
   # Background colors
   background: "#282a36"
-  background_alt: "#44475a"
+  background_alt: "#343746"
   
   # Border colors
   border_secondary: "#6272a4"
   
   # Status colors
   success: "#50fa7b"
-  error: "#ff5555"
+  error: "#ff7575"
   warning: "#f1fa8c"
   info: "#8be9fd"
   highlight: "#ff79c6"
@@ -32,50 +32,51 @@ colors:
   brand_bg: "#282a36"
   
   # Error colors
-  error_strong: "#ff5555"
+  error_strong: "#ff7575"
   error_dark: "#44282a"
   
   # Spinner colors
-  spinner_dim: "#bd93f9"
-  spinner_bright: "#c9a6f9"
-  spinner_brightest: "#d5b9f9"
+  spinner_dim: "#8be9fd"
+  spinner_bright: "#8be9fd"
+  spinner_brightest: "#8be9fd"
   
   # Diff colors
   diff_add_bg: "#2a4a2a"
   diff_remove_bg: "#4a2a2a"
   
   # UI element colors
-  line_number: "#6272a4"
+  line_number: "#959fc5"
   separator: "#6272a4"
   selected: "#44475a"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#6272a4"
+  suggestion_ghost: "#959fc5"
   tab_bg: "#282a36"
-  tab_active_bg: "#44475a"
+  tab_active_bg: "#343746"
   tab_active_fg: "#f8f8f2"
-  tab_inactive_fg: "#6272a4"
+  tab_inactive_fg: "#8390b7"
   tab_border: "#bd93f9"
 
   placeholder: "#f8f8f2"
   # Shared shell/editor semantic colors
-  editor_bg: "#44475a"
-  card_bg: "#44475a"
+  editor_bg: "#343746"
+  card_bg: "#343746"
   shell_bg: "#282a36"
-  tab_hover_bg: "#44475a"
+  tab_hover_bg: "#343746"
   tab_hover_fg: "#f8f8f2"
   tab_drag_bg: "#44475a"
   tab_drag_fg: "#f8f8f2"
   tab_busy: "#f1fa8c"
   context_empty: "#282a36"
   context_fill: "#8be9fd"
-  context_text: "#6272a4"
+  context_text: "#8390b7"
   resize: "#6272a4"
   resize_hover: "#8be9fd"
   resize_active: "#f8f8f2"
   hint: "#f8f8f2"
   focus: "#8be9fd"
   disabled: "#44475a"
-  status_adjacent: "#6272a4"
+  status_adjacent: "#8390b7"
+  scrollbar_track: "#42444e"
 
   
   # Badge colors
@@ -85,7 +86,7 @@ colors:
 
 chroma:
   # Syntax highlighting colors - Dracula style
-  comment: "#6272a4"
+  comment: "#959fc5"
   comment_preproc: "#ff79c6"
   keyword: "#ff79c6"
   keyword_reserved: "#bd93f9"
@@ -100,10 +101,10 @@ chroma:
   literal_number: "#bd93f9"
   literal_string: "#f1fa8c"
   literal_string_escape: "#ff79c6"
-  generic_deleted: "#ff5555"
-  generic_subheading: "#6272a4"
+  generic_deleted: "#ff7575"
+  generic_subheading: "#959fc5"
   background: "#282a36"
-  error_fg: "#ff5555"
+  error_fg: "#ff7575"
   error_bg: "#44282a"
   success: "#50fa7b"
 
@@ -112,7 +113,7 @@ markdown:
   link: "#8be9fd"
   strong: "#f8f8f2"
   code: "#ff79c6"
-  code_bg: "#44475a"
-  blockquote: "#6272a4"
+  code_bg: "#343746"
+  blockquote: "#8390b7"
   list: "#f8f8f2"
   hr: "#44475a"

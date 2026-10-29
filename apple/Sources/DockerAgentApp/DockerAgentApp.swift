@@ -25,10 +25,10 @@ import AgentKit
             if localSmoke {
                 LocalSmokeRootView(model: model)
             } else {
-                RootView().environment(model)
+                RootView().environment(model).background(TeamWidgetSummarySync(model: model))
             }
             #else
-            RootView().environment(model)
+            RootView().environment(model).background(TeamWidgetSummarySync(model: model))
             #endif
         }
         WindowGroup("Session", for: SessionRef.self) { $ref in

@@ -237,6 +237,7 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 					published.AddMessage(edit.Message)
 				} else {
 					published.Messages[position].Message = edit.Message
+					published.MarkHistoryChanged()
 				}
 				d.sess = published
 			case SessionEditSummary:

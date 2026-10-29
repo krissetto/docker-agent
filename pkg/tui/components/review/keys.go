@@ -1,8 +1,11 @@
 package review
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	textlayout "github.com/docker/docker-agent/pkg/tui/text"
 )
 
 // HandleKey consumes review keys. Unhandled keys (Tab, Shift+Tab, Ctrl/Alt
@@ -25,14 +28,14 @@ func (m *Model) selectionChanged() tea.Cmd {
 }
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
+	if m.commentInput != nil {
+		return m.commentKey(msg)
+	}
 	if m.filterActive {
 		return m.inputKey(msg, &m.filterActive, true)
 	}
 	if m.searchOn {
 		return m.inputKey(msg, &m.searchOn, false)
-	}
-	if m.editing {
-		return m.editorKey(msg)
 	}
 	k := msg.String()
 	if m.previewing() {
@@ -42,6 +45,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return printable(msg), nil
 	}
 	switch k {
+	case "alt+c":
+		return true, m.emit(GeneralCommentRequestMsg{Owner: m.owner})
 	case "ctrl+w":
 		m.hint = "Esc closes review"
 		return true, nil
@@ -68,6 +73,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	case "D":
 		return true, m.emit(DockToggleRequestMsg{Owner: m.owner})
 	case "r":
+		m.reader.charSelection = nil
 		clear(m.loadPending)
 		m.hint = "Refreshing…"
 		refresh := m.emit(RefreshRequestMsg{Owner: m.owner})
@@ -85,6 +91,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return true, m.preview()
 	case "J", "K":
 		return true, m.jumpFile(map[string]int{"K": -1, "J": 1}[k])
+	case "f":
+		return true, m.toggleCounterpart()
 	}
 	var handled bool
 	var cmd tea.Cmd
@@ -95,7 +103,11 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return printable(msg), nil
 	}
 	if m.area == areaReader && m.readerVisible() {
+		oldLine := m.reader.line
 		handled, cmd = m.readerKey(k)
+		if m.reader.line != oldLine && !strings.HasPrefix(k, "shift+") {
+			m.reader.charSelection = nil
+		}
 	} else {
 		handled, cmd = m.navigatorKey(k)
 	}
@@ -234,7 +246,7 @@ func (m *Model) navigatorKey(k string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		return true, m.emit(CloseRequestMsg{Owner: m.owner})
-	case "c", "y":
+	case "y":
 		return true, m.copyPath()
 	case "C":
 		return true, m.copyWholePatch()
@@ -262,8 +274,10 @@ func (m *Model) readerKey(k string) (bool, tea.Cmd) {
 	switch k {
 	case "up", "k":
 		r.line--
+		r.charSelection = nil
 	case "down", "j":
 		r.line++
+		r.charSelection = nil
 	case "shift+up", "shift+down":
 		if r.anchor < 0 {
 			r.anchor = r.line
@@ -296,23 +310,34 @@ func (m *Model) readerKey(k string) (bool, tea.Cmd) {
 			m.hint = "No matches"
 		}
 	case "/":
+		r.charSelection = nil
 		m.syncInputWidths()
 		m.searchOn = true
 		return true, m.search.Focus()
-	case "a":
-		return true, m.startComment()
 	case "v":
+		r.charSelection = nil
 		if r.anchor >= 0 {
 			r.anchor = -1
 		} else {
 			r.anchor = r.line
 		}
-	case "c":
+	case "x":
 		text, n := r.copyText()
 		if n == 0 {
 			return true, nil
 		}
 		return true, m.emit(CopyRequestMsg{Owner: m.owner, Kind: CopyText, Text: text, Summary: "Copied " + plural(n, "line") + " (text)"})
+	case "c", "enter":
+		return true, m.startComment()
+	case "space":
+		m.toggleCommentAtCursor()
+		return true, nil
+	case "o":
+		if m.mode == ModeFiles {
+			return true, m.emit(OpenExternalEditorRequestMsg{Owner: m.owner, Key: m.requested})
+		}
+		m.hint = "f Whole file · then o Edit"
+		return true, nil
 	case "C":
 		if reason := r.patchDisabled(); reason != "" {
 			m.hint = reason
@@ -329,6 +354,7 @@ func (m *Model) readerKey(k string) (bool, tea.Cmd) {
 		switch {
 		case r.anchor >= 0:
 			r.anchor = -1
+			r.charSelection = nil
 		case m.search.Value() != "":
 			m.search.Reset()
 			r.recomputeMatches(matcher{})
@@ -346,9 +372,11 @@ func (m *Model) readerKey(k string) (bool, tea.Cmd) {
 }
 
 func (m *Model) ensureLineVisible() {
-	if m.hasDoc {
-		m.reader.ensureVisible(m.readerWidth(), m.readerBodyHeight())
+	if !m.hasDoc {
+		return
 	}
+	width, height := m.readerWidth(), m.readerBodyHeight()
+	m.reader.ensureVisible(width, height)
 }
 
 func (m *Model) backToNavigator() {
@@ -423,6 +451,9 @@ func (m *Model) open(r row) tea.Cmd {
 		return nil
 	}
 	key := DocumentKey{Mode: m.mode, WorktreeID: wt.ID, Path: r.path, Group: r.group}
+	if !m.prepareCommentDocumentChange(key) {
+		return nil
+	}
 	if m.hasRequest && m.requested == key {
 		return nil
 	}
@@ -655,7 +686,10 @@ func (m *Model) HandleMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 func (m *Model) handleMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 	mouse := msg.Mouse()
 	x, y := mouse.X-m.x, mouse.Y-m.y
-	if x < 0 || y < 0 || x >= m.width || y >= m.height {
+	_, motion := msg.(tea.MouseMotionMsg)
+	_, release := msg.(tea.MouseReleaseMsg)
+	capturedDrag := m.dragging && (motion || release)
+	if (x < 0 || y < 0 || x >= m.width || y >= m.height) && !capturedDrag {
 		return false, nil
 	}
 	m.hint = ""
@@ -667,15 +701,74 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 		delta := 0
 		switch msg.Button {
 		case tea.MouseWheelUp:
-			delta = -3
+			delta = -1
 		case tea.MouseWheelDown:
-			delta = 3
+			delta = 1
 		}
-		m.wheel(x, delta)
-		return true, nil
+		distance := delta * 2
+		oldLine := m.reader.line
+		m.wheel(x, distance)
+		if !m.dragging && m.reader.line != oldLine {
+			m.reader.charSelection = nil
+		}
+		if m.dragging && m.inReader(x, m.geometry()) && len(m.reader.items) > 0 {
+			m.mouseMoved = true
+			g := m.geometry()
+			row := g.readerBodyH - 1
+			if distance < 0 {
+				row = 0
+			}
+			m.reader.layout(m.readerWidth())
+			m.reader.line = m.reader.itemAtRow(max(0, min(m.reader.total-1, m.reader.top+row)))
+		}
+		return true, m.selectionChanged()
+	case tea.MouseMotionMsg:
+		if m.commentInput != nil {
+			return true, nil
+		}
+		if m.dragging && msg.Button == tea.MouseLeft {
+			_ = m.selectMouseLine(x, y)
+		}
+		return true, m.selectionChanged()
+	case tea.MouseReleaseMsg:
+		if m.commentInput != nil {
+			m.dragging = false
+			return true, nil
+		}
+		if m.dragging {
+			selected := m.selectMouseLine(x, y)
+			m.dragging = false
+			if selected {
+				if m.mouseMoved {
+					if _, ok := m.reader.anchorFor(); ok {
+						m.mouseStart = nil
+						return true, tea.Batch(m.startComment(), m.selectionChanged())
+					}
+				} else {
+					m.reader.charSelection = nil
+					m.reader.anchor = m.reader.line
+					m.mouseStart = nil
+					return true, tea.Batch(m.startComment(), m.selectionChanged())
+				}
+			}
+			m.reader.anchor = -1
+			m.reader.charSelection = nil
+		}
+		m.mouseStart = nil
+		return true, m.selectionChanged()
 	case tea.MouseClickMsg:
 		if msg.Button != tea.MouseLeft {
 			return true, nil
+		}
+		if m.commentInput != nil {
+			if m.commentCardClick(x, y) {
+				return true, nil
+			}
+			if !m.commentInputHasText() {
+				m.finishCommentInput(false)
+			} else {
+				return true, nil
+			}
 		}
 		cmd := m.click(x, y, msg.Mod&tea.ModShift != 0)
 		var focus tea.Cmd
@@ -685,6 +778,180 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 		return true, tea.Batch(focus, cmd, m.selectionChanged())
 	}
 	return true, nil
+}
+
+type mousePoint struct{ x, y, item, line, column int }
+type documentPosition struct{ Old, New, Top int }
+
+func (m *Model) mouseStartTextColumn(x, line, seg int) int {
+	lx := x - m.geometry().readerX
+	var cell int
+	if m.reader.split {
+		side, tw := m.reader.splitGeometry(m.readerWidth())
+		cell = lx - (side + m.reader.digits + 5) + seg*tw
+	} else {
+		cell = lx - m.reader.gutter(m.readerWidth()).width() + seg*m.reader.contentWidth(m.readerWidth())
+	}
+	return textlayout.CellToRune(m.doc.Lines[line].Text, max(0, cell), textlayout.Config{TabWidth: tabWidth})
+}
+
+func nextGraphemeColumn(value string, col int) int {
+	r := []rune(value)
+	col = max(0, min(col, len(r)))
+	if col >= len(r) {
+		return col
+	}
+	cell := textlayout.RuneToCell(value, col, textlayout.Config{TabWidth: tabWidth})
+	for next := col + 1; next <= len(r); next++ {
+		if textlayout.RuneToCell(value, next, textlayout.Config{TabWidth: tabWidth}) > cell {
+			return next
+		}
+	}
+	return len(r)
+}
+
+func (m *Model) mouseInSelectableText(x, item int) bool {
+	lx := x - m.geometry().readerX
+	it := m.reader.itemAt(item)
+	if m.reader.split && !it.full() {
+		side, _ := m.reader.splitGeometry(m.readerWidth())
+		return it.right >= 0 && lx >= side+m.reader.digits+5
+	}
+	if m.reader.split {
+		side, _ := m.reader.splitGeometry(m.readerWidth())
+		return lx >= side+m.reader.digits+5
+	}
+	return lx >= m.reader.gutter(m.readerWidth()).width()
+}
+
+func (m *Model) commentHit(x, y int) (int, int, int, bool) {
+	g := m.geometry()
+	if !m.inReader(x, g) || y < g.readerBodyY || y >= g.readerBodyY+g.readerBodyH || !m.hasDoc {
+		return 0, 0, 0, false
+	}
+	m.reader.layout(m.readerWidth())
+	vr := m.reader.top + y - g.readerBodyY
+	if vr < 0 || vr >= m.reader.total {
+		return 0, 0, 0, false
+	}
+	item := m.reader.itemAtRow(vr)
+	off := vr - m.reader.starts[item] - m.reader.textRows(item, m.readerWidth())
+	if off < 0 {
+		return 0, 0, 0, false
+	}
+	for ni, n := range m.reader.comments[item] {
+		rows := 1
+		if n.Expanded {
+			rows += max(1, len(strings.Split(n.Body, "\n")))
+		}
+		if off < rows {
+			return item, ni, off, true
+		}
+		off -= rows
+	}
+	return 0, 0, 0, false
+}
+
+func (m *Model) toggleCommentAtCursor() {
+	r := &m.reader
+	r.layout(m.readerWidth())
+	if r.line < 0 || r.line >= len(r.items) || len(r.comments[r.line]) == 0 {
+		return
+	}
+	id := r.comments[r.line][0].ID
+	m.commentExpanded[id] = !m.commentExpanded[id]
+	m.syncReaderComments()
+	m.ensureLineVisible()
+}
+
+func (m *Model) toggleCounterpart() tea.Cmd {
+	if !m.hasRequest || m.doc.Key.Path == "" {
+		m.hint = "Open a file first"
+		return nil
+	}
+	key := m.requested
+	position := documentPosition{Top: m.reader.top}
+	if m.hasDoc && m.doc.State == StateReady && m.reader.line >= 0 && m.reader.line < len(m.reader.items) {
+		it := m.reader.itemAt(m.reader.line)
+		if it.right >= 0 {
+			position.New = m.doc.Lines[it.right].New
+		}
+		if it.left >= 0 {
+			position.Old = m.doc.Lines[it.left].Old
+		}
+	}
+	if m.mode == ModeChanges {
+		key.Mode, key.Group = ModeFiles, GroupNone
+	} else {
+		key.Mode = ModeChanges
+		found := false
+		if _, wt, ok := m.worktreeByID(key.WorktreeID); ok {
+			for _, f := range wt.Files {
+				if f.Path == key.Path {
+					key.Group = f.Group
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			m.hint = "No diff available for this file"
+			return nil
+		}
+	}
+	if m.commentInput != nil && !m.prepareCommentDocumentChange(key) {
+		return nil
+	}
+	return m.emit(CounterpartRequestMsg{Owner: m.owner, Key: key, OldLine: position.Old, NewLine: position.New, Top: position.Top})
+}
+
+func (m *Model) selectMouseLine(x, y int) bool {
+	g := m.geometry()
+	if !m.hasDoc || len(m.reader.items) == 0 || g.readerBodyH <= 0 {
+		return false
+	}
+	if y < g.readerBodyY {
+		m.reader.scroll(m.readerWidth(), g.readerBodyH, -1)
+	} else if y >= g.readerBodyY+g.readerBodyH {
+		m.reader.scroll(m.readerWidth(), g.readerBodyH, 1)
+	}
+	m.reader.layout(m.readerWidth())
+	row := max(0, min(g.readerBodyH-1, y-g.readerBodyY))
+	row = max(0, min(m.reader.total-1, m.reader.top+row))
+	item := m.reader.itemAtRow(row)
+	if !m.mouseInSelectableText(x, item) {
+		return false
+	}
+	if m.reader.split && m.reader.itemAt(item).right < 0 {
+		return false
+	}
+	if row-m.reader.starts[item] >= m.reader.textRows(item, m.readerWidth()) {
+		return false
+	}
+	line := m.doc.Lines[m.reader.primary(m.reader.itemAt(item))]
+	if line.Kind != LineContext && line.Kind != LineAdd && line.Kind != LineRemove {
+		return false
+	}
+	m.reader.line = item
+	if m.mouseStart != nil && (x != m.mouseStart.x || y != m.mouseStart.y) {
+		m.mouseMoved = true
+	}
+	if m.mouseMoved && m.mouseStart != nil {
+		start := *m.mouseStart
+		endLine := m.reader.primary(m.reader.itemAt(item))
+		endVirtual := max(0, min(m.reader.total-1, m.reader.top+y-m.geometry().readerBodyY))
+		endSeg := endVirtual - m.reader.starts[item]
+		endLead := m.mouseStartTextColumn(x, endLine, endSeg)
+		endAfter := nextGraphemeColumn(m.doc.Lines[endLine].Text, endLead)
+		startAfter := nextGraphemeColumn(m.doc.Lines[start.line].Text, start.column)
+		first, last := textPoint{line: start.line, column: start.column}, textPoint{line: endLine, column: endAfter}
+		if first.line > endLine || (first.line == endLine && first.column > endLead) {
+			first, last = textPoint{line: endLine, column: endLead}, textPoint{line: start.line, column: startAfter}
+		}
+		m.reader.anchor = start.item
+		m.reader.charSelection = &readerCharSelection{start: first, end: last}
+	}
+	return true
 }
 
 func (m *Model) inNavigator(x int, g geometry) bool {
@@ -729,6 +996,28 @@ func (m *Model) scrollbarMouse(msg tea.MouseMsg) bool {
 	return false
 }
 
+func (m *Model) readerTitleAction(x int) string {
+	if !m.hasDoc || m.doc.Key.Path == "" {
+		return ""
+	}
+	width := m.geometry().readerW
+	editWidth := ansi.StringWidth("[o Edit]")
+	fileWidth := ansi.StringWidth("[f Diff]")
+	if m.mode == ModeFiles {
+		if x >= width-editWidth {
+			return "editor"
+		}
+		if x >= width-editWidth-3-fileWidth && x < width-editWidth-3 {
+			return "counterpart"
+		}
+		return ""
+	}
+	if x >= width-ansi.StringWidth("[f File]") {
+		return "counterpart"
+	}
+	return ""
+}
+
 func (m *Model) click(x, y int, extend bool) tea.Cmd {
 	g := m.geometry()
 	switch {
@@ -760,6 +1049,19 @@ func (m *Model) click(x, y int, extend bool) tea.Cmd {
 	case m.inReader(x, g):
 		m.area = areaReader
 		lx := x - g.readerX
+		if y == 0 && !m.previewing() {
+			action := m.readerTitleAction(lx)
+			if action == "counterpart" {
+				return m.toggleCounterpart()
+			}
+			if action == "editor" {
+				if m.mode == ModeFiles {
+					return m.emit(OpenExternalEditorRequestMsg{Owner: m.owner, Key: m.requested})
+				}
+				m.hint = "f Whole file · then o Edit"
+				return nil
+			}
+		}
 		if y == 0 && m.previewing() {
 			switch m.previewButtonAt(lx, g.readerW) {
 			case sendLabel:
@@ -774,15 +1076,26 @@ func (m *Model) click(x, y int, extend bool) tea.Cmd {
 		if m.previewing() {
 			return nil
 		}
-		if y == 0 && m.commentAffordance() && lx >= g.readerW-ansi.StringWidth(commentLabel) {
-			return m.startComment()
+		if item, noteIndex, _, ok := m.commentHit(x, y); ok {
+			m.reader.anchor = -1
+			m.reader.charSelection = nil
+			m.dragging = false
+			id := m.reader.comments[item][noteIndex].ID
+			m.commentExpanded[id] = !m.commentExpanded[id]
+			m.syncReaderComments()
+			m.ensureLineVisible()
+			return nil
 		}
 		if y > 0 && y < g.readerBodyY {
+			m.reader.anchor = -1
+			m.reader.charSelection = nil
 			m.syncInputWidths()
 			m.searchOn = true
 			return m.search.Focus()
 		}
 		if !m.hasDoc || len(m.doc.Lines) == 0 || y < g.readerBodyY {
+			m.reader.anchor = -1
+			m.reader.charSelection = nil
 			return nil
 		}
 		m.reader.layout(m.readerWidth())
@@ -790,29 +1103,45 @@ func (m *Model) click(x, y int, extend bool) tea.Cmd {
 		if row >= m.reader.total {
 			return nil
 		}
+		item, selectable := m.commentLineSelectable(row)
+		if !selectable || !m.mouseInSelectableText(x, item) {
+			m.reader.anchor = -1
+			m.reader.charSelection = nil
+			m.dragging = false
+			return nil
+		}
 		if extend {
 			if m.reader.anchor < 0 {
 				m.reader.anchor = m.reader.line
 			}
+			m.reader.line = item
+			m.reader.charSelection = nil
+			m.dragging = false
 		} else {
-			m.reader.anchor = -1
+			m.reader.anchor = item
+			m.reader.line = item
+			m.reader.charSelection = nil
+			m.dragging = true
+			line := m.reader.primary(m.reader.itemAt(item))
+			virtual := m.reader.top + y - g.readerBodyY
+			segment := virtual - m.reader.starts[item]
+			m.mouseStart = &mousePoint{x: x, y: y, item: item, line: line}
+			m.mouseStart.column = m.mouseStartTextColumn(x, line, segment)
+			m.mouseMoved = false
 		}
-		m.reader.line = m.reader.itemAtRow(row)
 	}
 	return nil
 }
 
 // HandlePaste routes paste to whichever review text input currently owns focus.
 func (m *Model) HandlePaste(msg tea.PasteMsg) tea.Cmd {
+	if m.commentInput != nil {
+		return m.commentPaste(msg)
+	}
 	if !m.Capturing() {
 		return nil
 	}
 	defer m.syncScrollviews()
-	if m.editing {
-		updated, cmd := m.editor.Update(msg)
-		m.editor = updated
-		return cmd
-	}
 	if m.filterActive {
 		before := m.filter.Value()
 		updated, cmd := m.filter.Update(msg)

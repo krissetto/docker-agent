@@ -22,9 +22,22 @@ const (
 	KindNone      Kind = "none"
 )
 
+type DiscoveryLimit string
+
+const (
+	DiscoveryLimitDepth        DiscoveryLimit = "depth"
+	DiscoveryLimitEntries      DiscoveryLimit = "entries"
+	DiscoveryLimitRepositories DiscoveryLimit = "repositories"
+	DiscoveryLimitTimeout      DiscoveryLimit = "timeout"
+	DiscoveryLimitBytes        DiscoveryLimit = "bytes"
+	DiscoveryLimitUnavailable  DiscoveryLimit = "unavailable"
+)
+
 type Scope struct {
 	Label       string
 	Note        string
+	LimitReason DiscoveryLimit
+	LimitValue  int
 	Remote      bool
 	RemoteLabel string
 	Unavailable string
@@ -34,8 +47,11 @@ type Snapshot struct {
 	Generation    uint64
 	CapturedAt    time.Time
 	MaybeOutdated bool
-	Scope         Scope
-	Repositories  []Repository
+	// Browse reports a root-only inventory from BrowseRoot. Nearby repositories
+	// have not been discovered; Snapshot replaces it with a full inventory.
+	Browse       bool
+	Scope        Scope
+	Repositories []Repository
 }
 
 type Repository struct {
@@ -56,8 +72,11 @@ type Worktree struct {
 	Current      bool
 	Linked       bool
 	State        string
-	Err          string
-	Files        []FileChange
+	// CountsState reports whether Added, Removed, and Binary metadata is complete.
+	// Binary files are complete entries with unavailable numeric line counts.
+	CountsState LoadState
+	Err         string
+	Files       []FileChange
 }
 
 type FileGroup string
@@ -127,15 +146,37 @@ type DocumentLine struct {
 	Text string
 }
 
+type ChangeKind string
+
+const (
+	ChangeAdded    ChangeKind = "added"
+	ChangeModified ChangeKind = "modified"
+	ChangeDeleted  ChangeKind = "deleted"
+)
+
+// DocumentIndicator describes a whole-file line change without adding synthetic
+// lines to the document. Line is one-based; zero anchors deletions in empty files.
+type DocumentIndicator struct {
+	Line int
+	Kind ChangeKind
+}
+
 type Document struct {
 	Key         DocumentKey
 	State       LoadState
 	Lines       []DocumentLine
+	Indicators  []DocumentIndicator
 	Binary      bool
 	Truncated   bool
 	Note        string
 	Err         string
 	PatchHeader string
+}
+
+// BrowseProvider is implemented by providers that can open the scope's root
+// checkout without the nearby-repository inventory performed by Snapshot.
+type BrowseProvider interface {
+	BrowseRoot(ctx context.Context) (Snapshot, error)
 }
 
 // Provider performs only bounded read operations. A Snapshot call is an

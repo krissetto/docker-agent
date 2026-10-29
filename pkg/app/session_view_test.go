@@ -23,10 +23,20 @@ import (
 )
 
 func runSessionHandle(ctx context.Context, rt runtime.SessionRuntime, sess *session.Session) <-chan runtime.SessionEvent {
+	return runSessionHandleAs(ctx, rt, sess, runtime.SessionBinding{AgentName: sess.AgentName})
+}
+
+// runAdmittedChildHandle creates the child through its parent binding, so the
+// runtime admits a child record that the attached view can validate.
+func runAdmittedChildHandle(ctx context.Context, rt runtime.SessionRuntime, sess *session.Session) <-chan runtime.SessionEvent {
+	return runSessionHandleAs(ctx, rt, sess, runtime.SessionBinding{AgentName: sess.AgentName, ParentSessionID: sess.ParentID})
+}
+
+func runSessionHandleAs(ctx context.Context, rt runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding) <-chan runtime.SessionEvent {
 	events := make(chan runtime.SessionEvent, 64)
 	go func() {
 		defer close(events)
-		handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName})
+		handle, err := rt.CreateSession(ctx, sess, binding)
 		if err != nil {
 			return
 		}
@@ -88,6 +98,10 @@ func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
 	))
 	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
+	// The child's ancestry must resolve in the runtime: create its parent first.
+	parent := session.New(session.WithID("parent"), session.WithAgentName("root"))
+	for range runSessionHandle(t.Context(), rt, parent) {
+	}
 	child := session.New(
 		session.WithID("child"),
 		session.WithParentID("parent"),
@@ -95,15 +109,21 @@ func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
 		session.WithNonInteractive(true),
 	)
 	// Run once to register the child with the session driver.
-	for range runSessionHandle(t.Context(), rt, child) {
+	for range runAdmittedChildHandle(t.Context(), rt, child) {
 	}
 
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 	info := runtime.SubagentAttachInfo{NodeID: "abcde", Session: child, ParentSessionID: "parent"}
-	a := New(t.Context(), rt, child, runtime.SessionBinding{}, WithRuntimeServices(rt), WithSubagentAttach(info))
+	a := New(t.Context(), owner.Runtime(), child, runtime.SessionBinding{}, WithRuntimeServices(rt), WithSubagentAttach(info))
 	_, err = a.FollowUpMessage(t.Context(), "target child", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		snapshot, snapshotErr := a.SessionHandle().Snapshot(t.Context())
+		handle := a.SessionHandle()
+		if handle == nil {
+			return false
+		}
+		snapshot, snapshotErr := handle.Snapshot(t.Context())
 		if snapshotErr != nil || snapshot == nil {
 			return false
 		}
@@ -129,20 +149,30 @@ func TestIdleAttachedAppRunPreservesAttachments(t *testing.T) {
 	))
 	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
+	// The child's ancestry must resolve in the runtime: create its parent first.
+	parent := session.New(session.WithID("parent"), session.WithAgentName("root"))
+	for range runSessionHandle(t.Context(), rt, parent) {
+	}
 	child := session.New(
 		session.WithID("idle-child"),
 		session.WithParentID("parent"),
 		session.WithAgentName("planner"),
 		session.WithNonInteractive(true),
 	)
-	for range runSessionHandle(t.Context(), rt, child) {
+	for range runAdmittedChildHandle(t.Context(), rt, child) {
 	}
 
-	a := New(t.Context(), rt, child, runtime.SessionBinding{}, WithRuntimeServices(rt), WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "abcde", Session: child}))
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	a := New(t.Context(), owner.Runtime(), child, runtime.SessionBinding{}, WithRuntimeServices(rt), WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "abcde", Session: child}))
 	ctx, cancel := context.WithCancel(t.Context())
 	a.Run(ctx, cancel, "idle message", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
 	require.Eventually(t, func() bool {
-		snapshot, snapshotErr := a.SessionHandle().Snapshot(t.Context())
+		handle := a.SessionHandle()
+		if handle == nil {
+			return false
+		}
+		snapshot, snapshotErr := handle.Snapshot(t.Context())
 		if snapshotErr != nil || snapshot == nil {
 			return false
 		}

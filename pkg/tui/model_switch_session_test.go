@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -94,6 +95,65 @@ func TestModelSwitchHandlersUnsupportedNotice(t *testing.T) {
 	assert.Contains(t, note.Text, "unavailable")
 }
 
+// filterMetadataRefresh pins the background metadata refresh committed by the
+// Update that started at generation gen. The generation delta is the exact
+// expected count (0 or 1), and every refresh must carry the committed generation
+// and the application it was scheduled for. Every other batched message is
+// returned to the caller; nothing is dropped by kind.
+func filterMetadataRefresh(t *testing.T, m *appModel, gen uint64, msgs []tea.Msg) []tea.Msg {
+	t.Helper()
+	delta := m.metadataGeneration - gen
+	require.LessOrEqual(t, delta, uint64(1), "one Update schedules at most one metadata refresh")
+	var semantic []tea.Msg
+	refreshes := 0
+	for _, msg := range msgs {
+		meta, ok := msg.(capabilityResult)
+		if !ok || !meta.refresh {
+			semantic = append(semantic, msg)
+			continue
+		}
+		refreshes++
+		require.Equal(t, m.metadataGeneration, meta.metadataGeneration, "metadata refresh must carry the committed generation")
+		require.Same(t, m.application, meta.scope.application, "metadata refresh must target the committed application")
+	}
+	require.Equal(t, int(delta), refreshes, "background metadata refresh count must equal the committed generation delta")
+	return semantic
+}
+
+// requireOnlyMetadataRefresh fails on any batched message other than the
+// committed background metadata refresh.
+func requireOnlyMetadataRefresh(t *testing.T, m *appModel, gen uint64, cmd tea.Cmd) {
+	t.Helper()
+	require.Empty(t, filterMetadataRefresh(t, m, gen, collectMsgs(cmd)), "only the background metadata refresh may be batched")
+}
+
+// sessionMetadataOf reads metadata only when a session handle is attached; a
+// nil handle is a valid state and its absence is pinned by the zero value.
+func sessionMetadataOf(application *app.App) runtime.SessionMetadata {
+	if handle := application.SessionHandle(); handle != nil {
+		return handle.Metadata()
+	}
+	return runtime.SessionMetadata{}
+}
+
+// rootOwnerState pins everything a stale picker result could mutate.
+type rootOwnerState struct {
+	application    *app.App
+	modelPickerApp *app.App
+	generation     uint64
+	dialogOpen     bool
+	metadata       runtime.SessionMetadata
+}
+
+func captureRootOwnerState(m *appModel) rootOwnerState {
+	return rootOwnerState{application: m.application, modelPickerApp: m.modelPickerApp, generation: m.modelPickerGeneration, dialogOpen: m.dialogMgr.Open(), metadata: sessionMetadataOf(m.application)}
+}
+
+func requireRootOwnerState(t *testing.T, m *appModel, want rootOwnerState) {
+	t.Helper()
+	require.Equal(t, want, captureRootOwnerState(m), "stale result must not mutate the owner, model, metadata, or dialog state")
+}
+
 func TestModelPickerLoadedDispatchRejectsStaleOriginAndGeneration(t *testing.T) {
 	m, _ := newModelSwitchHandlerTest(t)
 	t.Cleanup(m.dialogMgr.Cleanup)
@@ -101,19 +161,28 @@ func TestModelPickerLoadedDispatchRejectsStaleOriginAndGeneration(t *testing.T) 
 	_, currentCmd := m.handleOpenModelPicker()
 	old := oldCmd().(messages.ModelPickerLoadedMsg)
 	current := currentCmd().(messages.ModelPickerLoadedMsg)
+
+	before, gen := captureRootOwnerState(m), m.metadataGeneration
 	_, cmd := m.Update(old)
-	require.Nil(t, cmd)
+	requireOnlyMetadataRefresh(t, m, gen, cmd)
+	requireRootOwnerState(t, m, before)
 	require.False(t, m.dialogMgr.Open())
+
 	wrong := current
 	wrong.SessionID = "other-session"
+	before, gen = captureRootOwnerState(m), m.metadataGeneration
 	_, cmd = m.Update(wrong)
-	require.Nil(t, cmd)
+	requireOnlyMetadataRefresh(t, m, gen, cmd)
+	requireRootOwnerState(t, m, before)
 	require.False(t, m.dialogMgr.Open())
+
 	_, _ = m.Update(current)
 	require.True(t, m.dialogMgr.HasDialog(func(d dialog.Dialog) bool { return d != nil }))
 	m.dialogMgr.Cleanup()
 	m.modelPickerGeneration++
+	before, gen = captureRootOwnerState(m), m.metadataGeneration
 	_, cmd = m.Update(current)
-	require.Nil(t, cmd)
+	requireOnlyMetadataRefresh(t, m, gen, cmd)
+	requireRootOwnerState(t, m, before)
 	require.False(t, m.dialogMgr.Open())
 }

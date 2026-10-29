@@ -48,11 +48,12 @@ func (r *leanCancellationRuntime) SessionByID(string) (runtime.SessionHandle, er
 func cancellationModel(t *testing.T) (*model, *leanCancellationHandle) {
 	t.Helper()
 	provider := &viewerLifecycleProvider{calls: make(chan viewerLifecycleCall, 4)}
-	local, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("agent", "fixture", agent.WithModel(provider)))), runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	dir := t.TempDir()
+	local, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("agent", "fixture", agent.WithModel(provider)))), runtime.WithSessionStore(session.NewInMemorySessionStore()), runtime.WithWorkingDir(dir))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(local)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
-	sess := session.New(session.WithAgentName("agent"), session.WithWorkingDir(t.TempDir()))
+	sess := session.New(session.WithAgentName("agent"), session.WithWorkingDir(dir))
 	handle, err := owner.Runtime().CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "agent"})
 	require.NoError(t, err)
 	accepted, err := handle.Submit(t.Context(), runtime.TurnInput{Content: "active fake provider"})

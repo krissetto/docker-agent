@@ -75,7 +75,8 @@ extension AppModel {
     }
 
     public func forkBeforeUserMessage(_ ref: SessionRef, index: Int, confirmed: Bool) async throws -> SessionForkProjection {
-        guard confirmed, openSessions[ref] != nil else { throw SessionWorkflowError.destructiveConfirmationRequired }
+        guard confirmed, let openSession = openSessions[ref] else { throw SessionWorkflowError.destructiveConfirmationRequired }
+        guard openSession.transcriptWindow.hasCompleteCanonicalCoverage else { throw SessionAdvancedError.transcriptWindowIncomplete }
         let client = try await advancedClient(ref, capability: "branching", execution: true)
         let metadataResponse = try await client.sessionStatus(ref.sessionID)
         guard clients[ref.serverID] === client, metadataResponse.metadata.sessionID == ref.sessionID else { throw SessionAdvancedError.identityMismatch }

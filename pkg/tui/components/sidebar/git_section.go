@@ -2,6 +2,7 @@ package sidebar
 
 import (
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -22,11 +23,17 @@ type GitChanges struct {
 	Available bool
 	Loading   bool
 	// Scanning lists worktrees whose status request is in flight.
-	Scanning map[string]bool
-	Err      string
-	Snapshot *review.Snapshot
+	Scanning                       map[string]bool
+	Err                            string
+	Snapshot                       *review.Snapshot
+	DiscoveryContinuationSupported bool
+	ContinueDiscovery              bool
+	ContinuingDiscovery            bool
 	// Open is the file shown in the inspector, highlighted in the tree.
-	Open review.DocumentKey
+	Open                review.DocumentKey
+	Mode                review.Mode
+	Directories         []review.Directory
+	DirectoryGeneration uint64
 }
 
 type GitAction int
@@ -36,7 +43,12 @@ const (
 	GitLoad GitAction = iota
 	GitRefresh
 	GitLoadWorktree
+	GitContinueDiscovery
 	GitOpen
+	GitBrowse
+	GitShowChanges
+	GitLoadDirectory
+	GitOpenFile
 )
 
 type GitRequestMsg struct {
@@ -51,6 +63,7 @@ type GitRequestMsg struct {
 type GitWatchMsg struct {
 	Owner             string
 	Open              bool
+	Mode              review.Mode
 	ExpandedWorktrees []string
 }
 
@@ -62,6 +75,8 @@ const (
 	gitRowWorktree
 	gitRowGroup
 	gitRowFile
+	gitRowContinue
+	gitRowBrowse
 )
 
 type gitRow struct {
@@ -71,36 +86,62 @@ type gitRow struct {
 	label    string
 	tail     string
 	worktree string
+	path     string
 	group    review.Group
 	file     review.FileChange
-	branch   bool
-	open     bool
+	status   string
+	warning  bool
+	// counts reports whether the worktree's line counts and binary flags are known.
+	counts bool
+	branch bool
+	open   bool
 }
 
 // gitSection renders like the subagent tree: a summary row, then indented
-// rows with ├/│/└ guides. Everything starts collapsed and expansions are kept
-// by stable identity across snapshots.
+// rows where top-level repositories sit flush and nested rows carry ├/│/└
+// guides. Everything starts collapsed and expansions are kept by stable
+// identity across snapshots.
 type gitSection struct {
-	data     GitChanges
-	expanded map[string]bool
-	rows     []gitRow
-	cursor   int
-	focused  bool
-	revision uint64
-	hovered  int
+	data                   GitChanges
+	expanded               map[string]bool
+	rows                   []gitRow
+	displayRows            []gitRow
+	displayToSource        []int
+	cursor                 int
+	focused                bool
+	revision               uint64
+	hovered                int
+	previousHovered        int
+	directoryPending       map[string]bool
+	directoryGeneration    uint64
+	directoryGenerationSet bool
+	spinnerFrame           string
+	summaryLoading         bool
 }
 
 const gitSectionKey = "git"
 
 func (g *gitSection) set(data GitChanges) {
+	if g.directoryGenerationSet && g.directoryGeneration != data.DirectoryGeneration {
+		clear(g.directoryPending)
+	}
+	g.directoryGeneration, g.directoryGenerationSet = data.DirectoryGeneration, true
 	selected := ""
-	if g.cursor > 0 && g.cursor-1 < len(g.rows) {
-		selected = g.rows[g.cursor-1].key
+	if g.cursor > 0 && g.cursor-1 < len(g.displayRows) {
+		selected = g.displayRows[g.cursor-1].key
+	}
+	if g.directoryPending == nil {
+		g.directoryPending = map[string]bool{}
+	}
+	for _, dir := range data.Directories {
+		if dir.State != review.StateLoading {
+			delete(g.directoryPending, directoryIdentity(dir.WorktreeID, dir.Path))
+		}
 	}
 	g.data = data
 	g.rebuild()
 	if selected != "" {
-		for i, row := range g.rows {
+		for i, row := range g.displayRows {
 			if row.key == selected {
 				g.cursor = i + 1
 				break
@@ -114,8 +155,20 @@ func (g *gitSection) open() bool { return g.expanded[gitSectionKey] }
 func (g *gitSection) visible() bool { return g.data.Available }
 
 func (g *gitSection) rebuild() {
+	selected := ""
+	if g.cursor > 0 && g.cursor-1 < len(g.displayRows) {
+		selected = g.displayRows[g.cursor-1].key
+	}
 	g.revision++
 	g.rows = g.rows[:0]
+	g.summaryLoading = false
+	if g.data.Snapshot != nil {
+		for _, repo := range g.data.Snapshot.Repositories {
+			for _, wt := range repo.Worktrees {
+				g.summaryLoading = g.summaryLoading || wt.State == review.StateUnscanned || wt.State == review.StateLoading
+			}
+		}
+	}
 	if !g.open() {
 		g.clamp()
 		return
@@ -125,27 +178,340 @@ func (g *gitSection) rebuild() {
 	case g.data.Err != "" && snap == nil:
 		g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.ErrorStyle.Render("⚠ " + sanitizeGit(g.data.Err))})
 	case snap == nil && g.data.Loading:
-		g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render("scanning…")})
+		frame := g.spinnerFrame
+		if frame == "" {
+			frame = "⠋"
+		}
+		g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render(frame)})
 	case snap == nil:
 		// An interrupted scan never leaves the section spinning.
 		g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render("not loaded · r to refresh")})
 	case snap.Scope.Unavailable != "":
 		g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render(sanitizeGit(snap.Scope.Unavailable))})
 	case len(snap.Repositories) == 0:
-		g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render("no Git repositories")})
-	default:
-		for i, repo := range snap.Repositories {
-			g.repository(repo, i == len(snap.Repositories)-1)
+		if snap.Scope.LimitReason == "" {
+			g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render("no Git repositories")})
 		}
-		if snap.Scope.Note != "" {
-			g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render(sanitizeGit(snap.Scope.Note))})
+	default:
+		if g.data.Mode == review.ModeFiles {
+			g.browse(snap)
+		} else {
+			for _, repo := range snap.Repositories {
+				g.repository(repo)
+			}
+		}
+	}
+	// Files lists the browsed tree only; global Git discovery limits describe repositories.
+	if g.data.Mode != review.ModeFiles {
+		g.discoveryRows(snap)
+	}
+	g.prepareDisplayRows(40)
+	if selected != "" {
+		for i, row := range g.displayRows {
+			if row.key == selected {
+				g.cursor = i + 1
+				break
+			}
 		}
 	}
 	g.clamp()
 }
 
+func (g *gitSection) discoveryRows(snap *review.Snapshot) {
+	if snap == nil {
+		return
+	}
+	if snap.Scope.LimitReason != "" {
+		label := discoveryLimitSummary(snap.Scope.LimitReason, snap.Scope.LimitValue)
+		if !g.data.ContinueDiscovery {
+			if snap.Scope.Remote {
+				label += " · remote"
+			} else if !g.data.DiscoveryContinuationSupported {
+				label += " · final"
+			}
+		}
+		g.rows = append(g.rows, gitRow{kind: gitRowNote, key: "discovery-limit", label: label, warning: true})
+		if g.data.ContinuingDiscovery {
+			g.rows = append(g.rows, gitRow{kind: gitRowContinue, key: "continue-scan", label: styles.MutedStyle.Render("⠋ Scanning deeper…")})
+		} else if g.data.ContinueDiscovery {
+			g.rows = append(g.rows, gitRow{kind: gitRowContinue, key: "continue-scan", label: styles.InfoStyle.Render("Continue scan")})
+		}
+		return
+	}
+	if snap.Scope.Note != "" {
+		label := sanitizeGit(snap.Scope.Note)
+		if snap.Scope.Remote {
+			label = "Incomplete · remote"
+		}
+		g.rows = append(g.rows, gitRow{kind: gitRowNote, key: "discovery-note", label: label, warning: true})
+	}
+}
+
+func (g *gitSection) currentScopeWorktrees() []review.Worktree {
+	if g.data.Snapshot == nil {
+		return nil
+	}
+	var current []review.Worktree
+	for _, repo := range g.data.Snapshot.Repositories {
+		for _, wt := range repo.Worktrees {
+			if wt.Current {
+				current = append(current, wt)
+			}
+		}
+	}
+	return current
+}
+
+func (g *gitSection) requestCurrentScopeDirectories() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, wt := range g.currentScopeWorktrees() {
+		cmds = append(cmds, g.requestDirectory(wt.ID, ""))
+	}
+	return tea.Batch(cmds...)
+}
+
+func browseDirKey(worktreeID, dir string) string      { return "browse:dir:" + worktreeID + ":" + dir }
+func browseWorktreeKey(worktreeID string) string      { return "browse:wt:" + worktreeID }
+func browseRepoKey(repoID string) string              { return "browse:repo:" + repoID }
+func directoryIdentity(worktreeID, dir string) string { return worktreeID + "\x00" + dir }
+
+func (g *gitSection) directory(worktreeID, dir string) (review.Directory, bool) {
+	for _, item := range g.data.Directories {
+		if item.WorktreeID == worktreeID && item.Path == dir {
+			return item, true
+		}
+	}
+	return review.Directory{}, false
+}
+
+func (g *gitSection) requestDirectory(worktreeID, dir string, retry ...bool) tea.Cmd {
+	item, ok := g.directory(worktreeID, dir)
+	forceRetry := len(retry) > 0 && retry[0]
+	if ok && item.State != review.StateUnscanned && !(forceRetry && item.State == review.StateError) {
+		return nil
+	}
+	key := directoryIdentity(worktreeID, dir)
+	if g.directoryPending == nil {
+		g.directoryPending = map[string]bool{}
+	}
+	if g.directoryPending[key] {
+		return nil
+	}
+	g.directoryPending[key] = true
+	g.revision++
+	return core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitLoadDirectory, WorktreeID: worktreeID, Path: dir})
+}
+
+func (g *gitSection) browse(snapshot *review.Snapshot) {
+	directoryByID := make(map[string]review.Directory, len(g.data.Directories))
+	for _, dir := range g.data.Directories {
+		directoryByID[directoryIdentity(dir.WorktreeID, dir.Path)] = dir
+		if dir.State != review.StateLoading {
+			delete(g.directoryPending, directoryIdentity(dir.WorktreeID, dir.Path))
+		}
+	}
+	statusByWorktree := map[string]map[string]string{}
+	changesByWorktree := map[string]map[string]review.FileChange{}
+	countsByWorktree := map[string]bool{}
+	changedCounts := map[string]map[string]bool{}
+	for _, repo := range snapshot.Repositories {
+		for _, wt := range repo.Worktrees {
+			statusByWorktree[wt.ID] = map[string]string{}
+			changesByWorktree[wt.ID] = map[string]review.FileChange{}
+			countsByWorktree[wt.ID] = countsKnown(wt)
+			changedCounts[wt.ID] = map[string]bool{}
+			for _, file := range wt.Files {
+				statusByWorktree[wt.ID][file.Path] = file.Status
+				changesByWorktree[wt.ID][file.Path] = file
+				for parent := path.Dir(file.Path); parent != "." && parent != "/"; parent = path.Dir(parent) {
+					changedCounts[wt.ID][parent] = true
+				}
+			}
+		}
+	}
+	appendWorktree := func(repo review.Repository, wt review.Worktree, guides, child string) {
+		key := browseWorktreeKey(wt.ID)
+		label := checkoutPath(repo, wt)
+		metadata := checkoutMetadata(wt)
+		if metadata != "" {
+			label += "  " + metadata
+		}
+		open := g.expanded[key]
+		g.rows = append(g.rows, gitRow{kind: gitRowWorktree, key: key, guides: guides, label: label, worktree: wt.ID, branch: true, open: open})
+		if !open {
+			return
+		}
+		dir, loaded := directoryByID[directoryIdentity(wt.ID, "")]
+		if !loaded || dir.State == review.StateUnscanned || dir.State == review.StateLoading {
+			text := "Loading…"
+			if g.directoryPending[directoryIdentity(wt.ID, "")] {
+				text = "Loading…"
+			}
+			g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: child, label: styles.MutedStyle.Render(text)})
+			return
+		}
+		if dir.Err != "" || dir.State == review.StateError {
+			g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: child, label: styles.ErrorStyle.Render("⚠ " + sanitizeGit(dir.Err))})
+			return
+		}
+		g.browseEntries(wt.ID, "", child, dir, directoryByID, statusByWorktree[wt.ID], changesByWorktree[wt.ID], countsByWorktree[wt.ID], changedCounts[wt.ID])
+	}
+	for _, repo := range snapshot.Repositories {
+		var otherWorktrees []review.Worktree
+		for _, wt := range repo.Worktrees {
+			if !wt.Current {
+				otherWorktrees = append(otherWorktrees, wt)
+				continue
+			}
+			dir, loaded := directoryByID[directoryIdentity(wt.ID, "")]
+			switch {
+			case !loaded || dir.State == review.StateUnscanned || dir.State == review.StateLoading:
+				g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.MutedStyle.Render("Loading…")})
+			case dir.Err != "" || dir.State == review.StateError:
+				g.rows = append(g.rows, gitRow{kind: gitRowNote, label: styles.ErrorStyle.Render("⚠ " + sanitizeGit(dir.Err))})
+			default:
+				g.browseEntries(wt.ID, "", "", dir, directoryByID, statusByWorktree[wt.ID], changesByWorktree[wt.ID], countsByWorktree[wt.ID], changedCounts[wt.ID])
+			}
+		}
+		if len(otherWorktrees) == 0 {
+			continue
+		}
+		key := browseRepoKey(repo.ID)
+		open := g.expanded[key]
+		g.rows = append(g.rows, gitRow{kind: gitRowRepo, key: key, label: styles.TabPrimaryStyle.Render(sanitizeGit(repo.Name)), branch: true, open: open})
+		if !open {
+			continue
+		}
+		for i, wt := range otherWorktrees {
+			guides, child := connector("", i == len(otherWorktrees)-1)
+			appendWorktree(repo, wt, guides, child)
+		}
+	}
+}
+
+func (g *gitSection) discoveredWorktreeAt(scopeWorktreeID, rel string) bool {
+	if g.data.Snapshot == nil {
+		return false
+	}
+	currentScope := false
+	for _, wt := range g.currentScopeWorktrees() {
+		currentScope = currentScope || wt.ID == scopeWorktreeID
+	}
+	if !currentScope {
+		return false
+	}
+	rel = path.Clean(rel)
+	for _, repo := range g.data.Snapshot.Repositories {
+		for _, wt := range repo.Worktrees {
+			if !wt.Current && wt.Path != "" && wt.Path != "." && path.Clean(wt.Path) == rel {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (g *gitSection) browseEntries(worktreeID, parent, guides string, dir review.Directory, all map[string]review.Directory, statuses map[string]string, changes map[string]review.FileChange, counts bool, changedDirs map[string]bool) {
+	entries := make([]review.Entry, 0, len(dir.Entries))
+	for _, entry := range dir.Entries {
+		if entry.Dir && g.discoveredWorktreeAt(worktreeID, path.Join(parent, entry.Name)) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	slices.SortFunc(entries, func(a, b review.Entry) int {
+		if a.Dir != b.Dir {
+			if a.Dir {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
+	for i, entry := range entries {
+		rel := path.Join(parent, entry.Name)
+		last := i == len(entries)-1
+		rowGuides, child := connector(guides, last)
+		if parent == "" && guides == "" {
+			rowGuides, child = "", "  "
+		}
+		if entry.Dir {
+			key := browseDirKey(worktreeID, rel)
+			open := g.expanded[key]
+			changed := 0
+			for file := range statuses {
+				if strings.HasPrefix(file, rel+"/") {
+					changed++
+				}
+			}
+			if changed == 0 && changedDirs[rel] {
+				changed = 1
+			}
+			tail := ""
+			if changed > 0 {
+				tail = strconv.Itoa(changed) + " changed"
+			}
+			g.rows = append(g.rows, gitRow{kind: gitRowBrowse, key: key, guides: rowGuides, label: styles.TabPrimaryStyle.Render(sanitizeGit(entry.Name + "/")), tail: tail, worktree: worktreeID, path: rel, branch: true, open: open})
+			if !open {
+				continue
+			}
+			nested, loaded := all[directoryIdentity(worktreeID, rel)]
+			if !loaded || nested.State == review.StateUnscanned || nested.State == review.StateLoading {
+				text := "Loading…"
+				if !g.directoryPending[directoryIdentity(worktreeID, rel)] {
+					text = "Select to load"
+				}
+				g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: child, label: styles.MutedStyle.Render(text)})
+			} else if nested.Err != "" || nested.State == review.StateError {
+				g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: child, label: styles.ErrorStyle.Render("⚠ " + sanitizeGit(nested.Err))})
+			} else {
+				g.browseEntries(worktreeID, rel, child, nested, all, statuses, changes, counts, changedDirs)
+			}
+			continue
+		}
+		change, changed := changes[rel]
+		status := statuses[rel]
+		selected := g.data.Open.Mode == review.ModeFiles && g.data.Open.WorktreeID == worktreeID && g.data.Open.Path == rel
+		name := entry.Name
+		if selected {
+			name = "▸ " + name
+		}
+		row := gitRow{kind: gitRowBrowse, key: "browse:file:" + worktreeID + ":" + rel, guides: rowGuides, label: styles.TabPrimaryStyle.Render(sanitizeGit(name)), worktree: worktreeID, path: rel, status: status}
+		if changed {
+			row.file, row.counts = change, counts
+		}
+		g.rows = append(g.rows, row)
+	}
+	if dir.Truncated {
+		g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: guides, label: styles.WarningStyle.Render("More entries not shown")})
+	}
+}
+
+func (g *gitSection) setMode(mode review.Mode) tea.Cmd {
+	if g.data.Mode == mode {
+		return nil
+	}
+	g.data.Mode = mode
+	g.focused, g.cursor = true, 0
+	var cmds []tea.Cmd
+	if mode == review.ModeFiles {
+		if g.expanded == nil {
+			g.expanded = map[string]bool{}
+		}
+		g.expanded[gitSectionKey] = true
+	}
+	if mode == review.ModeFiles {
+		cmds = append(cmds, g.requestCurrentScopeDirectories(), core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitBrowse}))
+	} else {
+		cmds = append(cmds, core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitShowChanges}))
+	}
+	g.rebuild()
+	cmds = append(cmds, core.CmdHandler(g.watchState()))
+	return tea.Batch(cmds...)
+}
+
 func (g *gitSection) clamp() {
-	g.cursor = max(0, min(g.cursor, len(g.rows)))
+	g.cursor = max(0, min(g.cursor, len(g.displayRows)))
 }
 
 func connector(prefix string, last bool) (string, string) {
@@ -155,40 +521,36 @@ func connector(prefix string, last bool) (string, string) {
 	return prefix + "├ ", prefix + "│ "
 }
 
-func (g *gitSection) repository(repo review.Repository, last bool) {
-	if len(repo.Worktrees) == 1 {
-		g.worktree(repo, repo.Worktrees[0], "", last, true)
-		return
-	}
-	guides, child := connector("", last)
+// repository emits a top-level row; each checkout branches beneath it.
+func (g *gitSection) repository(repo review.Repository) {
 	key := "repo:" + repo.ID
-	g.rows = append(g.rows, gitRow{kind: gitRowRepo, key: key, guides: guides, label: styles.TabPrimaryStyle.Render(sanitizeGit(repo.Name)), branch: true, open: g.expanded[key]})
+	g.rows = append(g.rows, gitRow{kind: gitRowRepo, key: key, label: styles.TabPrimaryStyle.Render(sanitizeGit(repo.Name)), branch: true, open: g.expanded[key]})
 	if !g.expanded[key] {
 		return
 	}
 	for i, wt := range repo.Worktrees {
-		g.worktree(repo, wt, child, i == len(repo.Worktrees)-1, false)
+		guides, child := connector("", i == len(repo.Worktrees)-1)
+		g.worktree(repo, wt, guides, child)
 	}
 	if repo.HiddenOutside > 0 {
-		g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: child + "  ", label: styles.MutedStyle.Render("⊘ +" + strconv.Itoa(repo.HiddenOutside) + " outside · not shown")})
+		g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: "  ", label: styles.MutedStyle.Render("⊘ +" + strconv.Itoa(repo.HiddenOutside) + " outside · not shown")})
 	}
 }
 
-func (g *gitSection) worktree(repo review.Repository, wt review.Worktree, prefix string, last, merged bool) {
-	guides, child := connector(prefix, last)
+// worktree appends a row drawn with guides and nests its children under child.
+func (g *gitSection) worktree(repo review.Repository, wt review.Worktree, guides, child string) {
 	key := "wt:" + wt.ID
-	label := branchLabel(wt)
-	if merged {
-		label = styles.TabPrimaryStyle.Render(sanitizeGit(repo.Name))
-		if b := branchLabel(wt); b != "" && repo.Kind != review.RepoNone {
-			label += " " + styles.MutedStyle.Render("⎇ "+b)
-		}
-	} else if wt.Current {
+	metadata := checkoutMetadata(wt)
+	label := styles.TabPrimaryStyle.Render(checkoutPath(repo, wt))
+	if wt.Current {
 		label = "● " + label
+	}
+	if metadata != "" {
+		label += "  " + styles.MutedStyle.Render(metadata)
 	}
 	tail := ""
 	if wt.State == review.StateReady && len(wt.Files) > 0 {
-		tail = strconv.Itoa(len(wt.Files))
+		tail = changeTail(wt.Files, countsKnown(wt))
 	}
 	g.rows = append(g.rows, gitRow{kind: gitRowWorktree, key: key, guides: guides, label: label, tail: tail, worktree: wt.ID, branch: true, open: g.expanded[key]})
 	if !g.expanded[key] {
@@ -198,7 +560,7 @@ func (g *gitSection) worktree(repo review.Repository, wt review.Worktree, prefix
 	case review.StateUnscanned, review.StateLoading:
 		label := "not scanned · r to refresh"
 		if g.data.Scanning[wt.ID] {
-			label = "scanning…"
+			label = ""
 		}
 		g.rows = append(g.rows, gitRow{kind: gitRowNote, guides: child + "  ", label: styles.MutedStyle.Render(label)})
 		return
@@ -233,24 +595,109 @@ func (g *gitSection) group(wt review.Worktree, grp review.Group, prefix string, 
 			files = append(files, f)
 		}
 	}
-	g.rows = append(g.rows, gitRow{kind: gitRowGroup, key: key, guides: guides, label: grp.String(), tail: strconv.Itoa(len(files)), worktree: wt.ID, group: grp, branch: true, open: g.expanded[key]})
+	counts := countsKnown(wt)
+	g.rows = append(g.rows, gitRow{kind: gitRowGroup, key: key, guides: guides, label: grp.String(), tail: changeTail(files, counts), worktree: wt.ID, group: grp, branch: true, open: g.expanded[key]})
 	if !g.expanded[key] {
 		return
 	}
 	for i, f := range files {
 		fg, _ := connector(child, i == len(files)-1)
-		g.rows = append(g.rows, gitRow{kind: gitRowFile, key: "file:" + wt.ID + ":" + strconv.Itoa(int(grp)) + ":" + f.Path, guides: fg, worktree: wt.ID, group: grp, file: f})
+		g.rows = append(g.rows, gitRow{kind: gitRowFile, key: "file:" + wt.ID + ":" + strconv.Itoa(int(grp)) + ":" + f.Path, guides: fg, worktree: wt.ID, group: grp, file: f, counts: counts})
 	}
 }
 
-func branchLabel(wt review.Worktree) string {
+// countsKnown reports whether per-file line counts and binary flags are
+// complete; until then the tree shows file counts only, never zeros.
+func countsKnown(wt review.Worktree) bool {
+	return wt.CountsState == review.StateReady
+}
+
+// changeTail is the muted file count followed, when known, by the summed
+// green/red line deltas: "3 +12 −4". Binary files add nothing to the sums.
+func changeTail(files []review.FileChange, counts bool) string {
+	tail := styles.MutedStyle.Render(strconv.Itoa(len(files)))
+	if !counts {
+		return tail
+	}
+	added, removed := 0, 0
+	for _, f := range files {
+		if f.Binary {
+			continue
+		}
+		added += f.Added
+		removed += f.Removed
+	}
+	if stats := lineStats(added, removed); stats != "" {
+		tail += " " + stats
+	}
+	return tail
+}
+
+// lineStats renders "+N −N", omitting zero sides.
+func lineStats(added, removed int) string {
+	stats := ""
+	if added > 0 {
+		stats = styles.SuccessStyle.Render("+" + strconv.Itoa(added))
+	}
+	if removed > 0 {
+		if stats != "" {
+			stats += " "
+		}
+		stats += styles.ErrorStyle.Render("−" + strconv.Itoa(removed))
+	}
+	return stats
+}
+
+// fileStats mirrors the review panel: "bin" for binaries, else line deltas,
+// and nothing while counts are still unknown.
+func fileStats(f review.FileChange, counts bool) string {
 	switch {
-	case wt.Branch != "":
-		return sanitizeGit(wt.Branch)
-	case wt.Detached != "":
-		return "detached @" + sanitizeGit(wt.Detached)
+	case !counts:
+		return ""
+	case f.Binary:
+		return styles.MutedStyle.Render("bin")
+	}
+	return lineStats(f.Added, f.Removed)
+}
+
+func discoveryLimitSummary(reason string, value int) string {
+	limit := "limit"
+	switch reason {
+	case "depth":
+		limit = "depth"
+	case "entries":
+		limit = "entries"
+	case "repositories":
+		limit = "repositories"
+	case "timeout":
+		limit = "time"
+	case "bytes":
+		limit = "bytes"
+	case "unavailable":
+		limit = "unavailable"
+	}
+	label := "Incomplete · " + limit
+	if value > 0 {
+		label += " " + strconv.Itoa(value)
+	}
+	return label
+}
+
+func checkoutPath(repo review.Repository, wt review.Worktree) string {
+	if wt.Path == "" || wt.Path == "." {
+		return sanitizeGit(fallbackGit(repo.Name, wt.Path))
 	}
 	return sanitizeGit(wt.Path)
+}
+
+func checkoutMetadata(wt review.Worktree) string {
+	switch {
+	case wt.Branch != "":
+		return "⎇ " + sanitizeGit(wt.Branch)
+	case wt.Detached != "":
+		return "⎇ detached @" + sanitizeGit(wt.Detached)
+	}
+	return ""
 }
 
 func sanitizeGit(s string) string {
@@ -263,123 +710,273 @@ func sanitizeGit(s string) string {
 	}, s)
 }
 
-func (g *gitSection) summary(width int) string {
+func (g *gitSection) summary(width int, hoverValues map[string]hoverValue) string {
+	frame := g.spinnerFrame
+	if g.loading() && frame == "" {
+		frame = "⠋"
+	}
+	return g.summaryFrame(width, frame, hoverValues)
+}
+
+func (g *gitSection) loading() bool {
+	return g.data.Loading || g.data.ContinuingDiscovery || len(g.data.Scanning) > 0 || g.summaryLoading
+}
+
+func (g *gitSection) repositoryCount() int {
+	if g.data.Snapshot == nil {
+		return 0
+	}
+	count := 0
+	for _, repo := range g.data.Snapshot.Repositories {
+		if repo.Kind != review.RepoNone {
+			count++
+		}
+	}
+	return count
+}
+
+// summaryFrame paints the header without rebuilding the tree. Brightness comes
+// only from the shared hover ramp; keyboard focus marks the disclosure glyph.
+func (g *gitSection) summaryFrame(width int, frame string, hoverState ...map[string]hoverValue) string {
+	var hoverValues map[string]hoverValue
+	if len(hoverState) > 0 {
+		hoverValues = hoverState[0]
+	}
+	hover := gitHoverProgress(hoverValues, g.rowID(0))
+	label := styles.MutedStyle.Render("Files - Git")
+	if g.open() {
+		// The selected mode keeps its semantic color; the rest stays muted.
+		filesStyle, gitStyle := styles.MutedStyle, styles.MutedStyle
+		if g.data.Mode == review.ModeFiles {
+			filesStyle = styles.TabPrimaryStyle
+		} else {
+			gitStyle = styles.TabPrimaryStyle
+		}
+		label = filesStyle.Render("Files") + styles.MutedStyle.Render(" - ") + gitStyle.Render("Git")
+	}
+	if g.data.Snapshot != nil {
+		label += styles.MutedStyle.Render(" · " + strconv.Itoa(g.repositoryCount()))
+	}
+	label = styles.HoverText(label, hover, styles.TextPrimary)
+	if g.loading() && frame != "" {
+		label += " " + styles.SpinnerDotsHighlightStyle.Render(frame)
+	}
 	glyph := "›"
 	if g.open() {
 		glyph = "⌄"
 	}
-	text := "Git changes"
-	if snap := g.data.Snapshot; snap != nil {
-		n, repos := 0, len(snap.Repositories)
-		scanned := false
-		for _, repo := range snap.Repositories {
-			for _, wt := range repo.Worktrees {
-				if wt.State == review.StateReady {
-					scanned = true
-					n += len(wt.Files)
-				}
-			}
-		}
-		if scanned {
-			text = strconv.Itoa(n) + " changes"
-		}
-		if repos > 1 {
-			text += " · " + strconv.Itoa(repos) + " repos"
-		}
-	}
-	if g.data.Loading {
-		text += " · scanning…"
-	}
-	label := styles.TabPrimaryStyle.Render(text)
+	glyphStyle := styles.MutedStyle
 	if g.focused && g.cursor == 0 {
-		label = styles.HighlightWhiteStyle.Render(text)
-	} else if g.hovered == 0 {
-		label = styles.HoverText(label, 1, styles.TextPrimary)
+		glyphStyle = styles.TabPrimaryStyle
 	}
-	label = ansi.Truncate(label, max(0, width-2), "…")
-	return label + strings.Repeat(" ", max(1, width-ansi.StringWidth(label)-1)) + styles.MutedStyle.Render(glyph)
+	width = max(0, width-1-ansi.StringWidth(glyph))
+	label = ansi.Truncate(label, width, "…")
+	return label + strings.Repeat(" ", max(1, width+1-ansi.StringWidth(label))) + glyphStyle.Render(glyph)
 }
 
-// lines renders the section: summary, then (when open) a blank row and the
-// tree body indented like the subagent tree.
-func (g *gitSection) lines(width int) []string {
+func (g *gitSection) modeAtX(x int) (review.Mode, bool) {
+	switch {
+	case x >= 0 && x < ansi.StringWidth("Files"):
+		return review.ModeFiles, true
+	case x >= ansi.StringWidth("Files - ") && x < ansi.StringWidth("Files - Git"):
+		return review.ModeChanges, true
+	default:
+		return review.ModeChanges, false
+	}
+}
+
+// lines renders the Files header and the active Git tree.
+func (g *gitSection) lines(width int, hoverState ...map[string]hoverValue) []string {
+	var hoverValues map[string]hoverValue
+	if len(hoverState) > 0 {
+		hoverValues = hoverState[0]
+	}
 	if !g.visible() {
 		return nil
 	}
-	out := []string{g.summary(width)}
-	if !g.open() {
-		return out
+	g.prepareDisplayRows(width)
+	n := 1
+	if g.open() {
+		n = len(g.displayRows) + 1
 	}
-	out = append(out, "")
-	indent := min(2, max(0, width-1))
-	body := max(1, width-indent)
-	for i, r := range g.rows {
-		out = append(out, strings.Repeat(" ", indent)+g.renderRow(r, body, g.focused && g.cursor == i+1, g.hovered == i+1))
+	out := make([]string, n)
+	for i := range out {
+		out[i] = g.line(width, i, hoverValues)
 	}
 	return out
 }
 
-func (g *gitSection) renderRow(r gitRow, width int, focused, hovered bool) string {
+func (g *gitSection) prepareDisplayRows(width int) {
+	g.displayRows = g.displayRows[:0]
+	g.displayToSource = g.displayToSource[:0]
+	indent := min(2, max(0, width-1))
+	for source, row := range g.rows {
+		if row.kind != gitRowNote || strings.TrimSpace(ansi.Strip(row.label)) == "" {
+			g.displayRows = append(g.displayRows, row)
+			g.displayToSource = append(g.displayToSource, source)
+			continue
+		}
+		inner := max(8, width-indent-ansi.StringWidth(row.guides))
+		plain := strings.TrimSpace(ansi.Strip(row.label))
+		wrapped := strings.Split(ansi.Wrap(plain, inner, ""), "\n")
+		if row.key == "discovery-limit" || row.key == "discovery-note" {
+			wrapped = []string{ansi.Truncate(plain, inner, "…")}
+		}
+		for i, text := range wrapped {
+			displayRow := row
+			style := styles.MutedStyle
+			if row.warning {
+				style = styles.WarningStyle
+			}
+			displayRow.label = style.Render(text)
+			if i > 0 {
+				displayRow.key = row.key + ":line:" + strconv.Itoa(i)
+			}
+			g.displayRows = append(g.displayRows, displayRow)
+			g.displayToSource = append(g.displayToSource, source)
+		}
+	}
+	g.cursor = max(0, min(g.cursor, len(g.displayRows)))
+}
+
+// line renders one section line (0 = header, rows from 1) for partial refreshes.
+func (g *gitSection) line(width, line int, hoverState ...map[string]hoverValue) string {
+	var hoverValues map[string]hoverValue
+	if len(hoverState) > 0 {
+		hoverValues = hoverState[0]
+	}
+	switch {
+	case line == 0:
+		return g.summary(width, hoverValues)
+	case line < 1 || line > len(g.displayRows):
+		return ""
+	}
+	indent := min(2, max(0, width-1))
+	r := g.displayRows[line-1]
+	focused := g.focused && g.cursor == line
+	hover := gitHoverProgress(hoverValues, g.rowID(line))
+	painted := strings.Repeat(" ", indent) + g.renderRow(r, max(1, width-indent), focused, hover)
+	selected := r.kind == gitRowFile && g.data.Open.WorktreeID == r.worktree && g.data.Open.Path == r.file.Path && g.data.Open.Group == r.group
+	selected = selected || r.kind == gitRowBrowse && !r.branch && g.data.Open.Mode == review.ModeFiles && g.data.Open.WorktreeID == r.worktree && g.data.Open.Path == r.path
+	if g.data.Open.Path != "" && !selected && !focused {
+		// Resting de-emphasis is static; pointer brightness comes only from the shared hover ramp in renderRow.
+		return styles.FadeLine(painted, gitOtherFileRestAlpha)
+	}
+	return painted
+}
+
+// gitOtherFileRestAlpha is the resting strength of rows other than the open file.
+const gitOtherFileRestAlpha = .55
+
+// gitHoverProgress reads the shared hover ramp only; a missing entry is rest.
+func gitHoverProgress(values map[string]hoverValue, key string) float64 {
+	return values["git:"+key].value
+}
+
+func (g *gitSection) lineForHoverKey(key string) int {
+	key, _ = strings.CutPrefix(key, "git:")
+	for line := range len(g.displayRows) + 1 {
+		if g.rowID(line) == key {
+			return line
+		}
+	}
+	return -1
+}
+
+func (g *gitSection) renderRow(r gitRow, width int, focused bool, hover float64) string {
 	guides := styles.MutedStyle.Render(r.guides)
 	label := r.label
-	if r.kind == gitRowFile {
-		status := gitStatusStyle(r.file.Status).Render(sanitizeGit(fallbackGit(r.file.Status, "·")))
-		stats := ""
-		if r.file.Added > 0 {
-			stats += styles.SuccessStyle.Render("+" + strconv.Itoa(r.file.Added))
+	inlineStats := false
+	if r.kind == gitRowFile || r.kind == gitRowBrowse && !r.branch {
+		statusText, filePath, stats := r.file.Status, r.file.Path, ""
+		if r.kind == gitRowBrowse {
+			statusText, filePath = r.status, r.path
+			stats = fileStats(r.file, r.counts)
+			inlineStats = stats != ""
+		} else {
+			stats = fileStats(r.file, r.counts)
+			inlineStats = stats != ""
 		}
-		if r.file.Removed > 0 {
-			if stats != "" {
-				stats += " "
+		status := gitStatusStyle(statusText).Render(sanitizeGit(fallbackGit(statusText, "·")))
+		name := sanitizeGit(filePath)
+		selected := r.kind == gitRowBrowse && g.data.Open.Mode == review.ModeFiles && g.data.Open.WorktreeID == r.worktree && g.data.Open.Path == r.path
+		if r.kind == gitRowBrowse {
+			name = path.Base(filePath)
+			if selected {
+				name = "▸ " + name
 			}
-			stats += styles.ErrorStyle.Render("−" + strconv.Itoa(r.file.Removed))
 		}
-		avail := max(1, width-ansi.StringWidth(r.guides)-2-ansi.StringWidth(stats)-1)
-		name := truncateMiddleGit(sanitizeGit(r.file.Path), avail)
-		open := g.data.Open
-		selected := open.WorktreeID == r.worktree && open.Path == r.file.Path && open.Group == r.group
+		statsWidth := ansi.StringWidth(stats)
+		statGap := 0
+		if stats != "" {
+			statGap = 1
+		}
+		avail := max(1, width-ansi.StringWidth(r.guides)-ansi.StringWidth(status)-2-statGap-statsWidth)
+		name = truncateMiddleGit(name, avail)
 		nameStyle := styles.BaseStyle
-		selectedMark := " "
-		switch {
-		case selected:
-			selectedMark = styles.InfoStyle.Render("▌")
-			nameStyle = styles.SelectionStyle
-			if hovered {
-				nameStyle = styles.BaseStyle.Background(styles.TabHoverBg).Foreground(styles.TabHoverFg)
-			}
-		case focused:
+		if focused || selected {
 			nameStyle = styles.HighlightWhiteStyle
-		case hovered:
-			nameStyle = styles.BaseStyle.Background(styles.TabHoverBg).Foreground(styles.TabHoverFg)
 		}
-		label = status + selectedMark + nameStyle.Render(name)
-		r.tail = stats
-	} else if focused {
-		label = styles.HighlightWhiteStyle.Render(ansi.Strip(label))
-	} else if r.kind == gitRowWorktree && g.data.Scanning[r.worktree] {
-		label = styles.BaseStyle.Background(styles.CardBg).Foreground(styles.Info).Render(ansi.Strip(label))
-	} else if hovered && r.kind != gitRowNote {
-		label = styles.BaseStyle.Background(styles.TabHoverBg).Foreground(styles.TabHoverFg).Render(ansi.Strip(label))
+		label = styles.HoverText(status+" "+nameStyle.Render(name), hover, styles.TextPrimary)
+		if stats != "" {
+			label += " " + stats
+		}
+		r.tail = ""
+	}
+	if r.kind != gitRowFile && (r.kind != gitRowBrowse || r.branch) {
+		label = g.styleLabel(label, r, focused, hover)
 	}
 	tail := r.tail
-	if tail != "" && r.kind != gitRowFile {
-		tail = styles.MutedStyle.Render(tail)
+	chevron := "›"
+	if r.open {
+		chevron = "⌄"
 	}
 	if r.branch {
-		chevron := "›"
-		if r.open {
-			chevron = "⌄"
-		}
 		if tail != "" {
 			tail += " "
 		}
 		tail += styles.MutedStyle.Render(chevron)
 	}
-	left := ansi.Truncate(guides+label, max(0, width-ansi.StringWidth(tail)-1), "…")
+	if (r.kind == gitRowWorktree || r.kind == gitRowGroup || r.kind == gitRowBrowse) && ansi.StringWidth(guides+label)+ansi.StringWidth(tail)+1 > width {
+		plain := strings.Fields(ansi.Strip(r.tail))
+		if len(plain) > 1 {
+			count := plain[0]
+			tail = styles.MutedStyle.Render(count)
+			if r.branch {
+				tail += " " + styles.MutedStyle.Render(chevron)
+			}
+		}
+	}
+	leftWidth := width
+	if tail != "" {
+		leftWidth -= ansi.StringWidth(tail) + 1
+	}
+	left := guides + label
+	if !inlineStats {
+		left = ansi.Truncate(left, max(0, leftWidth), "…")
+	}
 	if tail == "" {
+		if inlineStats {
+			return left + strings.Repeat(" ", max(0, width-ansi.StringWidth(left)))
+		}
 		return left
 	}
 	return left + strings.Repeat(" ", max(1, width-ansi.StringWidth(left)-ansi.StringWidth(tail))) + tail
+}
+
+func (g *gitSection) styleLabel(label string, row gitRow, focused bool, hover float64) string {
+	switch {
+	case focused:
+		label = styles.HighlightWhiteStyle.Render(ansi.Strip(label))
+	case row.kind == gitRowContinue && !g.data.ContinuingDiscovery:
+		label = styles.InfoStyle.Render(ansi.Strip(label))
+	case row.kind == gitRowWorktree && g.data.Scanning[row.worktree]:
+		label = styles.BaseStyle.Background(styles.CardBg).Foreground(styles.Info).Render(ansi.Strip(label))
+	}
+	if row.kind != gitRowNote {
+		return styles.HoverText(label, hover, styles.TextPrimary)
+	}
+	return label
 }
 
 func gitStatusStyle(status string) lipgloss.Style {
@@ -420,11 +1017,11 @@ func (g *gitSection) interactive(i int) bool {
 	if i == 0 {
 		return true
 	}
-	if i < 2 || i-2 >= len(g.rows) {
+	if i < 1 || i-1 >= len(g.displayRows) {
 		return false
 	}
-	switch g.rows[i-2].kind {
-	case gitRowRepo, gitRowWorktree, gitRowGroup, gitRowFile:
+	switch g.displayRows[i-1].kind {
+	case gitRowRepo, gitRowWorktree, gitRowGroup, gitRowFile, gitRowContinue, gitRowBrowse:
 		return true
 	default:
 		return false
@@ -435,13 +1032,25 @@ func (g *gitSection) activate(i int) tea.Cmd {
 	if i == 0 {
 		return g.toggleSection()
 	}
-	if i-1 >= len(g.rows) {
+	if i < 1 || i-1 >= len(g.displayRows) {
 		return nil
 	}
-	r := g.rows[i-1]
+	display := g.displayRows[i-1]
+	r := display
+	if i-1 < len(g.displayToSource) && g.displayToSource[i-1] < len(g.rows) {
+		r = g.rows[g.displayToSource[i-1]]
+	}
+	if display.kind == gitRowContinue {
+		return core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitContinueDiscovery})
+	}
 	switch r.kind {
 	case gitRowFile:
 		return core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitOpen, WorktreeID: r.worktree, Path: r.file.Path, Group: r.group})
+	case gitRowBrowse:
+		if r.branch {
+			return g.toggle(r)
+		}
+		return core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitOpenFile, WorktreeID: r.worktree, Path: r.path})
 	case gitRowRepo, gitRowWorktree, gitRowGroup:
 		return g.toggle(r)
 	}
@@ -456,16 +1065,29 @@ func (g *gitSection) toggleSection() tea.Cmd {
 	g.rebuild()
 	var cmds []tea.Cmd
 	if g.open() && g.data.Snapshot == nil && !g.data.Loading {
-		cmds = append(cmds, core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitLoad}))
+		// Files browses one folder without a repository scan; Changes needs discovery.
+		action := GitLoad
+		if g.data.Mode == review.ModeFiles {
+			action = GitBrowse
+		}
+		cmds = append(cmds, core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: action}))
+	}
+	if g.open() && g.data.Mode == review.ModeFiles {
+		cmds = append(cmds, g.requestCurrentScopeDirectories())
 	}
 	cmds = append(cmds, core.CmdHandler(g.watchState()))
 	return tea.Batch(cmds...)
 }
 
 func (g *gitSection) watchState() GitWatchMsg {
-	state := GitWatchMsg{Owner: g.data.Owner, Open: g.open()}
+	state := GitWatchMsg{Owner: g.data.Owner, Open: g.open(), Mode: g.data.Mode}
 	if !state.Open {
 		return state
+	}
+	if state.Mode == review.ModeFiles {
+		for _, wt := range g.currentScopeWorktrees() {
+			state.ExpandedWorktrees = append(state.ExpandedWorktrees, wt.ID)
+		}
 	}
 	for _, row := range g.rows {
 		if row.kind == gitRowWorktree && row.open {
@@ -476,6 +1098,20 @@ func (g *gitSection) watchState() GitWatchMsg {
 }
 
 func (g *gitSection) toggle(r gitRow) tea.Cmd {
+	if g.data.Mode == review.ModeFiles && r.branch && r.open {
+		var dirPath string
+		switch r.kind {
+		case gitRowWorktree:
+			if dir, ok := g.directory(r.worktree, ""); ok && dir.State == review.StateError {
+				return g.requestDirectory(r.worktree, "", true)
+			}
+		case gitRowBrowse:
+			dirPath = r.path
+			if dir, ok := g.directory(r.worktree, dirPath); ok && dir.State == review.StateError {
+				return g.requestDirectory(r.worktree, dirPath, true)
+			}
+		}
+	}
 	if g.expanded == nil {
 		g.expanded = map[string]bool{}
 	}
@@ -483,9 +1119,14 @@ func (g *gitSection) toggle(r gitRow) tea.Cmd {
 	g.rebuild()
 	var cmds []tea.Cmd
 	if r.kind == gitRowWorktree && !r.open {
-		if wt, ok := g.worktreeByID(r.worktree); ok && wt.State == review.StateUnscanned {
+		if g.data.Mode == review.ModeFiles {
+			cmds = append(cmds, g.requestDirectory(r.worktree, ""))
+		} else if wt, ok := g.worktreeByID(r.worktree); ok && wt.State == review.StateUnscanned {
 			cmds = append(cmds, core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitLoadWorktree, WorktreeID: wt.ID}))
 		}
+	}
+	if r.kind == gitRowBrowse && r.branch && !r.open {
+		cmds = append(cmds, g.requestDirectory(r.worktree, r.path))
 	}
 	cmds = append(cmds, core.CmdHandler(g.watchState()))
 	return tea.Batch(cmds...)
@@ -507,11 +1148,21 @@ func (g *gitSection) worktreeByID(id string) (review.Worktree, bool) {
 
 // key handles keyboard input while the section has focus.
 func (g *gitSection) key(k string) (bool, tea.Cmd) {
-	n := len(g.rows)
+	n := len(g.displayRows)
 	if !g.open() {
 		n = 0
 	}
 	switch k {
+	case "tab":
+		mode := review.ModeFiles
+		if g.data.Mode == review.ModeFiles {
+			mode = review.ModeChanges
+		}
+		return true, g.setMode(mode)
+	case "1":
+		return true, g.setMode(review.ModeChanges)
+	case "2", "b":
+		return true, g.setMode(review.ModeFiles)
 	case "up", "k":
 		g.cursor = max(0, g.cursor-1)
 	case "down", "j":
@@ -530,11 +1181,14 @@ func (g *gitSection) key(k string) (bool, tea.Cmd) {
 			g.cursor = min(n, 1)
 			return true, nil
 		}
-		r := g.rows[g.cursor-1]
+		r := g.displayRows[g.cursor-1]
+		if r.kind == gitRowContinue {
+			return true, g.activate(g.cursor)
+		}
 		if r.branch && !r.open {
 			return true, g.toggle(r)
 		}
-		if r.kind == gitRowFile {
+		if r.kind == gitRowFile || r.kind == gitRowBrowse && !r.branch {
 			return true, g.activate(g.cursor)
 		}
 		g.cursor = min(n, g.cursor+1)
@@ -545,12 +1199,13 @@ func (g *gitSection) key(k string) (bool, tea.Cmd) {
 			}
 			return true, nil
 		}
-		r := g.rows[g.cursor-1]
+		r := g.displayRows[g.cursor-1]
 		if r.branch && r.open {
 			return true, g.toggle(r)
 		}
 		g.cursor = g.parentOf(g.cursor)
 	case "r":
+		clear(g.directoryPending)
 		return true, core.CmdHandler(GitRequestMsg{Owner: g.data.Owner, Action: GitRefresh})
 	default:
 		return false, nil
@@ -560,9 +1215,12 @@ func (g *gitSection) key(k string) (bool, tea.Cmd) {
 
 // parentOf returns the line of the nearest row with shallower guides.
 func (g *gitSection) parentOf(line int) int {
-	depth := len(g.rows[line-1].guides)
+	if line <= 0 || line-1 >= len(g.displayRows) {
+		return 0
+	}
+	depth := len(g.displayRows[line-1].guides)
 	for i := line - 1; i >= 1; i-- {
-		if g.rows[i-1].branch && len(g.rows[i-1].guides) < depth {
+		if g.displayRows[i-1].branch && len(g.displayRows[i-1].guides) < depth {
 			return i
 		}
 	}
@@ -571,13 +1229,13 @@ func (g *gitSection) parentOf(line int) int {
 
 // rowID is a stable placement identity for a section line.
 func (g *gitSection) setHovered(line int) bool {
-	if line < -1 || line >= len(g.rows)+2 {
+	if line < -1 || line >= len(g.displayRows)+1 {
 		line = -1
 	}
 	if g.hovered == line {
 		return false
 	}
-	g.hovered = line
+	g.previousHovered, g.hovered = g.hovered, line
 	g.revision++
 	return true
 }
@@ -586,10 +1244,8 @@ func (g *gitSection) rowID(line int) string {
 	switch {
 	case line == 0:
 		return "git:summary"
-	case line == 1:
-		return "gap:git"
-	case line-2 < len(g.rows) && g.rows[line-2].key != "":
-		return "git:" + g.rows[line-2].key
+	case line >= 1 && line <= len(g.displayRows) && g.displayRows[line-1].key != "":
+		return "git:" + g.displayRows[line-1].key
 	}
 	return "git:line:" + strconv.Itoa(line)
 }
@@ -597,6 +1253,7 @@ func (g *gitSection) rowID(line int) string {
 // GitSidebar is the Git section surface the chat page drives.
 type GitSidebar interface {
 	SetGitChanges(changes GitChanges) tea.Cmd
+	SetGitMode(mode review.Mode) tea.Cmd
 	GitWatchState() GitWatchMsg
 	ActivateGitLine(line string) tea.Cmd
 	RevealGit() tea.Cmd
@@ -609,22 +1266,75 @@ func (m *model) GitWatchState() GitWatchMsg { return m.git.watchState() }
 
 func (m *model) SetGitChanges(c GitChanges) tea.Cmd {
 	m.git.set(c)
+	var cmds []tea.Cmd
+	if m.git.data.Mode == review.ModeFiles && m.git.open() && !m.git.data.Loading && m.git.data.Snapshot != nil {
+		cmds = append(cmds, m.git.requestCurrentScopeDirectories())
+		for _, row := range m.git.rows {
+			if row.kind == gitRowWorktree && row.open {
+				cmds = append(cmds, m.git.requestDirectory(row.worktree, ""))
+			} else if row.kind == gitRowBrowse && row.branch && row.open {
+				cmds = append(cmds, m.git.requestDirectory(row.worktree, row.path))
+			}
+		}
+	}
+	loading := m.git.loading()
+	if loading != m.gitLoading {
+		m.gitLoading = loading
+		if loading {
+			cmds = append(cmds, m.startSpinner())
+		} else {
+			m.stopSpinner()
+		}
+	}
+	if loading {
+		m.git.spinnerFrame = m.spinner.RawFrame()
+	} else {
+		m.git.spinnerFrame = ""
+	}
 	m.invalidateCache()
-	return m.ReconcileLayout()
+	cmds = append(cmds, m.ReconcileLayout())
+	return tea.Batch(cmds...)
 }
 
-// ActivateGitLine handles a click on a section line (summary=0, blank=1, rows from 2).
+// ActivateGitLine handles a section line (header=0, body rows from 1).
 func (m *model) ActivateGitLine(line string) tea.Cmd {
+	if line == "mode:changes" || line == "mode:browse" {
+		mode := review.ModeChanges
+		if line == "mode:browse" {
+			mode = review.ModeFiles
+		}
+		var cmd tea.Cmd
+		if m.git.data.Mode == mode {
+			cmd = m.git.toggleSection()
+		} else {
+			if m.git.expanded == nil {
+				m.git.expanded = map[string]bool{}
+			}
+			m.git.expanded[gitSectionKey] = true
+			cmd = m.git.setMode(mode)
+		}
+		return m.finishGitMode(cmd)
+	}
 	n, err := strconv.Atoi(line)
-	if err != nil || n == 1 {
+	if err != nil || n < 0 {
 		return nil
 	}
-	i := n
-	if n >= 2 {
-		i = n - 1
+	m.git.cursor = n
+	cmd := m.git.activate(n)
+	m.invalidateCache()
+	return tea.Batch(cmd, m.ReconcileLayout())
+}
+
+// SetGitMode applies the host-selected Changes/Browse presentation.
+func (m *model) SetGitMode(mode review.Mode) tea.Cmd {
+	if m.git.data.Mode == mode {
+		return nil
 	}
-	m.git.cursor = i
-	cmd := m.git.activate(i)
+	cmd := m.git.setMode(mode)
+	return m.finishGitMode(cmd)
+}
+
+func (m *model) finishGitMode(cmd tea.Cmd) tea.Cmd {
 	m.invalidateCache()
 	return tea.Batch(cmd, m.ReconcileLayout())
 }
@@ -667,8 +1377,5 @@ func (m *model) ensureGitCursorVisible() {
 		return
 	}
 	line := m.gitStart + m.git.cursor
-	if m.git.cursor > 0 {
-		line++ // skip the blank row under the summary
-	}
 	m.scrollview.EnsureLineVisible(line)
 }

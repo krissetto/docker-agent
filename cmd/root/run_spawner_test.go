@@ -14,8 +14,11 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -174,7 +177,7 @@ func TestLeanSessionSpawnerForkPreservesBindingAndHistory(t *testing.T) {
 	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
 		agent.New("root", "root instructions", agent.WithModel(rootTestProvider{})),
 		agent.New("worker", "worker instructions", agent.WithModel(rootTestProvider{})),
-	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir))
+	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir), runtime.WithModelSwitcherConfig(leanSpawnerModelSwitcher()))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
@@ -245,7 +248,7 @@ func TestLeanSessionRestorerLazyIdentityAndCleanup(t *testing.T) {
 	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
 		agent.New("root", "root instructions", agent.WithModel(rootTestProvider{})),
 		agent.New("worker", "worker instructions", agent.WithModel(rootTestProvider{})),
-	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir))
+	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir), runtime.WithModelSwitcherConfig(leanSpawnerModelSwitcher()))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
@@ -447,4 +450,49 @@ func TestLeanSessionSpawnerErrorsAndCleanup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// leanSpawnerModelSwitcher lets the persisted "test/override" ref resolve through
+// the production model-switcher path, using a registry factory instead of a live provider.
+func leanSpawnerModelSwitcher() *runtime.ModelSwitcherConfig {
+	return &runtime.ModelSwitcherConfig{
+		Models: map[string]latestcfg.ModelConfig{"test/override": {Provider: "test", Model: "override"}},
+		ProviderRegistry: provider.NewRegistry(map[string]provider.Factory{
+			"test": func(context.Context, *latestcfg.ModelConfig, environment.Provider, ...options.Opt) (provider.Provider, error) {
+				return rootTestProvider{}, nil
+			},
+		}),
+		EnvProvider: environment.NewMapEnvProvider(nil),
+	}
+}
+
+// Without a model switcher the stored override must survive untouched; the
+// live binding falls back to the agent's configured provider.
+func TestLeanSessionForkWithoutModelSwitcherKeepsStoredOverride(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	workingDir := t.TempDir()
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
+		agent.New("root", "root instructions", agent.WithModel(rootTestProvider{})),
+		agent.New("worker", "worker instructions", agent.WithModel(rootTestProvider{})),
+	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	flags := &runExecFlags{}
+	flags.runConfig.WorkingDir = workingDir
+	source := session.New(session.WithAgentName("worker"), session.WithWorkingDir(workingDir))
+	source.AgentModelOverrides = map[string]string{"worker": "test/override"}
+	require.NoError(t, store.AddSession(t.Context(), source))
+	spawn := leanSessionSpawner(flags.createSessionSpawner(nil, rt, owner.Runtime()), store)
+	fork, cleanup, err := spawn(t.Context(), "ignored-for-fork", source)
+	require.NoError(t, err)
+	t.Cleanup(fork.Close)
+	assert.Nil(t, cleanup)
+	assert.Empty(t, fork.Binding().Model)
+	persisted, err := store.GetSession(t.Context(), fork.Session().ID)
+	require.NoError(t, err)
+	assert.Equal(t, "test/override", persisted.AgentModelOverrides["worker"])
+	stored, err := store.GetSession(t.Context(), source.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "test/override", stored.AgentModelOverrides["worker"])
 }

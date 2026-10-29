@@ -4,8 +4,8 @@ colors:
   # Text colors
   text_bright: "#abb2bf"
   text_primary: "#abb2bf"
-  text_secondary: "#636d83"
-  text_muted: "#636d83"
+  text_secondary: "#979eac"
+  text_muted: "#979eac"
   text_faint: "#3e4451"
   
   # Accent colors
@@ -21,10 +21,10 @@ colors:
   
   # Status colors
   success: "#98c379"
-  error: "#e06c75"
+  error: "#e48189"
   warning: "#e5c07b"
   info: "#56b6c2"
-  highlight: "#c678dd"
+  highlight: "#ca83e0"
   
   # Brand colors
   # NOTE: Used as selection background in dialogs - must be dark for white text
@@ -32,7 +32,7 @@ colors:
   brand_bg: "#282c34"
   
   # Error colors
-  error_strong: "#e06c75"
+  error_strong: "#e48189"
   error_dark: "#3e2a2e"
   
   # Spinner colors
@@ -45,11 +45,11 @@ colors:
   diff_remove_bg: "#3e2a2e"
   
   # UI element colors
-  line_number: "#5c6370"
+  line_number: "#9a9ea6"
   separator: "#5c6370"
   selected: "#3e4451"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#5c6370"
+  suggestion_ghost: "#9a9ea6"
   tab_bg: "#282c34"
   tab_active_bg: "#32363e"
   tab_active_fg: "#abb2bf"
@@ -76,6 +76,7 @@ colors:
   focus: "#61afef"
   disabled: "#5c6370"
   status_adjacent: "#abb2bf"
+  scrollbar_track: "#42454c"
 
   
   # Badge colors
@@ -85,25 +86,25 @@ colors:
 
 chroma:
   # Syntax highlighting colors - One Dark style
-  comment: "#5c6370"
-  comment_preproc: "#c678dd"
-  keyword: "#c678dd"
-  keyword_reserved: "#e06c75"
+  comment: "#9a9ea6"
+  comment_preproc: "#ca83e0"
+  keyword: "#ca83e0"
+  keyword_reserved: "#e48189"
   keyword_namespace: "#56b6c2"
   keyword_type: "#61afef"
   operator: "#56b6c2"
   punctuation: "#abb2bf"
   name_builtin: "#e5c07b"
-  name_tag: "#e06c75"
+  name_tag: "#e48189"
   name_attribute: "#d19a66"
   name_decorator: "#e5c07b"
   literal_number: "#d19a66"
   literal_string: "#98c379"
   literal_string_escape: "#56b6c2"
-  generic_deleted: "#e06c75"
-  generic_subheading: "#5c6370"
+  generic_deleted: "#e48189"
+  generic_subheading: "#9a9ea6"
   background: "#282c34"
-  error_fg: "#e06c75"
+  error_fg: "#e48189"
   error_bg: "#3e2a2e"
   success: "#98c379"
 
@@ -113,6 +114,6 @@ markdown:
   strong: "#abb2bf"
   code: "#e5c07b"
   code_bg: "#32363e"
-  blockquote: "#636d83"
+  blockquote: "#8b93a3"
   list: "#abb2bf"
   hr: "#3e4451"

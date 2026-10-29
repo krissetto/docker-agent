@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -279,10 +280,13 @@ func (f *runExecFlags) managedSnapshot(ctx context.Context, sourceKey, workspace
 // Attach never starts a process, commits configuration, or opens SQLite.
 func attachManagedAPI(ctx context.Context, dir string) (managedDescriptor, error) {
 	for {
+		stage := "manifest"
 		m, err := managedReadManifest(dir)
 		if err == nil {
+			stage = "descriptor"
 			d, probeErr := managedReadDescriptor(dir)
 			if probeErr == nil {
+				stage = "authenticated readiness"
 				probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 				probeErr = managedProbe(probeCtx, dir, d, m)
 				cancel()
@@ -295,8 +299,26 @@ func attachManagedAPI(ctx context.Context, dir string) (managedDescriptor, error
 			return managedDescriptor{}, err
 		}
 		if pauseErr := managedPause(ctx); pauseErr != nil {
-			return managedDescriptor{}, fmt.Errorf("lifecycle-owned API is not authenticated and ready; no daemon was started; restart the sandbox and inspect %s: %w (last probe: %v)", filepath.Join(dir, "server.log"), pauseErr, err)
+			return managedDescriptor{}, managedAttachTimeoutError(dir, stage, pauseErr, err)
 		}
+	}
+}
+
+func managedAttachTimeoutError(dir, stage string, timeout, last error) error {
+	logPath := filepath.Join(dir, "server.log")
+	switch stage {
+	case "manifest":
+		if errors.Is(last, os.ErrNotExist) {
+			return fmt.Errorf("lifecycle-owned API never initialized managed state: %s is missing; startup may not have run or may have failed before managed logging began. Check the SBX lifecycle startup log at /var/log/sbx-kit-startup.log (server.log is created only after startup configuration loads); no API process was started by this connection: %w (last probe: %v)", filepath.Join(dir, "manifest.json"), timeout, last)
+		}
+		return fmt.Errorf("lifecycle-owned API could not read its managed manifest at %s; inspect the reported error and SBX lifecycle startup log at /var/log/sbx-kit-startup.log (managed API log path: %s). No API process was started by this connection: %w (last probe: %v)", filepath.Join(dir, "manifest.json"), logPath, timeout, last)
+	case "descriptor":
+		if errors.Is(last, os.ErrNotExist) {
+			return fmt.Errorf("lifecycle-owned API initialized managed state but did not publish %s; check the SBX lifecycle startup log at /var/log/sbx-kit-startup.log and whether the API process exited before readiness (managed server.log path: %s). No API process was started by this connection: %w (last probe: %v)", filepath.Join(dir, "server.json"), logPath, timeout, last)
+		}
+		return fmt.Errorf("lifecycle-owned API could not read %s; check the reported error and managed API log at %s (SBX lifecycle log: /var/log/sbx-kit-startup.log). No API process was started by this connection: %w (last probe: %v)", filepath.Join(dir, "server.json"), logPath, timeout, last)
+	default:
+		return fmt.Errorf("lifecycle-owned API is not authenticated and ready; no daemon was started; inspect the SBX lifecycle startup log at /var/log/sbx-kit-startup.log and managed API log at %s before restarting the sandbox: %w (last probe: %v)", logPath, timeout, last)
 	}
 }
 
@@ -428,6 +450,38 @@ func managedAPIEnv() []string {
 	return slices.DeleteFunc(os.Environ(), func(entry string) bool {
 		return strings.HasPrefix(entry, "CAGENT_PPROF_ADDR=")
 	})
+}
+
+func managedListenHost(host string) (string, error) {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	switch host {
+	case "127.0.0.1", "0.0.0.0":
+		return host, nil
+	default:
+		return "", errors.New("managed API listen host must be 127.0.0.1 or 0.0.0.0")
+	}
+}
+
+func managedListenerAddress(host, port string) (string, error) {
+	host, err := managedListenHost(host)
+	if err != nil {
+		return "", err
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 || (n == 0 && port != "0") {
+		return "", errors.New("managed API listen port is invalid")
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+func managedDiscoveryAddress(addr net.Addr) (string, error) {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok || tcpAddr.Port < 1 || tcpAddr.Port > 65535 {
+		return "", errors.New("managed API listener did not report a valid TCP port")
+	}
+	return "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port)), nil
 }
 
 func managedValidAddress(address string) bool {

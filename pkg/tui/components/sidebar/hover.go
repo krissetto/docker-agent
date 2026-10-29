@@ -87,6 +87,11 @@ func (m *model) tickHover(tick animation.TickMsg) {
 		state.value = animation.HoverStep(state.value, state.target, after-before)
 		changed = changed || old != state.value
 		running = running || state.value != state.target
+		if strings.HasPrefix(key, "git:") && old != state.value {
+			if line := m.git.lineForHoverKey(key); line >= 0 {
+				m.gitHoverLines = append(m.gitHoverLines, line)
+			}
+		}
 		if state.value == 0 && state.target == 0 {
 			delete(m.hoverValues, key)
 		} else {
@@ -116,10 +121,12 @@ func (m *model) cancelHover() {
 
 // StopAnimation releases this sidebar's runtime leases when its page is removed.
 func (m *model) StopAnimation() {
+	m.scrollview.StopAnimation()
 	m.CancelPresentation()
 	m.spinner.Stop()
 	m.subagentSpinner.Stop()
 	m.transferAnimation.Stop()
+	m.backgroundAnimation.Stop()
 	for _, state := range m.ragIndexing {
 		state.spinner.Stop()
 	}
@@ -139,6 +146,12 @@ func (m *model) CancelHover() {
 // Pointer styling leaves semantic rows and section geometry unchanged. Do not
 // mask an already pending spinner/data refresh with this narrower invalidation.
 func (m *model) invalidateHover() {
+	if m.backgroundOnlyHover() {
+		m.backgroundOnlyDirty = true
+		m.visualGeneration++
+		m.hoverOnlyDirty = true
+		return
+	}
 	onlyHover := !m.cacheDirty || m.hoverOnlyDirty
 	m.invalidateAnimation()
 	m.hoverOnlyDirty = onlyHover

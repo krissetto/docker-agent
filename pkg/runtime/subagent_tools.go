@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -150,18 +151,64 @@ func (r *LocalRuntime) handleSendMessage(ctx context.Context, sess *session.Sess
 		if sess.ParentID == "" {
 			return invalid("you have no parent to message")
 		}
+		if !r.subagents.canMessageParent(ctx, sess) {
+			return result(&SessionError{Kind: SessionErrorInvalid, Operation: SessionOperationSend, Detail: "caller has no authorized parent instance in this runtime tree"})
+		}
 		senderID := sess.ID
 		if id, ok := r.subagents.nodeForSession(sess.ID); ok {
 			senderID = string(id)
 		}
-		msg := agentCommunication(args.Message, args.RequestID, senderID, r.resolveSessionAgentContext(ctx, sess).Name(), args.DeliveryMode)
+		a := r.resolveSessionAgentContext(ctx, sess)
+		senderName := sess.AgentName
+		if a != nil {
+			senderName = a.Name()
+		}
+		msg := agentCommunication(args.Message, args.RequestID, senderID, senderName, args.DeliveryMode)
 		var err error
-		receipt, err = r.subagents.postAgentCommunication(ctx, sess.ParentID, msg)
+		receipt, err = r.subagents.postAuthorizedAgentCommunication(ctx, sess.ParentID, msg)
 		receipt.Target = args.To
 		return result(err)
 	}
+	tm := r.teamForContext(ctx, sess)
+	a := r.resolveSessionAgentContext(ctx, sess)
+	var access *latest.SubagentAccessConfig
+	if a != nil && tm != nil {
+		if cfg, ok := tm.AgentConfig(a.Name()); ok {
+			access = cfg.SubagentAccess
+		}
+	}
+	if a == nil && access != nil {
+		return invalid("current agent is unavailable in the captured configuration")
+	}
+	if !r.subagents.canMessageTarget(ctx, sess, args.To, access) {
+		return result(&SessionError{Kind: SessionErrorInvalid, Operation: SessionOperationSend, Detail: fmt.Sprintf("target %q is outside your authorized subagent scope", args.To)})
+	}
 	var err error
-	receipt, err = r.subagents.sendCommunicationToChild(ctx, sess.ID, subagent.NodeID(args.To), args.Message, args.RequestID, args.DeliveryMode)
+	if access != nil && access.SendMessage == latest.SubagentAccessTree {
+		senderName := sess.AgentName
+		if a != nil {
+			senderName = a.Name()
+		}
+		receipt, err = r.subagents.sendCommunicationToTree(ctx, sess.ID, subagent.NodeID(args.To), args.Message, args.RequestID, args.DeliveryMode, senderName)
+	} else {
+		_, parentNode := r.subagents.sessionIdentity(sess.ID)
+		if args.To == string(parentNode) && parentNode != "" {
+			if !r.subagents.canMessageParent(ctx, sess) {
+				return invalid("caller has no authorized parent instance in this runtime tree")
+			}
+			senderID := sess.ID
+			if id, ok := r.subagents.nodeForSession(sess.ID); ok {
+				senderID = string(id)
+			}
+			senderName := sess.AgentName
+			if a != nil {
+				senderName = a.Name()
+			}
+			receipt, err = r.subagents.postAuthorizedAgentCommunication(ctx, sess.ParentID, agentCommunication(args.Message, args.RequestID, senderID, senderName, args.DeliveryMode))
+		} else {
+			receipt, err = r.subagents.sendCommunicationToChild(ctx, sess.ID, subagent.NodeID(args.To), args.Message, args.RequestID, args.DeliveryMode)
+		}
+	}
 	receipt.Target = args.To
 	return result(err)
 }

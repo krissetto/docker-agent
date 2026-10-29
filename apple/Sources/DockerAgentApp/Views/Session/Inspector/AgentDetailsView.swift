@@ -81,7 +81,7 @@ struct ToolsetRow: View {
         VStack(alignment: .leading, spacing: Metrics.xxs) {
             HStack(spacing: Metrics.s) {
                 Circle().fill(tint).frame(width: 8, height: 8).accessibilityHidden(true)
-                Text(toolset.name).font(.callout.weight(.medium))
+                Text(toolset.displayName).font(.callout.weight(.medium)).help(toolset.name)
                 if !toolset.kind.isEmpty { Text(toolset.kind).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
                 Text(toolset.state).font(.caption).foregroundStyle(.secondary)

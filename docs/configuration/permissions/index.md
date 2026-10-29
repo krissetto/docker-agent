@@ -19,7 +19,7 @@ Permissions provide fine-grained control over tool execution. You can configure 
 
 ## Safety Modes
 
-Every session runs in a **safety mode** that decides what happens when no permission rule matched a tool call. The runtime labels each call `safe` (safe-listed shell command such as `ls` or `git status`, or a read-only-annotated tool), `destructive` (destructive shell command such as `rm -rf`, or a destructive-annotated tool), or `unknown` — and the mode gates on that label. Command classification applies to both `shell` and `run_background_job`:
+Every session runs in a **safety mode** that decides what happens when no permission rule matched a tool call. The runtime labels each call `safe` (safe-listed shell command such as `ls` or `git status`, or a read-only-annotated tool), `destructive` (destructive shell command such as `rm -rf`, or a destructive-annotated tool), or `unknown` — and the mode gates on that label. Command classification applies to `shell` commands:
 
 | Mode | safe | destructive | unknown |
 | ---- | ---- | ----------- | ------- |

@@ -4,12 +4,12 @@ colors:
   # Text colors
   text_bright: "#ebdbb2"
   text_primary: "#ebdbb2"
-  text_secondary: "#a89984"
-  text_muted: "#928374"
+  text_secondary: "#aea08c"
+  text_muted: "#aba094"
   text_faint: "#504945"
   
   # Accent colors
-  accent: "#83a598"
+  accent: "#88a99c"
   accent_muted: "#458588"
   
   # Background colors
@@ -21,10 +21,10 @@ colors:
   
   # Status colors
   success: "#b8bb26"
-  error: "#fb4934"
+  error: "#fc7b6b"
   warning: "#fabd2f"
   info: "#8ec07c"
-  highlight: "#d3869b"
+  highlight: "#d58da1"
   
   # Brand colors
   # NOTE: Used as selection background in dialogs - must be dark for white text
@@ -32,31 +32,31 @@ colors:
   brand_bg: "#282828"
   
   # Error colors
-  error_strong: "#cc241d"
+  error_strong: "#e38985"
   error_dark: "#3c1f1e"
   
   # Spinner colors
-  spinner_dim: "#83a598"
-  spinner_bright: "#8fbcbb"
-  spinner_brightest: "#9bc5c8"
+  spinner_dim: "#88a99c"
+  spinner_bright: "#96b5a9"
+  spinner_brightest: "#a4c1b6"
   
   # Diff colors
   diff_add_bg: "#2d3319"
   diff_remove_bg: "#3c1f1e"
   
   # UI element colors
-  line_number: "#7c6f64"
+  line_number: "#a8a099"
   separator: "#928374"
   selected: "#504945"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#665c54"
+  suggestion_ghost: "#a6a19c"
   tab_bg: "#282828"
   tab_active_bg: "#3c3836"
   tab_active_fg: "#ebdbb2"
-  tab_inactive_fg: "#928374"
+  tab_inactive_fg: "#9a8c7e"
   tab_border: "#d5c4a1"
 
-  placeholder: "#928374"
+  placeholder: "#aba094"
   # Shared shell/editor semantic colors
   editor_bg: "#3c3836"
   card_bg: "#3c3836"
@@ -68,14 +68,15 @@ colors:
   tab_busy: "#fabd2f"
   context_empty: "#282828"
   context_fill: "#8ec07c"
-  context_text: "#928374"
+  context_text: "#9a8c7e"
   resize: "#504945"
   resize_hover: "#8ec07c"
   resize_active: "#ebdbb2"
-  hint: "#928374"
+  hint: "#aba094"
   focus: "#83a598"
   disabled: "#504945"
   status_adjacent: "#a89984"
+  scrollbar_track: "#424242"
 
   
   # Badge colors
@@ -85,25 +86,25 @@ colors:
 
 chroma:
   # Syntax highlighting colors - Gruvbox style
-  comment: "#928374"
+  comment: "#aba094"
   comment_preproc: "#fe8019"
-  keyword: "#fb4934"
-  keyword_reserved: "#d3869b"
+  keyword: "#fc7b6b"
+  keyword_reserved: "#d58da1"
   keyword_namespace: "#8ec07c"
   keyword_type: "#fabd2f"
   operator: "#fe8019"
   punctuation: "#ebdbb2"
-  name_builtin: "#d3869b"
-  name_tag: "#fb4934"
+  name_builtin: "#d58da1"
+  name_tag: "#fc7b6b"
   name_attribute: "#fabd2f"
   name_decorator: "#fe8019"
-  literal_number: "#d3869b"
+  literal_number: "#d58da1"
   literal_string: "#b8bb26"
   literal_string_escape: "#8ec07c"
-  generic_deleted: "#fb4934"
-  generic_subheading: "#928374"
+  generic_deleted: "#fc7b6b"
+  generic_subheading: "#aba094"
   background: "#282828"
-  error_fg: "#fb4934"
+  error_fg: "#fc7b6b"
   error_bg: "#3c1f1e"
   success: "#b8bb26"
 

@@ -152,7 +152,14 @@ func TestSteeringBoundaryConsumedAwaitNotifies(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newDriverTestRuntime(t)
 		d := r.sessionDrivers.Get(session.New(session.WithID("await-steering")))
-		h := &sessionHandle{driver: d, sessionID: "await-steering"}
+		// Live in-run guidance: a running owner keeps Steer from waking an idle stream.
+		d.mu.Lock()
+		d.phase = sessionRunning
+		d.activeRequestID = "active"
+		d.generation++
+		d.openSettledLocked()
+		d.mu.Unlock()
+		h := &sessionHandle{runtime: r, driver: d, sessionID: "await-steering"}
 		input, err := h.Steer(t.Context(), TurnInput{Content: "guidance"})
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -608,9 +615,25 @@ func TestSteeringBoundaryDuringStartupKeepsActiveRequest(t *testing.T) {
 			activeInput <- active
 		}()
 		<-startEntered
-		guide, err := h.Steer(t.Context(), TurnInput{Content: "startup STEERING", RequestID: "guidance"})
-		require.NoError(t, err)
+		type steerResult struct {
+			guide Submission
+			err   error
+		}
+		steered := make(chan steerResult, 1)
+		go func() {
+			guide, err := h.Steer(t.Context(), TurnInput{Content: "startup STEERING", RequestID: "guidance"})
+			steered <- steerResult{guide: guide, err: err}
+		}()
+		synctest.Wait()
 		startOnce.Do(func() { close(startRelease) })
+		var result steerResult
+		select {
+		case result = <-steered:
+		case <-time.After(time.Second):
+			t.Fatal("Steer did not complete after the startup gate was released")
+		}
+		require.NoError(t, result.err)
+		guide := result.guide
 		active := <-activeInput
 		synctest.Wait()
 		select {

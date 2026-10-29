@@ -1594,11 +1594,8 @@ type Toolset struct {
 	// nil/false keeps the default behaviour (sudo has no TTY and fails fast).
 	SudoAskpass *bool `json:"sudo_askpass,omitempty" yaml:"sudo_askpass,omitempty"`
 
-	// For the `background_jobs` toolset — opt in to background-job recall. When
-	// enabled, run_background_job exposes a recall boolean parameter. If the
-	// agent sets recall:true on a background job, the runtime injects a steering
-	// message with a short completion sentence and the job output when the job
-	// finishes.
+	// Deprecated compatibility field for historical background_jobs configs.
+	// Shell completion is delivered automatically; this option has no effect.
 	Recall *bool `json:"recall,omitempty" yaml:"recall,omitempty"`
 
 	// For the `shell` toolset — opt in to destructive-command detection.

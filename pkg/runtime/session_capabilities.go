@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
@@ -55,12 +56,33 @@ func (h *sessionHandle) SessionExecutableTools(ctx context.Context) ([]tools.Too
 	if err != nil {
 		return nil, err
 	}
+	sess := h.driver.session()
 	toolsForAgent, err := a.Tools(todotool.WithBindings(opCtx, h.runtime.todoBindingsForTeam(tm)))
 	if err != nil {
 		return nil, err
 	}
-	toolsForAgent = append(toolsForAgent, h.runtime.teamEditDefinitions(opCtx, h.driver.session(), a)...)
-	toolsForAgent = filterExcludedTools(toolsForAgent, h.driver.session().ExcludedTools)
+	toolsForAgent = addAsyncChildTools(sess, toolsForAgent)
+	toolsForAgent = addListAgentsTool(sess, a, toolsForAgent)
+	toolsForAgent = addConfiguredSubagentTools(sess, a, tm, toolsForAgent)
+	toolsForAgent = enrichSpawnToolDescription(a, toolsForAgent, h.runtime.allowedFromAgentForTeam(tm, a))
+	toolsForAgent = a.FilterTools(toolsForAgent)
+	toolsForAgent = append(toolsForAgent, h.runtime.teamEditDefinitions(opCtx, sess, a)...)
+	toolsForAgent = filterExcludedTools(toolsForAgent, sess.ExcludedTools)
+	for index := range toolsForAgent {
+		toolName := toolsForAgent[index].Name
+		if toolsForAgent[index].Handler == nil && (toolName == subagent.ToolListAgents || toolName == subagent.ToolSendMessage) {
+			toolsForAgent[index].Handler = func(callCtx context.Context, call tools.ToolCall, toolRuntime tools.Runtime) (*tools.ToolCallResult, error) {
+				if call.Function.Name != toolName {
+					return tools.ResultError("tool name does not match the authorized executable tool"), nil
+				}
+				handler, ok := h.runtime.toolMap[toolName]
+				if !ok {
+					return nil, fmt.Errorf("authorized tool %q has no runtime handler", toolName)
+				}
+				return handler(callCtx, h.driver.session(), call, nil, toolRuntime)
+			}
+		}
+	}
 	for index := range toolsForAgent {
 		underlying := toolsForAgent[index].Handler
 		if underlying == nil {
@@ -131,6 +153,7 @@ func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, err
 	if err != nil {
 		return SessionToolsInfo{}, err
 	}
+	available = enrichSpawnToolDescription(mustTeamAgent(tm, binding.agentName), available, h.runtime.allowedFromAgentForTeam(tm, mustTeamAgent(tm, binding.agentName)))
 	// Runtime-provided team-edit tools participate in the same inspected
 	// permission surface as the tools offered on an active turn.
 	operationCtx, releaseEnvironment, captureErr := h.runtime.captureEnvironmentForOperation(ctx, h.driver.session())

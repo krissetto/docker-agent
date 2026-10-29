@@ -69,8 +69,21 @@ func WithPermissions(checker *permissions.Checker) Opt {
 // surfaces; the runtime continues to operate on the resolved *agent.Agent.
 func WithAgentConfigs(configs map[string]latest.AgentConfig) Opt {
 	return func(t *Team) {
-		t.agentConfigs = configs
+		copied := make(map[string]latest.AgentConfig, len(configs))
+		for name, cfg := range configs {
+			cfg.SubagentAccess = cloneSubagentAccess(cfg.SubagentAccess)
+			copied[name] = cfg
+		}
+		t.agentConfigs = copied
 	}
+}
+
+func cloneSubagentAccess(access *latest.SubagentAccessConfig) *latest.SubagentAccessConfig {
+	if access == nil {
+		return nil
+	}
+	clone := *access
+	return &clone
 }
 
 // WithDefinitionSnapshot retains immutable, credential-safe authored history.
@@ -221,6 +234,7 @@ func (t *Team) StopToolSets(ctx context.Context) error {
 // letting callers gracefully omit config-derived detail.
 func (t *Team) AgentConfig(name string) (latest.AgentConfig, bool) {
 	cfg, ok := t.agentConfigs[name]
+	cfg.SubagentAccess = cloneSubagentAccess(cfg.SubagentAccess)
 	return cfg, ok
 }
 

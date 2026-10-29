@@ -507,8 +507,8 @@ func TestAgentReturnRendersBadgesAndLabel(t *testing.T) {
 	assert.False(t, mv.isSpinnerDriven(), "the transition is static")
 
 	out := stripANSI(mv.View())
-	assert.Contains(t, out, "researcher", "the child badge names the returning agent")
-	assert.Contains(t, out, "root", "the parent badge names the agent receiving control")
+	assert.Contains(t, out, "researcher", "the transfer names the returning agent")
+	assert.Contains(t, out, "root", "the transfer names the agent receiving control")
 	assert.Contains(t, out, types.AgentReturnLabel)
 	assert.NotContains(t, out, types.MessageCopyLabel, "the transition carries no copy affordance")
 

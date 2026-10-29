@@ -25,7 +25,7 @@ type LoopDetector struct {
 // NewLoopDetector creates a detector that triggers after threshold
 // consecutive identical call batches. Tool names passed in exemptTools
 // are polling-safe: batches composed entirely of exempt tools (e.g.
-// view_background_agent, list_background_agents, view_background_job)
+// view_background_agent, list_background_agents)
 // never count toward the consecutive-duplicate limit.
 func NewLoopDetector(threshold int, exemptTools ...string) *LoopDetector {
 	exempt := make(map[string]struct{}, len(exemptTools))

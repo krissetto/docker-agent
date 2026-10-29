@@ -25,7 +25,7 @@ func saveTestSettings(layout messages.LayoutSettings, mode messages.SendMode) er
 	return savePreferences(messages.Preferences{
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		GitDiffLayout:  messages.ParseGitDiffLayout(settings.GetGitDiffLayout()),
-		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
+		ExpandThinking: settings.GetExpandThinking(), CompactWorkLog: settings.GetCompactWorkLog(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
 		DimInactivePanes:      settings.GetDimInactivePanes(),
 		TransparentBackground: settings.GetTransparentBackground(),

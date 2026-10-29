@@ -131,15 +131,31 @@ func TestForegroundManagedAPIAndAttach(t *testing.T) {
 }
 
 func TestManagedAttachMissingHookNeverStarts(t *testing.T) {
-	dir, _ := managedFixture(t)
+	dir, manifest := managedFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
 	defer cancel()
 	_, err := attachManagedAPI(ctx, dir)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.ErrorContains(t, err, "restart the sandbox")
+	require.ErrorContains(t, err, "manifest.json is missing")
+	require.ErrorContains(t, err, "/var/log/sbx-kit-startup.log")
+	require.ErrorContains(t, err, "server.log is created only after startup configuration loads")
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "attach creates no token, locks, manifest or database")
+	manifestData, err := manifest.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, managedAtomicWrite(filepath.Join(dir, "manifest.json"), manifestData))
+	descriptorCtx, descriptorCancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+	defer descriptorCancel()
+	_, err = attachManagedAPI(descriptorCtx, dir)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "did not publish")
+	require.ErrorContains(t, err, "server.json")
+	require.ErrorContains(t, err, "/var/log/sbx-kit-startup.log")
+	entries, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "manifest.json", entries[0].Name(), "attach creates no descriptor, token or log")
 }
 
 func TestManagedAttachCLIRejectsServerChanges(t *testing.T) {
@@ -190,4 +206,13 @@ func TestForegroundManagedAPIPrivateState(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(workspace, "state", "*", "token"))
 	require.NoError(t, err)
 	assert.Empty(t, files)
+}
+
+func TestManagedAPIListenHostRequiresManagedMode(t *testing.T) {
+	for _, flag := range []string{"--managed-api-listen-host", "--managed-api-listen-port"} {
+		cmd := newAPICmd()
+		cmd.SetArgs([]string{flag, "9182", "team.yaml"})
+		err := cmd.Execute()
+		require.ErrorContains(t, err, "require --managed-api")
+	}
 }

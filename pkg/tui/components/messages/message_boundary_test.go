@@ -45,8 +45,11 @@ func TestCommittedAssistantBoundaryPreservesChunkBytes(t *testing.T) {
 					texts = append(texts, msg.Content)
 				}
 			}
-			require.Len(t, texts, 2, "committed messages must not be overwritten or concatenated")
-			assert.Equal(t, []string{"staff meeting.", "I’m Shelly:  exact\tbytes."}, texts)
+			if reasoning {
+				require.Equal(t, []string{"staff meeting.\n\nI’m Shelly:  exact\tbytes."}, texts, "adjacent committed thinking remains one visible block")
+			} else {
+				require.Equal(t, []string{"staff meeting.", "I’m Shelly:  exact\tbytes."}, texts)
+			}
 		})
 	}
 }
@@ -86,13 +89,13 @@ func TestAssistantBoundaryRetiresOnlyUncommittedPartialTools(t *testing.T) {
 
 func TestAssistantBoundaryRestoredReasoningAndDeferredBytes(t *testing.T) {
 	m := newAttachTestModel(t, assistantItem("root", "", "first."), assistantItem("root", "", "second."))
-	assert.Equal(t, []string{"first.", "second."}, contents(m))
+	assert.Equal(t, []string{"first.\n\nsecond."}, contents(m))
 	m.AppendToLastMessage("root", "word")
 	m.userHasScrolled = true
 	m.AppendToLastMessage("root", "part")
 	m.CompleteAssistant(runtime.MessageAddedAt("s", session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "wordpart"}), "root", 2).(*runtime.MessageAddedEvent))
 	m.AppendToLastMessage("root", "next")
-	assert.Equal(t, []string{"first.", "second.", "wordpart", "next"}, contents(m))
+	assert.Equal(t, []string{"first.\n\nsecond.", "wordpart", "next"}, contents(m))
 }
 
 func TestRestoreHistoricalToolNeedsLiveSeedForRunningState(t *testing.T) {

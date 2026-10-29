@@ -62,8 +62,83 @@ func (m *model) pruneCollapsedBranches() {
 	for id := range m.collapsedBranches {
 		if !ids[id] {
 			delete(m.collapsedBranches, id)
+			delete(m.manualBranches, id)
+			delete(m.knownBranches, id)
+			delete(m.autoOpenedBranches, id)
 		}
 	}
+}
+
+func activeSubagentBranch(node subagent.NodeSnapshot) bool {
+	if isActiveSubagentState(node.Node.State) {
+		return true
+	}
+	return slices.ContainsFunc(node.Children, activeSubagentBranch)
+}
+
+func stoppedSubagentBranch(node subagent.NodeSnapshot) bool {
+	if node.Node.State == subagent.NodeStopped {
+		return true
+	}
+	return slices.ContainsFunc(node.Children, stoppedSubagentBranch)
+}
+
+func (m *model) syncDefaultBranchExpansion() {
+	if m.collapsedBranches == nil {
+		m.collapsedBranches = map[subagent.NodeID]bool{}
+	}
+	if m.knownBranches == nil {
+		m.knownBranches = map[subagent.NodeID]bool{}
+	}
+	if m.manualBranches == nil {
+		m.manualBranches = map[subagent.NodeID]bool{}
+	}
+	if m.autoOpenedBranches == nil {
+		m.autoOpenedBranches = map[subagent.NodeID]bool{}
+	}
+	var walk func([]subagent.NodeSnapshot)
+	walk = func(nodes []subagent.NodeSnapshot) {
+		for _, node := range nodes {
+			if len(node.Children) > 0 {
+				id := node.Node.ID
+				if !m.manualBranches[id] {
+					if activeSubagentBranch(node) {
+						m.collapsedBranches[id] = false
+						m.autoOpenedBranches[id] = true
+					} else if m.autoOpenedBranches[id] && stoppedSubagentBranch(node) {
+						m.collapsedBranches[id] = true
+						delete(m.autoOpenedBranches, id)
+					} else if !m.knownBranches[id] {
+						m.collapsedBranches[id] = true
+					}
+				}
+				m.knownBranches[id] = true
+				walk(node.Children)
+			}
+		}
+	}
+	walk(m.subagentNodes)
+}
+
+func (m *model) resetAutoBranchExpansion() {
+	var walk func([]subagent.NodeSnapshot)
+	walk = func(nodes []subagent.NodeSnapshot) {
+		for _, node := range nodes {
+			if len(node.Children) == 0 {
+				continue
+			}
+			id := node.Node.ID
+			if m.autoOpenedBranches[id] && !m.manualBranches[id] {
+				active := activeSubagentBranch(node)
+				m.collapsedBranches[id] = !active
+				if !active {
+					delete(m.autoOpenedBranches, id)
+				}
+			}
+			walk(node.Children)
+		}
+	}
+	walk(m.subagentNodes)
 }
 
 func (m *model) treeCounts() (total, active, attention int) {
@@ -103,7 +178,7 @@ func (m *model) treeSummary(width int) string {
 	if total == 0 || width < 1 {
 		return ""
 	}
-	parts := []string{styles.TabPrimaryStyle.Render(fmt.Sprintf("%d subagents", total))}
+	parts := []string{styles.MutedStyle.Render(fmt.Sprintf("%d subagents", total))}
 
 	for i, value := range []int{active, attention} {
 		counter := m.treeCounters[i]
@@ -191,6 +266,9 @@ func (m *model) toggleTreeControl(control treeControl) tea.Cmd {
 			m.todosCollapsed = !m.todosCollapsed
 		} else {
 			m.treeCollapsed = !m.treeCollapsed
+			if !m.treeCollapsed {
+				m.resetAutoBranchExpansion()
+			}
 		}
 		m.invalidateCache()
 		return m.ReconcileLayout()
@@ -199,6 +277,11 @@ func (m *model) toggleTreeControl(control treeControl) tea.Cmd {
 			m.collapsedBranches = make(map[subagent.NodeID]bool)
 		}
 		m.collapsedBranches[control.id] = !m.collapsedBranches[control.id]
+		if m.manualBranches == nil {
+			m.manualBranches = map[subagent.NodeID]bool{}
+		}
+		m.manualBranches[control.id] = true
+		delete(m.autoOpenedBranches, control.id)
 	}
 
 	m.invalidateCache()
@@ -245,20 +328,17 @@ func (m *model) participantNames() []string {
 	return append(names, legacy...)
 }
 
+// participantLine renders a participant row. The context reading follows the
+// name and is dropped, before the name is truncated, when the whole name does
+// not fit beside it. Hover only restyles the name, so the reading never moves.
 func (m *model) participantLine(name string, width int) string {
-	reading := m.agentContextPercent(name)
-	room := width - 2
-	if reading != "" {
-		room -= lipgloss.Width(reading) + 1
+	reading, level := m.contextReading("", name)
+	room := max(1, width-2)
+	label := ""
+	if reading != "" && lipgloss.Width(name)+1+lipgloss.Width(reading) <= room {
+		label = " " + contextGaugeStyle(level, styles.MutedStyle).Render(reading)
 	}
-	if room < 1 {
-		reading = ""
-		room = max(1, width-2)
-	}
-	line := styles.MutedStyle.Render("  ") + m.hoverText(styles.AgentIdentityStyle(name, false).Render(ansi.Truncate(name, room, "…")), "agent:"+name)
-	if reading != "" {
-		line = padRight(line, width-lipgloss.Width(reading)) + contextGaugeStyle(m.agentContextGaugeLevel(name), styles.MutedStyle).Render(reading)
-	}
+	line := styles.MutedStyle.Render("  ") + m.hoverText(styles.AgentIdentityStyle(name, false).Render(ansi.Truncate(name, room, "…")), "agent:"+name) + label
 	return ansi.Truncate(line, width, "")
 }
 

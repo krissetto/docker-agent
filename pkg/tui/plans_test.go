@@ -97,6 +97,10 @@ func collectPlanMessages(t *testing.T, m *appModel, cmd tea.Cmd) []tea.Msg {
 	for len(queue) > 0 {
 		next := queue[0]
 		queue = queue[1:]
+		// Background command-metadata refresh is batched by root Update; it is not a plan result.
+		if meta, ok := next.(capabilityResult); ok && meta.refresh {
+			continue
+		}
 		if _, ok := next.(animation.TickMsg); ok {
 			ticks++
 			require.LessOrEqual(t, ticks, 240, "finite plan-dialog owner ticks must settle")
@@ -1275,8 +1279,9 @@ func TestHandleShowPlanBrowser_RefusedWhenBrowserAlreadyOpen(t *testing.T) {
 	WithPlansService(blocking)(m)
 	openPlanBrowser(t, m, plans.ListResult{Plans: []plans.Plan{}})
 
+	gen := m.metadataGeneration
 	_, cmd := m.Update(messages.ShowPlanBrowserMsg{})
-	assert.Nil(t, cmd, "a /plans with the browser already open must not start a read")
+	requireOnlyMetadataRefresh(t, m, gen, cmd)
 	assert.Zero(t, blocking.readsStarted.Load())
 }
 
@@ -1540,8 +1545,10 @@ func TestStalePlanResults_Dropped(t *testing.T) {
 		p := mustCreatePlan(t, svc, "release", "content")
 
 		// No plan dialog is open anymore when the read lands.
+		gen := m.metadataGeneration
 		_, cmd := m.Update(planDetailLoadedMsg{plan: p})
-		assert.Nil(t, cmd, "a stale detail result must not open a dialog")
+		requireOnlyMetadataRefresh(t, m, gen, cmd)
+		assert.False(t, m.dialogMgr.Open(), "a stale detail result must not open a dialog")
 	})
 
 	t.Run("edit result after /plans closed launches no editor", func(t *testing.T) {
@@ -1550,13 +1557,14 @@ func TestStalePlanResults_Dropped(t *testing.T) {
 		draft := filepath.Join(t.TempDir(), "draft.md")
 		require.NoError(t, os.WriteFile(draft, []byte("stored content"), 0o600))
 
+		gen := m.metadataGeneration
 		_, cmd := m.Update(planEditReadyMsg{
 			ref:             plans.SharedRef("release"),
 			expectedVersion: 1,
 			currentVersion:  1,
 			draftPath:       draft,
 		})
-		assert.Nil(t, cmd, "a stale edit must not take over the terminal with an editor")
+		requireOnlyMetadataRefresh(t, m, gen, cmd)
 		_, err := os.Stat(draft)
 		assert.True(t, os.IsNotExist(err), "the unused draft holds no user edits and is removed")
 	})
@@ -1576,8 +1584,9 @@ func TestPlanRefresh_ResultWithoutDialogsDropsSilently(t *testing.T) {
 	m.planRefreshQueued = true
 	m.planRefreshQueuedWarnings = true
 
+	gen := m.metadataGeneration
 	_, cmd := m.Update(planRefreshedMsg{listErr: errors.New("boom")})
-	assert.Nil(t, cmd, "no notification and no follow-up may be produced")
+	requireOnlyMetadataRefresh(t, m, gen, cmd)
 	assert.False(t, m.planRefreshInFlight, "the pipeline must be idle")
 	assert.False(t, m.planRefreshQueued, "the queued follow-up must be dropped")
 	assert.False(t, m.planRefreshQueuedWarnings)

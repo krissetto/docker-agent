@@ -3,6 +3,26 @@ import Testing
 @testable import AgentKit
 
 struct SSETransportTests {
+    @Test func tailEventStreamNegotiatesTailProjectionWithoutReplayCursor() async throws {
+        let state = TransportStubState()
+        state.plan = .stalled(prefix: Data())
+        let client = try makeClient(state)
+        let (_, _) = try await client.eventStream(sessionID: "session-id", since: nil, epoch: nil, tailProjection: true)
+        let query = URLComponents(url: try #require(state.request?.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(query.map(\.name) == ["projection", "max_items", "max_bytes", "max_item_bytes"])
+        #expect(query.map(\.value) == ["tail", "50", "2097152", "131072"])
+        #expect(!query.contains(where: { $0.name == "since" || $0.name == "since_epoch" }))
+    }
+
+    @Test func tailEventStreamRejectsReplayCursorCombination() async throws {
+        let state = TransportStubState()
+        let client = try makeClient(state)
+        await #expect(throws: APIError.self) {
+            try await client.eventStream(sessionID: "session-id", since: 1, epoch: "e", tailProjection: true)
+        }
+        #expect(!state.started)
+    }
+
     @Test func eventRequestTimeoutBoundsStalledAsyncBytesAfterHeaders() async throws {
         let state = TransportStubState()
         state.plan = .stalled(prefix: Data(": ping\n\n".utf8))

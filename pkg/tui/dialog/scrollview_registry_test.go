@@ -105,3 +105,30 @@ func TestPreparedFamilyViewsPreserveScrollResourcesAndSelection(t *testing.T) {
 		})
 	}
 }
+
+func TestDialogScrollbarPointerAndOcclusionLifecycle(t *testing.T) {
+	runtime := newDialogRuntime()
+	mgr := New(runtime).(*manager)
+	mgr.SetSize(80, 24)
+	d := &registryDialog{}
+	d.viewport = d.newScrollview(scrollview.WithReserveScrollbarSpace(true))
+	d.viewport.SetSize(20, 3)
+	d.viewport.SetContent([]string{"a", "b", "c", "d", "e", "f"}, 6)
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	settleTestDialog(mgr)
+	runtime.Continue()
+
+	require.True(t, mgr.SetScrollbarPointer(d.viewport.ScrollbarX(), 1))
+	require.EqualValues(t, 1, runtime.ActiveCount(), "pointer proximity starts only the viewport visibility lease")
+	require.True(t, mgr.SetScrollbarActive(false))
+	require.Zero(t, runtime.ActiveCount(), "occlusion suspends scrollview timers")
+	require.False(t, mgr.SetScrollbarPointer(d.viewport.ScrollbarX(), 1), "occluded modal ignores pointer routing")
+	require.False(t, d.viewport.SetScrollbarPointer(d.viewport.ScrollbarX(), 1), "inactive scrollview clears pointer and does not rearm")
+	require.Zero(t, runtime.ActiveCount())
+
+	require.True(t, mgr.SetScrollbarActive(true))
+	require.True(t, mgr.SetScrollbarPointer(d.viewport.ScrollbarX(), 1), "visible dialog resumes pointer tracking")
+	require.EqualValues(t, 1, runtime.ActiveCount())
+	mgr.Cleanup()
+	require.Zero(t, runtime.ActiveCount(), "dialog cleanup releases visibility lease")
+}

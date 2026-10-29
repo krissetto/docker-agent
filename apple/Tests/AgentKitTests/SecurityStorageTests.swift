@@ -42,6 +42,19 @@ struct SecurityStorageTests {
         #expect(store.load().isEmpty)
     }
 
+    @Test func instanceConfigPersistsAnExplicitDefaultAgentSourceWithoutBreakingOldConfigs() throws {
+        let url = temporaryURL("preferred-source.json")
+        defer { removeStore(at: url) }
+        let store = InstanceConfigStore(fileURL: url)
+        let config = InstanceConfig(id: UUID(), name: "Kit", baseURL: "https://kit.example", instanceID: "kit-instance", preferredSource: "team.yaml")
+        try store.upsert(config)
+        #expect(store.load().first?.preferredSource == "team.yaml")
+
+        let legacy = Data(#"[{"id":"00000000-0000-0000-0000-000000000001","name":"Old","baseURL":"https://old.example","allowsLocalHTTP":false,"capabilities":[]}]"#.utf8)
+        try legacy.write(to: url, options: .atomic)
+        #expect(store.load().first?.preferredSource == nil)
+    }
+
     @Test func reviewDraftEditsAndStaleStatePersistByFullScope() throws {
         let url = temporaryURL("review-drafts.json")
         defer { removeStore(at: url) }

@@ -106,7 +106,7 @@ func TestLeanStatusShowsConnectionAndRecoveryUncertainty(t *testing.T) {
 	status = strings.Join(ui.RenderStatus(m.status, 120), "\n")
 	assert.Contains(t, status, "recovery uncertain (1 interrupted)")
 	assert.NotContains(t, status, "· ready", "uncertain recovery is not presented as a normal idle")
-	assert.Contains(t, strings.Join(m.screen.Transcript.Lines(160, 0, false, nil, nil), "\n"), "Recovery uncertain: 1 turn was interrupted")
+	assert.Contains(t, strings.Join(m.screen.Transcript.Lines(160, 0, false, nil, nil), "\n"), "Recovery uncertain: 1 accepted input has no terminal outcome record.")
 }
 
 // leanDelegationHandle holds a canonical session-tree "Use subagents" policy.

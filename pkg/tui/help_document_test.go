@@ -38,10 +38,23 @@ func helpKeys(sections []help.Section, id string) []string {
 	return nil
 }
 
+func helpDescription(sections []help.Section, id string) string {
+	for _, section := range sections {
+		for _, entry := range section.Entries {
+			if entry.ID == id {
+				return entry.Description
+			}
+		}
+	}
+	return ""
+}
+
 func TestHelpDocumentEffectiveContextsAndAliases(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	root.focusedPanel = PanelEditor
 	doc := root.helpDocument()
+	require.Equal(t, "Send message; queue for the next turn while working", helpDescription(doc.Current, "composer.send"))
+	require.Equal(t, "While working, steer into the active turn; sends normally while idle", helpDescription(doc.Current, "composer.steer"))
 	require.Contains(t, helpKeys(doc.Current, "input.composer.DeleteWordBackward"), "ctrl+w")
 	require.NotContains(t, helpKeys(doc.Current, "input.composer.CharacterBackward"), "ctrl+b", "disabled sidebar still consumes its binding")
 	require.NotContains(t, helpKeys(doc.Current, "input.composer.DeleteCharacterBackward"), "ctrl+h")

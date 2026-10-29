@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"time"
 )
 
 // Capability identifies an optional runtime facility a tool can probe for
@@ -66,6 +68,48 @@ type Runtime interface {
 	Supports(capability Capability) bool
 }
 
+// BackgroundProcessState is the authoritative lifecycle state of an adopted shell process.
+type BackgroundProcessState string
+
+const (
+	BackgroundProcessRunning   BackgroundProcessState = "running"
+	BackgroundProcessCompleted BackgroundProcessState = "completed"
+	BackgroundProcessStopped   BackgroundProcessState = "stopped"
+	BackgroundProcessFailed    BackgroundProcessState = "failed"
+)
+
+// BackgroundProcess describes a shell process that the process manager actually adopted.
+type BackgroundProcess struct {
+	ID         string                 `json:"id"`
+	SessionID  string                 `json:"session_id"`
+	AgentName  string                 `json:"agent_name"`
+	ToolCallID string                 `json:"tool_call_id"`
+	Command    string                 `json:"command"`
+	Cwd        string                 `json:"cwd"`
+	StartedAt  time.Time              `json:"started_at"`
+	FinishedAt time.Time              `json:"finished_at,omitzero"`
+	State      BackgroundProcessState `json:"state"`
+}
+
+func (p BackgroundProcess) MarshalJSON() ([]byte, error) {
+	var finishedAt *time.Time
+	if !p.FinishedAt.IsZero() {
+		finished := p.FinishedAt
+		finishedAt = &finished
+	}
+	return json.Marshal(struct {
+		ID         string                 `json:"id"`
+		SessionID  string                 `json:"session_id"`
+		AgentName  string                 `json:"agent_name"`
+		ToolCallID string                 `json:"tool_call_id"`
+		Command    string                 `json:"command"`
+		Cwd        string                 `json:"cwd"`
+		StartedAt  time.Time              `json:"started_at"`
+		FinishedAt *time.Time             `json:"finished_at,omitempty"`
+		State      BackgroundProcessState `json:"state"`
+	}{p.ID, p.SessionID, p.AgentName, p.ToolCallID, p.Command, p.Cwd, p.StartedAt, finishedAt, p.State})
+}
+
 // BackgroundWork tracks an adopted process until its completion guidance has
 // been admitted and its retained environment can be released. Close must be
 // called exactly once after Complete (or when completion is intentionally
@@ -74,6 +118,19 @@ type BackgroundWork interface {
 	Complete(message string) error
 	Cancel()
 	Close() error
+}
+
+// BackgroundProcessIdentity supplies stable ownership details for a process that the manager adopts.
+type BackgroundProcessIdentity interface {
+	BackgroundProcessIdentity() (sessionID, agentName, toolCallID string)
+}
+
+// BackgroundProcessLifecycle is an optional BackgroundWork extension implemented by hosts that
+// publish process state. The process manager invokes Adopt only after retaining a live process,
+// and Finish exactly once when that process reaches a terminal state.
+type BackgroundProcessLifecycle interface {
+	AdoptBackgroundProcess(process BackgroundProcess) error
+	FinishBackgroundProcess(state BackgroundProcessState, finishedAt time.Time)
 }
 
 // BackgroundWorkRuntime is an optional capability used by tools that hand

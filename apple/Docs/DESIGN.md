@@ -4,8 +4,8 @@ Native SwiftUI client for iPhone, iPad and macOS that connects to one or more
 user-added docker-agent API servers (`docker agent serve api`). It is a native
 product, not a terminal clone or web view.
 
-Status: design handoff. See [Scope and status](#scope-and-status) before
-treating any section as a commitment.
+Status: design blueprint with the current implementation and bounded gaps
+recorded in [Scope and status](#scope-and-status).
 
 ## Principles
 
@@ -28,28 +28,47 @@ treating any section as a commitment.
 
 ## Information architecture and navigation
 
-### Mac and iPad
+### iPhone, iPad and Mac
 
-`NavigationSplitView` with three columns plus an `.inspector`.
+The primary hierarchy is **active server → sessions → session detail**. The
+home is a workbench with two parts that never overlap:
 
-1. **Sidebar**
-   - **Needs You** across all servers, from tree nodes' `needs_attention` /
-     `waiting_on`; each row states why (approve tool, answer question, failed).
-   - **Running** across all servers.
-   - One section per server: name, health dot, session count. Context menu:
-     Edit, Reconnect, Remove. "Add Server…" at the bottom.
-2. **Session list** for the selected server or filter
-   - Groups: Waiting, Running, Recent; Starred filter; search.
-   - Row: title, owning agent (dot + name), relative time, one-line status,
-     cost when space allows (hover on Mac).
-   - Root sessions only; subagents live in the session's tree, not the list.
-3. **Session detail**: transcript, activity strip, interactions, composer.
+- **Board** — every root session that is live right now, as a team tag:
+  title and age, the root agent with its current activity (or the reason a
+  person is needed) and cost, then the agents under it as hue dot + name +
+  state word. Sub-agents come from the live `agentTree` while the session is
+  open and otherwise from child sessions in the catalog; neither is presented
+  as the complete hierarchy. "Needs you" tags come first with a Signal spine;
+  "Working" tags follow. Idle servers show one sentence, "Nothing is running
+  on <server>", never a row of zero counts.
+- **Log** — everything else, newest first, grouped Today / Yesterday / This
+  week / Earlier, as quiet rows (title, agent, cost, age).
 
-### iPhone
+A toolbar server menu switches the active profile and exposes connection
+state, session count, needs-you count, add, manage and reconnect actions. The
+toolbar's More menu narrows the board (Everything / Needs you / Working),
+toggles starred-only and enters selection. Search covers loaded sessions and
+shows plain rows. Per-window active server and last selected session are
+remembered independently. Server settings remain available from the profile
+menu and the macOS Settings scene.
 
-`NavigationStack`: root (Needs You, then Servers) → Sessions → Session. The
-inspector is a sheet with medium/large detents, opened from the toolbar agent
-chip.
+"Needs you" is only ever derived from server facts: an open interaction,
+pending input, a reported error or a failed run. A `waiting` state on its own
+means waiting on an agent, a tool or a pause and is shown as "Waiting".
+
+New Session is a direct action on the active server. It uses that server's
+reported default source and root agent, plus its workspace root. A source key
+and its configured root-agent name are separate identities; clients never
+invent a `root` name or infer a default from catalog order. If a server has no
+identified default and more than one source, the action reports that an agent
+team must be chosen in **New Session Options…**. Options retains source
+registration, explicit team selection, title and server working-directory
+fields; a successful explicit choice is saved per server profile.
+
+On wide Mac/iPad layouts, `NavigationSplitView` places the workbench beside
+the session detail and its `.inspector`. On iPhone the same hierarchy
+collapses into a native navigation stack. With no profiles, show a Connect a
+Server empty state with an Add Server action; do not open setup automatically.
 
 ### Windows instead of TUI tabs and panes
 
@@ -96,24 +115,31 @@ chip.
 
 ### Session detail — bottom stack (top to bottom)
 
-1. **Activity strip**: owning agent dot, current tool or "Thinking…", elapsed
-   time, "+2 agents" when subagents run. Tap opens the Agents inspector. Hidden
-   when idle.
-2. **Interaction cards**: inline, not modal; they stack; each is agent-owned.
+1. **Team line**: owning agent, current activity (or "Needs you" when an
+   interaction is open), one overlapping dot per live sub-agent in its hue
+   with the count, a progress indicator while running, and Stop. Tap opens
+   the Agents inspector. Hidden when idle.
+2. **Interaction cards**: inline, not modal; they stack; each is agent-owned
+   and drawn in the board-tag language with a Signal spine — no stroke, no
+   shadow.
    - Tool approval: agent, tool, short argument preview with Details. Actions:
-     Allow Once (prominent), Always Allow This Tool, More (Balanced Mode, Allow
-     All Tools — labeled as session-wide), Deny, Deny with Reason.
+     Allow Once (prominent), Deny, Always Allow This Tool, More (Deny with
+     Reason, Balanced Mode, Allow All Tools — labeled as session-wide). On
+     narrow screens the four controls sit in two rows of two.
    - Like the TUI (default "No"), no global or blind keystroke approves. On Mac,
      when a card has focus, TUI letters work: Y, T, N, R.
    - Elicitation uses native form fields; max-iterations gets Continue/Stop.
    - Cards resolve on `interaction_resolved`, with a brief "Answered
      elsewhere" fade when another client answered.
 3. **Composer**
-   - Agent chip: current agent details. Switching agent reads "Continue with
-     coder in a new session" because the server branches.
-   - Multiline field; "/" suggests agent commands, MCP prompts, skills.
-   - Send submits (queues while a turn runs). Steer is an explicit secondary
-     action (long-press Send, ⌥⏎). Stop replaces Send while running.
+   - One leading "+" menu: Photos, Files, Prompts & Skills (when supported).
+   - Multiline field; placeholder names the agent ("Message root…", "Queue for
+     root…" while a turn runs).
+   - Send submits (queues while a turn runs). Stop lives on the team line,
+     next to the work it stops; ⌘. always stops. Steer is a secondary action
+     on Send (press and hold / right-click, ⌥⏎).
+   - On iPhone the Conversation / Review / Files picker sits at the top of the
+     session menu (⋯) so the title keeps its width.
    - Queued inputs appear as small chips above the field.
 
 ### Session modes
@@ -130,8 +156,10 @@ Every control is gated by the session's reported capabilities
 historical sessions or sessions without execution show "Read-only history"
 with mutations disabled.
 
-- **Agents**: live subagent tree (dot, name, status, needs-you marker); rows
-  open child sessions.
+- **Agents**: live subagent tree with an accessible outline and a pan/zoom GPU-
+  composited Canvas map (name, status, attention marker, cost). Opening a child
+  requires explicit confirmation, then uses prepare-info and open-view to
+  validate identity and ancestry; no new work is started.
 - **Todos** (only with `todos`): grouped In Progress / To Do / Completed
   (collapsed). Tapping the status glyph cycles status; the context menu sets a
   status, edits the text (compare-and-swap against the shown text) or deletes;
@@ -319,19 +347,22 @@ definite failure and clears it once the server accepts the message.
 - **Register Source…** in New Session takes a configuration path relative to
   the server's workspace plus an optional remote working directory. Nothing
   is read from this device, and servers without the route say so.
-- **New Session** has an optional "Working directory on server" field; empty
-  starts without a workspace.
+- **New Session Options…** retains an optional "Working directory on server"
+  field; empty uses the server's configured workspace when one is available.
 - **Edit** in Recent Messages appears only for full (not shortened) user
   messages while the session is idle with nothing queued (`session_editing`).
   The sheet shows the original text. Saving changes the stored message only,
   and concurrent edits are last-write-wins. Errors keep the edited text and
   offer Reload History.
 
-### New Session (sheet)
+### New Session
 
-Server, agent (from `/api/agents`, with descriptions), optional title, model
-only if allowed. Working directory is never a free-text local path; offer it
-only if the server exposes workspace choices.
+The primary New Session action immediately starts with the active server's
+resolved default source and actual `root_agent_name`, rooted at `workspace_root`
+when supplied. **New Session Options…** exposes source registration and explicit
+team selection for ambiguous multi-source profiles, plus optional title and a
+server-host working directory. It never submits a client-local path or guesses
+an agent named `root`.
 
 ## States
 
@@ -379,23 +410,37 @@ Slash-command equivalents live in "Session" and "Agent" menus on Mac.
 
 ## Visual system
 
-- **Type**: system fonts with full Dynamic Type. Title weight only for session
-  titles; agent headers subheadline semibold; metadata footnote secondary. SF
-  Mono only for commands, paths, code and diffs.
-- **Color**: semantic system colors plus one app tint (Docker-adjacent blue,
-  e.g. #1D63ED, tuned for light/dark). Agents get a fixed 8-hue palette
-  assigned deterministically by agent name per server, used only for dots,
-  small capsules and a 2pt gutter — never fills behind text. Status uses system
-  green/orange/red, always paired with a symbol or label.
+The spine is the team. One structural device — a 3pt bar at the leading edge
+in the owning agent's hue — carries who (colour) and state (Signal orange when
+a person is needed, full when live, 40% when quiet). Everything aligns to one
+text edge beside it. Cards appear only where something asks for a decision
+(interaction cards), where live work is shown (board tags) or where you spoke
+(user turns); history and transcript rows have none.
+
+- **Type**: system fonts with full Dynamic Type. `headline` for board-tag
+  titles, `body` medium for log rows, `body` for prose, `callout` for tool rows
+  and controls, `footnote` for the agent/activity line, `caption` for meta. SF
+  Mono only for commands, paths, code and diffs; monospaced digits for cost,
+  tokens and ages so numbers line up as data. No all-caps labels.
+- **Color**: two owned colors — Harbor `#1D63ED`, the app tint (you, your
+  sends, running state), and Signal (system orange) for attention only. All
+  other colors are semantic system colors. Agents get a fixed 8-hue palette
+  assigned deterministically by agent name per server, used for the spine,
+  dots and small capsules — never fills behind text. Red is failure.
+- **Words**: state vocabulary shared by board, team line, team map and widget
+  — Needs you, Working, Waiting, Idle, Done, Failed — in sentence case. Idle is
+  said once in words, not as zero counts.
 - **Material**: Liquid Glass only via standard toolbars, sidebars, sheets and
   the composer background. Content stays opaque.
-- **Spacing**: 4pt grid; 12pt between rows, 20pt between turns, 16pt card
-  insets; continuous corners 12pt (cards), 8pt (chips).
+- **Spacing**: 4pt grid; 12pt between rows, 20pt between turns, 12pt tag
+  insets; continuous corners 12pt (tags, cards), 8pt (chips), 16pt (decision
+  cards).
 - **Motion**: short and subtle; streamed text appends without per-token
-  animation; delegation dividers fade in; activity strip cross-fades. Respect
+  animation; team-line activity cross-fades; disclosure answers a tap. Respect
   Reduce Motion.
 - **Accessibility**: VoiceOver labels include the agent ("coder ran git status,
-  succeeded"); interaction cards are announced; 44pt minimum targets on iOS;
+  succeeded"); board tags read title, agent, state, team size and cost as one
+  element; interaction cards are announced; 44pt minimum targets on iOS;
   contrast passes in both appearances.
 
 ## Platform adaptation
@@ -419,9 +464,10 @@ The compiled declaration contract published by Engineer is authoritative.
 Views/
   Root/      RootView, SessionWindowView, SidebarView
   Servers/   ServerEditorSheet, ServerRow, ServerSettingsView
-  Sessions/  SessionListView, SessionRow, NewSessionSheet
+  Sessions/  SessionListView (board + log), BenchBoard (BoardEntry, BoardTag,
+             LogBucket, FlowLayout), SessionRow, NewSessionSheet
   Session/   SessionView (+ ConversationPane), TranscriptView, TranscriptRows,
-             ActivityStrip, InteractionCards, ComposerView, PendingSendsView,
+             ActivityStrip (team line), InteractionCards, ComposerView, PendingSendsView,
              SessionInspector
   Review/    ReviewWorkspaceView, ReviewNavigator, DiffPane, DiffLinesView,
              DiffModel (split pairing, anchor builder, limits), CommentComposer,
@@ -454,6 +500,14 @@ composer keeps its draft until a send is accepted.
    for this client. The `plan_changed` notification carries no plan content,
    so there is nothing faithful to render. Team and config editing stay out
    until the backend exposes a public contract.
+
+- **Native WidgetKit**: separate iOS/iPadOS and macOS widget builds share a
+  minimal App Group snapshot of aggregate agent/active/attention counts,
+  session/server counts, and freshness time. macOS offers systemSmall and
+  systemMedium only. No credentials, transcript text, session titles or prompts
+  enter the snapshot. The app publishes during foreground life on a bounded
+  five-minute cadence; stale/no-live/container-unavailable states are explicit.
+  Distribution profiles must enable the fixed App Group entitlement.
 
 ## Scope and status
 

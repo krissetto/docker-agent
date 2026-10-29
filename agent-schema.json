@@ -368,6 +368,10 @@
             "openai/gpt-4o-mini",
             "fast"
           ]
+        },
+        "compaction_prompt": {
+          "type": "string",
+          "description": "Replacement compaction user prompt for agents using this provider. An agent-level prompt wins, then the first configured model prompt, then this provider default. Manual /compact text and pre_compact hook additional_context are appended."
         }
       },
       "additionalProperties": false
@@ -656,6 +660,15 @@
             "type": "string"
           }
         },
+        "subagent_access": {
+          "type": "object",
+          "description": "Independent opt-in scopes for discovering or messaging live async agent instances. Does not grant transcript reads or stop authority. The children scope preserves legacy parent/direct-child messaging; tree includes only instances in this root session's tree.",
+          "additionalProperties": false,
+          "properties": {
+            "list_agents": {"type": "string", "enum": ["children", "tree"], "description": "Instance discovery scope; tree returns a bounded page of this root session's instance tree."},
+            "send_message": {"type": "string", "enum": ["children", "tree"], "description": "Message target scope; children allows legacy parent/direct-child messaging, tree allows any non-stopped instance in this root session's tree."}
+          }
+        },
         "subagents": {
           "type": "array",
           "description": "Async subagents this agent may spawn and communicate with. Each entry is either a target agent name string, or an object with agent (target agent name), optional name (alias used by the delegating model), and optional description (prompt override). Agents communicate asynchronously; spawned subagents have independent sessions/runtime contexts and can end their turn until messaged again.",
@@ -788,6 +801,10 @@
             "fast",
             "openai/gpt-4o-mini"
           ]
+        },
+        "compaction_prompt": {
+          "type": "string",
+          "description": "Replaces the built-in user prompt used to generate session summaries; the built-in system prompt remains. Highest priority: takes precedence over a compaction_prompt set on the agent's model or provider. Manual /compact text and pre_compact hook additional_context are appended."
         },
         "add_prompt_files": {
           "type": "array",
@@ -1800,6 +1817,10 @@
             "fast"
           ]
         },
+        "compaction_prompt": {
+          "type": "string",
+          "description": "Replacement compaction user prompt for agents using this model. The agent-level prompt takes precedence over this value, which takes precedence over a provider-level default. Manual /compact text and pre_compact hook additional_context are appended."
+        },
         "compaction_threshold": {
           "type": "number",
           "exclusiveMinimum": 0,
@@ -2229,7 +2250,6 @@
             "filesystem",
             "file",
             "shell",
-            "background_jobs",
             "tasks",
             "plan",
             "session_context",
@@ -2455,15 +2475,11 @@
         "background_after": {
           "type": "integer",
           "minimum": 0,
-          "description": "For the shell toolset, seconds to wait before automatically retaining a still-running command as a background job. Defaults to 2 seconds; 0 disables automatic backgrounding."
+          "description": "For the shell toolset, seconds to wait before automatically retaining a still-running command as a background process. Defaults to 2 seconds; 0 disables automatic backgrounding."
         },
         "sudo_askpass": {
           "type": "boolean",
           "description": "Opt in to a sudo privilege escalation flow for the shell toolset (only valid for type 'shell'). When enabled, sudo commands prompt the user for their password through the host UI via SUDO_ASKPASS; in non-interactive runs the prompt is declined automatically. Only a bare 'sudo ...' invocation in a POSIX shell is handled. No effect on Windows. Default false."
-        },
-        "recall": {
-          "type": "boolean",
-          "description": "Opt in to background-job recall for the background_jobs toolset (only valid for type 'background_jobs'). When enabled, run_background_job exposes a recall boolean parameter. If the agent sets recall=true for a background job, the runtime injects a steering message with a short completion sentence and the job output when the job finishes. Default false."
         },
         "url": {
           "type": "string",
@@ -2576,8 +2592,7 @@
                 "filesystem",
                 "file",
                 "shell",
-                "background_jobs",
-                "tasks",
+                    "tasks",
                 "plan",
                     "session_context",
                 "todo",

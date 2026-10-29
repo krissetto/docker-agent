@@ -41,6 +41,9 @@ func newPlacementSidebar(t *testing.T, collapsed bool) *model {
 	state.SetCurrentAgentName("root")
 	state.SetYoloMode(true)
 	m := New(animation.NewRuntimeWithScheduler(clock), t.Context(), state).(*model)
+	// Most sidebar tests exercise static geometry/hover behavior; visibility
+	// transitions have focused tests in scroll_visibility_test.go.
+	m.scrollview.SetAnimationRuntime(nil)
 	t.Cleanup(m.StopAnimation)
 	m.rootSessionID = "placement"
 	m.treeCollapsed = collapsed

@@ -52,6 +52,7 @@ type streamingState struct {
 	content          strings.Builder
 	reasoningContent strings.Builder
 	presentation     []chat.AssistantPart
+	text             chat.AssistantTextAppender
 	agentName        string
 	messageID        int64
 	writeID          string
@@ -232,7 +233,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			j.streaming = st
 		}
 		st.content.WriteString(e.Content)
-		st.presentation = captureAssistantPresentation(st.presentation, e)
+		st.presentation = st.text.Append(st.presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
 		st.agentName = e.AgentName
 		p.persistStreamingContentLocked(ctx, id, j, st)
 	case *AgentChoiceReasoningEvent:
@@ -242,7 +243,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			j.streaming = st
 		}
 		st.reasoningContent.WriteString(e.Content)
-		st.presentation = captureAssistantPresentation(st.presentation, e)
+		st.presentation = st.text.Append(st.presentation, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
 		st.agentName = e.AgentName
 		p.persistStreamingContentLocked(ctx, id, j, st)
 	case *PartialToolCallEvent:
@@ -426,6 +427,17 @@ func (p *PersistenceObserver) publishMessageID(ctx context.Context, id string, r
 		d.sess.PublishMessageID(receipt, rowID)
 		return nil
 	})
+}
+
+// capturePresentation routes streamed text through the append-only text appender.
+func capturePresentation(text *chat.AssistantTextAppender, parts []chat.AssistantPart, event Event) []chat.AssistantPart {
+	switch e := event.(type) {
+	case *AgentChoiceEvent:
+		return text.Append(parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
+	case *AgentChoiceReasoningEvent:
+		return text.Append(parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
+	}
+	return captureAssistantPresentation(parts, event)
 }
 
 func captureAssistantPresentation(parts []chat.AssistantPart, event Event) []chat.AssistantPart {

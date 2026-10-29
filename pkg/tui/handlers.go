@@ -291,10 +291,12 @@ func copyToClipboard(text, successMsg string) tea.Cmd {
 // --- Agent management ---
 
 func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
+	if cmd, ok := m.prepareReviewInputTransition(); !ok {
+		return m, cmd
+	}
 	if agentName == m.sessionState.CurrentAgentName() {
 		return m, nil
 	}
-
 	oldWorkingDir := ""
 	if oldSession := m.application.Session(); oldSession != nil {
 		oldWorkingDir = oldSession.WorkingDir
@@ -329,6 +331,9 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 		}
 		return m, notification.ErrorCmd("Failed to retarget the active tab")
 	}
+	if m.reviewCommentInput != nil {
+		m.finishReviewComment(false)
+	}
 	m.initSessionComponents(newSess.ID, m.application, newSess)
 	commitApp()
 	m.dialogMgr.Cleanup()
@@ -342,19 +347,36 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 // agent, looking it up in the available-agents roster. The agent's latest
 // token-usage snapshot (if it has run) rides along so the dialog can show its
 // context usage, as does its cumulative attributed cost (if any).
-func (m *appModel) handleShowAgentDetails(agentName string) (tea.Model, tea.Cmd) {
+func (m *appModel) handleShowAgentDetails(msg messages.ShowAgentDetailsMsg) (tea.Model, tea.Cmd) {
+	agentName := msg.AgentName
 	for _, agent := range m.sessionState.AvailableAgents() {
 		if agent.Name != agentName {
 			continue
 		}
 		cfg := m.application.AgentConfigInfo(m.ctx(), agentName)
 		var usage *runtime.Usage
-		if u, ok := m.sessionState.AgentUsage(agentName); ok {
-			usage = &u
-		}
 		var cost *float64
-		if c, ok := m.sessionState.AgentCost(agentName); ok {
-			cost = &c
+		if msg.SessionID != "" {
+			// A subagent row names its own session: never fall back to a same-named agent.
+			// The active page's sidebar caches usage for every observed session, including
+			// unopened subagents; an unknown session has no entry and shows no context.
+			if owner, ok := m.chatPage.(interface {
+				SessionUsage(sessionID string) (runtime.Usage, bool)
+			}); ok {
+				if u, ok := owner.SessionUsage(msg.SessionID); ok {
+					usage = &u
+				}
+			}
+			if c, ok := m.sessionState.SessionCost(msg.SessionID); ok {
+				cost = &c
+			}
+		} else {
+			if u, ok := m.sessionState.AgentUsage(agentName); ok {
+				usage = &u
+			}
+			if c, ok := m.sessionState.AgentCost(agentName); ok {
+				cost = &c
+			}
 		}
 		return m, core.CmdHandler(dialog.OpenDialogMsg{
 			Model: dialog.NewAgentDetailsDialog(agent, cfg, usage, cost),
@@ -951,6 +973,9 @@ func preferencesFromConfig(settings *userconfig.Settings) messages.Preferences {
 		SplitDiffView:         settings.GetSplitDiffView(),
 		GitDiffLayout:         messages.ParseGitDiffLayout(settings.GetGitDiffLayout()),
 		ExpandThinking:        settings.GetExpandThinking(),
+		CompactWorkLog:        settings.GetCompactWorkLog(),
+		ShowAgentContext:      settings.GetShowAgentContext(),
+		VisibleReplies:        messages.ParseVisibleReplies(settings.GetVisibleReplies()),
 		HideToolResults:       settings.HideToolResults,
 		RenderImages:          settings.GetRenderImages(),
 		ShowBanner:            settings.GetShowBanner(),
@@ -992,15 +1017,16 @@ func (m *appModel) applyLayoutSettings(settings messages.LayoutSettings) (tea.Mo
 // layoutSettingsFromConfig converts persisted layout settings to their runtime form.
 func layoutSettingsFromConfig(l userconfig.LayoutSettings) messages.LayoutSettings {
 	return messages.LayoutSettings{
-		SidebarPosition:  messages.ParseSidebarPosition(l.SidebarPosition),
-		SectionSpacing:   messages.ParseSectionSpacing(l.SectionSpacing),
-		SidebarInfoMode:  messages.ParseSidebarInfoMode(l.SidebarInfoMode),
-		ActiveAgentsOnly: l.ActiveAgentsOnly,
-		HideSessionPath:  l.HideSessionPath,
-		HideUsage:        l.HideUsage,
-		HideAgents:       l.HideAgents,
-		HideTools:        l.HideTools,
-		HideTodos:        l.HideTodos,
+		SidebarPosition:        messages.ParseSidebarPosition(l.SidebarPosition),
+		SectionSpacing:         messages.ParseSectionSpacing(l.SectionSpacing),
+		SidebarInfoMode:        messages.ParseSidebarInfoMode(l.SidebarInfoMode),
+		ActiveAgentsOnly:       l.ActiveAgentsOnly,
+		HideSessionPath:        l.HideSessionPath,
+		HideUsage:              l.HideUsage,
+		HideAgents:             l.HideAgents,
+		HideTools:              l.HideTools,
+		HideTodos:              l.HideTodos,
+		AlignInputWithMessages: l.AlignInputWithMessages,
 	}
 }
 
@@ -1040,6 +1066,14 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 		s.GitDiffLayout = string(layout)
 	}
 	s.ExpandThinking = boolPreference(p.ExpandThinking, false)
+	s.CompactWorkLog = boolPreference(p.CompactWorkLog, true)
+	s.ShowAgentContext = p.ShowAgentContext
+	visibleReplies := messages.ParseVisibleReplies(string(p.VisibleReplies))
+	if visibleReplies == messages.VisibleRepliesThree {
+		s.VisibleReplies = ""
+	} else {
+		s.VisibleReplies = string(visibleReplies)
+	}
 	s.RestoreTabs = boolPreference(p.RestoreTabs, false)
 	s.Snapshot = boolPreference(p.Snapshot, false)
 	s.CacheStablePrompts = boolPreference(p.CacheStablePrompts, false)
@@ -1101,6 +1135,7 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 		ActiveAgentsOnly: layout.ActiveAgentsOnly,
 		HideSessionPath:  layout.HideSessionPath, HideUsage: layout.HideUsage,
 		HideAgents: layout.HideAgents, HideTools: layout.HideTools, HideTodos: layout.HideTodos,
+		AlignInputWithMessages: layout.AlignInputWithMessages,
 	}
 	return nil
 }

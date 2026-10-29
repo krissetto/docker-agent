@@ -32,14 +32,13 @@ const (
 // largeResultCategories lists the tool categories whose results can be
 // arbitrarily large and are not bounded anywhere else, so they are subject
 // to the oversized-result cap. filesystem and shell are the high-output
-// built-in toolsets alongside background_jobs; mcp and a2a call external servers that impose no
+// built-in toolsets; mcp and a2a call external servers that impose no
 // per-result limit of their own (unlike the openapi/api toolsets, which
 // already truncate their output). Internal toolsets (memory, plan, tasks,
 // think, ...) return bounded, structured results and are left untouched.
 var largeResultCategories = map[string]bool{
 	filesystemToolCategory: true,
 	"shell":                true,
-	"background_jobs":      true,
 	"mcp":                  true,
 	"a2a":                  true,
 }
@@ -124,12 +123,12 @@ func (l *largeToolResultLimiter) limitLargeToolResponse(ctx context.Context, in 
 	case path == "":
 		updated = BoundToolResult(in.ToolCategory, in.ToolName, payload, "The full result could not be saved; narrow the tool query to retrieve the part you need.")
 		if updated == payload { // A line-count-only overflow still needs an excerpt.
-			updated = tailToolResultNotice(in.ToolCategory, payload, "The full result could not be saved.\n\n")
+			updated = tailToolResultNotice(in.ToolCategory, in.ToolName, payload, "The full result could not be saved.\n\n")
 		}
 	case in.ToolCategory == filesystemToolCategory && in.ToolName == readFileToolName:
 		updated = readFileHeadNotice(in.ToolInput, payload, path)
 	default:
-		updated = tailToolResultNotice(in.ToolCategory, payload, largeToolResultNotice(payload)+fmt.Sprintf(" The full result is available in a file: %s\n\n", path))
+		updated = tailToolResultNotice(in.ToolCategory, in.ToolName, payload, largeToolResultNotice(payload)+fmt.Sprintf(" The full result is available in a file: %s\n\n", path))
 	}
 
 	return &hooks.Output{
@@ -334,7 +333,7 @@ func BoundToolResult(category, name, payload, notice string) string {
 		prefix += "Showing the beginning of the result:\n\n"
 		return boundedExcerpt(prefix, payload, true)
 	}
-	return tailToolResultNotice(category, payload, prefix)
+	return tailToolResultNotice(category, name, payload, prefix)
 }
 
 func boundedExcerpt(prefix, payload string, head bool) string {
@@ -349,10 +348,11 @@ func boundedExcerpt(prefix, payload string, head bool) string {
 	return prefix + payload
 }
 
-func tailToolResultNotice(category, payload, prefix string) string {
-	if category == "background_jobs" {
+func tailToolResultNotice(category, name, payload, prefix string) string {
+	if category == "shell" && name == "shell_completion" {
 		// Preserve status/exit code ahead of the log tail, even with a huge command.
-		if header, _, ok := strings.Cut(payload, "--- Output ---\n"); ok {
+		marker := "--- Untrusted command output ---\n"
+		if header, _, ok := strings.Cut(payload, marker); ok {
 			for line := range strings.SplitSeq(header, "\n") {
 				prefix += chat.TruncateUTF8Bytes(line, 512) + "\n"
 				if len(prefix) > maxToolCallResultBytes/4 {

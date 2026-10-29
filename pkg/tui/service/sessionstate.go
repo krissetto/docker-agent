@@ -240,6 +240,13 @@ func (s *SessionState) AgentUsage(agentName string) (runtime.Usage, bool) {
 	return usage, ok
 }
 
+// SessionCost returns the latest cumulative cost recorded for one session, and
+// whether that session has any recorded cost.
+func (s *SessionState) SessionCost(sessionID string) (float64, bool) {
+	cost, ok := s.sessionCost[sessionID]
+	return cost, ok
+}
+
 // AgentCost returns the cumulative cost currently attributed to the named
 // agent — its restored historical total (see SeedRestoredCosts) plus every
 // live session attributed to it — and whether any cost is attributable to

@@ -26,6 +26,22 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 	if row, ok := m.placementRowAt(x, y); ok && row.action == ClickWorkingDir {
 		key = "directory"
 	}
+	if control, ok := m.backgroundControlAt(x, y); ok && control == "toggle" {
+		key = "background:header"
+	}
+	if m.mode == ModeVertical && m.backgroundStart >= 0 {
+		if m.placement != nil {
+			if row, ok := m.placementRowAt(x, y); ok && strings.HasPrefix(row.id, "background:process:") {
+				key = "background:" + strings.TrimPrefix(row.id, "background:process:")
+			}
+		} else {
+			contentY := y + m.scrollview.ScrollOffset()
+			index := contentY - m.backgroundStart - 1
+			if index >= 0 && index < len(m.backgroundRowIDs) {
+				key = "background:" + m.backgroundRowIDs[index]
+			}
+		}
+	}
 	if control, ok := m.treeControlAt(x, y); ok {
 		key = "tree-summary"
 		if control.todos {
@@ -62,11 +78,20 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		key = "node:" + payload
 	case ClickSubagentParent:
 		key = "parent:" + payload
-	case ClickGit:
-		line, err := strconv.Atoi(payload)
-		if err == nil && m.git.interactive(line) {
-			key = "git:" + m.git.rowID(line)
+	case ClickBackgroundProcess:
+		if row, ok := m.placementRowAt(x, y); ok && strings.HasPrefix(row.id, "background:process:") {
+			key = strings.TrimPrefix(row.id, "background:process:")
+		} else if m.backgroundStart >= 0 {
+			index := y + m.scrollview.ScrollOffset() - m.backgroundStart - 1
+			if index >= 0 && index < len(m.backgroundRowIDs) {
+				key = m.backgroundRowIDs[index]
+			}
 		}
+		if key != "" {
+			key = "background:" + key
+		}
+	case ClickGit:
+		key = ""
 	default:
 		region = ClickNone
 	}
@@ -80,14 +105,27 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 	} else if region == ClickGit {
 		gitLine, _ = strconv.Atoi(payload)
 	}
+	if gitLine >= 0 {
+		key = "git:" + m.git.rowID(gitLine)
+	}
 	if m.git.setHovered(gitLine) {
+		if previous := m.git.previousHovered; previous >= 0 {
+			m.gitHoverLines = append(m.gitHoverLines, previous)
+		}
+		if gitLine >= 0 {
+			m.gitHoverLines = append(m.gitHoverLines, gitLine)
+		}
 		m.invalidateHover()
 	}
 	nameKey := ""
-	if identity, ok := m.subagentIdentityColumnsAt(x, y); ok {
-		col := x - m.layoutCfg.PaddingLeft
-		if col >= identity.nameStart && col < identity.nameEnd && strings.HasPrefix(key, "node:") {
-			nameKey = "node-name:" + strings.TrimPrefix(key, "node:")
+	// A disclosure control takes precedence over the name, as in HandleClickType; a
+	// narrow hovered row can move the control into the resting name span.
+	if _, onControl := m.treeControlAt(x, y); !onControl {
+		if identity, ok := m.subagentIdentityColumnsAt(x, y); ok {
+			col := x - m.layoutCfg.PaddingLeft
+			if col >= identity.nameStart && col < identity.nameEnd && strings.HasPrefix(key, "node:") {
+				nameKey = "node-name:" + strings.TrimPrefix(key, "node:")
+			}
 		}
 	}
 	return m.setHoverTargets(key, nameKey)
@@ -132,6 +170,14 @@ func (m *model) addBreathingRows(lines []string, boundaries []int) []string {
 			return end
 		}
 		return shifted[end-1] + 1
+	}
+	if m.backgroundStart >= 0 {
+		m.backgroundStart = shifted[m.backgroundStart]
+		m.backgroundEnd = shiftEnd(m.backgroundEnd)
+		m.backgroundHeader = shifted[m.backgroundHeader]
+		if m.backgroundMoreLine >= 0 {
+			m.backgroundMoreLine = shifted[m.backgroundMoreLine]
+		}
 	}
 	m.usageSectionEnd = shiftEnd(m.usageSectionEnd)
 	if m.usageReadingLine >= 0 {

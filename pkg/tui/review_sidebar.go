@@ -1,19 +1,43 @@
 package tui
 
 import (
+	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/gitreview"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	view "github.com/docker/docker-agent/pkg/tui/components/review"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 )
 
+type gitDiscoveryContinuation interface {
+	ContinueDiscovery(ctx context.Context) (gitreview.Snapshot, error)
+	CanContinueDiscovery() bool
+}
+
+type gitDiscoveryContinuationRequest struct{ Owner string }
+
+type gitSidebarWorktreePosition struct {
+	repo, worktree int
+}
+
+type gitSidebarPrewarm struct {
+	generation      uint64
+	ownerGeneration uint64
+	repo            int
+	worktree        int
+	complete        bool
+	inflight        map[string]gitSidebarWorktreePosition
+}
+
 type gitSidebarPage interface {
 	SetGitChanges(changes sidebar.GitChanges) tea.Cmd
+	SetGitMode(mode view.Mode) tea.Cmd
 	GitWatchState() sidebar.GitWatchMsg
 	RevealGit() tea.Cmd
 	GitFocused() bool
@@ -27,11 +51,14 @@ func (m *appModel) gitPage(anchor string) (gitSidebarPage, bool) {
 	return page, ok
 }
 
-// markGitSidebar offers the Git section on the focused page once its session
-// has a workspace folder. Nothing is scanned until the section is expanded.
+// maxSidebarMetadataConcurrent limits concurrent status/numstat metadata jobs.
+const maxSidebarMetadataConcurrent = 4
+
+// markGitSidebar offers Git on the focused page and warms its bounded metadata
+// while the sidebar is visible. It never opens a review surface or loads diffs.
 func (m *appModel) markGitSidebar() tea.Cmd {
 	focus := m.paneFocus()
-	if focus == "" || m.gitSidebarMarked[focus] || m.supervisor == nil {
+	if focus == "" || m.supervisor == nil {
 		return nil
 	}
 	runner := m.supervisor.GetRunner(focus)
@@ -42,11 +69,124 @@ func (m *appModel) markGitSidebar() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	if m.gitSidebarMarked == nil {
-		m.gitSidebarMarked = map[string]bool{}
+	var cmds []tea.Cmd
+	if !m.gitSidebarMarked[focus] {
+		if m.gitSidebarMarked == nil {
+			m.gitSidebarMarked = map[string]bool{}
+		}
+		m.gitSidebarMarked[focus] = true
+		cmds = append(cmds, page.SetGitChanges(sidebar.GitChanges{Owner: focus, Available: true}))
 	}
-	m.gitSidebarMarked[focus] = true
-	return page.SetGitChanges(sidebar.GitChanges{Owner: focus, Available: true})
+	if m.hideSidebar || m.leanMode {
+		return tea.Batch(cmds...)
+	}
+	// Do not prewarm by taking ownership away from a visible Files review or
+	// diff inspector. Once that surface closes, syncGitReview calls us again.
+	if active := m.activeReview(); active != nil &&
+		(active.anchor != focus || active.mode != view.ModeChanges || active.inspecting) {
+		return tea.Batch(cmds...)
+	}
+	ws, ensure := m.ensureGitData(nil)
+	cmds = append(cmds, ensure)
+	if ws != nil {
+		if _, loading := m.gitReviewPending["provider"]; loading {
+			cmds = append(cmds, m.pushGitSidebar(ws))
+		}
+		cmds = append(cmds, m.prewarmGitSidebarMetadata(ws))
+	}
+	return tea.Batch(cmds...)
+}
+
+// prewarmGitSidebarMetadata batches status/numstat metadata until every
+// discovered worktree is resolved. Provider.LoadWorktree never hydrates diffs
+// or history; work remains lazy while hidden or another surface owns the page.
+func (m *appModel) prewarmGitSidebarMetadata(ws *gitReviewWorkspace) tea.Cmd {
+	if ws == nil || ws.provider == nil || ws.snapshot == nil || ws.anchor != m.paneFocus() ||
+		m.hideSidebar || m.leanMode || ws.inspecting || ws.mode != view.ModeChanges ||
+		ws.sidebarMode != view.ModeChanges || ws.snapshot.Browse {
+		return nil
+	}
+	if active := m.activeReview(); active != ws {
+		return nil
+	}
+	state := &ws.prewarm
+	if state.generation != ws.snapshot.Generation || state.ownerGeneration != m.gitReviewGeneration {
+		*state = gitSidebarPrewarm{generation: ws.snapshot.Generation, ownerGeneration: m.gitReviewGeneration,
+			inflight: make(map[string]gitSidebarWorktreePosition)}
+	}
+	if state.complete {
+		return nil
+	}
+	pending := make(map[string]bool)
+	for key := range m.gitReviewPending {
+		if id, ok := strings.CutPrefix(key, "worktree:"); ok {
+			pending[id] = true
+		}
+	}
+	// If an in-flight request disappears without updating the snapshot, resume
+	// at its saved position so cancellation cannot strand later metadata.
+	resumeRepo, resumeWorktree := len(ws.snapshot.Repositories), 0
+	for id, position := range state.inflight {
+		if pending[id] {
+			continue
+		}
+		if position.repo < len(ws.snapshot.Repositories) && position.worktree < len(ws.snapshot.Repositories[position.repo].Worktrees) &&
+			ws.snapshot.Repositories[position.repo].Worktrees[position.worktree].State == view.StateUnscanned {
+			if position.repo < resumeRepo || position.repo == resumeRepo && position.worktree < resumeWorktree {
+				resumeRepo, resumeWorktree = position.repo, position.worktree
+			}
+		}
+		delete(state.inflight, id)
+	}
+	if resumeRepo < len(ws.snapshot.Repositories) {
+		state.repo, state.worktree = resumeRepo, resumeWorktree
+	}
+	slots := maxSidebarMetadataConcurrent - len(pending)
+	if slots <= 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, slots)
+	for state.repo < len(ws.snapshot.Repositories) {
+		repoIndex, worktreeIndex := state.repo, state.worktree
+		repo := ws.snapshot.Repositories[repoIndex]
+		if worktreeIndex >= len(repo.Worktrees) {
+			state.repo++
+			state.worktree = 0
+			continue
+		}
+		wt := repo.Worktrees[worktreeIndex]
+		state.worktree++
+		position := gitSidebarWorktreePosition{repo: repoIndex, worktree: worktreeIndex}
+		if pending[wt.ID] {
+			state.inflight[wt.ID] = position
+			continue
+		}
+		if wt.State != view.StateUnscanned {
+			continue
+		}
+		cmd := m.submitGitReviewRequest(view.LoadWorktreeRequestMsg{Owner: ws.anchor, WorktreeID: wt.ID})
+		if cmd == nil {
+			// Submission can be unavailable during a scope handoff. Retry this
+			// exact position on the next safe update.
+			state.repo, state.worktree = repoIndex, worktreeIndex
+			if len(cmds) > 0 {
+				return tea.Batch(append(cmds, m.pushGitSidebar(ws))...)
+			}
+			return nil
+		}
+		cmds = append(cmds, cmd)
+		pending[wt.ID] = true
+		state.inflight[wt.ID] = position
+		slots--
+		if slots == 0 {
+			return tea.Batch(append(cmds, m.pushGitSidebar(ws))...)
+		}
+	}
+	state.complete = len(state.inflight) == 0
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(append(cmds, m.pushGitSidebar(ws))...)
 }
 
 // pushGitSidebar shows the workspace's Git data in its page's sidebar.
@@ -55,8 +195,21 @@ func (m *appModel) pushGitSidebar(ws *gitReviewWorkspace) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	c := sidebar.GitChanges{Owner: ws.anchor, Available: true, Snapshot: ws.snapshot}
+	// Root-only data is shown only in Files; Changes waits for its explicit scan.
+	snapshot := ws.snapshot
+	if snapshot != nil && snapshot.Browse && ws.sidebarMode != view.ModeFiles {
+		snapshot = nil
+	}
+	c := sidebar.GitChanges{Owner: ws.anchor, Available: true, Snapshot: snapshot, Mode: ws.sidebarMode, DirectoryGeneration: ws.directoryGeneration}
+	if capability, ok := ws.provider.(gitDiscoveryContinuation); ok && ws.snapshot != nil && ws.snapshot.Scope.LimitReason != "" {
+		c.DiscoveryContinuationSupported = true
+		c.ContinueDiscovery = capability.CanContinueDiscovery()
+	}
 	_, c.Loading = m.gitReviewPending["provider"]
+	if _, resolving := m.gitReviewPending["identity"]; resolving {
+		c.Loading = true
+	}
+	_, c.ContinuingDiscovery = m.gitReviewPending["snapshot.continue"]
 	if _, refreshing := m.gitReviewPending["snapshot"]; refreshing {
 		c.Loading = true
 	}
@@ -68,8 +221,22 @@ func (m *appModel) pushGitSidebar(ws *gitReviewWorkspace) tea.Cmd {
 			c.Scanning[id] = true
 		}
 	}
+	for _, directory := range ws.directories {
+		c.Directories = append(c.Directories, directory)
+	}
+	slices.SortFunc(c.Directories, func(a, b view.Directory) int {
+		if a.WorktreeID != b.WorktreeID {
+			return strings.Compare(a.WorktreeID, b.WorktreeID)
+		}
+		return strings.Compare(a.Path, b.Path)
+	})
+	if model := ws.models[view.ModeFiles]; model != nil {
+		if key, ok := model.OpenKey(); ok {
+			c.Open = key
+		}
+	}
 	if ws.inspecting {
-		if model := ws.models[view.ModeChanges]; model != nil {
+		if model := ws.models[ws.mode]; model != nil {
 			c.Open, _ = model.OpenKey()
 		}
 	}
@@ -79,7 +246,8 @@ func (m *appModel) pushGitSidebar(ws *gitReviewWorkspace) tea.Cmd {
 // ensureGitData makes the focused session's Git data live without showing any
 // surface. It is scoped to the focused pane's own session and folder (not the
 // pane workspace's root), so the sidebar, inspector and send all agree.
-func (m *appModel) ensureGitData() (*gitReviewWorkspace, tea.Cmd) {
+// intent, when set, is the sidebar mode the request serves; nil keeps the current one.
+func (m *appModel) ensureGitData(intent *view.Mode) (*gitReviewWorkspace, tea.Cmd) {
 	anchor := m.paneFocus()
 	if anchor == "" || m.supervisor == nil {
 		return nil, nil
@@ -100,6 +268,7 @@ func (m *appModel) ensureGitData() (*gitReviewWorkspace, tea.Cmd) {
 	}
 	route, _ := m.supervisor.RouteGeneration(anchor)
 	if ws.sessionID != sess.ID || filepath.Clean(ws.workingDir) != filepath.Clean(sess.WorkingDir) || ws.route != route {
+		m.detachGitReviewScope(ws)
 		draft, preview, sent, splitPref := ws.draft, ws.preview, ws.sent, ws.splitPref
 		*ws = *newGitReviewWorkspace(anchor)
 		ws.draft, ws.preview, ws.sent, ws.splitPref = draft, preview, sent, splitPref
@@ -114,10 +283,22 @@ func (m *appModel) ensureGitData() (*gitReviewWorkspace, tea.Cmd) {
 	if !ws.open {
 		ws.open, ws.mode = true, view.ModeChanges
 	}
-	if ws.provider == nil {
-		if _, loading := m.gitReviewPending["provider"]; !loading {
+	ws.scopePane = true
+	if intent != nil {
+		ws.sidebarMode = *intent
+	}
+	if ws.provider == nil && ws.snapshot == nil {
+		_, loading := m.gitReviewPending["provider"]
+		_, resolving := m.gitReviewPending["identity"]
+		loading = loading || resolving
+		// Files never waits behind a full Changes bootstrap; it restarts as a root-only browse.
+		restartAsBrowse := loading && !ws.loadBrowse && intent != nil && *intent == view.ModeFiles
+		if !loading || restartAsBrowse {
 			cmds = append(cmds, m.loadGitReviewProvider(anchor, runner.App))
 		}
+	}
+	if policyCmd, changed := m.revalidateGitReviewScope(ws, runner.App); changed {
+		cmds = append(cmds, policyCmd)
 	}
 	return ws, tea.Batch(cmds...)
 }
@@ -126,7 +307,13 @@ func (m *appModel) handleGitSidebarRequest(msg sidebar.GitRequestMsg) tea.Cmd {
 	if msg.Owner != m.paneFocus() {
 		return nil // a late request from a page that is no longer focused
 	}
-	ws, cmd := m.ensureGitData()
+	if msg.Action == sidebar.GitLoad || msg.Action == sidebar.GitRefresh {
+		if ws := m.gitReviews[msg.Owner]; ws != nil && ws.provider == nil && ws.snapshot != nil {
+			// A user retry may recover after provider construction/discovery failed.
+			ws.snapshot = nil
+		}
+	}
+	ws, cmd := m.ensureGitData(gitRequestIntent(msg.Action))
 	if ws == nil {
 		return notification.InfoCmd("This session has no workspace folder to review")
 	}
@@ -138,16 +325,120 @@ func (m *appModel) handleGitSidebarRequest(msg sidebar.GitRequestMsg) tea.Cmd {
 		}
 	case sidebar.GitRefresh:
 		if ws.provider != nil {
+			m.invalidateGitDirectories(ws)
 			cmds = append(cmds, m.submitGitReviewRequest(view.RefreshRequestMsg{Owner: ws.anchor}))
 		}
 	case sidebar.GitLoadWorktree:
 		cmds = append(cmds, m.submitGitReviewRequest(view.LoadWorktreeRequestMsg{Owner: ws.anchor, WorktreeID: msg.WorktreeID}))
+	case sidebar.GitBrowse:
+		ws.sidebarMode = view.ModeFiles
+		if page, ok := m.gitPage(ws.anchor); ok {
+			cmds = append(cmds, page.SetGitMode(view.ModeFiles))
+		}
+		cmds = append(cmds, m.filesRootRequest(ws))
+	case sidebar.GitShowChanges:
+		ws.sidebarMode = view.ModeChanges
+		if page, ok := m.gitPage(ws.anchor); ok {
+			cmds = append(cmds, page.SetGitMode(view.ModeChanges))
+			if !page.GitWatchState().Open {
+				cmds = append(cmds, page.RevealGit())
+			}
+		}
+		cmds = append(cmds, m.ensureChangesScan(ws))
+	case sidebar.GitLoadDirectory:
+		cmds = append(cmds, m.submitGitReviewRequest(view.LoadDirectoryRequestMsg{Owner: ws.anchor, WorktreeID: msg.WorktreeID, Path: msg.Path}))
+	case sidebar.GitOpenFile:
+		ws.scopePane = true
+		ws.sidebarMode = view.ModeFiles
+		if page, ok := m.gitPage(ws.anchor); ok {
+			cmds = append(cmds, page.SetGitMode(view.ModeFiles))
+		}
+		key := view.DocumentKey{Mode: view.ModeFiles, WorktreeID: msg.WorktreeID, Path: msg.Path}
+		cmds = append(cmds, m.openGitFilesInspector(ws, key))
+	case sidebar.GitContinueDiscovery:
+		cmds = append(cmds, m.submitGitReviewRequest(gitDiscoveryContinuationRequest{Owner: ws.anchor}))
 	case sidebar.GitOpen:
+		ws.scopePane = true
+		ws.sidebarMode = view.ModeChanges
+		if page, ok := m.gitPage(ws.anchor); ok {
+			cmds = append(cmds, page.SetGitMode(view.ModeChanges))
+		}
 		cmds = append(cmds, m.openGitInspector(ws, view.DocumentKey{Mode: view.ModeChanges, WorktreeID: msg.WorktreeID, Path: msg.Path, Group: msg.Group}))
+		cmds = append(cmds, m.ensureChangesScan(ws))
 	}
 	cmds = append(cmds, m.pushGitSidebar(ws))
 	m.viewCacheValid = false
 	return tea.Batch(cmds...)
+}
+
+// gitRequestIntent is the sidebar mode a request is for; nil leaves it unchanged.
+func gitRequestIntent(action sidebar.GitAction) *view.Mode {
+	switch action {
+	case sidebar.GitBrowse, sidebar.GitLoadDirectory, sidebar.GitOpenFile:
+		mode := view.ModeFiles
+		return &mode
+	case sidebar.GitShowChanges, sidebar.GitOpen:
+		mode := view.ModeChanges
+		return &mode
+	}
+	return nil
+}
+
+// filesRootRequest makes Files read the root, superseding a full Git scan that is
+// still running. A root read already in flight, or data already loaded, is reused.
+func (m *appModel) filesRootRequest(ws *gitReviewWorkspace) tea.Cmd {
+	if ws == nil || ws.provider == nil {
+		return nil
+	}
+	m.setGitReviewLease(ws, false)
+	if req, pending := m.gitReviewPending["snapshot"]; pending {
+		if ws.snapshotBrowse {
+			return nil
+		}
+		req.cancel()
+		delete(m.gitReviewPending, "snapshot")
+	} else if ws.snapshot != nil {
+		return nil
+	}
+	return m.submitGitReviewRequest(view.RefreshRequestMsg{Owner: ws.anchor})
+}
+
+// ensureChangesScan turns a root-only Files snapshot into an explicit Git scan
+// once Changes is selected, so root-only data is never shown as complete.
+func (m *appModel) ensureChangesScan(ws *gitReviewWorkspace) tea.Cmd {
+	if ws == nil || ws.provider == nil || ws.snapshot == nil || !ws.snapshot.Browse || ws.sidebarMode != view.ModeChanges {
+		return nil
+	}
+	return m.submitGitReviewRequest(view.RefreshRequestMsg{Owner: ws.anchor})
+}
+
+func (m *appModel) openGitFilesInspector(ws *gitReviewWorkspace, key view.DocumentKey) tea.Cmd {
+	if ws == nil {
+		return nil
+	}
+	if ws.mode != view.ModeFiles {
+		if ws.inspecting {
+			m.hideGitInspector(ws)
+		}
+		ws.mode = view.ModeFiles
+	}
+	model := ws.current()
+	if ws.snapshot != nil {
+		model.SetSnapshot(*ws.snapshot)
+	}
+	model.SetDraft(ws.draftView())
+	model.SetInspector(true)
+	ws.inspecting = true
+	ws.scopePane = true
+	ws.sidebarMode = view.ModeFiles
+	_ = m.chatPage.SetSize(m.width, m.contentHeight)
+	if page, ok := m.gitPage(ws.anchor); ok {
+		page.SetContentOverlay(model)
+	}
+	model.Focus()
+	m.focusReview()
+	m.viewCacheValid = false
+	return model.OpenDocument(key)
 }
 
 // openGitInspector shows a diff over the transcript; the sidebar stays.
@@ -168,6 +459,8 @@ func (m *appModel) openGitInspector(ws *gitReviewWorkspace, key view.DocumentKey
 		}
 	}
 	ws.inspecting = true
+	ws.scopePane = true
+	_ = m.chatPage.SetSize(m.width, m.contentHeight)
 	model := ws.current()
 	if ws.snapshot != nil {
 		model.SetSnapshot(*ws.snapshot)
@@ -186,12 +479,14 @@ func (m *appModel) hideGitInspector(ws *gitReviewWorkspace) tea.Cmd {
 		return nil
 	}
 	ws.inspecting = false
-	if model := ws.models[view.ModeChanges]; model != nil {
+	if model := ws.models[ws.mode]; model != nil {
 		model.Blur()
+		model.SetInspector(ws.mode == view.ModeChanges)
 	}
 	if page, ok := m.gitPage(ws.anchor); ok {
 		page.SetContentOverlay(nil)
 	}
+	_ = m.chatPage.SetSize(m.width, m.contentHeight)
 	m.viewCacheValid = false
 	return m.pushGitSidebar(ws)
 }
@@ -278,7 +573,7 @@ func (m *appModel) focusAfterContent() tea.Cmd {
 		return nil
 	}
 	m.focusedPanel = PanelEditor
-	return m.editor.Focus()
+	return m.focusReviewComposer()
 }
 
 // previewCurrentAgent captures the focused session's current agent as the
@@ -294,7 +589,7 @@ func (m *appModel) previewCurrentAgent(ws *gitReviewWorkspace, revision uint64) 
 		label += " › " + string(attached.NodeID)
 	}
 	route, _ := m.supervisor.RouteGeneration(focus)
-	choice := &gitReviewTargetChoice{owner: ws.anchor, revision: revision, options: map[string]gitReviewCandidate{
+	choice := &gitReviewTargetChoice{owner: ws.anchor, revision: revision, activeOnly: true, options: map[string]gitReviewCandidate{
 		focus: {label: label, sessionID: focus, app: runner.App, route: route},
 	}}
 	return m.applyGitReviewTarget(choice, focus)

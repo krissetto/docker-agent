@@ -89,7 +89,7 @@ func testOversizedReplay(t *testing.T, reasoning, expanded bool) {
 	a, _ := newSessionTestApp(t, sess, nil, nil)
 	state := service.NewSessionState(sess)
 	state.SetExpandThinking(expanded)
-	p := New(animation.NewRuntime(), t.Context(), a, state).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, state, WithCompactWorkLog(false)).(*chatPage)
 	p.SetSize(120, 40)
 	EnableAsyncReplay(p)
 	m := &replayProgram{page: p, gate: make(chan struct{}), started: make(chan struct{})}

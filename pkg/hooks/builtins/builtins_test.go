@@ -874,18 +874,16 @@ func TestTransformPipelineRedactsBeforeSpillingLargeOutput(t *testing.T) {
 	}
 }
 
-func TestLimitLargeToolResultsBackgroundStatusAndFullLog(t *testing.T) {
+func TestLimitLargeToolResultsShellCompletionStatusAndFullOutput(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
-	payload := "Job ID: job_1\nCommand: " + strings.Repeat("c", 100_000) + "\nStatus: failed\nExit Code: 1\n\n--- Output ---\n" + strings.Repeat("x", 10*1024*1024) + "FINAL DIAGNOSTIC"
+	payload := "Shell command proc_1 with status failed (exit code 1).\nCommand: " + strings.Repeat("c", 100_000) + "\n\n--- Untrusted command output ---\n" + strings.Repeat("x", 10*1024*1024) + "FINAL DIAGNOSTIC"
 	fn := lookup(t, builtins.LimitLargeToolResults)
-	out, err := fn(t.Context(), &hooks.Input{HookEventName: hooks.EventToolResponseTransform, ToolCategory: "background_jobs", ToolName: "wait_background_job", ToolResponse: payload}, nil)
+	out, err := fn(t.Context(), &hooks.Input{HookEventName: hooks.EventToolResponseTransform, ToolCategory: "shell", ToolName: "shell_completion", ToolResponse: payload}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	got := *out.HookSpecificOutput.UpdatedToolResponse
 	assert.LessOrEqual(t, len(got), 50*1024)
-	assert.Contains(t, got, "Job ID: job_1")
-	assert.Contains(t, got, "Status: failed")
-	assert.Contains(t, got, "Exit Code: 1")
+	assert.Contains(t, got, "Shell command proc_1 with status failed (exit code 1)")
 	assert.Contains(t, got, "FINAL DIAGNOSTIC")
 	stored, err := os.ReadFile(extractLargeResultPath(t, got))
 	require.NoError(t, err)

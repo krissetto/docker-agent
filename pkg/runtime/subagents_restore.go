@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
@@ -34,6 +35,7 @@ func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.D
 	normalize = func(nodes []subagent.NodeSnapshot, ancestorStopped bool) {
 		for i := range nodes {
 			state := nodes[i].Node.State
+			nodes[i].Node.BackgroundProcesses = 0
 			inheritedStop := ancestorStopped
 			// Canonical stop is subtree-atomic; a later manual revival is node-local.
 			if stored, ok := canonical[nodes[i].Node.ID]; ok {
@@ -189,13 +191,13 @@ func (m *subagentManager) preflightRestoreForTeam(ctx context.Context, rootSess 
 
 			grant := parentAgent
 			if childSess != nil {
-				if provenanceID := childSess.AttributesSnapshot()[SessionParentAgentIDAttribute]; provenanceID != "" {
-					grant, _, _ = tm.ResolveIdentity(provenanceID)
-				} else if provenance := childSess.AttributesSnapshot()[SessionParentAgentAttribute]; provenance != "" {
-					grant, _, _ = tm.ResolveLegacyName(provenance)
-				} else if parentSess != nil {
-					grant, _, _ = resolveActiveAgentForTeam(tm, parentSess)
-				}
+				grant, _ = recordedGrantor(tm, childSess, func() (*agent.Agent, bool) {
+					if parentSess == nil {
+						return parentAgent, true
+					}
+					a, _, ok := resolveActiveAgentForTeam(tm, parentSess)
+					return a, ok
+				})
 			}
 
 			state := node.State
@@ -218,7 +220,7 @@ func (m *subagentManager) preflightRestoreForTeam(ctx context.Context, rootSess 
 					childSess.AgentName, childSess.AgentID = activeName, configuredAgentID(tm, activeName)
 				}
 			}
-			allowed := creationOK && m.r.allowedIdentityForTeam(tm, grant, creationAgent)
+			allowed := creationOK && (m.r.allowedIdentityForTeam(tm, grant, creationAgent) || grantedSyncSubAgent(grant, creationAgent))
 			invalid := ancestorStopped || childSess == nil || !creationOK || !activeOK || activeAgent == nil || !allowed
 			if invalid {
 				state = subagent.NodeStopped
@@ -433,4 +435,23 @@ func resolveActiveAgentForTeam(tm *team.Team, sess *session.Session) (*agent.Age
 		name, _ = sess.Attribute(SessionAgentAttribute)
 	}
 	return tm.ResolveLegacyName(name)
+}
+
+// transfer_task authority: sub_agents, matched by name.
+func grantedSyncSubAgent(grantor, child *agent.Agent) bool {
+	return grantor != nil && child != nil && slices.ContainsFunc(grantor.SubAgents(), func(a *agent.Agent) bool { return a != nil && a.Name() == child.Name() })
+}
+
+// Legacy rows lack grantor provenance; recorded identities must never fall back.
+func recordedGrantor(tm *team.Team, child *session.Session, activeParent func() (*agent.Agent, bool)) (*agent.Agent, bool) {
+	attrs := child.AttributesSnapshot()
+	name, id := attrs[SessionParentAgentAttribute], attrs[SessionParentAgentIDAttribute]
+	if name == "" && id == "" {
+		return activeParent()
+	}
+	grantor, _, ok := resolveAgentIdentity(tm, id, name)
+	if !ok || grantor == nil {
+		return nil, false
+	}
+	return grantor, true
 }

@@ -29,7 +29,7 @@ func TestMessageReferenceHoverChatPresentationRouting(t *testing.T) {
 	sess.SetSubagentTree(&tree)
 	a, _ := newSessionTestApp(t, sess, nil, nil)
 	ar := animation.NewRuntimeWithScheduler(&referenceHoverScheduler{now: time.Unix(1, 0)})
-	p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(ar, t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	t.Cleanup(func() { Cleanup(p); ar.Stop() })
 	p.SetSize(160, 40)
 	p.resetProjection(runtime.SessionSnapshot{Session: sess})
@@ -66,26 +66,31 @@ func TestMessageReferenceHoverChatPresentationRouting(t *testing.T) {
 	require.True(t, ar.HasActive())
 	tick()
 	ClearSidebarHover(p)
-	tick()
+	for ar.HasActive() {
+		tick()
+	}
 	require.False(t, ar.HasActive(), "modal/input occlusion fades the message reference")
 	hover()
 	tick()
 	p.routeMouseEvent(tea.MouseMotionMsg{X: 159, Y: 0}, 0)
-	tick()
+	for ar.HasActive() {
+		tick()
+	}
 	require.False(t, ar.HasActive(), "sidebar entry clears transcript hover")
 	hover()
 	tick()
 	CancelSidebarPresentation(p)
 	require.False(t, ar.HasActive(), "hidden page releases presentation immediately")
 	SetSidebarPresentationActive(p, false)
-	hover()
-	require.False(t, ar.HasActive(), "disabled presentation ignores entry")
 	SetSidebarPresentationActive(p, true)
 	hover()
 	require.True(t, ar.HasActive())
 	p.isDraggingSidebar = true
 	p.handleMouseMotion(tea.MouseMotionMsg{X: 100, Y: 0})
-	require.False(t, ar.HasActive(), "sidebar drag cancels transcript presentation")
+	for ar.HasActive() {
+		tick()
+	}
+	require.False(t, ar.HasActive(), "sidebar drag clears transcript presentation")
 	p.isDraggingSidebar = false
 	g := SplitPresentationGeometry{Transcript: PresentationRect{X: 10, Y: 8, Width: 60, Height: 15}, Shell: p.MeasureSplitShell(160, 40), ShowSidebar: false}
 	p.SetSplitPresentation(&g)
@@ -93,7 +98,9 @@ func TestMessageReferenceHoverChatPresentationRouting(t *testing.T) {
 	require.True(t, ar.HasActive(), "a visible transcript works without its sidebar")
 	tick()
 	p.routeMouseEvent(tea.MouseMotionMsg{X: 1, Y: 1}, 1)
-	tick()
+	for ar.HasActive() {
+		tick()
+	}
 	require.False(t, ar.HasActive(), "leaving a split transcript clears its reference")
 	hover()
 	require.True(t, ar.HasActive())

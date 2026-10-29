@@ -37,6 +37,7 @@ func (s *Session) RemovePendingUserMessageByTurnID(turnID string) bool {
 			}
 		}
 		s.Messages = slices.Delete(s.Messages, position, position+1)
+		s.historyRevision++
 		return true
 	}
 	return false

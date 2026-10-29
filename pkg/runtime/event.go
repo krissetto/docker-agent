@@ -47,6 +47,17 @@ const (
 	TurnFailed    TurnOutcome = "failed"
 )
 
+// BackgroundProcessesEvent replaces the authoritative background-process list for one session.
+type BackgroundProcessesEvent struct {
+	AgentContext
+
+	Type      string                    `json:"type"`
+	SessionID string                    `json:"session_id"`
+	Processes []tools.BackgroundProcess `json:"processes"`
+}
+
+func (e *BackgroundProcessesEvent) GetSessionID() string { return e.SessionID }
+
 // TurnSettledEvent is published only after the accepted turn's persistence and
 // child settlement succeed. StreamStopped, withdrawals and snapshots are not
 // settlement signals. Identity is (SessionID, TurnID), not a stream generation.
@@ -87,6 +98,9 @@ type PendingUserMessageAcceptedEvent struct {
 	SenderName    string                `json:"sender_name,omitempty"`
 	ReportOutcome session.ReportOutcome `json:"report_outcome,omitempty"`
 	InputMode     string                `json:"input_mode,omitempty"`
+	// Immediate is true only when durable promotion completed before publication;
+	// older senders and snapshots default to false (pending).
+	Immediate bool `json:"immediate,omitempty"`
 
 	Type            string             `json:"type"`
 	SessionID       string             `json:"session_id"`
@@ -750,6 +764,7 @@ type DormancyChangedEvent struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
 	Dormant   bool   `json:"dormant"`
+	Stopped   bool   `json:"stopped,omitempty"`
 }
 
 func (e *DormancyChangedEvent) GetSessionID() string { return e.SessionID }
@@ -1403,6 +1418,11 @@ func (e *MessageAddedEvent) CommittedToolCallIDs() []string {
 		if part.Type == chat.AssistantPartToolCall && part.ToolCallID != "" && !slices.Contains(ids, part.ToolCallID) {
 			ids = append(ids, part.ToolCallID)
 		}
+	}
+	// omitempty drops an empty list on the wire; keep nil so a snapshot decoded
+	// from JSON compares equal to the original event.
+	if len(ids) == 0 {
+		return nil
 	}
 	return ids
 }

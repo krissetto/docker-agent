@@ -21,7 +21,11 @@ type ThinkingStatus struct {
 
 // StatusModel is the snapshot of run state shown in the footer.
 type StatusModel struct {
-	Dormant bool
+	Dormant    bool
+	Stopped    bool
+	ReadOnly   bool
+	PauseArmed bool
+	Paused     bool
 	// Connection is a non-healthy observer transport state ("reconnecting",
 	// "disconnected"); empty while connected.
 	Connection string
@@ -75,10 +79,18 @@ func RenderStatus(d StatusModel, width int) []string {
 	}
 
 	switch {
+	case d.ReadOnly:
+		left1 = StMuted().Render("· read-only")
+	case d.Stopped:
+		left1 = StMuted().Render("· stopped")
+	case d.Paused:
+		left1 = StWarning().Render("⏸ paused")
+	case d.PauseArmed:
+		left1 = StWarning().Render("⏸ pausing")
 	case d.Dormant:
-		left1 = StWarning().Render("Restored · paused · /resume")
+		left1 = StMuted().Render("Restored · dormant · message or /resume")
 		if d.Pending > 0 {
-			left1 += StMuted().Render(fmt.Sprintf(" · %d accepted inputs queued", d.Pending))
+			left1 += StWarning().Render(fmt.Sprintf(" · %d inputs queued", d.Pending))
 		}
 	case d.Active:
 		right1 += StMuted().Render(" · active")

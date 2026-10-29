@@ -123,6 +123,34 @@ func (m *lifecycleProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// coldRestoreSessions is the canonical view owner for store-backed sessions:
+// restores go through PrepareSessionView, which reads the persisted snapshot
+// and binds it to a settled handle, as the production owner does.
+type coldRestoreSessions struct {
+	*lifecycleSessions
+
+	store session.Store
+}
+
+func (r *coldRestoreSessions) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	sess, err := r.store.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if sess.ParentID != "" {
+		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	// The canonical registered handle is reused on every restore, as the owner does.
+	r.mu.Lock()
+	handle := r.handles[id]
+	if handle == nil {
+		handle = &lifecycleHandle{id: id}
+		r.handles[id] = handle
+	}
+	r.mu.Unlock()
+	return &preparedViewFixture{handle: handle, info: runtime.PreparedSessionViewInfo{SessionID: id, RootSessionID: id, Session: sess, ActiveAgentName: sess.AgentName, WorkingDir: sess.WorkingDir, Binding: runtime.SessionBinding{AgentName: sess.AttributesSnapshot()[runtime.SessionAgentAttribute]}}}, nil
+}
+
 func TestColdRestoreWorkingDirReplacementRetainsSharedRuntime(t *testing.T) {
 	dir := t.TempDir()
 	paths.SetDataDir(dir)
@@ -131,12 +159,14 @@ func TestColdRestoreWorkingDirReplacementRetainsSharedRuntime(t *testing.T) {
 
 	store := session.NewInMemorySessionStore()
 	persisted := session.New(session.WithID("persisted"), session.WithAgentName("root"), session.WithWorkingDir(t.TempDir()))
+	// The restore resolver requires the canonical agent binding attribute; without it the load fails before any view opens.
+	persisted.SetAttribute(runtime.SessionAgentAttribute, "root")
 	for i := range 30 {
 		persisted.AddMessage(session.UserMessage(string(rune('a' + i%26))))
 	}
 	require.NoError(t, store.AddSession(t.Context(), persisted))
 
-	sessions := newLifecycleSessions()
+	sessions := &coldRestoreSessions{lifecycleSessions: newLifecycleSessions(), store: store}
 	services := storeRuntime{store: store}
 	blank := session.New(session.WithID("blank"), session.WithAgentName("root"), session.WithWorkingDir(dir))
 	initial := app.New(t.Context(), sessions, blank, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
@@ -178,6 +208,7 @@ func TestColdRestoreWorkingDirReplacementRetainsSharedRuntime(t *testing.T) {
 	require.NoError(t, err)
 	restored := sessions.handles[persisted.ID]
 	require.NotNil(t, restored)
+	require.Same(t, restored, restoredApp.SessionHandle(), "restored app must run on the canonical registered handle")
 	obsCtx, cancel := context.WithCancel(t.Context())
 	obs, err := restored.Observe(obsCtx, runtime.ObserveOptions{})
 	require.NoError(t, err)

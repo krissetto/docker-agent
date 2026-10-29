@@ -45,11 +45,11 @@ colors:
   diff_remove_bg: "#3c2a2a"
   
   # UI element colors
-  line_number: "#565f89"
+  line_number: "#888eac"
   separator: "#414868"
   selected: "#33467c"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#565f89"
+  suggestion_ghost: "#8289a8"
   tab_bg: "#1a1b26"
   tab_active_bg: "#1f2335"
   tab_active_fg: "#c0caf5"
@@ -76,6 +76,7 @@ colors:
   focus: "#7aa2f7"
   disabled: "#414868"
   status_adjacent: "#9aa5ce"
+  scrollbar_track: "#353640"
 
   
   # Badge colors
@@ -85,7 +86,7 @@ colors:
 
 chroma:
   # Syntax highlighting colors - Tokyo Night style
-  comment: "#565f89"
+  comment: "#888eac"
   comment_preproc: "#bb9af7"
   keyword: "#bb9af7"
   keyword_reserved: "#f7768e"
@@ -101,7 +102,7 @@ chroma:
   literal_string: "#9ece6a"
   literal_string_escape: "#73daca"
   generic_deleted: "#f7768e"
-  generic_subheading: "#565f89"
+  generic_subheading: "#888eac"
   background: "#1a1b26"
   error_fg: "#f7768e"
   error_bg: "#3d2a2a"

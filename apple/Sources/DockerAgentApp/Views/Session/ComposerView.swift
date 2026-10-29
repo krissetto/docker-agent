@@ -19,6 +19,7 @@ struct ComposerView: View {
     @State private var sending = false
     @State private var error: String?
     @State private var duplicate: (requestID: String, steer: Bool)?
+    @State private var acceptedSends = 0
     @FocusState private var focused: Bool
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -52,43 +53,23 @@ struct ComposerView: View {
                 .padding(.horizontal, Metrics.s)
             }
             HStack(alignment: .bottom, spacing: Metrics.s) {
-                AttachmentMenu(allowedTypes: [.item], addFiles: addFiles, addPhoto: addPhoto)
-                    .padding(.bottom, 7)
+                AttachmentMenu(allowedTypes: [.item], addFiles: addFiles, addPhoto: addPhoto, openPrompts: openPrompts)
                     .disabled(!canSend)
-                if let openPrompts {
-                    Button(action: openPrompts) {
-                        Image(systemName: "sparkles").font(.title3)
-                    }
-                    .buttonStyle(.borderless)
-                    .padding(.bottom, 7)
-                    .disabled(!canSend)
-                    .help("Prompts & Skills")
-                    .accessibilityLabel("Prompts and skills")
-                }
-                TextField(isRunning ? "Queue a message for \(agentName)…" : "Message \(agentName)…", text: $text, axis: .vertical)
+                TextField(isRunning ? "Queue for \(agentName.nonEmpty ?? "the agent")…" : "Message \(agentName.nonEmpty ?? "the agent")…", text: $text, axis: .vertical)
                     .lineLimit(1...8)
                     .textFieldStyle(.plain)
                     .focused($focused)
                     .padding(.vertical, Metrics.s)
+                    .frame(minHeight: Metrics.target)
                     .onSubmit { submit(steer: false) }
                     .disabled(!canSend)
-                if isRunning {
-                    Button {
-                        Task { try? await stop() }
-                    } label: {
-                        Image(systemName: "stop.circle.fill").font(.title2)
-                    }
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut(".", modifiers: .command)
-                    .help("Stop the current turn")
-                    .accessibilityLabel("Stop")
-                }
+                // Stop lives on the team line above, next to the work it stops; this slot is always Send.
                 sendButton
             }
-            .padding(.horizontal, Metrics.m)
-            .padding(.vertical, Metrics.xs)
-            .glassEffect(.regular, in: .rect(cornerRadius: 20, style: .continuous))
+            .padding(.horizontal, Metrics.xs)
+            .glassEffect(.regular, in: .rect(cornerRadius: 22, style: .continuous))
         }
+        .sensoryFeedback(.success, trigger: acceptedSends)
         .dropDestination(for: URL.self) { urls, _ in
             let files = urls.filter(\.isFileURL)
             guard !files.isEmpty, canSend else { return false }
@@ -121,29 +102,41 @@ struct ComposerView: View {
                 Button("Steer") { submit(steer: true) }
                     .keyboardShortcut(.return, modifiers: .option)
                     .disabled(!isRunning)
+                // ⌘. always reaches Stop, even while Send is showing because a message is typed.
+                Button("Stop") { Task { try? await stop() } }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .disabled(!isRunning)
             }
             .hidden()
         }
     }
 
+    /// A plain button, not a menu: the menu's indicator leaked beside the glyph on iPhone.
+    /// Steer stays one press-and-hold (or right-click, or ⌥⏎) away.
     private var sendButton: some View {
-        Menu {
-            Button("Steer Current Turn") { submit(steer: true) }
-                .disabled(!isRunning)
+        Button {
+            submit(steer: false)
         } label: {
             Image(systemName: isRunning ? "text.line.last.and.arrowtriangle.forward" : "arrow.up.circle.fill")
                 .font(.title2)
-        } primaryAction: {
-            submit(steer: false)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: Metrics.target, height: Metrics.target)
+                .contentShape(.rect)
         }
-        .menuStyle(.button)
         .buttonStyle(.borderless)
-        .menuIndicator(.hidden)
         .fixedSize()
         .disabled(!hasContent || !withinLimit || sending || !canSend)
         .keyboardShortcut(.return, modifiers: .command)
+        .contextMenu {
+            Button("Steer current turn", systemImage: "arrow.turn.down.right") { submit(steer: true) }
+                .disabled(!isRunning || !hasContent)
+            if isRunning {
+                Button("Stop current turn", systemImage: "stop.circle") { Task { try? await stop() } }
+            }
+        }
         .help(isRunning ? "Queue after the current turn (hold for Steer)" : "Send")
         .accessibilityLabel(isRunning ? "Queue message" : "Send message")
+        .accessibilityHint(isRunning ? "Press and hold to steer the current turn instead" : "")
     }
 
     private func submit(steer: Bool) {
@@ -167,6 +160,7 @@ struct ComposerView: View {
                 try await action()
                 if text.trimmingCharacters(in: .whitespacesAndNewlines) == content { text = "" }
                 attachments.removeAll { sentIDs.contains($0.id) }
+                acceptedSends += 1
             } catch {
                 self.error = error.localizedDescription
             }

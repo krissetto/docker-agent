@@ -11,11 +11,13 @@ _Execute arbitrary shell commands in the user's environment._
 
 ## Overview
 
-The shell tool lets agents run commands in the user's environment. Each call starts one shell process; commands that finish quickly return normally. If a command is still running after the default two-second foreground window, the same process continues as an owned background job and the tool returns its job ID. Its output is bounded and available through the shell's background-job inspection tools. A command is never rerun to background it.
+The shell tool lets agents run commands in the user's environment. Each call starts one shell process; commands that finish quickly return normally. If a command is still running after the default two-second foreground window, the same process continues as an owned background process and the tool returns. Completion status and bounded output are delivered automatically; a command is never rerun to background it.
 
-Commands have a default 30-second total timeout and require user confirmation unless the safety policy allows them. Longer commands may continue in the background, but the configured shell timeout still applies. For manually managed servers, watchers, or parallel jobs, add the [`background_jobs`](../background-jobs/index.md) toolset.
+Commands have a default 30-second total timeout and require user confirmation unless the safety policy allows them. Longer commands may continue in the background, but the configured shell timeout still applies. Configure `background_after` and `env` directly on the shell toolset.
 
-Automatically retained shell jobs capture up to 10 MiB each, with at most 8 active jobs per session owner and 8 active jobs per shared job manager. Up to 8 shell-job records are retained per manager; the oldest completed record is evicted first. Explicit `background_jobs` jobs are separate. Stopping a shell job or explicitly canceling its originating active turn/session stops the process group; on Unix, children that detach into another session/process group are outside that cleanup boundary. Sudo commands and hosts without the optional safe process-exit observer stay foreground. A completion message is queued to the issuing session when admission is available; a stopped/canceled job does not send one.
+In the full TUI, an adopted process appears in the owning session's separate **Background** sidebar section (not the Subagents tree). The section opens automatically when the session is idle and is collapsed during a stream. The manual collapsed/expanded choice persists across empty process lists and subsequent adoptions for the session. The row is informational; selecting it returns to its original shell tool call when that call can be safely matched in the current transcript. Terminal rows linger briefly, then disappear.
+
+Automatically retained shell processes capture up to 10 MiB each, with at most 8 active processes per session owner and 8 active processes per shared manager. `list_running_processes`, `inspect_running_process`, and `kill_running_process` diagnose or stop only currently running shell processes owned by the caller's session. Completion status and output are sent automatically; completed output is not retained for manual retrieval. Stopping a process or canceling its originating active turn/session stops the process group; on Unix, children that detach into another session/process group are outside that cleanup boundary. Sudo commands and hosts without the optional safe process-exit observer stay foreground.
 
 ### Shell interpreter detection
 
@@ -61,7 +63,7 @@ toolsets:
 
 ### Command classification
 
-Every shell command is classified against an embedded taxonomy before the approval decision — no opt-in required. The same classification applies to the `cmd` of [`run_background_job`](../background-jobs/index.md#command-classification):
+Every shell command is classified against an embedded taxonomy before the approval decision — no opt-in required:
 
 - **Destructive matches** (`rm -rf <path>`, `docker volume rm`, `mkfs`, `dd if=… of=/dev/<disk>`, …) are labelled `destructive` with a `blast_radius` (`low` / `medium` / `high`) and a `category` tag. The TUI confirmation dialog renders the blast radius with a color badge.
 - **Known-safe reads** (`ls`, `cat`, `git status`, `git diff`, `gh pr view`, `go env`, `docker ps`, `docker logs`, `kubectl get`, …) are labelled `safe`.
@@ -104,7 +106,7 @@ Notes and limitations:
 
 ## Available Tools
 
-The shell toolset exposes `shell` and, when hosted by a runtime that supports background work, `list_background_jobs`, `view_background_job`, `wait_background_job`, and `stop_background_job` for automatically retained commands. Automatic shell backgrounding adds only inspector tools; it does not add another `run_background_job` start tool.
+The shell toolset exposes `shell` and, when hosted by a runtime that supports background work, the session-owned `list_running_processes`, `inspect_running_process`, and `kill_running_process` diagnostics. Long-running commands start only through `shell`; completion output arrives automatically.
 
 The shell toolset exposes one command-running tool:
 

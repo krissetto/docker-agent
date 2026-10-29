@@ -249,7 +249,26 @@ func migrateToLatestConfig(c any, raw []byte) (latest.Config, error) {
 	return c.(latest.Config), nil
 }
 
+func rejectRemovedBackgroundJobsToolsets(cfg *latest.Config) error {
+	for name, toolset := range cfg.Toolsets {
+		if toolset.Type == "background_jobs" {
+			return fmt.Errorf("toolsets.%s: toolset type 'background_jobs' was removed; configure shell background_after and env instead", name)
+		}
+	}
+	for _, agent := range cfg.Agents {
+		for i, toolset := range agent.Toolsets {
+			if toolset.Type == "background_jobs" {
+				return fmt.Errorf("agents.%s.toolsets[%d]: toolset type 'background_jobs' was removed; configure shell background_after and env instead", agent.Name, i)
+			}
+		}
+	}
+	return nil
+}
+
 func validateConfig(cfg *latest.Config) error {
+	if err := rejectRemovedBackgroundJobsToolsets(cfg); err != nil {
+		return err
+	}
 	if len(cfg.Agents) == 0 {
 		return errors.New("at least one agent must be configured (add an entry under 'agents')")
 	}

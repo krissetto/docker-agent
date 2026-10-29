@@ -1,0 +1,108 @@
+version: 1
+name: "Docker Next - Light"
+# Zero page, Canvas raised surfaces, Base/Console accents.
+# Trailing comments name the exact brand anchor or the derivation from anchors.
+colors:
+  # Text
+  text_bright: "#101010"  # Ether
+  text_primary: "#101010"  # Ether
+  text_secondary: "#64605C"  # Neutral +59% toward Ether
+  text_muted: "#64605C"  # Neutral +59% toward Ether
+  text_faint: "#B0A9A0"  # Neutral +22% toward Ether
+  # Accent
+  accent: "#4457F8"  # Base +16% toward Console (text-safe on Canvas)
+  accent_muted: "#545DB6"  # Base +45% toward light muted text
+  # Surfaces
+  background: "#FFFDFA"  # Zero
+  background_alt: "#F5F2EE"  # Canvas
+  # Borders
+  border_secondary: "#87827B"  # Neutral +42% toward Ether
+  # Status
+  success: "#096B3C"  # Flux +57% toward Ether
+  error: "#AE2324"  # Trigger +50% toward Root
+  warning: "#9E4800"  # Sand hue, HSL 27/100/31
+  info: "#3345D6"  # Console
+  highlight: "#7E428A"  # Bloom hue, HSL 290/35/40
+  # Brand
+  brand: "#475BFF"  # Base
+  brand_bg: "#D1E4FF"  # Air
+  # Errors
+  error_strong: "#AE2324"  # Trigger +50% toward Root
+  error_dark: "#FFEAE7"  # Trigger 10% over Zero
+  # Spinner ramp
+  spinner_dim: "#3D50EB"  # Base +50% toward Console
+  spinner_bright: "#384AE0"  # Base +75% toward Console
+  spinner_brightest: "#3345D6"  # Console
+  # Diff
+  diff_add_bg: "#DBFAE8"  # Flux 14% over Zero
+  diff_remove_bg: "#FFEAE7"  # Trigger 10% over Zero
+  # UI elements
+  line_number: "#64605C"  # Neutral +59% toward Ether
+  separator: "#AAA39B"  # Neutral +25% toward Ether
+  selected: "#D1E4FF"  # Air
+  selected_fg: "#FFFDFA"  # Zero
+  suggestion_ghost: "#64605C"  # Neutral +59% toward Ether
+  tab_bg: "#FFFDFA"  # Zero
+  tab_active_bg: "#F5F2EE"  # Canvas
+  tab_active_fg: "#101010"  # Ether
+  tab_inactive_fg: "#64605C"  # Neutral +59% toward Ether
+  tab_border: "#4457F8"  # Base +16% toward Console (text-safe on Canvas)
+  # Shared shell/editor semantic roles
+  placeholder: "#64605C"  # Neutral +59% toward Ether
+  editor_bg: "#F5F2EE"  # Canvas
+  card_bg: "#F5F2EE"  # Canvas
+  shell_bg: "#FFFDFA"  # Zero
+  tab_hover_bg: "#F5F2EE"  # Canvas
+  tab_hover_fg: "#101010"  # Ether
+  tab_drag_bg: "#3345D6"  # Console
+  tab_drag_fg: "#FFFDFA"  # Zero
+  tab_busy: "#AB4A2D"  # Launch +35% toward Ether
+  context_empty: "#FFFDFA"  # Zero
+  context_fill: "#3345D6"  # Console
+  context_text: "#64605C"  # Neutral +59% toward Ether
+  resize: "#AAA39B"  # Neutral +25% toward Ether
+  resize_hover: "#4457F8"  # Base +16% toward Console (text-safe on Canvas)
+  resize_active: "#101010"  # Ether
+  hint: "#64605C"  # Neutral +59% toward Ether
+  focus: "#4457F8"  # Base +16% toward Console (text-safe on Canvas)
+  disabled: "#B0A9A0"  # Neutral +22% toward Ether
+  status_adjacent: "#64605C"  # Neutral +59% toward Ether
+  scrollbar_track: "#DDD4C9"  # Neutral
+  # Badges
+  badge_accent: "#7E428A"  # Bloom hue, HSL 290/35/40
+  badge_info: "#3345D6"  # Console
+  badge_success: "#096B3C"  # Flux +57% toward Ether
+  agent_hues: [233, 14, 151, 290, 200, 35, 330, 170, 312, 55]
+
+chroma:
+  error_fg: "#5C0909"  # Root
+  error_bg: "#FFEAE7"  # Trigger 10% over Zero
+  success: "#096B3C"  # Flux +57% toward Ether
+  comment: "#64605C"  # Neutral +59% toward Ether
+  comment_preproc: "#AB4A2D"  # Launch +35% toward Ether
+  keyword: "#3345D6"  # Console
+  keyword_reserved: "#7E428A"  # Bloom hue, HSL 290/35/40
+  keyword_namespace: "#AE2324"  # Trigger +50% toward Root
+  keyword_type: "#7E428A"  # Bloom hue, HSL 290/35/40
+  operator: "#AB4A2D"  # Launch +35% toward Ether
+  punctuation: "#1D1D1D"  # Ink
+  name_builtin: "#AB4A2D"  # Launch +35% toward Ether
+  name_tag: "#3345D6"  # Console
+  name_attribute: "#9E4800"  # Sand hue, HSL 27/100/31
+  name_decorator: "#7E428A"  # Bloom hue, HSL 290/35/40
+  literal_number: "#5C0909"  # Root
+  literal_string: "#096B3C"  # Flux +57% toward Ether
+  literal_string_escape: "#AB4A2D"  # Launch +35% toward Ether
+  generic_deleted: "#AE2324"  # Trigger +50% toward Root
+  generic_subheading: "#64605C"  # Neutral +59% toward Ether
+  background: "#F5F2EE"  # Canvas
+
+markdown:
+  heading: "#4457F8"  # Base +16% toward Console (text-safe on Canvas)
+  link: "#3345D6"  # Console
+  strong: "#101010"  # Ether
+  code: "#5C0909"  # Root
+  code_bg: "#F5F2EE"  # Canvas
+  blockquote: "#64605C"  # Neutral +59% toward Ether
+  list: "#101010"  # Ether
+  hr: "#87827B"  # Neutral +42% toward Ether

@@ -57,7 +57,7 @@ an `instruction`.
 ## Built-in toolsets
 
 Examples that wire up one of the toolsets shipped with docker-agent
-(`filesystem`, `shell`, `background_jobs`, `todo`, `think`, `memory`,
+(`filesystem`, `shell`, `todo`, `think`, `memory`,
 `fetch`, `script`, `user_prompt`, `api`, `openapi`, `rag`, `model_picker`, …).
 
 ### Filesystem & shell
@@ -65,8 +65,8 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | File | What it shows |
 |------|---------------|
 | [`shell.yaml`](shell.yaml) | Plain `shell` toolset. |
-| [`background_jobs.yaml`](background_jobs.yaml) | `background_jobs` toolset for servers, watchers, and other long-running commands. |
-| [`shell_recall.yaml`](shell_recall.yaml) | `background_jobs` with recall enabled for finite long-running commands. |
+| [`shell_backgrounding.yaml`](shell_backgrounding.yaml) | shell automatic backgrounding and process diagnostics for long-running commands. |
+| [`shell_completion.yaml`](shell_completion.yaml) | shell automatic completion delivery for finite long-running commands. |
 | [`docker-wiki.yaml`](docker-wiki.yaml) | OpenWiki-inspired documentation agent that initializes and updates a `docker-wiki/` directory with `/init`, `/update`, and `/status` commands. |
 | [`safety_modes.yaml`](safety_modes.yaml) | Shell agents demonstrating the four safety modes (strict / balanced / restricted / autonomous) and the declarative YAML defaults: a config-wide `runtime.safety` plus per-agent `safety` overrides. User choices (CLI flags, alias options, user settings) always win over the YAML defaults. |
 | [`filesystem.yaml`](filesystem.yaml) | Plain `filesystem` toolset. |

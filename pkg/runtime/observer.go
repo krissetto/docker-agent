@@ -163,13 +163,32 @@ func observeBestEffort(ctx context.Context, fn func()) {
 }
 
 func observerEventSnapshot(event Event) (Event, error) {
+	out, _, err := observerEventSnapshotWithWire(event)
+	return out, err
+}
+
+// Also returns wire JSON so callers can size and clone without re-marshaling.
+func observerEventSnapshotWithWire(event Event) (Event, []byte, error) {
 	t := reflect.TypeOf(event)
 	if t == nil || t.Kind() != reflect.Pointer {
-		return nil, fmt.Errorf("unsupported observer event %T", event)
+		return nil, nil, fmt.Errorf("unsupported observer event %T", event)
 	}
 	data, err := json.Marshal(event)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	out, err := observerEventFromWire(event, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, data, nil
+}
+
+// observerEventFromWire decodes data, the wire JSON of event, into an independent copy.
+func observerEventFromWire(event Event, data []byte) (Event, error) {
+	t := reflect.TypeOf(event)
+	if t == nil || t.Kind() != reflect.Pointer {
+		return nil, fmt.Errorf("unsupported observer event %T", event)
 	}
 	copy := reflect.New(t.Elem()).Interface()
 	if err := json.Unmarshal(data, copy); err != nil {

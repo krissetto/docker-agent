@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/gitreview"
@@ -8,7 +10,7 @@ import (
 )
 
 func reviewSnapshot(in gitreview.Snapshot) view.Snapshot {
-	out := view.Snapshot{Generation: in.Generation, CapturedAt: in.CapturedAt, MaybeOutdated: in.MaybeOutdated, Scope: view.Scope{Label: in.Scope.Label, Note: in.Scope.Note, Remote: in.Scope.Remote, RemoteLabel: in.Scope.RemoteLabel, Unavailable: in.Scope.Unavailable}}
+	out := view.Snapshot{Generation: in.Generation, CapturedAt: in.CapturedAt, MaybeOutdated: in.MaybeOutdated, Browse: in.Browse, Scope: view.Scope{Label: in.Scope.Label, Note: in.Scope.Note, LimitReason: string(in.Scope.LimitReason), LimitValue: in.Scope.LimitValue, Remote: in.Scope.Remote, RemoteLabel: in.Scope.RemoteLabel, Unavailable: in.Scope.Unavailable}}
 	for _, repo := range in.Repositories {
 		r := view.Repository{ID: repo.ID, Name: repo.Name, Kind: reviewRepoKind(repo.Kind), HiddenOutside: repo.HiddenOutside, Err: repo.Err}
 		for _, wt := range repo.Worktrees {
@@ -26,7 +28,7 @@ func reviewWorktree(in gitreview.Worktree) view.Worktree {
 			detached = "HEAD"
 		}
 	}
-	return view.Worktree{ID: in.ID, Path: in.Path, Branch: in.Branch, Detached: detached, Current: in.Current, Linked: in.Linked, State: reviewState(in.State), Err: in.Err, Files: reviewFiles(in.Files)}
+	return view.Worktree{ID: in.ID, Path: in.Path, Branch: in.Branch, Detached: detached, Current: in.Current, Linked: in.Linked, State: reviewState(in.State), CountsState: reviewLoadedState(string(in.CountsState)), Err: in.Err, Files: reviewFiles(in.Files)}
 }
 func reviewDirectory(in gitreview.Directory) view.Directory {
 	out := view.Directory{WorktreeID: in.WorktreeID, Path: in.Path, State: reviewLoadedState(string(in.State)), Truncated: in.Truncated, Err: in.Err}
@@ -38,6 +40,9 @@ func reviewDirectory(in gitreview.Directory) view.Directory {
 func reviewDocument(in gitreview.Document) view.Document {
 	out := view.Document{Key: reviewKey(in.Key), State: reviewLoadedState(string(in.State)), Binary: in.Binary, Truncated: in.Truncated, Note: in.Note, Err: in.Err, PatchHeader: reviewPatchHeader(in.PatchHeader)}
 	files := out.Key.Mode == view.ModeFiles
+	for _, indicator := range in.Indicators {
+		out.Indicators = append(out.Indicators, view.DocumentIndicator{Line: indicator.Line, Kind: view.ChangeKind(indicator.Kind)})
+	}
 	for _, line := range in.Lines {
 		kind := reviewLineKind(line.Kind)
 		if files && kind != view.LineNote {
@@ -116,6 +121,20 @@ func reviewState(in string) view.LoadState {
 		return view.StateError
 	}
 	return view.StateUnscanned
+}
+
+// reviewScanSnapshot picks the explicit snapshot source. Files never falls back
+// to repository discovery when a provider cannot browse.
+func reviewScanSnapshot(provider gitreview.Provider, browse bool) func(context.Context) (gitreview.Snapshot, error) {
+	if !browse {
+		return provider.Snapshot
+	}
+	if browser, ok := provider.(gitreview.BrowseProvider); ok {
+		return browser.BrowseRoot
+	}
+	return func(context.Context) (gitreview.Snapshot, error) {
+		return gitreview.Snapshot{}, errors.New("folder browsing is not available for this workspace")
+	}
 }
 
 // reviewPatchHeader keeps only complete file headers, which patch copies need.

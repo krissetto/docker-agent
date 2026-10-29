@@ -9,7 +9,12 @@ type (
 
 	// ShowAgentDetailsMsg opens the read-only agent-details dialog for the
 	// named agent (clicking the current agent's card or Ctrl+clicking any agent).
-	ShowAgentDetailsMsg struct{ AgentName string }
+	// SessionID, when set, selects that session's usage and cost (a subagent row);
+	// empty keeps the agent-name fallback for agent cards.
+	ShowAgentDetailsMsg struct {
+		AgentName string
+		SessionID string
+	}
 
 	// AgentCommandMsg sends a command to the agent.
 	AgentCommandMsg struct{ Command string }

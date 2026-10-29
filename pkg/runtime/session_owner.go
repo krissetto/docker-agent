@@ -671,7 +671,7 @@ func (d *sessionDriver) drainRetirementOwned(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
 	defer cancel()
-	d.StopAll()
+	d.stopAllRetiring()
 	select {
 	case <-d.Done():
 	case <-ctx.Done():

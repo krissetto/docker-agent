@@ -37,6 +37,7 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 	}
 	updated, cmd := m.chatPage.Update(msg)
 	cmd = stampThinkingCycleCommand(origin, generation, cmd)
+	cmd = stampAttachmentPreviewCommand(origin, generation, cmd)
 	m.chatPage = updated.(chat.Page)
 	if id := m.paneFocus(); id != "" {
 		m.chatPages[id] = m.chatPage
@@ -82,6 +83,7 @@ func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	if opened, opening := msg.(dialog.OpenDialogMsg); opening {
+		m.clearVisiblePointerHover()
 		for _, page := range m.chatPages {
 			if owner, ok := page.(interface{ CancelImagePreviewClick() }); ok {
 				owner.CancelImagePreviewClick()
@@ -113,7 +115,7 @@ func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	m.dialogMgr = updated.(dialog.Manager)
 	cmd = tea.Batch(cmd, m.reconcileSettings())
 	if _, opening := msg.(dialog.OpenDialogMsg); opening && m.dialogMgr.Open() && !m.dialogMgr.TopIsBackground() {
-		cmds := []tea.Cmd{cmd, chat.ClearSidebarHover(m.chatPage)}
+		cmds := []tea.Cmd{cmd, m.clearVisiblePointerHover()}
 		if m.tabBar != nil {
 			cmds = append(cmds, m.tabBar.Update(tea.MouseMotionMsg{X: -1, Y: -1}))
 		}

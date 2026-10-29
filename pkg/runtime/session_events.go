@@ -86,6 +86,7 @@ type sequencedSessionEventSubscriber struct {
 type inflightAssistant struct {
 	agentName     string
 	parts         []chat.AssistantPart
+	text          chat.AssistantTextAppender
 	resolvedBytes int
 	seedTooLarge  bool
 }
@@ -204,7 +205,7 @@ func (h *sessionEventHub) Publish(sessionID string, event Event) {
 }
 
 func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
-	detached, err := observerEventSnapshot(event)
+	detached, wire, err := observerEventSnapshotWithWire(event)
 	if err != nil {
 		slog.Warn("Cannot detach session event", "error", err)
 		return
@@ -221,6 +222,10 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 		}
 		if terminalEvent && h.deleting[sessionID] {
 			event = StreamStopped(sessionID, stopped.AgentName, "deleted")
+			if event, wire, err = observerEventSnapshotWithWire(event); err != nil {
+				slog.Warn("Cannot detach session event", "error", err)
+				return
+			}
 		}
 		if terminalEvent {
 			h.terminal[sessionID] = true
@@ -230,7 +235,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 	interactionID := interactionEventID(event)
 	sequence := h.nextSeq[sessionID] + 1
 	h.nextSeq[sessionID] = sequence
-	eventBytes := estimateEventBytes(event) + len(h.requestID[sessionID]) + len(interactionID)
+	eventBytes := len(wire) + len(h.requestID[sessionID]) + len(interactionID)
 	h.appendReplayLocked(sessionID, retainedSessionEvent{sequence: sequence, requestID: h.requestID[sessionID], interactionID: interactionID, generation: h.generation[sessionID], event: event, bytes: eventBytes})
 	for sub := range h.subs[sessionID] {
 		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
@@ -243,7 +248,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			continue
 		}
 		select {
-		case sub.out <- cloneSessionEvent(event):
+		case sub.out <- cloneSessionEventWire(event, wire):
 			sub.queuedBytes += eventBytes
 			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
@@ -261,7 +266,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			continue
 		}
 		select {
-		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEvent(event)}:
+		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEventWire(event, wire)}:
 			sub.queuedBytes += eventBytes
 			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
@@ -274,7 +279,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			h.gapPublicSubscriberLocked(sessionID, sub)
 			continue
 		}
-		item := SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEvent(event)}
+		item := SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEventWire(event, wire)}
 		select {
 		case sub.out <- sessionEnvelope(sessionID, item):
 			sub.queuedBytes += eventBytes
@@ -621,13 +626,13 @@ func (h *sessionEventHub) trackInflightLocked(sessionID string, event Event) {
 		if e.Content != "" {
 			st := h.inflightLocked(sessionID)
 			st.agentName = e.AgentName
-			st.parts = chat.AppendAssistantPart(st.parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
+			st.parts = st.text.Append(st.parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
 		}
 	case *AgentChoiceReasoningEvent:
 		if e.Content != "" {
 			st := h.inflightLocked(sessionID)
 			st.agentName = e.AgentName
-			st.parts = chat.AppendAssistantPart(st.parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
+			st.parts = st.text.Append(st.parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
 		}
 	case *MessageAddedEvent:
 		if role := e.CommittedRole(); role == "" || role == chat.MessageRoleAssistant || role == chat.MessageRoleUser {
@@ -853,6 +858,16 @@ func cloneSessionEvent(event Event) Event {
 	return detached
 }
 
+// cloneSessionEventWire is cloneSessionEvent reusing known wire JSON.
+func cloneSessionEventWire(event Event, wire []byte) Event {
+	detached, err := observerEventFromWire(event, wire)
+	if err != nil {
+		slog.Warn("Cannot detach session event", "error", err)
+		return nil
+	}
+	return detached
+}
+
 type publicSessionEventSubscriber struct {
 	queuedBytes int
 	queuedSizes []int
@@ -863,6 +878,12 @@ type publicSessionEventSubscriber struct {
 }
 
 // Public observations use the hub's accounted queue directly, without a second buffer.
+func (h *sessionEventHub) CurrentCursor(sessionID string) (string, uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.epoch, h.nextSeq[sessionID]
+}
+
 func (h *sessionEventHub) SubscribePublic(sessionID string, since *uint64, buffer int) (seed []SequencedSessionEvent, events <-chan SessionEvent, cancel func(), cursor uint64, done <-chan struct{}) {
 	buffer = min(max(buffer, 1), maxSessionEventSubscriberBuffer)
 	h.mu.Lock()

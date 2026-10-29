@@ -81,6 +81,7 @@ func (s *Session) ReplacePendingUserMessagePayload(turnID, content string, parts
 	next.Message.Content = content
 	next.Message.MultiContent = cloneChatMessage(chat.Message{MultiContent: parts}).MultiContent
 	s.Messages[index].Message = next
+	s.historyRevision++
 	return true
 }
 

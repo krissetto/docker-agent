@@ -56,7 +56,8 @@ func TestSessionTransportCanonicalCommandsAndReplay(t *testing.T) {
 				`{"version":2,"type":"snapshot","snapshot":{"session":{"id":"remote-1"},"status":{"session_id":"remote-1","agent_name":"root","state":"settled","pending":0},"interactions":[],"pending_inputs":[],"cursor":8,"transcript_position":0}}`,
 				`{"version":2,"type":"event","envelope":{"version":2,"session_id":"remote-1","turn_id":"turn-old","sequence":8,"transcript_position":-1,"event":{"type":"stream_started","session_id":"remote-1","agent_name":"root"}}}`,
 				`{"version":2,"type":"ready","cursor":8}`,
-				`{"version":2,"type":"event","envelope":{"version":2,"session_id":"remote-1","turn_id":"turn-1","sequence":9,"transcript_position":-1,"event":{"type":"stream_stopped","session_id":"remote-1","agent_name":"root","reason":"normal"}}}`,
+				`{"version":2,"type":"event","envelope":{"version":2,"session_id":"remote-1","turn_id":"turn-1","sequence":9,"transcript_position":0,"event":{"type":"pending_user_message_accepted","session_id":"remote-1","turn_id":"turn-1","message":"hello","immediate":true}}}`,
+				`{"version":2,"type":"event","envelope":{"version":2,"session_id":"remote-1","turn_id":"turn-1","sequence":10,"transcript_position":-1,"event":{"type":"stream_stopped","session_id":"remote-1","agent_name":"root","reason":"normal"}}}`,
 			}
 			for _, frame := range frames {
 				fmt.Fprintf(writer, "data: %s\n\n", frame)
@@ -97,8 +98,18 @@ func TestSessionTransportCanonicalCommandsAndReplay(t *testing.T) {
 	case envelope := <-observation.Events:
 		assert.Equal(t, uint64(9), envelope.Sequence)
 		assert.Equal(t, "turn-1", envelope.TurnID)
+		accepted, ok := envelope.Event.(*PendingUserMessageAcceptedEvent)
+		require.True(t, ok)
+		assert.True(t, accepted.Immediate, "remoteSession observation preserves immediate admission classification")
 	case <-t.Context().Done():
-		t.Fatal("timed out waiting for live session envelope")
+		t.Fatal("timed out waiting for live accepted event")
+	}
+	select {
+	case envelope := <-observation.Events:
+		assert.Equal(t, uint64(10), envelope.Sequence)
+		assert.IsType(t, &StreamStoppedEvent{}, envelope.Event)
+	case <-t.Context().Done():
+		t.Fatal("timed out waiting for live stream settlement envelope")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -322,7 +333,16 @@ func TestRemoteInputEventsPreserveTypedMetadataAndInputIdentity(t *testing.T) {
 		assert.Contains(t, string(data), `"sender_id":"child"`)
 		assert.Contains(t, string(data), `"sender_name":"worker"`)
 		assert.Contains(t, string(data), `"input_mode":"steer"`)
+		if accepted, ok := event.(*PendingUserMessageAcceptedEvent); ok {
+			assert.False(t, accepted.Immediate, "old servers omit the flag and retain pending behavior")
+		}
 	}
+	event, err := c.decodeSessionEvent([]byte(`{"type":"pending_user_message_accepted","message":"body","turn_id":"accepted","immediate":true}`))
+	require.NoError(t, err)
+	assert.True(t, event.(*PendingUserMessageAcceptedEvent).Immediate)
+	encoded, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"immediate":true`)
 }
 
 func TestSessionSummaryCatalogRemoteRejectsLegacyAndInvalidIdentity(t *testing.T) {
@@ -385,4 +405,93 @@ func TestSessionTransportRejectsNonCanonicalWireVersions(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRemoteBackgroundProcessSnapshotAndEventDecode(t *testing.T) {
+	started := "2025-01-02T03:04:05Z"
+	wire := fmt.Sprintf(`{"session":{"id":"s"},"status":{"session_id":"s"},"background_processes":[{"id":"job","session_id":"s","agent_name":"worker","tool_call_id":"call","command":"sleep 1","cwd":"/tmp","started_at":%q,"state":"running"}]}`, started)
+	var snapshot remoteSessionSnapshot
+	require.NoError(t, json.Unmarshal([]byte(wire), &snapshot))
+	decoded, err := (&Client{}).decodeSessionSnapshot(snapshot)
+	require.NoError(t, err)
+	require.Len(t, decoded.BackgroundProcesses, 1)
+	assert.Equal(t, "call", decoded.BackgroundProcesses[0].ToolCallID)
+	assert.Equal(t, "running", string(decoded.BackgroundProcesses[0].State))
+	client := &Client{registry: map[string]func() Event{"background_processes": func() Event { return &BackgroundProcessesEvent{} }}}
+	event, err := client.decodeSessionEvent([]byte(`{"type":"background_processes","session_id":"s","processes":[{"id":"job","session_id":"s","started_at":"2025-01-02T03:04:05Z","state":"running"}]}`))
+	require.NoError(t, err)
+	require.Equal(t, "s", event.(*BackgroundProcessesEvent).GetSessionID())
+	_, err = client.decodeSessionEvent([]byte(`{"type":"background_processes","session_id":"s","processes":[{"id":"job","session_id":"other","started_at":"2025-01-02T03:04:05Z","state":"running"}]}`))
+	require.Error(t, err)
+}
+
+func TestRemoteReconnectAcceptsAuthoritativeBackgroundProcessSeed(t *testing.T) {
+	featureHeader := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		featureHeader <- r.Header.Get(api.SessionFeaturesHeader)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		frames := []string{
+			`{"version":2,"type":"snapshot","snapshot":{"session":{"id":"s"},"status":{"session_id":"s"},"epoch":"epoch","cursor":2,"interactions":[],"pending_inputs":[]}}`,
+			`{"version":2,"type":"event","envelope":{"version":2,"session_id":"s","epoch":"epoch","sequence":2,"transcript_position":-1,"event":{"type":"background_processes","session_id":"s","processes":[{"id":"job","session_id":"s","started_at":"2025-01-02T03:04:05Z","finished_at":"2025-01-02T03:04:06Z","state":"completed"}]}}}`,
+			`{"version":2,"type":"event","envelope":{"version":2,"session_id":"s","epoch":"epoch","sequence":0,"transcript_position":-1,"event":{"type":"background_processes","session_id":"s","processes":[]}}}`,
+			`{"version":2,"type":"ready","cursor":2}`,
+		}
+		for _, frame := range frames {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", frame)
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+	since := uint64(1)
+	observation, err := client.attachSession(t.Context(), "s", ObserveOptions{Since: &since, SinceEpoch: "epoch"})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	require.Equal(t, api.SessionFeatureBackgroundProcesses, <-featureHeader)
+	require.Len(t, observation.Replay, 2)
+	seed := observation.Replay[1]
+	require.True(t, seed.IsLiveSeed())
+	require.Empty(t, seed.Event.(*BackgroundProcessesEvent).Processes)
+}
+
+func TestPayloadlessLegacyLifecycleEnvelopeRetainsSequence(t *testing.T) {
+	client := &Client{}
+	envelope, err := client.decodeSessionEnvelope(remoteSessionEnvelope{Version: sessionWireVersion, SessionID: "s", Epoch: "epoch", Sequence: 9, TranscriptPosition: -1})
+	require.NoError(t, err)
+	require.Equal(t, "epoch", envelope.Epoch)
+	require.Equal(t, uint64(9), envelope.Sequence)
+	require.Nil(t, envelope.Event, "payloadless compatibility envelopes still retain sequence metadata")
+}
+
+func TestNewClientAcceptsLegacyServerPayloadlessSequence(t *testing.T) {
+	featureHeader := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This stand-in is an old server: it ignores the feature header.
+		featureHeader <- r.Header.Get(api.SessionFeaturesHeader)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, frame := range []string{
+			`{"version":2,"type":"snapshot","snapshot":{"session":{"id":"s"},"status":{"session_id":"s"},"epoch":"epoch","cursor":0,"interactions":[],"pending_inputs":[]}}`,
+			`{"version":2,"type":"event","envelope":{"version":2,"session_id":"s","epoch":"epoch","sequence":1,"transcript_position":-1}}`,
+			`{"version":2,"type":"ready","cursor":0}`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", frame)
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+	since := uint64(0)
+	observation, err := client.attachSession(t.Context(), "s", ObserveOptions{Since: &since, SinceEpoch: "epoch"})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	require.Equal(t, api.SessionFeatureBackgroundProcesses, <-featureHeader)
+	require.Len(t, observation.Replay, 1)
+	require.Equal(t, uint64(1), observation.Replay[0].Sequence)
+	require.Nil(t, observation.Replay[0].Event, "legacy server payloadless event retains sequence continuity")
 }

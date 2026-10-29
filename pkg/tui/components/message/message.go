@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -22,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/reviewdraft"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -71,22 +73,23 @@ type messageModel struct {
 	message  *types.Message
 	previous *types.Message
 
-	width      int
-	height     int
-	focused    bool
-	selected   bool
-	hovered    bool
-	expanded   bool
-	disclosure agentmessage.Disclosure
-	ar         *animation.Runtime
-	spinner    spinner.Spinner
+	width         int
+	height        int
+	focused       bool
+	selected      bool
+	hovered       bool
+	hoverProgress float64
+	expanded      bool
+	disclosure    agentmessage.Disclosure
+	ar            *animation.Runtime
+	spinner       spinner.Spinner
 
 	// renderCache memoizes the output of Render(width) keyed by the inputs
 	// that affect its output. During streaming, View() and Height() are called
 	// in pairs for each new chunk, and the chat list also re-renders for hover
 	// tracking and scroll updates; without this cache each call would re-parse
 	// the entire accumulated markdown from scratch.
-	renderCache     renderCache
+	renderCache     *renderCache
 	themeGeneration uint64
 
 	// codeBlocks holds the fenced code blocks emitted by the last call to
@@ -99,7 +102,7 @@ type messageModel struct {
 	// streamed-in chunks only re-render the trailing block instead of the whole
 	// accumulated markdown each time.
 	mdRenderer        *markdown.IncrementalRenderer
-	streamLines       assistantStreamLines
+	streamLines       *assistantStreamLines
 	segmentCodeBlocks []markdown.CodeBlock
 	contentBuf        strings.Builder
 	imageScanOffset   int
@@ -114,9 +117,14 @@ type messageModel struct {
 	prepared       *PreparedRender
 	renderRevision uint64 // owner mutations invalidate in-flight prepared work
 
-	markdownImages  map[string]tuiimage.Inline
-	loadingImages   map[string]bool
-	markdownImageID int
+	markdownImages   map[string]tuiimage.Inline
+	loadingImages    map[string]bool
+	markdownImageID  int
+	attachmentRows   []attachmentRow
+	referenceSource  string
+	referenceText    string
+	referenceChecked bool
+	referenceValid   bool
 }
 
 type assistantStreamLines struct {
@@ -141,10 +149,20 @@ type markdownImagePlaceholder struct {
 	lines []string
 }
 
+type attachmentRow struct {
+	index int
+	line  int
+	start int
+	width int
+	label string
+}
+
 // renderCache stores the most recent Render result keyed by the inputs that
 // can change its output. The key is small enough (a string and a few flags)
 // that comparing it is much cheaper than rendering markdown.
 type renderCache struct {
+	attachments    string
+	displayContent string
 	media          []types.AssistantMedia
 	inputReference lifecycle.InputReference
 	sender         string
@@ -158,6 +176,7 @@ type renderCache struct {
 	width          int
 	selected       bool
 	hovered        bool
+	hoverProgress  float64
 	expanded       bool
 	editable       bool
 	sameAgent      bool
@@ -239,6 +258,10 @@ func (mv *messageModel) SetMessage(msg *types.Message) tea.Cmd {
 		mv.mdRenderer.Reset()
 	}
 	mv.message = msg
+	mv.referenceSource = ""
+	mv.referenceText = ""
+	mv.referenceChecked = false
+	mv.referenceValid = false
 	mv.syncSpinner()
 	// Historical/committed content already has an immutable owner. Seed the
 	// mutable buffer only if AppendContent actually resumes this message.
@@ -352,10 +375,31 @@ func (mv *messageModel) SetSelected(selected bool) {
 }
 
 func (mv *messageModel) SetHovered(hovered bool) {
-	if mv.hovered != hovered {
-		mv.hovered = hovered
+	if mv.hovered == hovered {
+		return
+	}
+	mv.hovered = hovered
+	if hovered {
+		mv.hoverProgress = 1
+	} else {
+		mv.hoverProgress = 0
+	}
+	mv.invalidateOutput()
+}
+
+func (mv *messageModel) SetHoverProgress(progress float64) {
+	progress = min(max(progress, 0), 1)
+	if mv.hoverProgress != progress {
+		mv.hoverProgress = progress
 		mv.invalidateOutput()
 	}
+}
+
+func (mv *messageModel) actionProgress() float64 {
+	if mv.selected {
+		return 1
+	}
+	return mv.hoverProgress
 }
 
 // invalidateOutput invalidates both synchronous and worker-rendered output.
@@ -363,7 +407,7 @@ func (mv *messageModel) SetHovered(hovered bool) {
 func (mv *messageModel) invalidateOutput() {
 	mv.renderRevision++
 	mv.prepared = nil
-	mv.renderCache = renderCache{}
+	mv.renderCache = nil
 }
 
 // InvalidateRenderCache drops the memoized render so the next Render re-styles
@@ -371,7 +415,7 @@ func (mv *messageModel) invalidateOutput() {
 // registry changes underneath otherwise-identical inputs).
 func (mv *messageModel) InvalidateRenderCache() {
 	mv.invalidateOutput()
-	mv.streamLines = assistantStreamLines{}
+	mv.streamLines = nil
 	mv.segmentCodeBlocks = nil
 	if mv.mdRenderer != nil {
 		mv.mdRenderer.Reset()
@@ -430,6 +474,21 @@ func (mv *messageModel) Toggle() {
 	mv.invalidateOutput()
 }
 
+// SetSessionOpenerDefault opens the body of the session's first incoming
+// assignment without animation until the user sets its disclosure. Other
+// messages, including runtime notices, keep their collapsed default.
+func (mv *messageModel) SetSessionOpenerDefault(open bool) bool {
+	if mv.message == nil || mv.message.Type != types.MessageTypeAgentInput {
+		return false
+	}
+	if !mv.disclosure.SetDefault(open) {
+		return false
+	}
+	mv.expanded = mv.disclosure.Expanded()
+	mv.invalidateOutput()
+	return true
+}
+
 // IsToggleAt preserves existing controls and toggles inter-agent messages across their header.
 func (mv *messageModel) IsToggleAt(lineIdx, col int) bool {
 	if !mv.isAgentMessage() {
@@ -455,7 +514,8 @@ func (mv *messageModel) InputReferenceForLine(line int) (lifecycle.InputReferenc
 }
 
 func (mv *messageModel) isAgentMessage() bool {
-	return mv.message != nil && (mv.message.Type == types.MessageTypeAgentInput || mv.message.IsSubagentReply())
+	return mv.message != nil && (mv.message.Type == types.MessageTypeAgentInput ||
+		(mv.message.Type == types.MessageTypeRuntimeNotice && subagenttool.RuntimeNoticeBody(mv.message) != ""))
 }
 
 func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
@@ -463,36 +523,62 @@ func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
 func (mv *messageModel) replyHeader(width int) string {
 	icon := styles.ToolCompletedIcon.Render("✓")
 	status := "sent a message"
+	ref := mv.message.InputReference
 	if mv.message.Pending {
 		icon = styles.ToolPendingIcon.Render("○")
 		status = "accepted · awaiting consumption"
 	}
 	if mv.message.Type == types.MessageTypeRuntimeNotice && !mv.message.Pending {
-		var label string
-		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
-		status = "· " + label
+		return subagenttool.RuntimeNoticeHeader(mv.message, mv.disclosure.Chevron(), width)
 	}
-	return mv.disclosure.Header(icon+" ", mv.message.InputReference, " "+status, width)
+	return mv.disclosure.Header(icon+" From ", ref, " "+status, width)
+}
+
+func (mv *messageModel) referencePresentation() (string, bool) {
+	if mv.message == nil {
+		return "", false
+	}
+	if mv.referenceChecked && mv.referenceSource == mv.message.Content {
+		return mv.referenceText, mv.referenceValid
+	}
+	mv.referenceSource = mv.message.Content
+	mv.referenceText, mv.referenceValid = reviewdraft.RenderReferences(mv.message.Content)
+	mv.referenceChecked = true
+	return mv.referenceText, mv.referenceValid
 }
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.
 func (mv *messageModel) IsToggleLine(lineIdx int) bool {
-	if mv.message == nil || mv.isAgentMessage() || (mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput) {
+	if mv.message == nil {
 		return false
 	}
-	content := strings.TrimRight(mv.message.Content, "\n\r\t ")
+	if mv.isAgentMessage() {
+		return lineIdx >= 0 && lineIdx <= strings.Count(mv.replyHeader(mv.width), "\n")
+	}
+	if mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput {
+		return false
+	}
+	content := mv.message.Content
+	if len(mv.message.Attachments) > 0 {
+		content = mv.message.DisplayContent
+		if strings.Count(strings.TrimRight(content, "\n\r\t "), "\n")+1 <= maxUserMessageLines {
+			return false
+		}
+		lines := strings.Split(ansi.Strip(mv.Render(mv.width)), "\n")
+		if lineIdx < 0 || lineIdx >= len(lines) {
+			return false
+		}
+		return strings.Contains(lines[lineIdx], "[+] expand ") || strings.Contains(lines[lineIdx], "[-] collapse") ||
+			(lineIdx+1 < len(lines) && (strings.Contains(lines[lineIdx+1], "[+] expand ") || strings.Contains(lines[lineIdx+1], "[-] collapse")))
+	}
+	if readable, ok := mv.referencePresentation(); ok {
+		content = readable
+	}
+	content = strings.TrimRight(content, "\n\r\t ")
 	if strings.Count(content, "\n")+1 <= maxUserMessageLines {
 		return false
 	}
-
-	// The indicator is placed at the end of the message view with a leading \n\n.
-	// The view has an action row in place of top padding and 1 line of bottom padding.
-	// height-1 is the bottom padding.
-	// height-2 is the text of the indicator ("[-] click to collapse").
-	// height-3 is the empty line above it.
-	// By checking >= height-3, we provide a generous clickable area exactly on the toggle.
-	height := mv.Height(mv.width)
-	return lineIdx >= height-3
+	return lineIdx >= mv.Height(mv.width)-3
 }
 
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
@@ -503,7 +589,7 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 	if mv.finalized {
 		defer func() {
 			mv.mdRenderer = nil
-			mv.streamLines = assistantStreamLines{}
+			mv.streamLines = nil
 			mv.segmentCodeBlocks = nil
 		}()
 	}
@@ -522,7 +608,10 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 	if err != nil {
 		return AssistantSegments{}, false
 	}
-	cache := &mv.streamLines
+	if mv.streamLines == nil {
+		mv.streamLines = &assistantStreamLines{}
+	}
+	cache := mv.streamLines
 	widthChanged := cache.width != width
 	if widthChanged || !strings.HasPrefix(parts.StablePrefix, cache.stable) {
 		cache.width, cache.stable = width, ""
@@ -537,7 +626,7 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 		cache.stableLines = append(cache.stableLines, styledAssistantLines(messageStyle, width, delta)...)
 		cache.stable = parts.StablePrefix
 	}
-	header := actionRow(innerWidth, mv.hovered, types.MessageCopyLabel)
+	header := actionRowProgress(innerWidth, mv.actionProgress(), types.MessageCopyLabel)
 	headerKey := header
 	if cache.headerKey != headerKey || widthChanged {
 		cache.headerKey = headerKey
@@ -601,8 +690,7 @@ func (mv *messageModel) Render(width int) string {
 	// list's bounded LRU still memoizes their rendered output.
 	cacheable := !mv.isSpinnerDriven() && !mv.finalized
 	if cacheable {
-		c := &mv.renderCache
-		if c.valid &&
+		if c := mv.renderCache; c != nil && c.valid &&
 			c.width == width &&
 			c.msgType == msg.Type &&
 			c.inputOrigin == msg.InputOrigin &&
@@ -610,9 +698,12 @@ func (mv *messageModel) Render(width int) string {
 			c.sender == msg.Sender &&
 			c.selected == mv.selected &&
 			c.hovered == mv.hovered &&
+			c.hoverProgress == mv.hoverProgress &&
 			c.expanded == mv.expanded &&
 			c.editable == (msg.SessionPosition != nil) &&
 			c.content == msg.Content &&
+			c.displayContent == msg.DisplayContent &&
+			c.attachments == attachmentSignature(msg.Attachments) &&
 			c.receivedBody == msg.ReceivedBody &&
 			c.inputMode == msg.InputMode &&
 			c.pending == msg.Pending &&
@@ -626,10 +717,12 @@ func (mv *messageModel) Render(width int) string {
 	result := mv.render(width)
 
 	if cacheable {
-		mv.renderCache = renderCache{
+		mv.renderCache = &renderCache{
 			media:          slices.Clone(msg.AssistantMedia),
 			valid:          true,
 			content:        msg.Content,
+			displayContent: msg.DisplayContent,
+			attachments:    attachmentSignature(msg.Attachments),
 			receivedBody:   msg.ReceivedBody,
 			inputMode:      msg.InputMode,
 			pending:        msg.Pending,
@@ -640,6 +733,7 @@ func (mv *messageModel) Render(width int) string {
 			width:          width,
 			selected:       mv.selected,
 			hovered:        mv.hovered,
+			hoverProgress:  mv.hoverProgress,
 			expanded:       mv.expanded,
 			editable:       msg.SessionPosition != nil,
 			sameAgent:      mv.sameAgentAsPrevious(msg),
@@ -662,19 +756,35 @@ func (mv *messageModel) isSpinnerDriven() bool {
 	return false
 }
 
+func formatReferenceContent(content string, expanded bool) string {
+	totalLines := strings.Count(content, "\n") + 1
+	if totalLines <= maxUserMessageLines {
+		return content
+	}
+	if !expanded {
+		parts := strings.SplitN(content, "\n", collapsedUserMessageLines+1)
+		visible := strings.Join(parts[:collapsedUserMessageLines], "\n")
+		return visible + "\n\n" + styles.MutedStyle.Render(fmt.Sprintf("[+] expand %d more lines", totalLines-collapsedUserMessageLines))
+	}
+	return content + "\n\n" + styles.MutedStyle.Render("[-] collapse")
+}
+
 // render is the uncached rendering core. Render() wraps it with memoization.
 func (mv *messageModel) render(width int) string {
 	msg := mv.message
+	mv.attachmentRows = nil
 	if mv.isAgentMessage() {
 		header := mv.replyHeader(width)
 		if !mv.disclosure.Visible() {
 			return header
 		}
 		content := msg.Content
-		if msg.IsSubagentReply() {
+		if msg.Type == types.MessageTypeRuntimeNotice {
+			content = subagenttool.RuntimeNoticeBody(msg)
+		} else if msg.IsSubagentReply() {
 			content = msg.ReceivedBody
 		}
-		actions := actionRow(agentmessage.InnerWidth(width), mv.hovered || mv.selected, types.MessageCopyLabel)
+		actions := actionRowProgress(agentmessage.InnerWidth(width), mv.actionProgress(), types.MessageCopyLabel)
 		body := agentmessage.Body(content, width, mv.selected, actions)
 		return mv.disclosure.Render(header, body, width, mv.selected)
 	}
@@ -701,6 +811,9 @@ func (mv *messageModel) render(width int) string {
 		formatUserContent := func(c string) string {
 			c = strings.TrimRight(c, "\n\r\t ")
 			if c == "" {
+				if len(msg.Attachments) > 0 {
+					return ""
+				}
 				return msg.Content
 			}
 
@@ -719,8 +832,33 @@ func (mv *messageModel) render(width int) string {
 			return c
 		}
 
-		innerWidth := width - messageStyle.GetHorizontalFrameSize()
-		content := formatUserContent(msg.Content)
+		innerWidth := max(1, width-messageStyle.GetHorizontalFrameSize())
+		displayContent := msg.Content
+		if len(msg.Attachments) > 0 {
+			displayContent = msg.DisplayContent
+		}
+		content := formatUserContent(displayContent)
+		if len(msg.Attachments) == 0 {
+			if readable, ok := mv.referencePresentation(); ok {
+				content = formatReferenceContent(readable, mv.expanded)
+			}
+		}
+		rows := attachmentPresentationRows(msg.Attachments, innerWidth)
+		if len(rows) > 0 {
+			var body strings.Builder
+			body.WriteString(content)
+			for i, row := range rows {
+				switch {
+				case i == 0 && content != "":
+					body.WriteString("\n\n")
+				case i > 0:
+					body.WriteByte('\n')
+				}
+				body.WriteString(row.label)
+			}
+			content = body.String()
+			mv.attachmentRows = rows
+		}
 
 		// Action labels live in the top padding row and appear on hover or
 		// selection: edit (when the message can be branched) and copy.
@@ -729,13 +867,16 @@ func (mv *messageModel) render(width int) string {
 			labels = append(labels, types.UserMessageEditLabel)
 		}
 		labels = append(labels, types.MessageCopyLabel)
-		topRow := actionRow(innerWidth, mv.hovered || mv.selected, labels...)
+		topRow := actionRowProgress(innerWidth, mv.actionProgress(), labels...)
 
 		// Use a modified style with no top padding (the action row replaces it)
 		noTopPaddingStyle := messageStyle.PaddingTop(0)
 		rendered := noTopPaddingStyle.Width(width).Render(topRow + "\n" + content)
 		if msg.Type == types.MessageTypeAgentInput {
 			return agentidentity.Border(rendered, msg.InputReference, width, messageStyle)
+		}
+		if len(mv.attachmentRows) > 0 {
+			mv.locateAttachmentRows(rendered)
 		}
 		return rendered
 	case types.MessageTypeAssistant:
@@ -763,7 +904,7 @@ func (mv *messageModel) render(width int) string {
 		// (invisible). AssistantMessageStyle has PaddingTop=0, so this extra
 		// row acts as a stable spacer.
 		innerWidth := width - messageStyle.GetHorizontalFrameSize()
-		topRow := actionRow(innerWidth, mv.hovered || mv.selected, types.MessageCopyLabel)
+		topRow := actionRowProgress(innerWidth, mv.actionProgress(), types.MessageCopyLabel)
 
 		// The rendered markdown follows the always-present action row inside
 		// the styled bubble frame, so its first line lands at offset one.
@@ -998,8 +1139,17 @@ func (mv *messageModel) renderAssistantMarkdown(content string, width int) (stri
 // truncated: it must never wrap, as that would change the message height on
 // hover and invalidate click hit-testing until the next full render.
 func actionRow(innerWidth int, show bool, labels ...string) string {
+	progress := 0.0
+	if show {
+		progress = 1
+	}
+	return actionRowProgress(innerWidth, progress, labels...)
+}
+
+func actionRowProgress(innerWidth int, progress float64, labels ...string) string {
 	innerWidth = max(innerWidth, 0)
-	if !show {
+	progress = min(max(progress, 0), 1)
+	if progress <= 0 {
 		return strings.Repeat(" ", innerWidth)
 	}
 	joined := strings.Join(labels, types.MessageActionSeparator)
@@ -1009,7 +1159,11 @@ func actionRow(innerWidth int, show bool, labels ...string) string {
 	}
 	joined = ansi.Truncate(joined, innerWidth, "")
 	padding := max(innerWidth-ansi.StringWidth(joined), 0)
-	return strings.Repeat(" ", padding) + styles.MutedStyle.Render(joined)
+	row := strings.Repeat(" ", padding) + styles.MutedStyle.Render(joined)
+	if progress < 1 {
+		return styles.FadeLine(row, progress)
+	}
+	return row
 }
 
 // renderAgentReturn renders the delegation-return transition: the returning
@@ -1126,7 +1280,7 @@ func (mv *messageModel) Finalize() {
 	// This releases only the builder's ownership. Streamed canonical Content
 	// may still alias its backing allocation, which must remain intact.
 	mv.contentBuf.Reset()
-	mv.streamLines = assistantStreamLines{}
+	mv.streamLines = nil
 	mv.segmentCodeBlocks = nil
 	mv.imageScanOffset = -1
 	if mv.mdRenderer != nil {
@@ -1141,7 +1295,7 @@ func (mv *messageModel) Finalize() {
 // IncrementalRenderer instance. Tests use this to assert that Finalize()
 // actually released what it was supposed to release.
 func (mv *messageModel) HasLiveRenderState() bool {
-	return mv.prepared != nil || mv.renderCache.result != "" || mv.mdRenderer != nil
+	return mv.prepared != nil || (mv.renderCache != nil && mv.renderCache.result != "") || mv.mdRenderer != nil
 }
 
 // SetSize sets the dimensions of the message view
@@ -1209,4 +1363,85 @@ func (mv *messageModel) CopyActionLine() int {
 		return -1
 	}
 	return strings.Count(mv.replyHeader(mv.width), "\n") + 1
+}
+
+// AttachmentAt reports the attachment row targeted by rendered View coordinates.
+// Coordinates use zero-based terminal line and column positions.
+func (mv *messageModel) AttachmentAt(line, col int) (int, bool) {
+	if mv.message == nil || len(mv.message.Attachments) == 0 || line < 0 || col < 0 {
+		return 0, false
+	}
+	for _, row := range mv.attachmentRows {
+		if line == row.line && col >= row.start && col < row.start+row.width {
+			return row.index, true
+		}
+	}
+	return 0, false
+}
+
+func (mv *messageModel) locateAttachmentRows(rendered string) {
+	lines := strings.Split(ansi.Strip(rendered), "\n")
+	searchBefore := len(lines)
+	for rowIndex := len(mv.attachmentRows) - 1; rowIndex >= 0; rowIndex-- {
+		label := ansi.Strip(mv.attachmentRows[rowIndex].label)
+		for lineIndex := searchBefore - 1; lineIndex >= 0; lineIndex-- {
+			start := strings.LastIndex(lines[lineIndex], label)
+			if start < 0 {
+				continue
+			}
+			mv.attachmentRows[rowIndex].line = lineIndex
+			mv.attachmentRows[rowIndex].start = ansi.StringWidth(lines[lineIndex][:start])
+			mv.attachmentRows[rowIndex].width = ansi.StringWidth(label)
+			searchBefore = lineIndex
+			break
+		}
+	}
+}
+
+func attachmentSignature(attachments []types.UserAttachment) string {
+	var b strings.Builder
+	for _, attachment := range attachments {
+		b.WriteString(attachment.Name)
+		b.WriteByte(0)
+		b.WriteString(attachment.MediaType)
+		b.WriteByte(0)
+		b.WriteString(attachment.UnavailableReason)
+		if attachment.Available {
+			b.WriteByte(1)
+		} else {
+			b.WriteByte(0)
+		}
+		b.WriteByte(0xff)
+	}
+	return b.String()
+}
+
+func attachmentPresentationRows(attachments []types.UserAttachment, width int) []attachmentRow {
+	rows := make([]attachmentRow, 0, len(attachments))
+	for i, attachment := range attachments {
+		name := cleanAttachmentName(attachment.Name)
+		if name == "" {
+			name = "Attachment"
+		}
+		label := types.AttachmentNumberMarker(i) + " " + name
+		if !attachment.Available && attachment.UnavailableReason != "" {
+			label += " · unavailable"
+		}
+		label = ansi.Truncate(label, max(1, width), "…")
+		rows = append(rows, attachmentRow{index: i, label: styles.MutedStyle.Render(label)})
+	}
+	return rows
+}
+
+func cleanAttachmentName(value string) string {
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = value[strings.LastIndex(value, "/")+1:]
+	var b strings.Builder
+	for _, r := range value {
+		if unicode.IsControl(r) || r == '\u202a' || r == '\u202b' || r == '\u202d' || r == '\u202e' || r == '\u2066' || r == '\u2067' || r == '\u2068' || r == '\u2069' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }

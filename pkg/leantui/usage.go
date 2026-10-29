@@ -1,9 +1,19 @@
 package leantui
 
 import (
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
 )
+
+// newUsageTrackerFor binds the footer root to the view's attached session.
+func newUsageTrackerFor(application *app.App) *ui.UsageTracker {
+	tracker := ui.NewUsageTracker()
+	if application != nil && application.Session() != nil {
+		tracker.BindRoot(application.Session().ID)
+	}
+	return tracker
+}
 
 // trackStreamStarted records a newly-started stream and refreshes the footer.
 func (m *model) trackStreamStarted(sessionID string) {

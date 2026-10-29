@@ -243,3 +243,44 @@ func TestTypedInputPresentationModesLiveAndReload(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeNoticeDetailsUseTranscriptDisclosureAndAlignedSpacing(t *testing.T) {
+	input := session.UserMessage(`<system_info>Subagent "worker" (child-session) finished its turn. Full response: "useful report detail that wraps across the terminal"</system_info>`)
+	input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = session.InputOriginRuntime, "steer", "child-session", "worker"
+	input.ReportOutcome = session.ReportOutcomeFinished
+	m := NewScrollableView(animation.NewRuntime(), 40, 20, &service.SessionState{}).(*model)
+	toolCall := types.ToolCallMessage("root", tools.ToolCall{ID: "shell-before", Function: tools.FunctionCall{Name: "shell", Arguments: `{}`}}, tools.Tool{Name: "shell"}, types.ToolStatusCompleted)
+	m.addMessage(toolCall)
+	m.AddInputMessage(input, 0)
+	m.ensureAllItemsRendered()
+	collapsed := ansi.Strip(strings.Join(m.renderedLines, "\n"))
+	assert.Contains(t, strings.Join(strings.Fields(collapsed), " "), "From worker (child) · turn finished >")
+	assert.NotContains(t, collapsed, "useful report detail")
+	assert.NotContains(t, collapsed, "system_info")
+	toolCall = types.ToolCallMessage("root", tools.ToolCall{ID: "shell-after", Function: tools.FunctionCall{Name: "shell", Arguments: `{}`}}, tools.Tool{Name: "shell"}, types.ToolStatusCompleted)
+	m.addMessage(toolCall)
+	assert.False(t, m.needsSeparator(0), "compact tool rows stay together before the runtime notice")
+	assert.False(t, m.needsSeparator(1), "collapsed runtime notices align with neighboring compact tool rows")
+
+	view := m.views[1].(interface {
+		IsToggleAt(line, col int) bool
+		IsExpanded() bool
+		SetExpanded(expanded bool)
+	})
+	noticeLine := m.lineOffsets[1]
+	require.True(t, view.IsToggleAt(0, 0))
+	m.handleMouseClick(tea.MouseClickMsg{X: 0, Y: noticeLine, Button: tea.MouseLeft})
+	require.True(t, view.IsExpanded(), "the regular transcript click toggles runtime details")
+	assert.True(t, m.needsSeparator(0), "expanded details separate from the previous tool row")
+	assert.True(t, m.needsSeparator(1), "expanded details separate from the next tool row")
+	view.SetExpanded(true) // settle the shared disclosure animation for this assertion
+	m.invalidateItem(1)
+	m.ensureAllItemsRendered()
+	expanded := ansi.Strip(strings.Join(m.renderedLines, "\n"))
+	assert.Contains(t, expanded, "Full response:")
+	assert.Contains(t, expanded, "useful report detail")
+	assert.NotContains(t, expanded, "system_info")
+	for _, line := range m.renderedLines {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 40)
+	}
+}

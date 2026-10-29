@@ -18,6 +18,13 @@
 # priority: the agent-level `compaction_model` wins, then the model-level one,
 # then the provider-level default.
 #
+# `compaction_prompt` replaces the built-in compaction user prompt and keeps the
+# built-in system prompt. Resolution priority is the same as for `compaction_model`:
+# agent-level, then the agent's model(s), then provider-level. An empty value counts
+# as unset; the built-in prompt is used only when no applicable scope sets one. The
+# prompt is read from the agent's model(s), not from the `compaction_model`
+# definition. `/compact <text>` and `pre_compact` hook context are still appended.
+#
 # Note: if the compaction model has a SMALLER context window than the primary,
 # docker-agent triggers compaction against the smaller window so the summary
 # call can always ingest the conversation it must compact. Pair the primary
@@ -30,6 +37,8 @@ models:
     model: claude-sonnet-5
     # Summarize the conversation with the cheaper Haiku model instead of Sonnet.
     compaction_model: fast
+    # Replaces the built-in summary instruction; the built-in system prompt is kept.
+    compaction_prompt: Summarize for a code reviewer. Keep file paths, open TODOs, and design decisions.
   fast:
     provider: anthropic
     model: claude-haiku-4-5
@@ -41,8 +50,9 @@ providers:
   my_anthropic:
     provider: anthropic
     # Provider-level default: agents whose model uses this provider compact
-    # with Haiku unless the model or the agent overrides it.
+    # with Haiku and the prompt below unless the model or the agent overrides them.
     compaction_model: anthropic/claude-haiku-4-5
+    compaction_prompt: Summarize the conversation in short bullet points, keeping decisions and next steps.
 
 agents:
   root:
@@ -53,9 +63,10 @@ agents:
     model: anthropic/claude-sonnet-5
     description: An assistant configuring its compaction model at the agent level.
     instruction: You are a helpful code reviewer.
-    # Agent-level value: wins over any model- or provider-level setting.
+    # Agent-level values: win over any model- or provider-level settings.
     compaction_model: fast
+    compaction_prompt: "Summarize the review so far: files changed, issues found, and open questions."
   frugal:
     model: budget
-    description: An assistant inheriting its compaction model from the provider.
+    description: An assistant inheriting its compaction model and prompt from the provider.
     instruction: You are a helpful assistant.

@@ -11,7 +11,9 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // residualFixture preserves the production owner tick and View path. The replay
@@ -24,6 +26,10 @@ func residualFixture(tb testing.TB, scenario string, tabCount int) (*appModel, *
 
 func residualPaneFixture(tb testing.TB, scenario string, tabCount, panes int, draft string) (*appModel, *paneReplayScheduler) {
 	root, _, scheduler := paneReplayRoot(tb)
+	// New() built the tab bar on its own runtime before harnessRoot swapped in the
+	// scheduler clock; rebind it here (residual fixtures only) so running-tab
+	// indicator frames follow replayed ticks. Pane tests keep the HEAD tab bar.
+	root.tabBar = tabbar.New(root.ar, userconfig.Get().GetTabTitleMaxLength())
 	for id, wrapped := range root.chatPages {
 		switch page := wrapped.(type) {
 		case *paneReplayPage:
@@ -203,7 +209,8 @@ func residualMatrixFixture(tb testing.TB, panes int, draft, cadence string, toas
 	case "clean":
 		scheduler.step = time.Nanosecond
 	case "changed":
-		scheduler.step = 120 * time.Millisecond
+		// One card frame per tick: 24 ticks cross exactly 24 frame boundaries.
+		scheduler.step = animation.Card.DefaultFrameDuration()
 	case "real":
 		scheduler.step = 16666667 * time.Nanosecond
 	default:
@@ -252,7 +259,23 @@ func residualInputFixture(tb testing.TB, panes int, kind string) *appModel {
 	if kind == "typing" {
 		draft = "empty"
 	}
-	root, _ := residualPaneFixture(tb, "active", 3, panes, draft)
+	root, scheduler := residualPaneFixture(tb, "active", 3, panes, draft)
+	if kind == "stream" {
+		// The first chunk starts the incoming fade; the synchronous replay loop
+		// never ticks, so settle it here (outside the measured loop) before counting.
+		residualInput(root, kind, -1)
+		owner, ok := root.chatPages["profile"].(replyHandoffOwner)
+		if !ok {
+			tb.Fatal("chat page exposes the reply handoff state")
+		}
+		for ticks := 0; owner.ReplyHandoffActive(); ticks++ {
+			if ticks >= residualHandoffTickCap {
+				tb.Fatal("stream handoff exceeded its hard tick cap")
+			}
+			residualTick(tb, root, scheduler)
+			root.View()
+		}
+	}
 	if kind == "scroll" {
 		root.focusedPanel = PanelContent
 		root.chatPage.FocusMessages()

@@ -147,6 +147,8 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 		return withInlineImages(subagenttool.NewRead(ar, msg, sessionState, lookup, reference), msg.Images, sessionState)
 	case subagentpkg.ToolStopSubagent:
 		return withInlineImages(subagenttool.NewStop(ar, msg, sessionState, lookup, reference), msg.Images, sessionState)
+	case subagentpkg.ToolListAgents:
+		return withInlineImages(subagenttool.NewList(ar, msg, sessionState, reference), msg.Images, sessionState)
 	}
 	var view layout.Model
 	if b, ok := resolve(msg.ToolCall.Function.Name); ok {

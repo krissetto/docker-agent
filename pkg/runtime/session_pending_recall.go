@@ -98,6 +98,7 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 				d.withdrawnInputs = make(map[string]string)
 			}
 			d.withdrawnInputs[turnID] = d.inputFingerprints[turnID]
+			d.flushAllDeferredAcceptedLocked()
 			d.sess.RemovePendingUserMessageByTurnID(turnID)
 			*queue = slices.DeleteFunc(*queue, func(value QueuedMessage) bool { return value.RequestID == turnID })
 			d.completeTurnLocked(turnID)

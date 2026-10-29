@@ -21,7 +21,7 @@ colors:
   
   # Status colors - keeping practical colors
   success: "#FFFFFF"         # White (was Magenta)
-  error: "#FF0066"           # Kin error color
+  error: "#ff3b8a"           # Kin error color
   warning: "#DB7093"         # Rose
   info: "#FFFFFF"            # White (was Fuchsia)
   highlight: "#FFB3D9"       # Pastel pink (softer highlights)
@@ -35,20 +35,20 @@ colors:
   error_dark: "#2a0a15"
   
   # Spinner colors - pink gradient
-  spinner_dim: "#DB7093"     # Rose
-  spinner_bright: "#FF69B4"  # Pink
-  spinner_brightest: "#FFB6C1" # LightPink
+  spinner_dim: "#ffb3d9"     # Rose
+  spinner_bright: "#ffb3d9"  # Pink
+  spinner_brightest: "#ffb3d9" # LightPink
   
   # Diff colors
   diff_add_bg: "#0a2a0a"
   diff_remove_bg: "#2a0a15"
   
   # UI element colors
-  line_number: "#7a5570"     # Dim
+  line_number: "#9f8598"     # Dim
   separator: "#DB7093"       # Rose
-  selected: "#E6A8CF"        # Muted pastel pink
+  selected: "#71344f"        # Muted pastel pink
   selected_fg: "#FFFFFF"     # White text on selection
-  suggestion_ghost: "#7a5570"
+  suggestion_ghost: "#9f8598"
   tab_bg: "#1c1c1c"
   tab_active_bg: "#262626"   # Lighter grey
   tab_active_fg: "#FF69B4"   # Pink
@@ -74,6 +74,7 @@ colors:
   focus: "#FFB3D9"
   disabled: "#7a5570"
   status_adjacent: "#FFFFFF"
+  scrollbar_track: "#373737"
 
   
   # Badge colors
@@ -86,7 +87,7 @@ colors:
 
 chroma:
   # Syntax highlighting - kin inspired
-  comment: "#7a5570"         # Dim
+  comment: "#9f8598"         # Dim
   comment_preproc: "#FFFFFF" # White (was Magenta)
   keyword: "#FFFFFF"         # White (was Magenta)
   keyword_reserved: "#FFFFFF" # White (was HotPink)
@@ -102,7 +103,7 @@ chroma:
   literal_string: "#FFB6C1"  # LightPink
   literal_string_escape: "#FF69B4" # Pink
   generic_deleted: "#FFFFFF" # White (was error pink)
-  generic_subheading: "#7a5570"
+  generic_subheading: "#9f8598"
   background: "#1c1c1c"
   error_fg: "#FFFFFF"
   error_bg: "#2a0a15"

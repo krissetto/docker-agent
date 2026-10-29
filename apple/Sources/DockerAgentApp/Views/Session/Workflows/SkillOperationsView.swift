@@ -20,7 +20,7 @@ struct SkillOperationsView: View {
                 }
                 .padding(.horizontal, Metrics.m)
                 .padding(.vertical, Metrics.xs)
-                .background(.fill.quaternary, in: .rect(cornerRadius: Metrics.chipRadius, style: .continuous))
+                .floatingChip()
                 .accessibilityElement(children: .combine)
             }
         }

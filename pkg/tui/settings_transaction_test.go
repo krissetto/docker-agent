@@ -128,22 +128,15 @@ func TestSettingsNonvisualDraftWaitsForSuccessfulSave(t *testing.T) {
 	setupSettingsConfigTest(t)
 	root, _, _ := frozenClockRoot(t, 120, 50)
 	d := settingsFromRoot(t, root)
-	// Controls -> categories, choose Behavior, enter controls.
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	old := root.sendMode
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	require.Nil(t, cmd)
-	require.Equal(t, old, root.sendMode)
 	require.Empty(t, userconfig.Get().GetBusySendMode())
 	require.NoError(t, os.MkdirAll(userconfig.Path(), 0o700))
 	settingsSave(t, root, d)
-	require.Equal(t, old, root.sendMode)
-	require.NoError(t, os.Remove(userconfig.Path()))
-	settingsSave(t, root, d)
-	require.NotEqual(t, old, root.sendMode)
-	require.Equal(t, string(root.sendMode), userconfig.Get().GetBusySendMode())
+	require.Empty(t, userconfig.Get().GetBusySendMode(), "settings no longer writes a configurable send mode")
 }
 
 func TestSettingsNestedPickerForcedCleanupRestoresEntryAndOuterTheme(t *testing.T) {

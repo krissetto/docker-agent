@@ -280,7 +280,9 @@ func TestRootSidebarHoverIdleSplitTranscriptCounters(t *testing.T) {
 		if row == y {
 			require.Contains(t, baseRows[row], "second-CHILD-0")
 			require.Contains(t, baseRows[row], "completed")
-			require.Contains(t, hoverRows[row], "second-CHILD-0")
+			// Narrow hover prioritizes the canonical ID and age over the name; the
+			// full-name row is covered at a wide width in the sidebar component tests.
+			require.Contains(t, hoverRows[row], "second-canonical-0", "hover reveals the canonical ID")
 			require.Contains(t, hoverRows[row], "10m ago", "hover truthfully reveals the node's creation age")
 			require.Equal(t, ansi.Cut(baseRows[row], 0, x), ansi.Cut(hoverRows[row], 0, x), "hover cannot move the name or change neighboring transcripts")
 		} else {

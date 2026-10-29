@@ -293,10 +293,17 @@ func TestActualProgramStationarySidebarActionClickFadesOccludedTarget(t *testing
 			writer := &cacheProgramWriter{}
 			program := startTestProgram(t, root, model, tea.WithOutput(writer))
 			program.Send(runtime.TeamInfo([]runtime.AgentDetails{{Name: "worker", Model: "OCCLUSION-MODEL", Provider: "provider"}}, "worker"))
+			// The sidebar draws its usage line only after token usage is known; send the
+			// canonical usage event so the cost and context labels exist before hover.
+			program.Send(runtime.NewTokenUsageEvent(sess.ID, "worker", &runtime.Usage{InputTokens: 300, OutputTokens: 150, Cost: 0.25, ContextLength: 450, ContextLimit: 1000}))
 			require.Eventually(t, func() bool {
 				f := model.snapshot()
 				return len(f) > 0 && f[len(f)-1].active == 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "OCCLUSION-MODEL")
 			}, time.Second, time.Millisecond)
+			require.Eventually(t, func() bool {
+				f := model.snapshot()
+				return len(f) > 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "$") && strings.Contains(ansi.Strip(f[len(f)-1].content), "◉")
+			}, time.Second, time.Millisecond, "usage labels are visible before hover and occlusion")
 			require.Eventually(t, func() bool { f := model.snapshot(); return len(f) > 0 && f[len(f)-1].active == 0 }, time.Second, time.Millisecond)
 			frames := model.snapshot()
 			base := frames[len(frames)-1]

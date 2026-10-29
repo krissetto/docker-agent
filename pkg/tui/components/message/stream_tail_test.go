@@ -44,7 +44,7 @@ func TestMutableTailEveryChunk(t *testing.T) {
 				assertWithinFull(t, v, width)
 			}
 			v.Finalize()
-			require.Empty(t, v.streamLines.tail.input)
+			require.Nil(t, v.streamLines)
 			assertWithinFull(t, v, width)
 		}
 	}
@@ -86,8 +86,7 @@ func TestMutableTailRetainsOnlyCurrentLines(t *testing.T) {
 	require.Len(t, view.streamLines.tail.input, 1)
 	require.Len(t, view.streamLines.tail.rendered, 1)
 	view.Finalize()
-	require.Empty(t, view.streamLines.tail.input)
-	require.Empty(t, view.streamLines.tail.rendered)
+	require.Nil(t, view.streamLines)
 }
 
 func FuzzMutableTailMatchesFullRenderer(f *testing.F) {

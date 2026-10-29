@@ -6,23 +6,47 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 
 	"github.com/docker/docker-agent/pkg/session"
 )
 
 type inputAdmission struct {
-	queued     bool
-	idempotent bool
-	durable    bool
+	queued           bool
+	idempotent       bool
+	durable          bool
+	deferredAccepted bool
+	startOwner       bool
+}
+
+type deferredAcceptedInput struct {
+	event *PendingUserMessageAcceptedEvent
+	owner *byte
 }
 
 func (d *sessionDriver) admitInput(ctx context.Context, msg QueuedMessage, op SessionOperation, wake bool) (bool, error) {
-	admission, err := d.admitInputReceipt(ctx, msg, op, wake)
+	return d.admitInputWithDeferredAccepted(ctx, msg, op, wake, false)
+}
+
+func (d *sessionDriver) admitInputForStart(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, deferIdleAccepted bool, token *byte) (inputAdmission, error) {
+	return d.admitInputReceiptWithDeferredAccepted(ctx, msg, op, wake, deferIdleAccepted, token)
+}
+
+func (d *sessionDriver) admitInputWithDeferredAccepted(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, deferIdleAccepted bool) (bool, error) {
+	admission, err := d.admitInputReceiptWithDeferredAccepted(ctx, msg, op, wake, deferIdleAccepted, nil)
 	return admission.queued, err
 }
 
 func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage, op SessionOperation, wake bool) (inputAdmission, error) {
+	return d.admitInputReceiptWithDeferredAccepted(ctx, msg, op, wake, false, nil)
+}
+
+func (d *sessionDriver) admitInputReceiptWithDeferredAccepted(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, deferIdleAccepted bool, token *byte) (inputAdmission, error) {
+	return d.admitInputReceiptWithAuthorization(ctx, msg, op, wake, deferIdleAccepted, token, false)
+}
+
+func (d *sessionDriver) admitInputReceiptWithAuthorization(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, deferIdleAccepted bool, token *byte, authorizeDormant bool) (inputAdmission, error) {
 	var admission inputAdmission
 	msg, err := detachQueuedInput(msg)
 	if err != nil {
@@ -44,18 +68,41 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			}
 		}
 		if found, existingQueued, existingErr := d.existingInputLocked(msg); found || existingErr != nil {
+			if authorizeDormant && normalizedInputOrigin(msg.InputOrigin) != session.InputOriginUser && d.viewDormant && !d.stopped && existingErr == nil {
+				wakesDormant := !found
+				for _, queued := range d.pending {
+					if queued.RequestID == msg.RequestID && !queued.Retry {
+						wakesDormant = true
+						break
+					}
+				}
+				if wakesDormant {
+					if err := d.dormantCommunicationAdmissionLocked(msg); err != nil {
+						return sessionIOReservation{}, err
+					}
+				}
+			}
 			queued = existingQueued
 			admission.idempotent = found
-			if found && d.viewDormant && !d.stopped && msg.RequestID != "" && !msg.Retry {
+			if deferred, exists := d.deferredAccepted[msg.RequestID]; exists {
+				admission.deferredAccepted = true
+				admission.startOwner = token != nil && deferred.owner == token
+			}
+			if found && authorizeDormant && d.viewDormant && !d.stopped && !msg.Retry && msg.RequestID != "" {
 				pendingAccepted := false
-				for _, item := range d.sess.MessagesSnapshot() {
-					if item.Message != nil && item.Message.TurnID == msg.RequestID && item.Message.Pending && item.Message.Accepted {
+				for _, queued := range d.pending {
+					if queued.RequestID == msg.RequestID && !queued.Retry {
 						pendingAccepted = true
 						break
 					}
 				}
 				if pendingAccepted {
-					d.authorizeViewLocked()
+					for _, item := range d.sess.MessagesSnapshot() {
+						if item.Message != nil && item.Message.TurnID == msg.RequestID && item.Message.Pending && item.Message.Accepted {
+							d.authorizeViewLocked()
+							break
+						}
+					}
 				}
 			}
 			if found {
@@ -73,6 +120,11 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			}
 			return sessionIOReservation{commit: func(error) error { return existingErr }}, nil
 		}
+		if authorizeDormant && d.viewDormant && !d.stopped {
+			if err := d.dormantCommunicationAdmissionLocked(msg); err != nil {
+				return sessionIOReservation{}, err
+			}
+		}
 		if !d.stopped && !d.running() && !d.starting() && !wake {
 			return sessionIOReservation{}, ErrSessionStopped
 		}
@@ -80,7 +132,13 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			err.RequestID = msg.RequestID
 			return sessionIOReservation{}, err
 		}
+		if msg.Retry {
+			// An explicit retry is the only way to resume after an uncertain write.
+			d.unidentifiedUncertain = false
+		}
 		queued = d.queuedAtAdmissionLocked(msg)
+		deferAccepted := msg.RequestID != "" && !msg.Retry &&
+			(len(d.deferredAcceptedOrder) > 0 || (deferIdleAccepted && wake && ctx.Err() == nil && d.phase == sessionIdle && len(d.pending) == 0 && !d.compactReserved && !d.viewDormant))
 		count := len(d.pending)
 		if !limitAllows(count, d.pendingLimit()) {
 			return sessionIOReservation{}, &SessionError{Kind: SessionErrorCapacity, SessionID: d.identityID, RequestID: msg.RequestID, Operation: op, Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
@@ -149,7 +207,18 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 				d.inputFingerprints[msg.RequestID] = hex.EncodeToString(hash[:])
 			}
 			if !msg.Retry && msg.RequestID != "" {
-				d.events.PublishForRequest(d.identityID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.identityID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))
+				event := inputEventMetadata(PendingUserMessageAccepted(d.identityID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg).(*PendingUserMessageAcceptedEvent)
+				if deferAccepted {
+					if d.deferredAccepted == nil {
+						d.deferredAccepted = make(map[string]deferredAcceptedInput)
+					}
+					d.deferredAccepted[msg.RequestID] = deferredAcceptedInput{event: event, owner: token}
+					d.deferredAcceptedOrder = append(d.deferredAcceptedOrder, msg.RequestID)
+					admission.deferredAccepted = true
+					admission.startOwner = true
+				} else {
+					d.events.PublishForRequest(d.identityID, msg.RequestID, event)
+				}
 			} else if msg.Retry {
 				if d.recentRetries == nil {
 					d.recentRetries = map[string]bool{}
@@ -165,7 +234,7 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 				}
 			}
 			d.pending = append(d.pending, msg)
-			if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
+			if authorizeDormant {
 				d.authorizeViewLocked()
 			}
 			d.refreshSteeringLocked()
@@ -178,6 +247,37 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 	}
 	admission.queued = queued
 	return admission, nil
+}
+
+// dormantCommunicationAdmissionLocked permits a directed send to resume only
+// the previously accepted durable FIFO. Restored legacy pending transcript rows
+// without admission evidence remain visible but cannot hitchhike on new work.
+func (d *sessionDriver) dormantCommunicationAdmissionLocked(msg QueuedMessage) error {
+	pendingAccepted := make(map[string]bool, len(d.pending)+1)
+	for _, queued := range d.pending {
+		if queued.Retry || queued.RequestID == "" {
+			continue
+		}
+		pendingAccepted[queued.RequestID] = false
+	}
+	for _, item := range d.sess.MessagesSnapshot() {
+		if item.Message == nil || !item.Message.Pending {
+			continue
+		}
+		if !item.Message.Accepted {
+			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, RequestID: msg.RequestID, Operation: SessionOperationSend, Detail: "restored inbox contains an unaccepted legacy pending message; explicit session resume is required"}
+		}
+		if _, queued := pendingAccepted[item.Message.TurnID]; !queued {
+			return &SessionError{Kind: SessionErrorPersistence, SessionID: d.identityID, RequestID: item.Message.TurnID, Operation: SessionOperationSend, Detail: "restored accepted input lacks a live durable mailbox entry"}
+		}
+		pendingAccepted[item.Message.TurnID] = true
+	}
+	for id, accepted := range pendingAccepted {
+		if !accepted {
+			return &SessionError{Kind: SessionErrorPersistence, SessionID: d.identityID, RequestID: id, Operation: SessionOperationSend, Detail: "restored accepted mailbox input is missing durable pending evidence"}
+		}
+	}
+	return nil
 }
 
 func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume func(QueuedMessage)) error {
@@ -217,11 +317,13 @@ func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume
 				if !d.sess.PromotePendingUserMessageByTurnID(turnID) {
 					return &SessionError{Kind: SessionErrorStale, Operation: "promote_input"}
 				}
+				d.publishDeferredAcceptedLocked(turnID, true)
 				if msg.guidance() {
 					d.consumedSteering = append(d.consumedSteering, turnID)
 				}
 				d.lastFailureKey = ""
 				d.events.PublishForRequest(d.identityID, turnID, inputEventMetadata(PendingUserMessagePromoted(d.identityID, turnID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))
+				d.flushAllDeferredAcceptedLocked()
 			}
 			if consume != nil {
 				consume(msg)
@@ -229,6 +331,155 @@ func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume
 			return nil
 		}}, nil
 	})
+}
+
+// promoteUnidentifiedInput moves the queue head that has no request ID into the
+// transcript. Its durable append uses the existing AddMessage path; the commit
+// appends the transcript entry and removes the head only after the write result
+// is known. A failed write leaves the queue untouched, and the next wake retries
+// the append. An uncertain write that did commit before failing can therefore be
+// duplicated, because there is no row identity to deduplicate on. That residual
+// window is documented, not closed. Retry entries carry no content and only
+// consume the head.
+func (d *sessionDriver) promoteUnidentifiedInput(ctx context.Context, head QueuedMessage) (int, error) {
+	position := -1
+	err := d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped {
+			return sessionIOReservation{}, ErrSessionStopped
+		}
+		if d.unidentifiedUncertain && !head.Retry {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorInvalid, Operation: "promote_input", Detail: "uncertain input write requires an explicit retry"}
+		}
+		if len(d.pending) == 0 || !sameUnidentifiedInput(d.pending[0], head) {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorStale, Operation: "promote_input"}
+		}
+		// The fence captures the queue epoch at reservation. A stop or generation
+		// change in between means the head at commit may be a different admission
+		// with identical fields, so it must never be consumed by this write.
+		generation, stopped, stopRequest := d.generation, d.stopped, d.stopRequest.Load()
+		fenced := func() bool {
+			return d.generation != generation || d.stopped != stopped || d.stopRequest.Load() != stopRequest
+		}
+		consumeHead := func() {
+			d.pending = d.pending[1:]
+			d.refreshSteeringLocked()
+			d.notifyTurnChangedLocked()
+		}
+		if head.Retry {
+			return sessionIOReservation{commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				if fenced() || len(d.pending) == 0 || !sameUnidentifiedInput(d.pending[0], head) {
+					return &SessionError{Kind: SessionErrorStale, Operation: "promote_input"}
+				}
+				consumeHead()
+				return nil
+			}}, nil
+		}
+		// Shaped like the legacy steer transcript entry: committed, not accepted.
+		message := head.sessionMessage()
+		message.Pending = false
+		message.Message.CreatedAt = ""
+		var write func(context.Context) error
+		if d.r.sessionStore != nil {
+			write = func(ctx context.Context) error {
+				id, err := d.r.sessionStore.AddMessage(ctx, d.identityID, message)
+				if errors.Is(err, session.ErrNotFound) {
+					// Unpersisted session: admission treats this as an in-memory-only input.
+					return nil
+				}
+				if err == nil {
+					message.ID = id
+				}
+				return err
+			}
+		}
+		return sessionIOReservation{write: write, commit: func(err error) error {
+			if err != nil {
+				// Fail closed: the write may have committed, so the head is kept and
+				// no automatic wake or retry runs until an explicit retry is admitted.
+				d.unidentifiedUncertain = true
+				d.lastError = err.Error()
+				d.publishPromotionFailureLocked("", err)
+				return err
+			}
+			// An acknowledged row is durable. It becomes visible even when the queue
+			// was fenced, but only an unfenced identical head may be consumed.
+			pos := d.sess.AddMessageAt(message)
+			event := inputEventMetadata(UserMessage(head.Content, d.identityID, head.MultiContent, pos), head).(*UserMessageEvent)
+			event.ownerAppend = true
+			d.events.Publish(d.identityID, event)
+			if fenced() || len(d.pending) == 0 || !sameUnidentifiedInput(d.pending[0], head) {
+				d.unidentifiedUncertain = true
+				stale := &SessionError{Kind: SessionErrorStale, Operation: "promote_input", Detail: "acknowledged input no longer heads the queue; explicit retry is required"}
+				d.lastError = stale.Error()
+				d.publishPromotionFailureLocked("", stale)
+				return stale
+			}
+			consumeHead()
+			position = pos
+			return nil
+		}}, nil
+	})
+	return position, err
+}
+
+// promotedRunInput is the ID-less head appended at run start. Its hooks use
+// this identity, so the prompt is not re-read from the transcript tail.
+type promotedRunInput struct {
+	msg      QueuedMessage
+	position int
+}
+
+type promotedRunInputKey struct{}
+
+func withPromotedRunInput(ctx context.Context, run *promotedRunInput) context.Context {
+	return context.WithValue(ctx, promotedRunInputKey{}, run)
+}
+
+// initialTurnInputFor returns the run's initial prompt. A promoted ID-less head
+// takes precedence; its position is -1 when the run has no promoted head.
+func (r *LocalRuntime) initialTurnInputFor(ctx context.Context, sess *session.Session) (QueuedMessage, int, bool) {
+	if run, ok := ctx.Value(promotedRunInputKey{}).(*promotedRunInput); ok && run != nil {
+		return run.msg, run.position, true
+	}
+	msg, ok := r.initialTurnInput(sess)
+	return msg, -1, ok
+}
+
+// promoteUnidentifiedHead promotes a non-guidance ID-less queue head into the
+// transcript at run start, before the execution snapshot is cloned. It returns
+// the promoted input for the run's hooks, or nil when nothing was appended.
+// skipModel reports a consumed retry marker, which carries no content.
+func (d *sessionDriver) promoteUnidentifiedHead(ctx context.Context) (run *promotedRunInput, skipModel bool, err error) {
+	var head QueuedMessage
+	found := false
+	if err := d.ownerCall(ctx, func() error {
+		if len(d.pending) > 0 && d.pending[0].RequestID == "" && !d.pending[0].guidance() {
+			head, found = d.pending[0], true
+		}
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	position, err := d.promoteUnidentifiedInput(ctx, head)
+	if err != nil {
+		return nil, false, err
+	}
+	if head.Retry {
+		return nil, true, nil
+	}
+	return &promotedRunInput{msg: head, position: position}, false, nil
+}
+
+// sameUnidentifiedInput identifies a queue entry without a request ID by every
+// field of the entry, so distinct inputs with equal text never match.
+func sameUnidentifiedInput(a, b QueuedMessage) bool {
+	return a.RequestID == "" && b.RequestID == "" && reflect.DeepEqual(a, b)
 }
 
 func (d *sessionDriver) drainGuidance(ctx context.Context) []QueuedMessage {
@@ -275,15 +526,16 @@ func (d *sessionDriver) drainGuidance(ctx context.Context) []QueuedMessage {
 
 // A canceled start becomes a settling generation without launching execution.
 // Ordinary settlement retries retain its canceled outcome on storage failure.
-func (d *sessionDriver) finishCanceledStart() bool {
+func (d *sessionDriver) finishCanceledStartFor(startGeneration uint64, startDone chan struct{}) bool {
 	var canceled bool
 	var generation uint64
 	_ = d.ownerCall(d.r.durabilityContext(), func() error {
-		if !d.starting() || !d.startCanceled {
+		if !d.starting() || !d.startCanceled || startDone != nil && (d.generation != startGeneration || d.startDone != startDone) {
 			return nil
 		}
 		canceled = true
 		turnID := d.activeRequestID
+		d.flushAllDeferredAcceptedLocked()
 		d.pending = slices.DeleteFunc(d.pending, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
 		d.generation++
 		generation = d.generation

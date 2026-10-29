@@ -1192,8 +1192,8 @@ func TestCloudProviderEnvVars(t *testing.T) {
 func TestDefaultModelsExistInModelsDev(t *testing.T) {
 	t.Parallel()
 
-	modelsStore, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	// Embedded snapshot: a mutable host models.dev cache can lack defaults.
+	modelsStore := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
 
 	for provider, model := range DefaultModels {
 		t.Run(provider, func(t *testing.T) {

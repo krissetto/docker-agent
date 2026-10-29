@@ -8,30 +8,12 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/styles"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 )
 
 const (
-	editorTextRows = 3
-	commentLabel   = "＋ comment"
-	sendLabel      = "Send"
-	cancelLabel    = "Cancel"
+	sendLabel   = "Send"
+	cancelLabel = "Cancel"
 )
-
-func newEditor() textarea.Model {
-	ed := textarea.New()
-	ed.Placeholder = "Comment for the agent…"
-	ed.SetStyles(styles.InputStyle)
-	ed.SetHeight(editorTextRows)
-	return ed
-}
-
-func (m *Model) editorRows() int {
-	if !m.editing {
-		return 0
-	}
-	return editorTextRows + 1
-}
 
 // previewing reports a captured send waiting for explicit confirmation.
 func (m *Model) previewing() bool {
@@ -59,6 +41,19 @@ func (m *Model) applySplit() {
 // SetDraft shows the host-owned review draft.
 func (m *Model) SetDraft(d DraftView) {
 	before := m.draft.Preview
+	if m.commentInput != nil && !m.commentSaving && m.commentID != "" {
+		found := false
+		for _, comment := range d.Comments {
+			if comment.ID == m.commentID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.pendingCommentRequest = ""
+			m.finishCommentInput(false)
+		}
+	}
 	m.draft = d
 	if d.Preview != before {
 		m.previewDoc = Document{Key: DocumentKey{Mode: ModeFiles, Path: "review"}, State: StateReady}
@@ -75,12 +70,15 @@ func (m *Model) SetDraft(d DraftView) {
 
 // syncReaderComments places draft comments under their anchored lines.
 func (m *Model) syncReaderComments() {
-	m.reader.comments = nil
+	m.reader.comments = map[int][]commentNote{}
 	m.staleComments = make(map[string]bool)
 	if !m.hasDoc || m.doc.State != StateReady {
 		return
 	}
 	for _, c := range m.draft.Comments {
+		if m.commentInput != nil && c.ID == m.commentID {
+			continue
+		}
 		a := c.Anchor
 		if a.WorktreeID != m.doc.Key.WorktreeID || a.Path != m.doc.Key.Path || a.Mode != m.doc.Key.Mode || a.Group != m.doc.Key.Group {
 			continue
@@ -91,9 +89,10 @@ func (m *Model) syncReaderComments() {
 		}
 		if i, ok := m.reader.commentItem(a); ok {
 			if m.reader.comments == nil {
-				m.reader.comments = map[int][]string{}
+				m.reader.comments = map[int][]commentNote{}
 			}
-			m.reader.comments[i] = append(m.reader.comments[i], commentPreview(c.Body))
+			expanded := m.commentExpanded[c.ID]
+			m.reader.comments[i] = append(m.reader.comments[i], commentNote{ID: c.ID, Preview: commentPreview(c.Body), Body: strings.TrimSpace(c.Body), Expanded: expanded})
 		}
 	}
 	m.reader.invalidate()
@@ -144,99 +143,51 @@ func (m *Model) currentFiles(worktreeID string) []FileChange {
 	return nil
 }
 
-// startComment opens the editor for the selected lines (or the cursor line).
-func (m *Model) startComment() tea.Cmd {
-	if !m.hasDoc || m.doc.State != StateReady || m.previewing() {
-		return nil
-	}
-	a, ok := m.reader.anchorFor()
-	if !ok {
-		m.hint = "Select diff lines to comment"
-		return nil
-	}
-	m.editAnchor, m.editID = m.enrichAnchor(a), ""
-	return m.openEditor("")
-}
-
 func (m *Model) startEdit(id string) tea.Cmd {
 	for _, c := range m.draft.Comments {
-		if c.ID == id {
-			m.editAnchor, m.editID = c.Anchor, id
-			return m.openEditor(c.Body)
+		if c.ID != id {
+			continue
 		}
+		key := documentKeyForAnchor(c.Anchor)
+		if !m.prepareCommentDocumentChange(key) {
+			return nil
+		}
+		if m.hasDoc && m.doc.Key == key && m.doc.State == StateReady {
+			return m.beginCommentInput(c.Anchor, c.ID, c.Body)
+		}
+		copy := c
+		m.pendingComment = &copy
+		m.mode = key.Mode
+		m.draftOpen = false
+		m.revealFile(key)
+		m.area = areaReader
+		if !m.geometry().twoColumn {
+			m.drilled = true
+		}
+		m.requested, m.hasRequest = key, true
+		m.doc, m.hasDoc = Document{Key: key, State: StateLoading}, true
+		m.reader.setDocument(&m.doc, false)
+		m.syncScrollviews()
+		return m.emit(OpenDocumentRequestMsg{Owner: m.owner, Key: key})
 	}
 	return nil
-}
-
-func (m *Model) openEditor(body string) tea.Cmd {
-	m.editing = true
-	m.editor.SetWidth(max(1, m.width-2))
-	m.editor.SetValue(body)
-	m.ensureLineVisible()
-	return m.editor.Focus()
-}
-
-func (m *Model) closeEditor() {
-	m.editing = false
-	m.editor.Blur()
-	m.editor.Reset()
-	m.ensureLineVisible()
-}
-
-func (m *Model) editorKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "f1":
-		return false, nil
-	case "ctrl+n", "ctrl+p", "ctrl+t":
-		return true, nil
-	case "esc":
-		m.closeEditor()
-		return true, nil
-	case "ctrl+j", "shift+enter":
-		m.editor.InsertString("\n")
-		return true, nil
-	case "enter":
-		body := strings.TrimSpace(m.editor.Value())
-		if body == "" {
-			m.hint = "Comment is empty"
-			return true, nil
-		}
-		var cmd tea.Cmd
-		if m.editID != "" {
-			cmd = m.emit(EditCommentMsg{Owner: m.owner, ID: m.editID, Body: body})
-		} else {
-			cmd = m.emit(AddCommentMsg{Owner: m.owner, Anchor: m.editAnchor, Body: body})
-			m.reader.anchor = -1
-		}
-		m.closeEditor()
-		return true, cmd
-	}
-	updated, cmd := m.editor.Update(msg)
-	m.editor = updated
-	return true, cmd
-}
-
-func (m *Model) renderEditor() []string {
-	what := "Comment"
-	if m.editID != "" {
-		what = "Edit comment"
-	}
-	label := styles.TabTitleStyle.Bold(true).Render(what) + styles.MutedStyle.Render(" · "+sanitize(m.editAnchor.Path)+" "+lineRange(m.editAnchor)+" · Enter save · Ctrl+J newline · Esc cancel")
-	out := []string{fit(" "+label, m.width)}
-	for line := range strings.SplitSeq(m.editor.View(), "\n") {
-		out = append(out, fit(" "+line, m.width))
-	}
-	return padRows(out, m.width, m.editorRows())
 }
 
 // Draft list ---------------------------------------------------------------
 
 // draftRowCount includes the trailing "Send review…" action when non-empty.
+func boolIntValue(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func (m *Model) draftRowCount() int {
-	if len(m.draft.Comments) == 0 {
+	if len(m.draft.Comments) == 0 && strings.TrimSpace(m.draft.General) == "" {
 		return 0
 	}
-	return len(m.draft.Comments) + 1
+	return len(m.draft.Comments) + 1 + boolIntValue(strings.TrimSpace(m.draft.General) != "")
 }
 
 func (m *Model) toggleDraft() {
@@ -270,6 +221,9 @@ func (m *Model) draftKey(k string) (bool, tea.Cmd) {
 	case "e":
 		if m.draftCursor < len(m.draft.Comments) {
 			return true, m.startEdit(m.draft.Comments[m.draftCursor].ID)
+		}
+		if m.draft.General != "" && m.draftCursor == len(m.draft.Comments) {
+			return true, m.emit(GeneralCommentRequestMsg{Owner: m.owner})
 		}
 	case "d", "delete":
 		return true, m.deleteDraftRow()
@@ -307,7 +261,10 @@ func (m *Model) deleteDraftRow() tea.Cmd {
 }
 
 func (m *Model) activateDraftRow() tea.Cmd {
-	if m.draftCursor >= len(m.draft.Comments) {
+	if m.draft.General != "" && m.draftCursor == len(m.draft.Comments) {
+		return m.emit(GeneralCommentRequestMsg{Owner: m.owner})
+	}
+	if m.draftCursor >= len(m.draft.Comments)+boolIntValue(m.draft.General != "") {
 		return m.requestPreview()
 	}
 	a := m.draft.Comments[m.draftCursor].Anchor
@@ -361,7 +318,7 @@ func (m *Model) jumpToAnchor() {
 }
 
 func (m *Model) requestPreview() tea.Cmd {
-	if len(m.draft.Comments) == 0 {
+	if len(m.draft.Comments) == 0 && strings.TrimSpace(m.draft.General) == "" {
 		m.hint = "Draft is empty"
 		return nil
 	}
@@ -436,8 +393,8 @@ func (m *Model) previewButtonAt(x, width int) string {
 }
 
 func (m *Model) draftRows(width int) []string {
-	if len(m.draft.Comments) == 0 {
-		return []string{styles.MutedStyle.Italic(true).Render("No comments yet · select lines and press a")}
+	if len(m.draft.Comments) == 0 && strings.TrimSpace(m.draft.General) == "" {
+		return []string{styles.MutedStyle.Italic(true).Render("No comments yet · select lines and press c")}
 	}
 	focused := m.navFocused()
 	var out []string
@@ -450,7 +407,11 @@ func (m *Model) draftRows(width int) []string {
 				mark = styles.HighlightWhiteStyle.Render("▌")
 			}
 		}
-		if i == len(m.draft.Comments) {
+		if m.draft.General != "" && i == len(m.draft.Comments) {
+			out = append(out, mark+" "+styles.SecondaryStyle.Render("General comment")+"  "+ansi.Truncate(commentPreview(m.draft.General), max(1, width-20), "…"))
+			continue
+		}
+		if i == len(m.draft.Comments)+boolIntValue(m.draft.General != "") {
 			label := "Send review…"
 			if m.draft.Status == DraftFailed {
 				label = "Retry send…"
@@ -489,7 +450,10 @@ func (m *Model) draftClick(row, x, width int) tea.Cmd {
 		}
 	}
 	m.draftCursor = i
-	if i == len(m.draft.Comments) {
+	if m.draft.General != "" && i == len(m.draft.Comments) {
+		return m.emit(GeneralCommentRequestMsg{Owner: m.owner})
+	}
+	if i == len(m.draft.Comments)+boolIntValue(m.draft.General != "") {
 		return m.requestPreview()
 	}
 	return nil

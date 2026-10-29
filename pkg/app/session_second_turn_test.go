@@ -27,6 +27,7 @@ func TestSecondAppTurnWithStoredHistoryUsesSameHandle(t *testing.T) {
 		require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID(fmt.Sprintf("historical-%d", i)))))
 	}
 	sess := session.New(session.WithID("active"), session.WithAgentName("root"))
+	sess.SetAttribute(runtime.SessionAgentAttribute, "root")
 	for i := range 64 {
 		sess.AddMessage(session.UserMessage(fmt.Sprintf("committed history %d", i)))
 	}

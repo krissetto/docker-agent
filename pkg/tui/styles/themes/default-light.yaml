@@ -22,9 +22,9 @@ colors:
   # Status colors
   success: "#4F6B33"
   error: "#B02A3C"
-  warning: "#8C6D1F"
+  warning: "#84671d"
   info: "#0F7490"
-  highlight: "#3F7A28"
+  highlight: "#3e7827"
 
   # Brand colors
   brand: "#1D63ED"
@@ -35,20 +35,20 @@ colors:
   error_dark: "#F6D9D5"
 
   # Spinner colors
-  spinner_dim: "#7C90DC"
-  spinner_bright: "#4A66C4"
-  spinner_brightest: "#1F3FAE"
+  spinner_dim: "#2e59d9"
+  spinner_bright: "#2e59d9"
+  spinner_brightest: "#2e59d9"
 
   # Diff colors
   diff_add_bg: "#D8EAD3"
   diff_remove_bg: "#F5DBDB"
 
   # UI element colors
-  line_number: "#9A9EB6"
+  line_number: "#686a7b"
   separator: "#8A91B4"
   selected: "#C7D4F2"
   selected_fg: "#FFFFFF"
-  suggestion_ghost: "#767D99"
+  suggestion_ghost: "#656a82"
   tab_bg: "#FAFAFA"
   tab_active_bg: "#EAECF2"
   tab_active_fg: "#0F1420"
@@ -75,6 +75,7 @@ colors:
   focus: "#2E59D9"
   disabled: "#A6ABBF"
   status_adjacent: "#5A607D"
+  scrollbar_track: "#dcdcdc"
 
 
   # Badge colors
@@ -89,9 +90,9 @@ chroma:
   # Syntax highlighting colors (GitHub-light-inspired)
   error_fg: "#B31D28"
   error_bg: "#F6D9D5"
-  success: "#1A7F37"
-  comment: "#7C8393"
-  comment_preproc: "#B35A00"
+  success: "#197b35"
+  comment: "#666b79"
+  comment_preproc: "#a85400"
   keyword: "#0550AE"
   keyword_reserved: "#A626A4"
   keyword_namespace: "#CF222E"
@@ -101,12 +102,12 @@ chroma:
   name_builtin: "#953800"
   name_tag: "#116329"
   name_attribute: "#0550AE"
-  name_decorator: "#B08800"
-  literal_number: "#0A7B83"
+  name_decorator: "#856700"
+  literal_number: "#0a767e"
   literal_string: "#0A3069"
   literal_string_escape: "#116329"
   generic_deleted: "#CF222E"
-  generic_subheading: "#6E7781"
+  generic_subheading: "#646c76"
   background: "#EFF1F5"
 
 markdown:

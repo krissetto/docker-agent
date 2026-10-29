@@ -14,6 +14,9 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
+// The name run carries the stable hyperlink id emitted by agentidentity.
+var identityNameLink = ansi.SetHyperlink(agentidentity.Link, "id=docker-agent-identity-name")
+
 func TestAgentInputKeepsUserSurfaceWithBorderIdentity(t *testing.T) {
 	original := styles.CurrentTheme()
 	t.Cleanup(func() { styles.ApplyTheme(original) })
@@ -44,10 +47,10 @@ func TestAgentInputKeepsUserSurfaceWithBorderIdentity(t *testing.T) {
 			require.Equal(t, 1, strings.Count(strings.Join(got, "\n"), seqOutputStart))
 			if width >= 30 {
 				require.Contains(t, ansi.Strip(got[0]), msg.InputReference.Label())
-				require.Contains(t, got[0], ansi.SetHyperlink(agentidentity.Link))
+				require.Contains(t, got[0], identityNameLink)
 				require.Contains(t, got[0], strings.TrimSuffix(styles.AgentIdentityStyle("worker", false).Render("worker"), "\x1b[m"))
 				require.Contains(t, got[0], strings.TrimSuffix(styles.MutedStyle.Render(" (abcde)"), "\x1b[m"))
-				require.Equal(t, 1, strings.Count(got[0], ansi.SetHyperlink(agentidentity.Link)))
+				require.Equal(t, 1, strings.Count(got[0], identityNameLink))
 			}
 		}
 	}

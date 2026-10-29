@@ -228,6 +228,15 @@ func BenchmarkPaneBoundedReplay(b *testing.B) {
 	}
 }
 
+// Candidate owns the dock column offset; the pristine baseline has no tabOrigin
+// method and keeps the frame-only origin.
+func replayTabOrigin(root *appModel) int {
+	if owner, ok := any(root).(interface{ tabOrigin() int }); ok {
+		return owner.tabOrigin()
+	}
+	return tabFrameOrigin()
+}
+
 // The baseline and candidate share this pointer workload byte-for-byte. Locate
 // tab rows by the production region mapper, not a separator-era fixed offset.
 func replayPaneDrag(tb testing.TB, root *appModel) {
@@ -238,8 +247,9 @@ func replayPaneDrag(tb testing.TB, root *appModel) {
 		if root.hitTestRegion(row) != regionTabBar {
 			continue
 		}
-		for column := tabFrameOrigin(); column < root.width; column++ {
-			if id, hit := root.tabBar.TabBodyAt(column-tabFrameOrigin(), 0); hit && id == "second" {
+		origin := replayTabOrigin(root)
+		for column := origin; column < root.width; column++ {
+			if _, hit := root.tabBar.TabBodyAt(column-origin, 0); hit {
 				x, y = column, row
 				break
 			}
@@ -249,7 +259,12 @@ func replayPaneDrag(tb testing.TB, root *appModel) {
 		}
 	}
 	if x < 0 {
-		tb.Fatal("drag replay cannot locate source tab")
+		// Split panes have no tab entry; grab the second pane by its title row.
+		r := root.paneAreas(root.paneGeometry.Panes["second"]).title
+		x, y = r.X+1, r.Y
+	}
+	if x < 0 {
+		tb.Fatal("drag replay cannot locate a pane to drag")
 	}
 	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	_, bounds, _ := root.measurePanes()

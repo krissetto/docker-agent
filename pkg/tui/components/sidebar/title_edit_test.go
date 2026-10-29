@@ -171,6 +171,8 @@ func TestSidebar_HandleClickType_WrappedTitle_Collapsed(t *testing.T) {
 	// Use a title long enough to wrap: "☆ " (2) + "LongTitle" (9) + " ✎" (2) = 13 chars
 	m.sessionTitle = "LongTitle"
 
+	setUsageReadyForTest(m)
+
 	paddingLeft := m.layoutCfg.PaddingLeft // 1
 
 	// Only the first row belongs to the title.
@@ -340,6 +342,8 @@ func TestSidebar_HandleClickType_HiddenPath_Vertical(t *testing.T) {
 	m.workingDirectory = "~/projects/myapp"
 	m.SetSectionVisibility(SectionVisibility{HideSessionPath: true})
 
+	setUsageReadyForTest(m)
+
 	paddingLeft := m.layoutCfg.PaddingLeft
 	view := sb.View()
 	assert.NotContains(t, view, "myapp")
@@ -372,6 +376,8 @@ func TestSidebar_HandleClickType_HiddenPath_Collapsed(t *testing.T) {
 	m.sessionTitle = "Hi"
 	m.workingDirectory = "~/projects/myapp"
 	m.SetSectionVisibility(SectionVisibility{HideSessionPath: true})
+
+	setUsageReadyForTest(m)
 
 	paddingLeft := m.layoutCfg.PaddingLeft
 

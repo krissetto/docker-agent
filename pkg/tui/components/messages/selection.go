@@ -339,10 +339,38 @@ func (m *model) ClearPresentationSelection() {
 		m.renderDirty = true
 		m.visualGeneration++
 	}
+	m.releaseRetainedReplies()
 }
 
 // clearSelection resets the selection state
 func (m *model) clearSelection() {
 	m.cancelImageClick()
 	m.selection.clear()
+	m.releaseRetainedReplies()
+}
+
+// releaseRetainedReplies hands replies kept visible during selection back to
+// Work through the normal reply handoff. Call it only after the selection has
+// ended. Reader position is left to the existing scroll anchor.
+func (m *model) releaseRetainedReplies() {
+	if len(m.workRetained) == 0 || m.workRetentionHeld() {
+		return
+	}
+	if !m.workEnabled || m.replay != nil {
+		clear(m.workRetained)
+		return
+	}
+	if m.pendingReplyHandoff {
+		// The caller's pending snapshot predates this mutation; its completion
+		// starts the handoff against the released target.
+		clear(m.workRetained)
+		m.invalidateAllItems()
+		return
+	}
+	m.snapshotPendingReplyHandoff(nil)
+	clear(m.workRetained)
+	m.invalidateAllItems()
+	m.ensureAllItemsRendered()
+	m.beginPendingReplyHandoff()
+	m.visualGeneration++
 }

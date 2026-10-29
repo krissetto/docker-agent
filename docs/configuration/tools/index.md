@@ -21,7 +21,6 @@ Built-in tools are included with Docker Agent and require no external dependenci
 | `filesystem` | Read, write, list, search, navigate | [Filesystem](../../tools/filesystem/index.md) |
 | `git` | Read-only repository inspection (status, log, branches, show, blame) | [Git](../../tools/git/index.md) |
 | `shell` | Execute shell commands synchronously | [Shell](../../tools/shell/index.md) |
-| `background_jobs` | Run and manage long-running shell commands | [Background Jobs](../../tools/background-jobs/index.md) |
 | `scheduler` | Schedule instructions to run at a time or on a recurring interval | [Scheduler](../../tools/scheduler/index.md) |
 | `environment` | Report the OS and resolved shell (read-only, no arguments, auto-approved) | [Environment](../../tools/environment/index.md) |
 | `think` | Reasoning scratchpad | [Think](../../tools/think/index.md) |
@@ -52,7 +51,6 @@ Built-in tools are included with Docker Agent and require no external dependenci
 toolsets:
   - type: filesystem
   - type: shell
-  - type: background_jobs
   - type: think
   - type: todo
   - type: memory

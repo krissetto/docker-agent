@@ -29,21 +29,23 @@ func TestAgentDisclosureTicksInvalidateTranscriptAndKeyboardToggle(t *testing.T)
 	ar := animation.NewRuntimeWithScheduler(&disclosureClock{now: time.Unix(1, 0)})
 	m := newModel(ar, 100, 10, &service.SessionState{}, subagentindex.New())
 	t.Cleanup(m.StopAnimations)
+	// A human request first keeps the report a non-opener: its default stays collapsed.
+	m.addMessage(types.User("request"))
 	input := session.UserMessage(strings.Repeat("literal body row\n", 20))
 	input.InputOrigin, input.SenderName, input.SenderID = session.InputOriginAgent, "director", "parent-session"
-	m.AddInputMessage(input, 0)
+	m.AddInputMessage(input, 1)
 	m.View()
-	m.selectedMessageIndex = 0
+	m.selectedMessageIndex = 1
 	for _, code := range []rune{tea.KeyEnter, tea.KeySpace} {
 		m.handleKeyPress(tea.KeyPressMsg{Code: code})
-		require.False(t, m.itemNeedsTick(0), "unfocused transcript cannot steal composer keys")
+		require.False(t, m.itemNeedsTick(1), "unfocused transcript cannot steal composer keys")
 	}
 	m.focused = true
 	m.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyEnter})
-	require.True(t, m.itemNeedsTick(0))
+	require.True(t, m.itemNeedsTick(1))
 	require.NotContains(t, ansi.Strip(m.View()), "literal body")
 	heights := map[int]bool{}
-	for m.itemNeedsTick(0) {
+	for m.itemNeedsTick(1) {
 		cmd := ar.Continue()
 		require.NotNil(t, cmd)
 		tick, ok := ar.Accept(cmd().(animation.TickMsg))
@@ -56,8 +58,8 @@ func TestAgentDisclosureTicksInvalidateTranscriptAndKeyboardToggle(t *testing.T)
 	require.Contains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "literal body")
 	m.scrollOffset, m.userHasScrolled = 2, true
 	m.handleKeyPress(tea.KeyPressMsg{Code: tea.KeySpace})
-	require.True(t, m.itemNeedsTick(0))
-	for m.itemNeedsTick(0) {
+	require.True(t, m.itemNeedsTick(1))
+	for m.itemNeedsTick(1) {
 		tick, ok := ar.Accept(ar.Continue()().(animation.TickMsg))
 		require.True(t, ok)
 		m.Update(tick)
@@ -65,8 +67,8 @@ func TestAgentDisclosureTicksInvalidateTranscriptAndKeyboardToggle(t *testing.T)
 	}
 	require.NotContains(t, ansi.Strip(m.View()), "literal body")
 	require.LessOrEqual(t, m.scrollOffset, max(0, m.totalScrollableHeight()-m.height))
-	require.Equal(t, input.Message.Content, m.messages[0].ReceivedBody)
-	require.Equal(t, input.Message.Content, copyableMessageContent(m.messages[0]))
+	require.Equal(t, input.Message.Content, m.messages[1].ReceivedBody)
+	require.Equal(t, input.Message.Content, copyableMessageContent(m.messages[1]))
 }
 
 func TestSendRequestNestedChevronAndStatusReplacement(t *testing.T) {

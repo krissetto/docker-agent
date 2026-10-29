@@ -40,10 +40,13 @@ func TestHandlePlanEditorClosed_NoInlineDraftRead(t *testing.T) {
 
 	// A regression to an inline draft read would block this call forever
 	// and fail the test by timeout.
+	gen := m.metadataGeneration
 	_, cmd := m.Update(planEditorClosedMsg{ref: plans.SharedRef("fresh"), create: true, path: fifo})
 	require.NotNil(t, cmd, "Update must defer the draft read to a command")
 
-	result := cmd()
+	semantic := filterMetadataRefresh(t, m, gen, collectMsgs(cmd))
+	require.Len(t, semantic, 1, "the draft read must be the only semantic result")
+	result := semantic[0]
 	writeResult, ok := result.(planWriteResultMsg)
 	require.True(t, ok, "the command must yield a typed result, got %T", result)
 	require.Error(t, writeResult.readErr)
@@ -82,19 +85,23 @@ func TestShowPlanBrowser_FIFOPlanFileDoesNotHang(t *testing.T) {
 		t.Skipf("cannot create a FIFO on this system: %v", err)
 	}
 
+	gen := m.metadataGeneration
 	_, cmd := m.Update(messages.ShowPlanBrowserMsg{})
 	require.NotNil(t, cmd)
 
-	done := make(chan tea.Msg, 1)
-	go func() { done <- cmd() }()
+	done := make(chan []tea.Msg, 1)
+	go func() { done <- collectMsgs(cmd) }()
 
-	var result tea.Msg
+	var batched []tea.Msg
 	select {
-	case result = <-done:
+	case batched = <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the /plans listing read blocked on a FIFO plan file; the storage open must not block")
 	}
 
+	semantic := filterMetadataRefresh(t, m, gen, batched)
+	require.Len(t, semantic, 1, "the listing read must be the only semantic result")
+	result := semantic[0]
 	loaded, ok := result.(planBrowserLoadedMsg)
 	require.True(t, ok, "got %T", result)
 	require.NoError(t, loaded.err, "the listing must complete for real, not through the read deadline")

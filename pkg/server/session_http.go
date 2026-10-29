@@ -61,6 +61,7 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.GET("/:id/status", s.canonicalSessionStatus)
 	group.GET("/:id/recent-chat", s.recentCanonicalChat)
 	group.GET("/:id/snapshot", s.canonicalSessionSnapshot)
+	group.GET("/:id/history", s.canonicalSessionHistory)
 	group.GET("/:id/events", s.sessionEventStream)
 	group.POST("/:id/messages", s.sessionInput)
 	group.POST("/:id/retry", s.retrySession)
@@ -615,6 +616,10 @@ func (s *Server) editCanonicalSession(c echo.Context) error {
 		if view != "" && view != "open-view" {
 			return sessionRequestError("unsupported session opening view")
 		}
+		metadataProjection, err := sessionViewProjectionError(c, "open-view")
+		if err != nil {
+			return err
+		}
 		if view == "open-view" && edit.ViewConfirmation == nil {
 			return sessionRequestError("session opening requires confirmed binding")
 		}
@@ -633,9 +638,22 @@ func (s *Server) editCanonicalSession(c echo.Context) error {
 			return sessionHTTPError(err)
 		}
 		if view == "open-view" {
+			if metadataProjection {
+				return c.JSON(http.StatusOK, struct {
+					Version    int                                     `json:"version"`
+					View       string                                  `json:"view"`
+					Projection string                                  `json:"projection"`
+					Info       metadataPreparedSessionViewInfo         `json:"info"`
+					Metadata   api.SessionMetadata                     `json:"metadata"`
+					Status     api.SessionStatus[runtime.SessionState] `json:"status"`
+				}{Version: api.SessionAPIVersion, View: "open-view", Projection: api.SessionViewMetadataProjection, Info: metadataPreparedViewInfo(committed.Info), Metadata: sessionMetadata(committed.Metadata), Status: sessionStatus(committed.Status)})
+			}
 			return c.JSON(http.StatusOK, api.SessionOpened[runtime.PreparedSessionViewInfo, runtime.SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: committed.Info, Metadata: sessionMetadata(committed.Metadata), Status: sessionStatus(committed.Status)})
 		}
 		return c.JSON(http.StatusOK, committed.Info.Session)
+	}
+	if _, err := sessionViewProjectionError(c, ""); err != nil {
+		return err
 	}
 	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
 	if err != nil {
@@ -703,11 +721,31 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		}
 		since = &value
 	}
-	observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree, OrderedTree: tree})
+	projection, limits, projectionErr := parseHistoryProjection(c, false, true)
+	if projectionErr != nil {
+		return sessionRequestError(projectionErr.Error())
+	}
+	options := runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree, OrderedTree: tree}
+	if projection == "tail" {
+		if tree || since != nil {
+			return sessionRequestError("tail projection requires an initial non-tree observation")
+		}
+		options.HistoryTail = &limits
+	}
+	observation, err := handle.Observe(c.Request().Context(), options)
 	if err != nil {
 		return sessionHTTPError(err)
 	}
 	defer observation.Cancel()
+	if projection == "tail" {
+		data, marshalErr := json.Marshal(sessionSnapshotForRequest(observation.Primary(), c))
+		if marshalErr != nil {
+			return sessionHTTPError(marshalErr)
+		}
+		if len(data) > limits.MaxBytes {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
+		}
+	}
 	response := c.Response()
 	response.Header().Set(echo.HeaderContentType, "text/event-stream")
 	response.Header().Set(echo.HeaderCacheControl, "no-cache")
@@ -734,14 +772,20 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	}
 	snapshots := observation.Initial
 	for _, initial := range snapshots {
-		snapshot := sessionSnapshot(initial)
+		snapshot := sessionSnapshotForRequest(initial, c)
+		if projection == "tail" && !boundedHistoryDTO(snapshot, limits.MaxBytes) {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
+		}
 		if err := writeSessionSnapshot(snapshot, write); err != nil {
 			return nil
 		}
 	}
 	for _, envelope := range observation.Replay {
-		dto := sessionEnvelope(envelope)
-		if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: &dto}); err != nil {
+		dto := sessionEnvelopeForRequest(envelope, supportsBackgroundProcessFeature(c.Request()))
+		if dto == nil {
+			continue
+		}
+		if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: dto}); err != nil {
 			return nil
 		}
 	}
@@ -763,16 +807,24 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 				return nil
 			}
 			if update.Snapshot != nil {
-				dto := sessionSnapshot(*update.Snapshot)
+				dto := sessionSnapshotForRequest(*update.Snapshot, c)
+				if projection == "tail" && !boundedHistoryDTO(dto, limits.MaxBytes) {
+					return nil
+				}
 				for _, seed := range update.Replay {
-					dto.LiveSeeds = append(dto.LiveSeeds, sessionEnvelope(seed))
+					if envelope := sessionEnvelopeForRequest(seed, supportsBackgroundProcessFeature(c.Request())); envelope != nil {
+						dto.LiveSeeds = append(dto.LiveSeeds, *envelope)
+					}
 				}
 				if err := writeSessionSnapshot(dto, write); err != nil {
 					return nil
 				}
 			} else if update.Event != nil {
-				dto := sessionEnvelope(*update.Event)
-				if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: &dto}); err != nil {
+				dto := sessionEnvelopeForRequest(*update.Event, supportsBackgroundProcessFeature(c.Request()))
+				if dto == nil {
+					continue
+				}
+				if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: dto}); err != nil {
 					return nil
 				}
 			}
@@ -781,7 +833,10 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 				observation.SessionsAdded = nil
 				continue
 			}
-			dto := sessionSnapshot(snapshot)
+			dto := sessionSnapshotForRequest(snapshot, c)
+			if projection == "tail" && !boundedHistoryDTO(dto, limits.MaxBytes) {
+				return nil
+			}
 			if err := writeSessionSnapshot(dto, write); err != nil {
 				return nil
 			}
@@ -789,8 +844,11 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 			if !ok {
 				return nil
 			}
-			dto := sessionEnvelope(envelope)
-			if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: &dto}); err != nil {
+			dto := sessionEnvelopeForRequest(envelope, supportsBackgroundProcessFeature(c.Request()))
+			if dto == nil {
+				continue
+			}
+			if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: dto}); err != nil {
 				return nil
 			}
 		case <-heartbeat.C:
@@ -806,6 +864,14 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 }
 
 const sessionSnapshotChunkBytes = 64 << 10
+
+func boundedHistoryDTO(snapshot sessionSnapshotDTO, maxBytes int) bool {
+	if session.BoundedJSONSize(snapshot, maxBytes) > maxBytes {
+		return false
+	}
+	data, err := json.Marshal(snapshot)
+	return err == nil && len(data) <= maxBytes
+}
 
 // Large snapshots have bounded wire frames, not a truncated transcript.
 func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamMessage) error) error {
@@ -850,8 +916,57 @@ func sessionStatus(status runtime.SessionStatus) sessionStatusDTO {
 	}
 }
 
+func sessionSnapshotForRequest(snapshot runtime.SessionSnapshot, c echo.Context) sessionSnapshotDTO {
+	dto := sessionSnapshot(snapshot)
+	if !supportsBackgroundProcessFeature(c.Request()) {
+		dto.BackgroundProcesses = nil
+	}
+	return dto
+}
+
+func supportsBackgroundProcessFeature(request *http.Request) bool {
+	value := request.Header.Get(api.SessionFeaturesHeader)
+	if len(value) > 128 {
+		return false
+	}
+	for token := range strings.SplitSeq(value, ",") {
+		if strings.TrimSpace(token) == api.SessionFeatureBackgroundProcesses {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionEnvelopeForRequest(envelope runtime.SessionEvent, includeBackgroundProcesses bool) *sessionEnvelopeDTO {
+	if _, isProcesses := envelope.Event.(*runtime.BackgroundProcessesEvent); isProcesses {
+		if !includeBackgroundProcesses {
+			if envelope.Sequence == 0 {
+				return nil
+			}
+			dto := sessionEnvelope(envelope)
+			dto.Event = nil
+			return &dto
+		}
+	}
+	dto := sessionEnvelope(envelope)
+	return &dto
+}
+
 func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
-	out := sessionSnapshotDTO{Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, TitleStatus: snapshot.TitleStatus, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs))}
+	out := sessionSnapshotDTO{BackgroundProcesses: snapshot.BackgroundProcesses, Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, TitleStatus: snapshot.TitleStatus, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs)), Projection: snapshot.Projection}
+	if snapshot.History != nil {
+		ranges := historyOmittedRanges(snapshot.History.OmittedPositions)
+		for _, position := range snapshot.History.OmittedResponsePositions {
+			ranges = append(ranges, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_response_byte_limit"})
+		}
+		out.History = &api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, OmittedRanges: ranges, NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
+	}
+	if snapshot.Items != nil {
+		out.Items = make([]api.SessionHistoryItem, len(snapshot.Items))
+		for i, item := range snapshot.Items {
+			out.Items[i] = api.SessionHistoryItem{Position: item.Position, Item: item.Item}
+		}
+	}
 	for _, event := range snapshot.Presentation {
 		out.Presentation = append(out.Presentation, event)
 	}
@@ -907,6 +1022,18 @@ func publicSessionOperation(operation string) string {
 func sessionHTTPError(err error) error {
 	if transportErr, ok := errors.AsType[*sessionTransportError](err); ok {
 		return echo.NewHTTPError(transportErr.Status, map[string]any{"error": transportErr.Code, "operation": transportErr.Operation, "session_id": transportErr.SessionID, "message": transportErr.Message})
+	}
+	if errors.Is(err, runtime.ErrHistoryCursorStale) {
+		return echo.NewHTTPError(http.StatusConflict, map[string]any{"error": "history_cursor_stale"})
+	}
+	if errors.Is(err, runtime.ErrHistoryCursorInvalid) {
+		return echo.NewHTTPError(http.StatusBadRequest, map[string]any{"error": "invalid_history_cursor"})
+	}
+	if errors.Is(err, runtime.ErrHistoryMetadataTooLarge) || errors.Is(err, session.ErrHistoryPageEnvelopeTooLarge) {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
+	}
+	if strings.Contains(err.Error(), "invalid history limits") {
+		return echo.NewHTTPError(http.StatusBadRequest, map[string]any{"error": "invalid_history_limits"})
 	}
 	if sessionErr, ok := errors.AsType[*runtime.SessionError](err); ok {
 		status := http.StatusConflict

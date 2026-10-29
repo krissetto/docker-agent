@@ -38,13 +38,16 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | --- | --- | --- | --- |
 | `use_subagents` | boolean | `true` | Allow delegation to subagents in local CLI runtimes. Managed with `/subagents on`, `/subagents off`, or the subagent-tree toggle, not the `/settings` dialog. See [Subagent Preference](#subagent-preference). |
 | `hide_tool_results` | boolean | `false` | Hide tool call results in the TUI by default. Mirrors the `--hide-tool-results` flag and the <kbd>Ctrl</kbd>+<kbd>O</kbd> toggle. |
+| `compact_work_log` | boolean | `true` | Group intermediate activity into an expandable Work block in the full TUI. Turn off **Compact work log** in `/settings` → **Appearance** to restore the previous transcript layout without losing history. Does not affect lean mode. |
+| `show_agent_context` | boolean | `false` | Show each agent's context-window fill beside its name in the sidebar: subagent rows, participant lines, and agent cards. Each row reads its own session's usage, so same-named agents never share a value. Managed by **Agent context %** in `/settings` → **Appearance** → **Sidebar layout**. The main context bar is unaffected. |
+| `visible_replies` | string | `"3"` | Regular assistant replies kept outside collapsed Work per user exchange: `latest`, `"3"`, `"5"`, or `all`. Managed by **Visible replies** in `/settings` → **Appearance**. Counts messages, not streaming chunks; only affects the full TUI with Compact work log enabled. |
 | `expand_thinking` | boolean | `false` | Start new sessions with thinking/tool blocks expanded instead of collapsed. |
 | `split_diff_view` | boolean | `true` | Render file-edit diffs side-by-side instead of unified. |
 | `render_images` | boolean | `true` | Render images in the TUI using the Kitty graphics protocol. Applies to both tool-result images and Markdown images in agent responses. Automatically disabled when the terminal does not support Kitty. |
 | `show_banner` | boolean | `true` | Show the ASCII-art startup banner on an empty conversation. Applies to both the full TUI and the [lean TUI](../../features/tui/index.md#lean-tui). Managed from the **Appearance** tab of `/settings`. |
-| `theme` | string | `default` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
-| `theme_dark` | string | `default` | Theme applied when `theme: auto` and the terminal background is dark. |
-| `theme_light` | string | `default-light` | Theme applied when `theme: auto` and the terminal background is light. |
+| `theme` | string | `docker-next-dark` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. Use `default` for the previous default palette (Old School); an unset value means Docker Next - Dark. Before Docker Next, choosing the old default cleared this setting, so a historical unset value cannot be told apart from an explicit Old School choice and is not migrated; set `theme: default` to keep Old School. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
+| `theme_dark` | string | `docker-next-dark` | Theme applied when `theme: auto` and the terminal background is dark. |
+| `theme_light` | string | `docker-next-light` | Theme applied when `theme: auto` and the terminal background is light. |
 | `YOLO` | boolean | `false` | Select the `autonomous` safety fallback globally. Unmatched calls are auto-approved, but deny rules, session-scoped ask rules, `tool_guard`, and `preempt_yolo` hooks can still block or prompt. Mirrors the `--yolo` flag and the `/yolo` command. Legacy alias for `safety: autonomous`; when both are set, `safety` wins. |
 | `safety` | string | _unset_ | Default [safety mode](../permissions/index.md#safety-modes) for new sessions: `strict`, `balanced`, `restricted`, or `autonomous` (any other value fails config loading). Wins over the legacy `YOLO` flag. Applied when no explicit `--safety`/`--yolo` flag and no alias safety option was given; wins over the agent YAML's `agents.<name>.safety` / `runtime.safety` defaults. Never changes the mode of a resumed session. |
 | `lean` | boolean | `false` | Make the [lean TUI](../../features/tui/index.md#lean-tui) (simplified, minimal-chrome interface) the default for interactive runs instead of the full TUI. |
@@ -55,12 +58,12 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `snapshot` | boolean | `false` | Enable automatic shadow-git snapshots at turn boundaries globally. See [Snapshots](../../features/snapshots/index.md). |
 | `cache_stable_prompts` | boolean | `false` | Keep changing trusted context (date, environment info, dynamic prompt files) out of the frozen system prefix and append chronological updates instead, improving prompt-cache hit rates on long sessions. |
 | `warn_on_cache_miss` | boolean | `false` | Warn when a model call after the first one in a session reports no cached input tokens (a prompt-cache miss). Managed from the **Notifications** tab of `/settings`. |
-| `busy_send_mode` | string | `queue` | What happens to a message sent while the agent is working: `steer` injects it into the ongoing stream; `queue` holds it until the current turn ends. |
+| `busy_send_mode` | string | `queue` | Legacy setting retained for config compatibility; no longer affects TUI routing. While busy, Enter queues and Alt+Enter steers. |
 | `interrupt_confirmation` | string | `always` | Controls how the <kbd>Esc</kbd> key interrupts a running stream: `always` (default) shows a confirmation dialog; `double-tap` requires pressing <kbd>Esc</kbd> twice within 1 second; `none` interrupts immediately without confirmation. Managed from the **Behavior** tab of `/settings`. |
 | `permissions` | object | _unset_ | Global tool-permission rules (`allow` / `ask` / `deny`), merged with agent-level and session-level permissions. See [Permissions](../permissions/index.md#global-permissions). |
 | `hooks` | object | _unset_ | Global lifecycle hooks applied to every agent, additive with agent-config and CLI hooks. See [Global (user-level) hooks](../hooks/index.md#global-user-level-hooks). |
 | `keybindings` | array | _unset_ | Remap TUI keyboard shortcuts. See [Custom Keybindings](../../features/tui/index.md#custom-keybindings) for the full list of actions and syntax. |
-| `layout` | object | _unset_ | Sidebar position and section visibility. See [Layout Settings](#layout-settings) below. |
+| `layout` | object | _unset_ | Sidebar position, input alignment, and section visibility. See [Layout Settings](#layout-settings) below. |
 
 ## Subagent Preference
 
@@ -79,11 +82,12 @@ Remote servers do **not** support this client-side control. A `--remote` launch 
 
 ## Layout Settings
 
-`layout` customizes the TUI's sidebar. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, every section visible, normal spacing.
+`layout` customizes the full TUI's sidebar and input alignment. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, full-width input, every section visible, normal spacing.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `sidebar_position` | string | `right` | `right`, `left`, `top`, or `bottom`. Left/right keep a full vertical sidebar; top/bottom render a compact horizontal band. |
+| `align_input_with_messages` | boolean | `false` | Align the whole input dock (tabs, editor, and context-usage bar) with the messages column so a left/right sidebar extends uninterrupted beside it. Only the global footer stays full width. Managed by **Align input with messages** in `/settings` → **Appearance**; no effect with a hidden or top/bottom sidebar, or in lean mode. |
 | `section_spacing` | string | `normal` | `compact`, `normal`, or `relaxed` — the number of blank lines between sidebar sections. |
 | `hide_session_path` | boolean | `false` | Hide the working-directory (session path) line, including its git branch. |
 | `hide_usage` | boolean | `false` | Hide the token-usage section. |
@@ -96,6 +100,7 @@ Remote servers do **not** support this client-side control. A `--remote` launch 
 settings:
   layout:
     sidebar_position: left
+    align_input_with_messages: true
     section_spacing: compact
     hide_usage: true
 ```
@@ -107,9 +112,11 @@ settings:
 settings:
   theme: auto
   theme_dark: dracula
-  theme_light: default-light
+  theme_light: docker-next-light
   lean: false
   use_subagents: true
+  compact_work_log: true
+  visible_replies: "3"
   expand_thinking: false
   split_diff_view: true
   render_images: true
@@ -120,12 +127,12 @@ settings:
   snapshot: true
   cache_stable_prompts: true
   warn_on_cache_miss: true
-  busy_send_mode: queue
   interrupt_confirmation: double-tap
   restore_tabs: true
   tab_title_max_length: 24
   layout:
     sidebar_position: right
+    align_input_with_messages: false
     section_spacing: normal
   permissions:
     deny:
@@ -151,4 +158,4 @@ User settings are a **low-priority** source: they establish defaults, and anythi
 - **Permissions are merged, not overridden.** Global `settings.permissions` and an agent's own `permissions:` are combined into a single set of `deny` → `allow` → `ask` patterns before evaluation — a global deny always blocks, regardless of what the agent config allows. See [Merging Behavior](../permissions/index.md#merging-behavior).
 - **Hooks are additive, not overridden.** For a given lifecycle event, hooks from the agent config, `settings.hooks`, `hooks.d/` drop-ins, and `--hook-*` CLI flags **all** run, in that order. Global hooks cannot be suppressed by an individual agent.
 - **Subagent delegation is a user-owned local runtime preference.** `use_subagents` defaults to `true` and has no agent-YAML or CLI-flag override. `/subagents on` and `/subagents off` save the preference; new and restored local runtimes read it. Remote and standalone service boundaries are described [above](#subagent-preference).
-- **Everything else is a plain default.** Fields with no CLI or agent-config equivalent (`sound`, `sound_threshold`, `restore_tabs`, `tab_title_max_length`, `split_diff_view`, `render_images`, `show_banner`, `cache_stable_prompts`, `warn_on_cache_miss`, `busy_send_mode`, `keybindings`, `layout`) only ever come from `settings:` (or the `/settings` dialog that writes it) — there is nothing to override them per run.
+- **Everything else is a plain default.** Fields with no CLI or agent-config equivalent (`sound`, `sound_threshold`, `restore_tabs`, `tab_title_max_length`, `split_diff_view`, `render_images`, `show_banner`, `cache_stable_prompts`, `warn_on_cache_miss`, `keybindings`, `layout`) only ever come from `settings:` (or the `/settings` dialog that writes it) — there is nothing to override them per run. The legacy `busy_send_mode` value is retained for config compatibility but no longer controls routing.

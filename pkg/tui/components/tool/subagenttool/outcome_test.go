@@ -46,3 +46,26 @@ func TestSubagentToolErrorsExposeBoundedExplanationLiveAndReplay(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeNoticeMetadataImprovesSummaryAndWrapsAtToolGutter(t *testing.T) {
+	for _, tc := range []struct {
+		outcome session.ReportOutcome
+		want    string
+	}{{session.ReportOutcomeFinished, "Subagent turn finished"}, {session.ReportOutcomeFailed, "Subagent turn failed"}} {
+		input := session.UserMessage("private report")
+		input.InputOrigin, input.ReportOutcome = session.InputOriginRuntime, tc.outcome
+		rendered := ansi.Strip(RenderInput(types.Input(input), 80))
+		assert.Contains(t, rendered, tc.want)
+		assert.NotContains(t, rendered, "private report")
+		assert.True(t, strings.HasPrefix(rendered, "  "), "notice icon aligns with tool rows")
+	}
+	input := session.UserMessage(`<system_info>Subagent "worker" (child) finished its turn. Full response: "a long response that will wrap over a narrow terminal display"</system_info>`)
+	input.InputOrigin, input.InputMode, input.SenderID, input.SenderName, input.ReportOutcome = session.InputOriginRuntime, "steer", "child-session", "worker", session.ReportOutcomeFinished
+	lines := strings.Split(ansi.Strip(RenderInput(types.Input(input), 24)), "\n")
+	for _, line := range lines {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 24)
+	}
+	if assert.Greater(t, len(lines), 1) {
+		assert.True(t, strings.HasPrefix(lines[1], "  "), "wrapped detail continues at the tool gutter")
+	}
+}

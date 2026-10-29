@@ -71,7 +71,7 @@ var namedKeys = map[string]bool{
 var reservedKeys = []string{
 	"ctrl+t", "ctrl+w", "ctrl+p", "ctrl+n", // tab bar
 	"shift+tab", // cycle thinking level
-	"alt+enter", // end-of-turn follow-up
+	"alt+enter", // explicit steer while working
 	"esc",       // cancel / dismiss
 	"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5",
 	"ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9", // agent quick-switch

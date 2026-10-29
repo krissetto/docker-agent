@@ -27,7 +27,13 @@ func (m *Model) modeLabel() string {
 	return modeChangesLabel
 }
 
-func (m *Model) draftLabel() string { return "Draft " + itoa(len(m.draft.Comments)) }
+func (m *Model) draftLabel() string {
+	n := len(m.draft.Comments)
+	if strings.TrimSpace(m.draft.General) != "" {
+		n++
+	}
+	return "Draft " + itoa(n)
+}
 
 // draftLabelAt reports whether a navigator heading column hits the Draft tab.
 func (m *Model) draftLabelAt(x int) bool {
@@ -77,9 +83,6 @@ func (m *Model) View() string {
 		default:
 			lines = append(lines, reader[y])
 		}
-	}
-	if m.editing {
-		lines = append(lines, m.renderEditor()...)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -287,14 +290,18 @@ func (m *Model) worktreeCells(r row, repo Repository, wt Worktree, label lipglos
 	if repo.Kind != RepoNone && (wt.Branch != "" || wt.Detached != "") {
 		branch = styles.SecondaryStyle.Render("⎇ " + worktreeLabel(wt))
 	}
+	path := sanitize(wt.Path)
+	if wt.Path == "" || wt.Path == "." {
+		path = sanitize(repo.Name)
+	}
 	if r.merged {
-		s := label.Bold(true).Render(sanitize(fallback(repo.Name, wt.Path)))
+		s := label.Bold(true).Render(path)
 		if branch != "" {
 			s += "  " + branch
 		}
 		s += repoBadge(repo.Kind)
 		if wt.Linked {
-			s += "  " + styles.MutedStyle.Render(sanitize(wt.Path)+" · linked")
+			s += "  " + styles.MutedStyle.Render("linked")
 		}
 		return s
 	}
@@ -302,14 +309,10 @@ func (m *Model) worktreeCells(r row, repo Repository, wt Worktree, label lipglos
 	if wt.Current {
 		dot = styles.SuccessStyle.Render("● ")
 	}
-	name := worktreeLabel(wt)
-	if repo.Kind == RepoNone {
-		name = sanitize(fallback(wt.Path, repo.Name))
-	}
-	s := dot + label.Render(name)
+	s := dot + label.Render(path)
 	var detail []string
-	if wt.Path != "" && name != sanitize(wt.Path) && wt.Path != m.snapshot.Scope.Label {
-		detail = append(detail, sanitize(wt.Path))
+	if branch != "" {
+		detail = append(detail, "⎇ "+worktreeLabel(wt))
 	}
 	if wt.Linked {
 		detail = append(detail, "linked")
@@ -370,9 +373,10 @@ func (m *Model) readerView(g geometry) []string {
 		return padRows(out, width, m.panelHeight())
 	}
 	out = append(out, m.readerTitle(width, focused))
-	if g.readerBodyY > 1 {
+	if !m.previewing() && (m.searchOn || m.search.Value() != "") {
 		out = append(out, fit(m.searchLine(), width))
 	}
+	out = append(out, "")
 	var lines []string
 	switch {
 	case m.snapshot.Scope.Unavailable != "":
@@ -385,17 +389,16 @@ func (m *Model) readerView(g geometry) []string {
 	case m.doc.Binary:
 		lines = []string{styles.MutedStyle.Render(" Binary file" + noteSuffix(m.doc.Note))}
 	case len(m.doc.Lines) == 0:
-		lines = []string{styles.MutedStyle.Render(" No textual changes" + noteSuffix(m.doc.Note))}
+		if indicator := emptyFileIndicator(m.doc.Indicators); indicator != "" {
+			lines = []string{indicator}
+		} else {
+			lines = []string{styles.MutedStyle.Render(" No textual changes" + noteSuffix(m.doc.Note))}
+		}
 	default:
 		lines = m.reader.render(m.readerWidth(), g.readerBodyH, focused, newMatcher(m.search.Value()))
 	}
 	out = append(out, strings.Split(m.readSV.ViewWithLines(lines), "\n")...)
 	return padRows(out, width, m.panelHeight())
-}
-
-// commentAffordance shows the clickable comment action while it applies.
-func (m *Model) commentAffordance() bool {
-	return m.hasDoc && m.doc.State == StateReady && len(m.doc.Lines) > 0 && !m.editing && (m.readerFocused() || m.reader.anchor >= 0)
 }
 
 func (m *Model) searchLine() string {
@@ -411,6 +414,15 @@ func noteSuffix(note string) string {
 		return ""
 	}
 	return " · " + sanitize(note)
+}
+
+func emptyFileIndicator(indicators []DocumentIndicator) string {
+	for _, indicator := range indicators {
+		if indicator.Line == 0 {
+			return indicatorStyle(indicator.Kind).Render(" " + indicatorGlyph(indicator.Kind) + " " + map[ChangeKind]string{ChangeAdded: "new file", ChangeModified: "file changed", ChangeDeleted: "file deleted"}[indicator.Kind])
+		}
+	}
+	return ""
 }
 
 func (m *Model) readerTitle(width int, focused bool) string {
@@ -436,10 +448,17 @@ func (m *Model) readerTitle(width int, focused bool) string {
 	if m.doc.Truncated {
 		status = append(status, styles.WarningStyle.Render("truncated"))
 	}
-	if m.commentAffordance() {
-		status = append(status, styles.InfoStyle.Render(commentLabel))
+	if m.doc.State == StateReady && m.commentInput == nil {
+		if key.Mode == ModeChanges {
+			status = append(status, styles.MutedStyle.Render("[f File]"))
+		} else {
+			status = append(status, styles.MutedStyle.Render("[f Diff] [o Edit]"))
+		}
 	}
-	right := strings.Join(status, " ")
+	right := strings.Join(status, styles.MutedStyle.Render(" · "))
+	if right != "" {
+		right = styles.MutedStyle.Render(" ") + right + styles.MutedStyle.Render(" ")
+	}
 	avail := max(4, width-ansi.StringWidth(right)-4)
 	return heading(titleStyle(focused).Render(truncateMiddle(sanitize(key.Path), avail)), right, width)
 }

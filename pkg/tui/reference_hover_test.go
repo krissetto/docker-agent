@@ -22,6 +22,10 @@ func TestRoutedVisiblePaneKeepsMessageReferencePresentation(t *testing.T) {
 	root.Update(messages.RoutedMsg{SessionID: "profile", Inner: &runtime.SubagentTreeEvent{Snapshot: tree}})
 	root.Update(messages.RoutedMsg{SessionID: "profile", Inner: &runtime.UserMessageEvent{Message: "raw report", TurnID: "report:unrelated", InputOrigin: session.InputOriginRuntime, SenderID: "child-session", SenderName: "worker", SessionPosition: 100000}})
 	page := root.chatPages["profile"]
+	// This test exercises inline source-reference hover, not compact Work headers.
+	if owner, ok := page.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
+		owner.SetCompactWorkLog(false)
+	}
 	frame := page.(chat.SplitPresentation).TranscriptView()
 	rect := root.paneGeometry.Panes["profile"]
 	for y, line := range strings.Split(frame, "\n") {
@@ -29,8 +33,12 @@ func TestRoutedVisiblePaneKeepsMessageReferencePresentation(t *testing.T) {
 		if !found {
 			continue
 		}
+		// The reference target is the sender's name; the muted "(abcde)" ID is not a hover target.
+		name := strings.TrimRight(before, " ")
 		beforeCount := root.ar.ActiveCount()
 		page.Update(tea.MouseMotionMsg{X: rect.X + ansi.StringWidth(before), Y: rect.Y + y})
+		require.Equal(t, beforeCount, root.ar.ActiveCount(), "muted ID cell takes no reference hover lease")
+		page.Update(tea.MouseMotionMsg{X: rect.X + ansi.StringWidth(name) - 1, Y: rect.Y + y})
 		require.Equal(t, beforeCount+1, root.ar.ActiveCount(), "background ingestion cannot disable visible transcript hover")
 		gap := root.paneAreas(rect).gap
 		root.Update(tea.MouseMotionMsg{X: gap.X, Y: gap.Y})

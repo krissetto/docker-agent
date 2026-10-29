@@ -277,6 +277,7 @@ func (d *subagentsDialog) tickSpinner(tick animation.TickMsg) {
 }
 
 func (d *subagentsDialog) StopAnimations() {
+	d.BaseDialog.StopAnimations()
 	d.hoverAnimation.Stop()
 	d.spinnerAnimation.Stop()
 	d.hover, d.hovered, d.pointerKnown = nil, "", false

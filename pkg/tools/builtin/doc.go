@@ -3,7 +3,7 @@
 //
 //   - filesystem      — file read/write/edit/search/list/tree
 //   - shell           — shell command execution
-//   - backgroundjobs  — long-running shell background jobs
+//   - shellprocess   — session-owned shell process lifecycle
 //   - lsp             — Language Server Protocol client tools
 //   - think           — structured thinking/scratchpad
 //   - todo            — task list management

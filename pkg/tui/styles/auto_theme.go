@@ -14,7 +14,7 @@ const AutoThemeRef = "auto"
 // DefaultLightThemeRef is the built-in light counterpart of the default
 // theme, applied when the auto theme detects a light terminal background and
 // no settings.theme_light is configured.
-const DefaultLightThemeRef = "default-light"
+const DefaultLightThemeRef = DockerNextLightThemeRef
 
 // AutoThemeDisplayName is the label shown for the auto theme in the picker
 // and in notifications.
@@ -52,8 +52,8 @@ func AutoThemeEnabled() bool {
 }
 
 // ResolveThemeRef maps the AutoThemeRef sentinel to the concrete theme for
-// the current terminal polarity: settings.theme_dark (default "default") on
-// a dark background, settings.theme_light (default "default-light") on a
+// the current terminal polarity: settings.theme_dark (default "docker-next-dark") on
+// a dark background, settings.theme_light (default "docker-next-light") on a
 // light one. Any other ref passes through unchanged.
 func ResolveThemeRef(ref string) string {
 	if ref != AutoThemeRef {

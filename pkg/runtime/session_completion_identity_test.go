@@ -381,3 +381,22 @@ func TestCompletionIdentityAncestorWakeDoesNotRepeatLeafReport(t *testing.T) {
 	assert.Len(t, rootDriver.pending, 1)
 	assert.Equal(t, uint64(2), m.children["leaf-node"].durable.Revision)
 }
+
+func TestChooseCompletionResultPrefersLiveAndFallsBackOnlyForDeferredReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		live, durable  string
+		deferredReplay bool
+		want           string
+	}{
+		{"live wins over durable on a direct completion", "live", "durable", false, "live"},
+		{"live wins over durable on a deferred replay", "live", "durable", true, "live"},
+		{"deferred replay falls back to durable when live is empty", "", "durable", true, "durable"},
+		{"direct completion never reads the durable record", "", "durable", false, ""},
+		{"deferred replay with both empty stays empty", "", "", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, chooseCompletionResult(tc.live, tc.durable, tc.deferredReplay))
+		})
+	}
+}

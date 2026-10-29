@@ -26,7 +26,7 @@ func TestClassifyCommand_ShellSubstitutionIsNeverSafe(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			assert.True(t, ContainsShellMetacharacter(command))
 			assert.NotEqual(t, ClassSafe, ClassifyCommand(command).Class)
-			assert.NotEqual(t, ClassSafe, LabelToolCall(BackgroundJobToolName, map[string]any{"cmd": command}, false, false).Class)
+			assert.NotEqual(t, ClassSafe, LabelToolCall(ShellToolName, map[string]any{"cmd": command}, false, false).Class)
 		})
 	}
 }

@@ -124,8 +124,10 @@ func TestSessionOwnerRegressionObservationMutatesCanonicalAdmission(t *testing.T
 	replayed, err := h.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: first.Primary().Epoch})
 	require.NoError(t, err)
 	defer replayed.Cancel()
-	require.Len(t, replayed.Replay, 1)
-	replay := replayed.Replay[0].Event.(*PendingUserMessageAcceptedEvent)
+	// Sequence-0 BackgroundProcesses bookkeeping trails the single sequenced accepted event.
+	sequenced := replayPrefix(t, replayed.Replay)
+	require.Len(t, sequenced, 1)
+	replay := sequenced[0].Event.(*PendingUserMessageAcceptedEvent)
 	require.Equal(t, "original", replay.MultiContent[0].ImageURL.URL)
 	replay.MultiContent[0].ImageURL.URL = "replay-changed"
 	snapshot, err = d.ownerSnapshot(t.Context())

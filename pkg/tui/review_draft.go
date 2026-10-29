@@ -25,27 +25,30 @@ const gitReviewTargetDialogID = "git-review-target"
 // gitReviewPreview is a captured send: the chosen recipient, its exact app and
 // route generation, the draft revision and a token the confirm must echo.
 type gitReviewPreview struct {
-	lease    *gitReviewLease // set when the recipient has no tab
-	token    string
-	revision uint64
-	label    string
-	target   reviewdraft.Target
-	app      *app.App
-	submit   app.ReviewSubmitTarget
-	payload  string
+	lease      *gitReviewLease // set when the recipient has no tab
+	token      string
+	revision   uint64
+	label      string
+	target     reviewdraft.Target
+	app        *app.App
+	submit     app.ReviewSubmitTarget
+	payload    string
+	general    string
+	activeOnly bool
 }
 
 // gitReviewTargetChoice is one open picker; results for any other picker are ignored.
 type gitReviewTargetChoice struct {
-	owner    string
-	revision uint64
-	options  map[string]gitReviewCandidate
-	agents   map[string]ReviewSessionAgent
-	next     string
-	pages    int
-	loading  bool
-	ctx      context.Context //nolint:containedctx // bounds the picker's loads; cancelled when it closes
-	cancel   context.CancelFunc
+	owner      string
+	revision   uint64
+	activeOnly bool
+	options    map[string]gitReviewCandidate
+	agents     map[string]ReviewSessionAgent
+	next       string
+	pages      int
+	loading    bool
+	ctx        context.Context //nolint:containedctx // bounds the picker's loads; cancelled when it closes
+	cancel     context.CancelFunc
 }
 
 type gitReviewCandidate struct {
@@ -58,11 +61,12 @@ type gitReviewCandidate struct {
 }
 
 type gitReviewSendResult struct {
-	owner     string
-	requestID string
-	receipt   app.ReviewSubmitReceipt
-	newTitle  string
-	err       error
+	owner        string
+	requestID    string
+	commentInput *reviewCommentInput
+	receipt      app.ReviewSubmitReceipt
+	newTitle     string
+	err          error
 }
 
 // gitReviewSubmitFunc submits one literal review body; tests replace it.
@@ -83,7 +87,7 @@ func toDraftAnchor(a view.Anchor) reviewdraft.Anchor {
 	return reviewdraft.Anchor{
 		RepositoryID: a.RepositoryID, RepositoryName: a.RepositoryName, WorktreeID: a.WorktreeID, WorktreePath: a.CheckoutPath,
 		Branch: fallbackString(a.Branch, a.Detached), Path: a.Path, OldPath: a.OldPath, Mode: reviewModeName(a.Mode), Group: reviewGroupName(a.Group),
-		OldStart: a.OldStart, OldEnd: a.OldEnd, NewStart: a.NewStart, NewEnd: a.NewEnd, Context: append([]string(nil), a.Context...), Version: a.Version,
+		OldStart: a.OldStart, OldEnd: a.OldEnd, NewStart: a.NewStart, NewEnd: a.NewEnd, StartColumn: a.StartColumn, EndColumn: a.EndColumn, CharacterRange: a.CharacterRange, Context: append([]string(nil), a.Context...), Version: a.Version,
 	}
 }
 
@@ -95,7 +99,7 @@ func fromDraftAnchor(a reviewdraft.Anchor) view.Anchor {
 	return view.Anchor{
 		RepositoryID: a.RepositoryID, RepositoryName: a.RepositoryName, WorktreeID: a.WorktreeID, CheckoutPath: a.WorktreePath, Branch: a.Branch,
 		Path: a.Path, OldPath: a.OldPath, Mode: mode, Group: reviewGroup(gitReviewGroup(groupFromName(a.Group))),
-		OldStart: a.OldStart, OldEnd: a.OldEnd, NewStart: a.NewStart, NewEnd: a.NewEnd, Context: a.Context, Version: a.Version,
+		OldStart: a.OldStart, OldEnd: a.OldEnd, NewStart: a.NewStart, NewEnd: a.NewEnd, StartColumn: a.StartColumn, EndColumn: a.EndColumn, CharacterRange: a.CharacterRange, Context: a.Context, Version: a.Version,
 	}
 }
 
@@ -120,7 +124,7 @@ func groupFromName(name string) view.Group {
 // draftView projects the workspace draft and any captured preview for display.
 func (ws *gitReviewWorkspace) draftView() view.DraftView {
 	snap := ws.draft.Snapshot()
-	out := view.DraftView{Revision: snap.Revision, Err: snap.Err}
+	out := view.DraftView{Revision: snap.Revision, Err: snap.Err, General: snap.General}
 	for _, c := range snap.Comments {
 		out.Comments = append(out.Comments, view.Comment{ID: c.ID, Anchor: fromDraftAnchor(c.Anchor), Body: c.Body})
 	}
@@ -164,26 +168,22 @@ func (ws *gitReviewWorkspace) pushDraft() {
 
 func (m *appModel) handleReviewDraftMessage(msg tea.Msg) tea.Cmd {
 	switch x := msg.(type) {
+	case view.CommentInputRequestMsg:
+		return m.startReviewComment(x)
 	case view.AddCommentMsg:
 		ws := m.gitReviews[x.Owner]
 		if ws == nil {
 			return nil
 		}
-		if _, err := ws.draft.Add(toDraftAnchor(x.Anchor), x.Body); err != nil {
-			return notification.ErrorCmd("Comment not added: " + err.Error())
-		}
-		ws.setPreview(nil)
-		ws.pushDraft()
+		_, err := ws.draft.Add(toDraftAnchor(x.Anchor), x.Body)
+		return m.finishInlineDraftMutation(ws, x.RequestID, err, "Comment not added")
 	case view.EditCommentMsg:
 		ws := m.gitReviews[x.Owner]
 		if ws == nil {
 			return nil
 		}
-		if err := ws.draft.Edit(x.ID, x.Body); err != nil {
-			return notification.ErrorCmd("Comment not saved: " + err.Error())
-		}
-		ws.setPreview(nil)
-		ws.pushDraft()
+		err := ws.draft.Edit(x.ID, x.Body)
+		return m.finishInlineDraftMutation(ws, x.RequestID, err, "Comment not saved")
 	case view.DeleteCommentMsg:
 		ws := m.gitReviews[x.Owner]
 		if ws == nil {
@@ -195,7 +195,16 @@ func (m *appModel) handleReviewDraftMessage(msg tea.Msg) tea.Cmd {
 		ws.setPreview(nil)
 		ws.pushDraft()
 	case view.PreviewDraftMsg:
-		return m.openGitReviewTargetPicker(x)
+		if cmd := m.captureReviewGeneral(x.Owner); cmd != nil {
+			return cmd
+		}
+		if ws := m.gitReviews[x.Owner]; ws != nil {
+			if _, pending := ws.draft.Attempt(); pending {
+				return m.openGitReviewTargetPicker(x)
+			}
+			return m.previewCurrentAgent(ws, x.Revision)
+		}
+		return nil
 	case dialog.ReviewTargetResultMsg, dialog.ReviewTargetMoreMsg, gitReviewCatalogResult, gitReviewResolved, gitReviewAgents:
 		return m.handleGitReviewTargetMessage(x)
 	case view.CancelPreviewMsg:
@@ -209,6 +218,25 @@ func (m *appModel) handleReviewDraftMessage(msg tea.Msg) tea.Cmd {
 		return m.applyGitReviewSend(x)
 	}
 	return nil
+}
+
+func (m *appModel) finishInlineDraftMutation(ws *gitReviewWorkspace, requestID string, err error, failure string) tea.Cmd {
+	if err == nil {
+		ws.setPreview(nil)
+		ws.pushDraft()
+	}
+	var cmds []tea.Cmd
+	if requestID != "" {
+		message := ""
+		if err != nil {
+			message = err.Error()
+		}
+		cmds = append(cmds, core.CmdHandler(view.CommentResultMsg{Owner: ws.anchor, RequestID: requestID, Err: message}))
+	}
+	if err != nil {
+		cmds = append(cmds, notification.ErrorCmd(failure+": "+err.Error()))
+	}
+	return tea.Batch(cmds...)
 }
 
 // gitReviewCandidates lists open sessions the user can already reach; the
@@ -281,7 +309,7 @@ func (m *appModel) applyGitReviewTarget(choice *gitReviewTargetChoice, id string
 	if submit.AttachedNodeID != "" {
 		target.Kind = reviewdraft.TargetAttached
 	}
-	ws.setPreview(&gitReviewPreview{lease: c.lease, token: token, revision: snap.Revision, label: c.label, target: target, app: c.app, submit: submit, payload: reviewdraft.Serialize(snap.Comments)})
+	ws.setPreview(&gitReviewPreview{lease: c.lease, token: token, revision: snap.Revision, label: c.label, target: target, app: c.app, submit: submit, payload: reviewdraft.SerializeWithGeneral(snap.Comments, snap.General), general: snap.General, activeOnly: choice.activeOnly})
 	ws.pushDraft()
 	m.viewCacheValid = false
 	return nil
@@ -303,6 +331,9 @@ func (m *appModel) sendGitReviewDraft(msg view.SendDraftMsg) tea.Cmd {
 		return nil
 	}
 	p := ws.preview
+	if p.activeOnly && p.target.Kind != reviewdraft.TargetNewSession && p.target.RouteID != m.paneFocus() {
+		return m.failGitReviewTarget(ws, errors.New("the active session changed; review kept for the original target"))
+	}
 	if ws.draft.Snapshot().Status == reviewdraft.StatusSending {
 		return nil
 	}
@@ -340,14 +371,18 @@ func (m *appModel) sendGitReviewDraft(msg view.SendDraftMsg) tea.Cmd {
 	sent.payload = attempt.Payload
 	ws.sent = &sent
 	ws.pushDraft()
+	var borrowedInput *reviewCommentInput
+	if input := m.reviewCommentInput; input != nil && input.general && input.owner == msg.Owner {
+		borrowedInput = input
+	}
 	if attempt.Target.Kind == reviewdraft.TargetNewSession {
-		return m.submitGitReviewNewSession(msg.Owner, attempt)
+		return m.submitGitReviewNewSession(msg.Owner, attempt, borrowedInput)
 	}
 	submit, a, owner := m.gitReviewSubmitter(), p.app, msg.Owner
 	ctx := m.ctx()
 	return func() tea.Msg {
 		receipt, err := submit(ctx, a, p.submit, attempt.RequestID, attempt.Payload)
-		return gitReviewSendResult{owner: owner, requestID: attempt.RequestID, receipt: receipt, err: err}
+		return gitReviewSendResult{owner: owner, requestID: attempt.RequestID, commentInput: borrowedInput, receipt: receipt, err: err}
 	}
 }
 
@@ -375,10 +410,26 @@ func (m *appModel) applyGitReviewSend(result gitReviewSendResult) tea.Cmd {
 		return notification.ErrorCmd("Review send could not be confirmed: " + err.Error())
 	}
 	label := ""
+	general := ""
 	if ws.preview != nil {
 		label = strings.TrimSpace(ws.preview.label)
+		general = ws.preview.general
+	}
+	clearBorrowed := false
+	if result.commentInput != nil && m.reviewCommentInput == result.commentInput &&
+		m.reviewCommentInput.general && m.reviewCommentInput.owner == result.owner {
+		if input, ok := m.editor.(reviewCommentEditor); ok {
+			clearBorrowed = strings.TrimSpace(input.CommentInputValue()) == strings.TrimSpace(general)
+			if clearBorrowed {
+				input.SetCommentInputValue("")
+			}
+		}
 	}
 	ws.releaseLeases()
+	if clearBorrowed && m.reviewCommentInput != nil {
+		m.reviewCommentInput.general = false
+		m.finishReviewComment(false)
+	}
 	ws.setPreview(nil)
 	ws.sent = nil
 	ws.pushDraft()
@@ -393,4 +444,54 @@ func (m *appModel) applyGitReviewSend(result gitReviewSendResult) tea.Cmd {
 		return notification.SuccessCmd(text + " · open it from /sessions")
 	}
 	return notification.SuccessCmd("Review sent to " + fallbackString(label, "the session"))
+}
+
+func (m *appModel) captureReviewGeneral(owner string) tea.Cmd {
+	ws := m.gitReviews[owner]
+	if ws == nil {
+		return nil
+	}
+	if m.reviewCommentInput != nil && m.reviewCommentInput.general && m.reviewCommentInput.owner == owner {
+		if err := ws.draft.SetGeneral(m.editor.(reviewCommentEditor).CommentInputValue()); err != nil {
+			return notification.ErrorCmd("Review comment not saved: " + err.Error())
+		}
+	}
+	ws.pushDraft()
+	return nil
+}
+
+func (m *appModel) sendReviewFromComposer() tea.Cmd {
+	ws := m.activeReview()
+	if ws == nil || (ws.mode == view.ModeChanges && !ws.inspecting) {
+		return nil
+	}
+	if m.reviewCommentInput != nil && m.reviewCommentInput.general && m.reviewCommentInput.owner != ws.anchor {
+		return notification.ErrorCmd("The active review changed; draft kept")
+	}
+	if ws.draft.Snapshot().Status == reviewdraft.StatusSending {
+		return nil
+	}
+	if cmd := m.captureReviewGeneral(ws.anchor); cmd != nil {
+		return cmd
+	}
+	snap := ws.draft.Snapshot()
+	if len(snap.Comments) == 0 && snap.General == "" {
+		return notification.InfoCmd("Add a review comment or select lines before sending")
+	}
+	if ws.draft.Snapshot().Attempt != nil {
+		if ws.sent == nil {
+			return notification.ErrorCmd("The previous review send is unresolved; draft kept")
+		}
+		copy := *ws.sent
+		copy.payload = ws.draft.Snapshot().Attempt.Payload
+		ws.setPreview(&copy)
+	} else {
+		if cmd := m.previewCurrentAgent(ws, snap.Revision); cmd != nil {
+			return cmd
+		}
+	}
+	if ws.preview == nil {
+		return notification.ErrorCmd("The current session can't receive this review")
+	}
+	return m.sendGitReviewDraft(view.SendDraftMsg{Owner: ws.anchor, Revision: ws.preview.revision, Token: ws.preview.token})
 }

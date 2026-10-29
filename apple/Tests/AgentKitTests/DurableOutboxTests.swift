@@ -57,6 +57,26 @@ struct DurableOutboxTests {
         #expect(retry.payload == recovered.payload)
     }
 
+    @Test func automaticTitleIntentPersistsAndRetriesAsExactRequestMetadata() throws {
+        let url = temporaryStoreURL()
+        defer { removeStore(at: url) }
+        let identity = try identity()
+        let original = try DurableSendOutbox(fileURL: url)
+        let payload = try SessionSendPayload.text("first prompt")
+        let prepared = try original.prepare(identity: identity, sendPayload: payload, requestID: "title-request", generateTitle: true)
+        #expect(prepared.generateTitle)
+        let originalBody = try payload.encodedRequest(requestID: prepared.requestID, generateTitle: prepared.generateTitle)
+
+        let reloaded = try DurableSendOutbox(fileURL: url)
+        let recovered = try #require(reloaded.pending(for: identity).first)
+        #expect(recovered.generateTitle)
+        let retryBody = try recovered.sendPayload.encodedRequest(requestID: recovered.requestID, generateTitle: recovered.generateTitle)
+        #expect(try JSONDecoder().decode(JSONValue.self, from: retryBody) == JSONDecoder().decode(JSONValue.self, from: originalBody))
+        #expect(throws: DurableSendOutboxError.conflictingRequestID) {
+            try reloaded.prepare(identity: identity, sendPayload: payload, requestID: "title-request", generateTitle: false)
+        }
+    }
+
     @Test func acceptedTombstoneBlocksSameRequestReplayUntilExplicitHistoryClear() throws {
         let url = temporaryStoreURL()
         defer { removeStore(at: url) }

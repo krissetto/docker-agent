@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type sessionStub struct {
@@ -834,4 +835,54 @@ func TestObservationIdleBaselineAllowsProlongedOutage(t *testing.T) {
 	assert.Equal(t, []uint64{8}, sink.applied)
 	require.Len(t, sink.errors, 1)
 	assert.NotContains(t, sink.errors[0].Error(), "startup")
+}
+
+type processLifecycleSink struct {
+	processes []tools.BackgroundProcess
+	resets    int
+	mu        sync.Mutex
+}
+
+func (s *processLifecycleSink) Reset(snapshot runtime.SessionSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resets++
+	s.processes = append([]tools.BackgroundProcess(nil), snapshot.BackgroundProcesses...)
+}
+
+func (s *processLifecycleSink) Apply(envelope runtime.SessionEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if event, ok := envelope.Event.(*runtime.BackgroundProcessesEvent); ok {
+		s.processes = append([]tools.BackgroundProcess(nil), event.Processes...)
+	}
+}
+
+func (*processLifecycleSink) OnError(error) {}
+
+func TestSameEpochReconnectRebasesProcessProjectionFromAuthoritativeSeed(t *testing.T) {
+	process := tools.BackgroundProcess{ID: "job", SessionID: "s", AgentName: "root", StartedAt: time.Now(), State: tools.BackgroundProcessRunning}
+	terminal := process
+	terminal.State = tools.BackgroundProcessCompleted
+	terminal.FinishedAt = time.Now()
+	staleEvent := runtime.SessionEvent{Epoch: "epoch", Version: 1, SessionID: "s", Sequence: 2, TranscriptPosition: -1, Event: &runtime.BackgroundProcessesEvent{Type: "background_processes", SessionID: "s", Processes: []tools.BackgroundProcess{terminal}}}
+	authority := runtime.SessionEvent{Epoch: "epoch", Version: 1, SessionID: "s", Sequence: 0, TranscriptPosition: -1, Event: &runtime.BackgroundProcessesEvent{Type: "background_processes", SessionID: "s", Processes: []tools.BackgroundProcess{}}}
+	closed := make(chan runtime.SessionEvent)
+	close(closed)
+	observer := &sessionStub{observations: make(chan runtime.Observation, 2)}
+	observer.observations <- runtime.Observation{Initial: []runtime.SessionSnapshot{{Session: session.New(session.WithID("s")), Status: runtime.SessionStatus{SessionID: "s"}, Epoch: "epoch", Cursor: 1, BackgroundProcesses: []tools.BackgroundProcess{process}}}, Events: closed, Cancel: func() {}}
+	observer.observations <- runtime.Observation{Initial: []runtime.SessionSnapshot{{Session: session.New(session.WithID("s")), Status: runtime.SessionStatus{SessionID: "s"}, Epoch: "epoch", Cursor: 2}}, Replay: []runtime.SessionEvent{staleEvent, authority}, Events: closed, Cancel: func() {}}
+	sink := &processLifecycleSink{}
+	attachment, err := Attach(t.Context(), observer, sink)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		return len(sink.processes) == 0 && sink.resets == 1
+	}, 2*time.Second, time.Millisecond)
+	attachment.Detach()
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	require.Equal(t, 1, sink.resets, "same-epoch reconnect preserves the existing projection")
+	require.Empty(t, sink.processes, "the final authoritative replacement clears stale terminal rows")
 }

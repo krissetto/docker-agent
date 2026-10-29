@@ -109,3 +109,14 @@ func TestLimitLargeToolResultsAllocatedDirectoryFailure(t *testing.T) {
 	require.LessOrEqual(t, len(*out.HookSpecificOutput.UpdatedToolResponse), maxToolCallResultBytes)
 	require.Contains(t, *out.HookSpecificOutput.UpdatedToolResponse, "could not be saved")
 }
+
+func TestShellCompletionBoundPreservesStatusAndOutputTail(t *testing.T) {
+	payload := "Background shell command proc_123 with status failed (exit code 42).\nCommand: build\n\n--- Untrusted command output ---\n" + strings.Repeat("x", maxToolCallResultBytes)
+	got := BoundToolResult("shell", "shell_completion", payload, "Completion output is delivered automatically.")
+	require.LessOrEqual(t, len(got), maxToolCallResultBytes)
+	require.Contains(t, got, "proc_123 with status failed (exit code 42)")
+	require.Contains(t, got, "Command: build")
+	require.Contains(t, got, strings.Repeat("x", 100))
+	plain := BoundToolResult("shell", "shell", payload, "no completion callback")
+	require.NotContains(t, plain, "proc_123 with status failed")
+}

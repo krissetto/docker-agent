@@ -50,7 +50,7 @@ func (tw *ThemeWatcher) Watch(themeRef string) error {
 	// Don't watch the built-in default (it's embedded, no file to watch)
 	// Also handle edge case of "user:default"
 	baseRef := strings.TrimPrefix(themeRef, UserThemePrefix)
-	if baseRef == DefaultThemeRef && !strings.HasPrefix(themeRef, UserThemePrefix) {
+	if (baseRef == DefaultThemeRef || baseRef == LegacyDefaultThemeRef) && !strings.HasPrefix(themeRef, UserThemePrefix) {
 		slog.Debug("Not watching built-in default theme", "theme", themeRef)
 		return nil
 	}

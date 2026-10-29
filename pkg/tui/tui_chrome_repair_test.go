@@ -86,7 +86,11 @@ func TestRootThemeGenerationInvalidatesCompleteView(t *testing.T) {
 func TestRootResizePointerSameRowKeepsCacheAndCompletionAnchor(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	_, _ = root.Update(completion.OpenMsg{Items: []completion.Item{{Label: "completion-anchor", Value: "completion-anchor"}}})
-	_, _ = root.Update(tea.MouseClickMsg{X: 40, Y: root.contentHeight, Button: tea.MouseLeft})
+	// Press the exact composer separator row so every motion below is real drag capture.
+	separator := root.composerLayout().separatorTop
+	require.True(t, root.composerResizeHit(40, separator), "the press lands on the composer resize handle")
+	_, _ = root.Update(tea.MouseClickMsg{X: 40, Y: separator, Button: tea.MouseLeft})
+	require.True(t, root.isDragging, "the press enters drag capture before the measured motions")
 	for _, lines := range []int{7, 8, 6, 9} {
 		y := root.height - (lines - 1) - 1 - root.tabBar.Height() - root.editor.BannerHeight() - styles.EditorStyle.GetVerticalFrameSize() - 1 - root.messageBarHeight()
 		motion := tea.MouseMotionMsg{X: 40, Y: y, Button: tea.MouseLeft}

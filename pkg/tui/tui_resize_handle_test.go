@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/components/grip"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -33,7 +34,7 @@ func TestRenderResizeHandle_TinyWidths(t *testing.T) {
 		if width <= appPaddingHorizontal {
 			assert.Empty(t, out)
 		} else {
-			assert.NotEmpty(t, out)
+			assert.Equal(t, strings.Repeat(" ", width), ansi.Strip(out), "at-rest resize grip is hidden at width %d", width)
 		}
 	}
 }
@@ -107,17 +108,47 @@ func TestRootWorkingSpinnerRetainsHighlightRoleAcrossThemeAndTabSwitch(t *testin
 	assertRole()
 }
 
+func TestComposerGripCompactHoverPressAndWholeDividerHitArea(t *testing.T) {
+	root := splitTestRoot(t)
+	root.composerGrip = grip.NewReveal(nil)
+	width, y := root.width, root.composerLayout().separatorTop
+	innerWidth := width - appPaddingHorizontal
+	base := root.renderResizeHandle(width)
+	require.Equal(t, strings.Repeat(" ", width), ansi.Strip(base), "hidden at rest")
+
+	root.Update(tea.MouseMotionMsg{X: styles.AppPadding, Y: y})
+	require.True(t, root.composerResizeHit(styles.AppPadding, y), "whole divider remains a resize target")
+	require.Equal(t, strings.Repeat(" ", styles.AppPadding)+grip.Horizontal(innerWidth, 0, false, 1)+strings.Repeat(" ", styles.AppPadding), root.renderResizeHandle(width))
+	require.Zero(t, root.composerGrip.HandleHighlight(), "region hover reveals without direct highlight")
+
+	centerX := styles.AppPadding + (innerWidth-grip.HorizontalLength)/2
+	root.Update(tea.MouseMotionMsg{X: centerX, Y: y})
+	require.Equal(t, grip.Horizontal(innerWidth, 1, false, 1), strings.TrimSuffix(strings.TrimPrefix(root.renderResizeHandle(width), strings.Repeat(" ", styles.AppPadding)), strings.Repeat(" ", styles.AppPadding)))
+	require.Equal(t, 1.0, root.composerGrip.HandleHighlight())
+
+	root.Update(tea.MouseClickMsg{X: centerX, Y: y, Button: tea.MouseLeft})
+	require.True(t, root.isDragging)
+	require.Equal(t, grip.Horizontal(innerWidth, 1, true, 1), strings.TrimSuffix(strings.TrimPrefix(root.renderResizeHandle(width), strings.Repeat(" ", styles.AppPadding)), strings.Repeat(" ", styles.AppPadding)), "press darkens the grip")
+	root.Update(tea.MouseReleaseMsg{X: centerX, Y: y, Button: tea.MouseLeft})
+	require.False(t, root.isDragging)
+	require.True(t, root.composerGrip.HandleHovered())
+	root.Update(tea.MouseMotionMsg{X: -1, Y: -1})
+	require.Equal(t, strings.Repeat(" ", width), ansi.Strip(root.renderResizeHandle(width)), "leaving edge hides segment")
+}
+
 func TestSeparatorResizeHoverOcclusionAndCancellation(t *testing.T) {
 	root := splitTestRoot(t)
+	root.composerGrip = grip.NewReveal(nil)
 	x, y := tabFrameOrigin()+5, root.contentHeight
 	require.True(t, root.composerResizeHit(x, y))
 	require.False(t, root.composerResizeHit(x, root.editorTop()+styles.EditorStyle.GetPaddingTop()), "editable text is never a resize target")
 	require.False(t, root.composerResizeHit(x, root.contentHeight+1), "tab row keeps tab gestures")
 	root.Update(tea.MouseMotionMsg{X: x, Y: y})
 	require.True(t, root.isHoveringHandle)
-	require.NotEmpty(t, root.renderResizeHandle(root.width))
+	require.Contains(t, ansi.Strip(root.renderResizeHandle(root.width)), "─", "edge hover reveals the compact segment")
 	root.Update(tea.MouseMotionMsg{X: -1, Y: -1})
 	require.False(t, root.isHoveringHandle)
+	require.Equal(t, strings.Repeat(" ", root.width), ansi.Strip(root.renderResizeHandle(root.width)), "grip hides when pointer leaves divider")
 	for _, cancel := range []string{"release outside", "blur", "modal"} {
 		root.Update(tea.MouseClickMsg{X: x, Y: root.contentHeight, Button: tea.MouseLeft})
 		require.True(t, root.isDragging)
@@ -184,7 +215,7 @@ func TestComposerResizeGeometryNormalNarrowTinyKeepsTextPadding(t *testing.T) {
 		require.Equal(t, size[1], lipgloss.Height(frame))
 		require.LessOrEqual(t, lipgloss.Width(frame), size[0])
 		if size[0] >= 24 && size[1] >= 12 {
-			require.Contains(t, ansi.Strip(root.renderResizeHandle(root.width)), "─", "the restored separator carries the visible resize grip")
+			require.Equal(t, strings.Repeat(" ", root.width), ansi.Strip(root.renderResizeHandle(root.width)), "the separator is hidden at rest")
 			require.Positive(t, styles.EditorStyle.GetPaddingTop())
 			require.False(t, root.composerResizeHit(tabFrameOrigin(), root.editorTop()+styles.EditorStyle.GetPaddingTop()), "first text row is never a resize hit")
 		}
@@ -197,7 +228,7 @@ func TestRestoredSeparatorMatchesPriorGripWithoutStatusClutter(t *testing.T) {
 		root.handleWindowResize(width, 40)
 		separator := root.renderResizeHandle(width)
 		require.Equal(t, width, ansi.StringWidth(separator))
-		require.Equal(t, " "+strings.Repeat("─", width-2)+" ", ansi.Strip(separator))
+		require.Equal(t, strings.Repeat(" ", width), ansi.Strip(separator), "full-width separator track is removed at rest")
 		root.sessionState.SetPauseState(service.PausePaused)
 		require.Equal(t, separator, root.renderResizeHandle(width), "status never replaces the restored grip")
 		require.Equal(t, regionResizeHandle, root.hitTestRegion(root.contentHeight))

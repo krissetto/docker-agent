@@ -2,6 +2,7 @@ package reasoningblock
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 
@@ -33,12 +34,8 @@ func legacyReasoningPreview(t *testing.T, m *Model) (string, bool, bool) {
 	truncated := len(lines) > previewLines
 	lines = lines[max(0, len(lines)-previewLines):]
 	var styled []string
-	for i, line := range lines {
-		style := styles.MutedStyle.Italic(true)
-		if i == 0 && truncated {
-			style = style.Faint(true)
-		}
-		styled = append(styled, style.Render(line))
+	for _, line := range lines {
+		styled = append(styled, styles.MutedStyle.Italic(true).Render(line))
 	}
 	preview := m.messageStyle().Render(strings.Join(styled, "\n"))
 	return preview, truncated, len(m.toolEntries) > 0 || len(all) > previewLines
@@ -64,6 +61,7 @@ func TestReasoningPreviewOwnsOnlyDisplayedLinesWithExactLegacyOutput(t *testing.
 				check := func() {
 					want, truncated, extra := legacyReasoningPreview(t, m)
 					got, gotTruncated := m.renderReasoningPreviewWithTruncationInfo()
+					require.False(t, containsFaintSGR(got), "reasoning prose relies on its muted semantic style, not terminal faint")
 					require.Equal(t, want, got)
 					require.Equal(t, truncated, gotTruncated)
 					require.Equal(t, extra, m.hasExtraContent())
@@ -89,4 +87,33 @@ func TestReasoningPreviewOwnsOnlyDisplayedLinesWithExactLegacyOutput(t *testing.
 			})
 		}
 	}
+}
+
+func containsFaintSGR(rendered string) bool {
+	p := ansi.GetParser()
+	defer ansi.PutParser(p)
+	var state byte
+	for rendered != "" {
+		seq, _, n, next := ansi.DecodeSequence(rendered, state, p)
+		if n == 0 {
+			break
+		}
+		if ansi.HasCsiPrefix(seq) && p.Command() == 'm' {
+			params := p.Params()
+			for i := 0; i < len(params); i++ {
+				code := params[i].Param(0)
+				switch code {
+				case 2:
+					return true
+				case 38, 48, 58:
+					var c color.Color
+					if consumed := ansi.ReadStyleColor(params[i:], &c); consumed > 0 {
+						i += consumed - 1
+					}
+				}
+			}
+		}
+		state, rendered = next, rendered[n:]
+	}
+	return false
 }

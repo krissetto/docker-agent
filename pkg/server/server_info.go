@@ -24,7 +24,7 @@ func newServerInfo(info api.ServerInfo) api.ServerInfo {
 	if info.InstanceID == "" {
 		info.InstanceID = uuid.NewString()
 	}
-	info.Capabilities = []string{"session_v2", "session_tools", "session_permissions", "mcp_prompts", "todo_editing", "session_branching", "session_explicit_ids"}
+	info.Capabilities = []string{"session_v2", "session_tools", "session_permissions", "mcp_prompts", "todo_editing", "session_branching", "session_explicit_ids", "session_view_metadata", "session_history_pages"}
 	return info
 }
 func (s *Server) serverIdentity(c echo.Context) error {

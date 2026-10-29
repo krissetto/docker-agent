@@ -761,71 +761,6 @@ func TestDispatcher_BalancedClassifiesShellCommands(t *testing.T) {
 	})
 }
 
-// TestDispatcher_BalancedClassifiesBackgroundJobCommands pins that the
-// command carried by run_background_job is classified exactly like a
-// shell command: a destructive command cannot be laundered through the
-// background-job tool to lose its badge, and a safe one auto-runs.
-func TestDispatcher_BalancedClassifiesBackgroundJobCommands(t *testing.T) {
-	t.Parallel()
-	a := newAgent()
-
-	t.Run("safe command auto-approves", func(t *testing.T) {
-		t.Parallel()
-		sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
-
-		var ran bool
-		tool := tools.Tool{
-			Name: "run_background_job",
-			Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
-				ran = true
-				return tools.ResultSuccess("ok"), nil
-			},
-		}
-		d := &toolexec.Dispatcher{
-			AgentFor: func(*session.Session) *agent.Agent { return a },
-		}
-		em := &captureEmitter{}
-
-		d.Process(t.Context(), sess, []tools.ToolCall{{
-			ID:       "b",
-			Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"git log --oneline"}`},
-		}}, []tools.Tool{tool}, em)
-
-		assert.True(t, ran, "balanced must auto-approve classifier-safe background commands")
-		assert.Empty(t, em.confirmations)
-	})
-
-	t.Run("destructive command prompts with label", func(t *testing.T) {
-		t.Parallel()
-		sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
-
-		tool := tools.Tool{
-			Name: "run_background_job",
-			Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
-				panic("must not run")
-			},
-		}
-		resume := make(chan toolexec.ResumeRequest, 1)
-		d := &toolexec.Dispatcher{
-			AgentFor: func(*session.Session) *agent.Agent { return a },
-			Resume:   resume,
-		}
-		em := &captureEmitter{}
-
-		resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
-
-		d.Process(t.Context(), sess, []tools.ToolCall{{
-			ID:       "b",
-			Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"rm -rf /tmp/x"}`},
-		}}, []tools.Tool{tool}, em)
-
-		require.Len(t, em.confirmations, 1)
-		require.Len(t, em.confirmationMeta, 1)
-		assert.Equal(t, "destructive", em.confirmationMeta[0]["safety_label"])
-		assert.Equal(t, "high", em.confirmationMeta[0]["blast_radius"])
-	})
-}
-
 // Restricted is the fail-closed profile for unattended runs: safe
 // calls auto-run, everything else is rejected outright — no
 // confirmation prompt, no tool execution — with the stable
@@ -954,12 +889,12 @@ func TestDispatcher_DenyRuleBlocksUnderAutonomous(t *testing.T) {
 // rules written against the canonical "cmd" key match whatever command
 // the handler will actually run: the "command" alias cannot dodge a
 // deny rule, and a stored "always allow" grant keeps covering alias
-// calls. Both command tools are exercised.
+// calls. The shell command surface is exercised.
 func TestDispatcher_CommandRulesSeeTheExecutedCommand(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 
-	for _, toolName := range []string{"shell", "run_background_job"} {
+	for _, toolName := range []string{"shell"} {
 		t.Run(toolName+" alias cannot dodge a deny rule", func(t *testing.T) {
 			t.Parallel()
 			sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
@@ -2025,7 +1960,7 @@ func TestDispatcher_NonInteractiveDefaultAskAutoDenies(t *testing.T) {
 
 func TestDispatcherBoundsResultsAfterHooks(t *testing.T) {
 	t.Parallel()
-	for _, category := range []string{"shell", "background_jobs", "memory"} {
+	for _, category := range []string{"shell", "filesystem", "memory"} {
 		for _, useHook := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/hook=%t", category, useHook), func(t *testing.T) {
 				t.Parallel()

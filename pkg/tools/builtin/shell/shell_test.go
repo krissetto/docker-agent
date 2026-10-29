@@ -21,7 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shellprocess"
 )
 
 func TestNew(t *testing.T) {
@@ -181,7 +181,6 @@ func TestShellTool_HandlerError(t *testing.T) {
 func TestShellTool_OutputSchema(t *testing.T) {
 	t.Parallel()
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
-
 	allTools, err := tool.Tools(t.Context())
 	require.NoError(t, err)
 	require.NotEmpty(t, allTools)
@@ -220,6 +219,9 @@ func TestShellTool_Instructions(t *testing.T) {
 	t.Parallel()
 
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
+	processes := shellprocess.New()
+	tool.AttachProcessManager(processes, true)
+	t.Cleanup(func() { require.NoError(t, processes.CloseAll(t.Context())) })
 
 	instructions := tool.Instructions()
 
@@ -227,7 +229,28 @@ func TestShellTool_Instructions(t *testing.T) {
 	assert.Contains(t, instructions, shellpath.ShellBaseName(tool.handler.shell),
 		"instructions must name the resolved shell so the model uses its syntax")
 	assert.Contains(t, instructions, displayOS())
-	assert.NotContains(t, instructions, "run_background_job")
+	if processes.SupportsShellBackground() {
+		assertShellBackgroundGuidance(t, instructions)
+	}
+}
+
+func assertShellBackgroundGuidance(t *testing.T, text string) {
+	t.Helper()
+	for _, phrase := range []string{
+		"wakes/resumes this agent",
+		"do independent work",
+		"end your turn without tool calls",
+		"no keep-alive needed",
+		"Never poll",
+		"inspect_running_process",
+		"list_running_processes",
+		"sleep",
+		"dummy calls",
+		"concrete diagnostic or user request",
+		"intentionally cancel",
+	} {
+		assert.Contains(t, text, phrase)
+	}
 }
 
 // TestShellTool_DescriptionNamesInterpreter guards against regressing to a
@@ -237,6 +260,9 @@ func TestShellTool_DescriptionNamesInterpreter(t *testing.T) {
 	t.Parallel()
 
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
+	processes := shellprocess.New()
+	tool.AttachProcessManager(processes, false)
+	t.Cleanup(func() { require.NoError(t, processes.CloseAll(t.Context())) })
 
 	allTools, err := tool.Tools(t.Context())
 	require.NoError(t, err)
@@ -247,6 +273,9 @@ func TestShellTool_DescriptionNamesInterpreter(t *testing.T) {
 	assert.Contains(t, description, displayOS())
 	assert.Contains(t, description, "get_environment_info",
 		"description must point the model at the environment tool for edge cases the static hint doesn't cover")
+	if processes.SupportsShellBackground() {
+		assertShellBackgroundGuidance(t, description)
+	}
 }
 
 func TestShellDialectHint(t *testing.T) {
@@ -606,9 +635,9 @@ func TestShellAutoBackgroundsSameProcessAndInspectors(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process test")
 	}
-	jobs := backgroundjobs.New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
+	jobs := shellprocess.New()
 	shellTool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
-	shellTool.AttachBackgroundJobs(jobs, true)
+	shellTool.AttachProcessManager(jobs, true)
 	shellTool.handler.backgroundAfter = 30 * time.Millisecond
 	owner := tools.NewResourceOwner()
 	work := &testBackgroundWork{complete: make(chan string, 1), closed: make(chan struct{})}
@@ -617,14 +646,15 @@ func TestShellAutoBackgroundsSameProcessAndInspectors(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "runs")
 	result, err := shellTool.handler.RunShell(ctx, RunShellArgs{Cmd: "echo start >> " + marker + "; sleep 0.2; echo after-handoff", Timeout: 2}, rt)
 	require.NoError(t, err)
-	require.Contains(t, result.Output, "Background job started with ID:")
-	id := strings.Fields(strings.Split(result.Output, "ID: ")[1])[0]
+	require.Contains(t, result.Output, "Completion output will be delivered automatically.")
+	assertShellBackgroundGuidance(t, result.Output)
+	id := strings.Fields(strings.Split(result.Output, "process ID ")[1])[0]
 	inspected, err := shellTool.Tools(t.Context())
 	require.NoError(t, err)
 	var view *tools.ToolCallResult
 	for _, candidate := range inspected {
-		if candidate.Name == backgroundjobs.ToolNameViewBackgroundJob {
-			view, err = candidate.Handler(ctx, tools.ToolCall{Function: tools.FunctionCall{Name: candidate.Name, Arguments: `{"job_id":"` + id + `"}`}}, tools.NopRuntime{})
+		if candidate.Name == shellprocess.ToolNameInspectRunningProcess {
+			view, err = candidate.Handler(ctx, tools.ToolCall{Function: tools.FunctionCall{Name: candidate.Name, Arguments: `{"process_id":"` + id + `"}`}}, tools.NopRuntime{})
 			require.NoError(t, err)
 		}
 	}
@@ -645,17 +675,20 @@ func TestShellAutoBackgroundsSameProcessAndInspectors(t *testing.T) {
 	for _, tool := range toolsList {
 		names = append(names, tool.Name)
 	}
-	require.Contains(t, names, backgroundjobs.ToolNameViewBackgroundJob)
-	require.NotContains(t, names, backgroundjobs.ToolNameRunBackgroundJob)
+	require.Contains(t, names, shellprocess.ToolNameListRunningProcesses)
+	require.Contains(t, names, shellprocess.ToolNameInspectRunningProcess)
+	require.Contains(t, names, shellprocess.ToolNameKillRunningProcess)
 	inspected, err = shellTool.Tools(t.Context())
 	require.NoError(t, err)
+	var inspectAfter *tools.ToolCallResult
 	for _, candidate := range inspected {
-		if candidate.Name == backgroundjobs.ToolNameViewBackgroundJob {
-			view, err = candidate.Handler(ctx, tools.ToolCall{Function: tools.FunctionCall{Name: candidate.Name, Arguments: `{"job_id":"` + id + `"}`}}, tools.NopRuntime{})
+		if candidate.Name == shellprocess.ToolNameInspectRunningProcess {
+			inspectAfter, err = candidate.Handler(ctx, tools.ToolCall{Function: tools.FunctionCall{Name: candidate.Name, Arguments: `{"process_id":"` + id + `"}`}}, tools.NopRuntime{})
 			require.NoError(t, err)
 		}
 	}
-	require.Contains(t, view.Output, "after-handoff")
+	require.NotNil(t, inspectAfter)
+	require.True(t, inspectAfter.IsError, "completed output is delivered once, not retained for manual inspection")
 	select {
 	case <-work.closed:
 	case <-time.After(time.Second):
@@ -666,8 +699,8 @@ func TestShellAutoBackgroundsSameProcessAndInspectors(t *testing.T) {
 
 func TestShellForegroundFastAndDisabledBackgrounding(t *testing.T) {
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
-	jobs := backgroundjobs.New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
-	tool.AttachBackgroundJobs(jobs, false)
+	jobs := shellprocess.New()
+	tool.AttachProcessManager(jobs, false)
 	tool.handler.backgroundAfter = 500 * time.Millisecond
 	ctx := tools.WithResourceOwner(t.Context(), tools.NewResourceOwner())
 	rt := &backgroundWorkRuntime{work: &testBackgroundWork{complete: make(chan string, 1), closed: make(chan struct{})}}
@@ -675,13 +708,13 @@ func TestShellForegroundFastAndDisabledBackgrounding(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, fast.Output, "fast")
 	require.NotContains(t, fast.Output, "Background job started")
-	require.Zero(t, jobs.JobCount())
+	require.Zero(t, jobs.ProcessCount())
 	tool.handler.backgroundAfter = 0
 	slow, err := tool.handler.RunShell(ctx, RunShellArgs{Cmd: "sleep 0.6; echo disabled"}, rt)
 	require.NoError(t, err)
 	require.Contains(t, slow.Output, "disabled")
 	require.NotContains(t, slow.Output, "Background job started")
-	require.Zero(t, jobs.JobCount())
+	require.Zero(t, jobs.ProcessCount())
 }
 
 type testBackgroundWork struct {
@@ -722,14 +755,14 @@ func TestShellWithoutBackgroundWorkCapabilityStaysForeground(t *testing.T) {
 		t.Skip("POSIX shell command")
 	}
 	workingDir := t.TempDir()
-	jobs := backgroundjobs.New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: workingDir}})
+	jobs := shellprocess.New()
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: workingDir}})
-	tool.AttachBackgroundJobs(jobs, true)
+	tool.AttachProcessManager(jobs, true)
 	tool.handler.backgroundAfter = 20 * time.Millisecond
 	ctx := tools.WithResourceOwner(t.Context(), tools.NewResourceOwner())
 	result, err := tool.handler.RunShell(ctx, RunShellArgs{Cmd: "sleep 0.08; echo fallback"}, tools.NopRuntime{})
 	require.NoError(t, err)
 	require.Contains(t, result.Output, "fallback")
 	require.NotContains(t, result.Output, "Background job started")
-	require.Zero(t, jobs.JobCount())
+	require.Zero(t, jobs.ProcessCount())
 }

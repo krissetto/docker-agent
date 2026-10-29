@@ -71,6 +71,8 @@ type BaseDialog struct {
 	footerHoverKey                        string
 	footerHoverAlpha                      float64
 	scrollviews                           []scrollviewRegistration
+	scrollbarRuntime                      *animation.Runtime
+	scrollbarActive                       bool
 	responseSent                          bool
 	width, height                         int
 	closeHovered                          bool
@@ -103,13 +105,91 @@ type BaseDialog struct {
 type scrollviewRegistration struct {
 	model      *scrollview.Model
 	generation uint64
+	active     bool
 }
 
 func (b *BaseDialog) newScrollview(opts ...scrollview.Option) *scrollview.Model {
 	view := scrollview.New(opts...)
-	b.scrollviews = append(b.scrollviews, scrollviewRegistration{model: view, generation: view.VisualGeneration()})
+	if b.scrollbarRuntime != nil {
+		view.SetAnimationRuntime(b.scrollbarRuntime)
+		view.SetScrollbarActive(b.scrollbarActive)
+	}
+	b.scrollviews = append(b.scrollviews, scrollviewRegistration{model: view, generation: view.VisualGeneration(), active: true})
 	return view
 }
+
+// SetAnimationRuntime opts registered dialog scrollviews into the shared TUI
+// animation clock. Calling it again with the same runtime preserves suspension.
+func (b *BaseDialog) SetAnimationRuntime(ar *animation.Runtime) {
+	if b.scrollbarRuntime == ar {
+		return
+	}
+	b.scrollbarRuntime = ar
+	b.scrollbarActive = ar != nil
+	for i := range b.scrollviews {
+		view := &b.scrollviews[i]
+		view.model.SetAnimationRuntime(ar)
+		view.model.SetScrollbarActive(b.scrollbarActive && view.active)
+	}
+}
+
+// SetScrollbarPointer updates hover proximity without routing mouse capture.
+func (b *BaseDialog) SetScrollbarPointer(x, y int) bool {
+	changed := false
+	for i := range b.scrollviews {
+		if b.scrollviews[i].active {
+			changed = b.scrollviews[i].model.SetScrollbarPointer(x, y) || changed
+		}
+	}
+	return changed
+}
+
+// SetScrollbarActive suspends scrollbar presentation for hidden dialogs.
+func (b *BaseDialog) SetScrollbarActive(active bool) bool {
+	if b.scrollbarActive == active {
+		return false
+	}
+	b.scrollbarActive = active
+	changed := false
+	for i := range b.scrollviews {
+		changed = b.scrollviews[i].model.SetScrollbarActive(active && b.scrollviews[i].active) || changed
+	}
+	return changed
+}
+
+// SetScrollviewActive enables only the currently presented viewport among a
+// dialog's registered scrollviews (for dialogs with tabbed/paged regions).
+func (b *BaseDialog) SetScrollviewActive(view *scrollview.Model, active bool) bool {
+	for i := range b.scrollviews {
+		registration := &b.scrollviews[i]
+		if registration.model != view || registration.active == active {
+			continue
+		}
+		registration.active = active
+		return registration.model.SetScrollbarActive(active && b.scrollbarActive)
+	}
+	return false
+}
+
+// UpdateScrollbarAnimation advances each registered scrollview on accepted ticks.
+func (b *BaseDialog) UpdateScrollbarAnimation(msg tea.Msg) bool {
+	changed := false
+	for i := range b.scrollviews {
+		if b.scrollviews[i].active {
+			changed = b.scrollviews[i].model.UpdateAnimation(msg) || changed
+		}
+	}
+	return changed
+}
+
+// StopScrollbarAnimation releases scrollbar leases without affecting dialog-owned transitions.
+func (b *BaseDialog) StopScrollbarAnimation() {
+	b.SetScrollbarActive(false)
+}
+
+// StopAnimations releases this dialog's scrollbar visibility animations;
+// promoted to concrete dialogs unless they own additional animations.
+func (b *BaseDialog) StopAnimations() { b.StopScrollbarAnimation() }
 
 // CancelDialogCmd is the default semantic cancellation transaction. Stateful
 // dialogs override it when cancellation must emit additional messages.
@@ -739,6 +819,12 @@ func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int
 		b.bodyHeaderGap = 1
 	}
 	b.actionScrollActive = len(footers) > max(1, available-1)
+	if b.bodyScroll != nil {
+		b.SetScrollviewActive(b.bodyScroll, true)
+	}
+	if b.actionScroll != nil {
+		b.SetScrollviewActive(b.actionScroll, b.actionScrollActive)
+	}
 	if b.actionScrollActive {
 		if b.actionScroll == nil {
 			b.actionScroll = b.newScrollview(scrollview.WithKeyMap(nil), scrollview.WithFadeEffectDisabled())

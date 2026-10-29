@@ -35,7 +35,7 @@ func TestOrderedChatAttachQueuesLateResultsWithoutRegrouping(t *testing.T) {
 		a, _ := newSessionTestApp(t, sess, nil, nil)
 		ar := animation.NewRuntime()
 		state := service.NewSessionState(sess)
-		p := New(ar, t.Context(), a, state).(*chatPage)
+		p := New(ar, t.Context(), a, state, WithCompactWorkLog(false)).(*chatPage)
 		p.messages.SetSize(100, 100)
 		t.Cleanup(func() { p.messages.StopAnimations(); ar.Stop() })
 		return p
@@ -72,24 +72,22 @@ func TestOrderedChatAttachQueuesLateResultsWithoutRegrouping(t *testing.T) {
 		name string
 		p    *chatPage
 	}{{"live", live}, {"async_attach_queued_results", attached}, {"history", replay}} {
-		require.Equal(t, 2, path.p.messages.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+		require.Equal(t, 1, path.p.messages.MessageTypeCount(types.MessageTypeAssistantReasoningBlock), path.name)
 		require.Zero(t, path.p.messages.MessageTypeCount(types.MessageTypeToolCall))
 		frame := ansi.Strip(path.p.messages.View())
-		require.Equal(t, 2, strings.Count(frame, "Thinking [+] (1 tool)"))
-		t.Logf("%s: two adjacent collapsed reasoning blocks, no standalone tools", path.name)
+		require.Equal(t, 1, strings.Count(frame, "Thinking [+] (2 tools)"))
+		t.Logf("%s: one collapsed reasoning block with both tools, no standalone tools", path.name)
 	}
-	// Tool results are usually folded in collapsed reasoning, so validate by expanding every block.
+	// Tool results are usually folded in collapsed reasoning, so validate by expanding the merged block.
 	for _, path := range []struct {
 		name string
 		p    *chatPage
 	}{{"live", live}, {"async_attach_queued_results", attached}, {"history", replay}} {
 		path.p.messages.Focus()
 		path.p.messages.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-		path.p.messages.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-		path.p.messages.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		frame := ansi.Strip(path.p.messages.View())
-		require.True(t, strings.Contains(frame, "late first result"), path.name)
-		require.True(t, strings.Contains(frame, "late second result"), path.name)
+		require.Contains(t, frame, "late first result", path.name)
+		require.Contains(t, frame, "late second result", path.name)
 	}
 }
 
@@ -103,7 +101,7 @@ func TestOrderedChatMidResponseAttachPreservesSeedAndQueuedOrder(t *testing.T) {
 		ar := animation.NewRuntime()
 		state := service.NewSessionState(sess)
 		state.SetExpandThinking(true)
-		p := New(ar, t.Context(), a, state).(*chatPage)
+		p := New(ar, t.Context(), a, state, WithCompactWorkLog(false)).(*chatPage)
 		p.messages.SetSize(100, 100)
 		t.Cleanup(func() { p.messages.StopAnimations(); ar.Stop() })
 		return p

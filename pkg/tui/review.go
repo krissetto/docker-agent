@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,7 +20,9 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	view "github.com/docker/docker-agent/pkg/tui/components/review"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/internal/editorname"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/reviewdraft"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -42,33 +45,46 @@ type gitReviewFocus struct {
 	contextBar bool
 }
 
-// gitReviewWorkspace is the review state of one workspace anchor. Snapshots,
-// providers and presentation never leak between anchors.
+// Each anchor keeps its presentation and drafts independent of shared workspace data.
 type gitReviewWorkspace struct {
-	anchor     string
-	models     map[view.Mode]*view.Model
-	mode       view.Mode
-	draft      *reviewdraft.Draft
-	preview    *gitReviewPreview
-	sent       *gitReviewPreview // recipient of the unresolved attempt, for exact retry
-	snapshot   *view.Snapshot
-	provider   gitreview.Provider
-	sessionID  string
-	workingDir string
-	route      uint64
-	open       bool
-	inspecting bool // Changes: the diff inspector is shown over the transcript
-	docked     bool
-	restore    gitReviewFocus
-	session    view.Session
-	hint       messagebar.Token
-	hintText   string
-	splitPref  bool
-	refreshAt  time.Time
+	anchor      string
+	models      map[view.Mode]*view.Model
+	mode        view.Mode
+	sidebarMode view.Mode
+	// loadBrowse is the intent of the provider bootstrap currently in flight.
+	loadBrowse bool
+	// snapshotBrowse is the intent of the snapshot refresh currently in flight.
+	snapshotBrowse           bool
+	draft                    *reviewdraft.Draft
+	preview                  *gitReviewPreview
+	sent                     *gitReviewPreview // recipient of the unresolved attempt, for exact retry
+	snapshot                 *view.Snapshot
+	provider                 gitreview.Provider
+	sessionID                string
+	workingDir               string
+	route                    uint64
+	open                     bool
+	inspecting               bool // Changes: the diff inspector is shown over the transcript
+	docked                   bool
+	restore                  gitReviewFocus
+	session                  view.Session
+	hint                     messagebar.Token
+	hintText                 string
+	splitPref                bool
+	refreshAt                time.Time
+	prewarm                  gitSidebarPrewarm
+	directories              map[string]view.Directory
+	directoryGeneration      uint64
+	externalEditorGeneration uint64
+	scopePane                bool
+	// scopeKey names the shared Git scope this workspace is attached to.
+	scopeKey string
+	// policyFingerprint is the cheap metadata captured at attach; a change revalidates identity.
+	policyFingerprint string
 }
 
 func newGitReviewWorkspace(anchor string) *gitReviewWorkspace {
-	return &gitReviewWorkspace{anchor: anchor, models: map[view.Mode]*view.Model{}, draft: reviewdraft.New(anchor)}
+	return &gitReviewWorkspace{anchor: anchor, models: map[view.Mode]*view.Model{}, draft: reviewdraft.New(anchor), directories: map[string]view.Directory{}}
 }
 
 // current is the surface on screen: /changes and /files keep separate
@@ -104,7 +120,9 @@ type gitAutoRefreshMsg struct {
 }
 
 type gitReviewTaskResult struct {
-	request            tea.Msg
+	request tea.Msg
+	// browse is the request's captured Files intent, independent of the snapshot it returns.
+	browse             bool
 	owner, key         string
 	token, generation  uint64
 	snapshotGeneration uint64
@@ -113,6 +131,7 @@ type gitReviewTaskResult struct {
 	worktree           *view.Worktree
 	directory          *view.Directory
 	document           *view.Document
+	refreshDocument    *view.DocumentKey
 	err                error
 }
 
@@ -147,7 +166,7 @@ func chooseGitReviewProvider(rt runtime.SessionRuntime, handle runtime.SessionHa
 // gitScopeKey identifies what the shown review belongs to: the focused pane's
 // session for Git (sidebar + inspector), the pane workspace for /files.
 func (m *appModel) gitScopeKey() string {
-	if ws := m.activeReview(); ws != nil && ws.mode == view.ModeChanges {
+	if ws := m.activeReview(); ws != nil && (ws.scopePane || ws.inspecting) {
 		return m.paneFocus()
 	}
 	return m.reviewAnchor()
@@ -183,7 +202,7 @@ func (m *appModel) reviewModel() *view.Model {
 
 // reviewSurface is the full-content Files surface, if shown.
 func (m *appModel) reviewSurface() *view.Model {
-	if ws := m.activeReview(); ws != nil && ws.mode == view.ModeFiles {
+	if ws := m.activeReview(); ws != nil && ws.mode == view.ModeFiles && !ws.inspecting {
 		return ws.current()
 	}
 	return nil
@@ -196,13 +215,32 @@ func (m *appModel) reviewFocused() bool {
 
 func (m *appModel) reviewCapturing() bool { return m.reviewFocused() && m.reviewModel().Capturing() }
 
+func (m *appModel) reviewTargetLabel(owner string) string {
+	if m.supervisor == nil {
+		return ""
+	}
+	focus := m.paneFocus()
+	if focus == "" {
+		focus = owner
+	}
+	runner := m.supervisor.GetRunner(focus)
+	if runner == nil || runner.App == nil || runner.App.Session() == nil {
+		return ""
+	}
+	label := fallbackString(runner.App.Session().TitleSnapshot(), "current session")
+	if attached := runner.App.AttachedSubagent(); attached != nil {
+		label += " › " + string(attached.NodeID)
+	}
+	return label
+}
+
 func (m *appModel) reviewCanDock() bool {
 	return !m.leanMode && !m.panePresentationEnabled() && m.width >= gitReviewDockMinWidth
 }
 
 func (m *appModel) reviewDocked() bool {
 	ws := m.activeReview()
-	return ws != nil && ws.mode == view.ModeFiles && ws.docked && m.reviewCanDock()
+	return ws != nil && ws.mode == view.ModeFiles && !ws.inspecting && ws.docked && m.reviewCanDock()
 }
 
 func (m *appModel) reviewDockChatWidth() int {
@@ -212,7 +250,7 @@ func (m *appModel) reviewDockChatWidth() int {
 // reviewOwnsPointer reports whether a content-area pointer event belongs to review.
 // Undocked review owns the whole content area so nothing reaches hidden chat.
 func (m *appModel) reviewOwnsPointer(x, y int) bool {
-	if m.reviewSurface() == nil || y < 0 || y >= m.contentHeight {
+	if m.reviewSurface() == nil || y < m.mainContentInset() || y >= m.contentHeight {
 		return false
 	}
 	return !m.reviewDocked() || x >= m.reviewDockChatWidth()
@@ -224,9 +262,18 @@ func (m *appModel) reviewHandleMouse(msg tea.MouseMsg) tea.Cmd {
 	return cmd
 }
 
+func (m *appModel) reviewHandleWheelDelta(x, y, delta int) {
+	model := m.reviewModel()
+	if model == nil {
+		return
+	}
+	model.HandleWheelDelta(x, y, delta)
+	m.viewCacheValid = false
+}
+
 // blurReviewForChat hands keyboard focus to the visible docked chat after a click there.
 func (m *appModel) blurReviewForChat(msg tea.MouseMsg) {
-	if _, click := msg.(tea.MouseClickMsg); click && m.reviewDocked() && msg.Mouse().Y < m.contentHeight {
+	if _, click := msg.(tea.MouseClickMsg); click && m.reviewDocked() && msg.Mouse().Y >= m.mainContentInset() && msg.Mouse().Y < m.contentHeight {
 		m.reviewModel().Blur()
 		m.viewCacheValid = false
 	}
@@ -235,17 +282,23 @@ func (m *appModel) blurReviewForChat(msg tea.MouseMsg) {
 // layoutGitReview sizes review (and the docked chat) after the content area changes.
 func (m *appModel) layoutGitReview() tea.Cmd {
 	ws := m.activeReview()
-	if ws == nil || ws.mode != view.ModeFiles {
-		return nil // the inspector is sized by the chat page with the transcript
+	if ws == nil || ws.mode != view.ModeFiles || ws.inspecting {
+		return nil // inspectors are sized by the chat page with the transcript
 	}
 	if m.reviewDocked() {
 		chatWidth := m.reviewDockChatWidth()
-		ws.current().SetSize(m.width-chatWidth-1, m.contentHeight)
-		ws.current().SetPosition(chatWidth+1, 0)
-		return m.chatPage.SetSize(chatWidth, m.contentHeight)
+		ws.current().SetSize(m.width-chatWidth-1, m.mainContentHeight())
+		ws.current().SetPosition(chatWidth+1, m.mainContentInset())
+		if origin, ok := m.chatPage.(interface{ SetMainContentInset(inset int) }); ok {
+			origin.SetMainContentInset(m.mainContentInset())
+		}
+		if owner, ok := m.chatPage.(interface{ SetSidebarPresentationExtent(height int) }); ok {
+			owner.SetSidebarPresentationExtent(m.sidebarContinuationHeight())
+		}
+		return m.chatPage.SetSize(chatWidth, m.mainContentHeight())
 	}
-	ws.current().SetSize(m.width, m.contentHeight)
-	ws.current().SetPosition(0, 0)
+	ws.current().SetSize(m.width, m.mainContentHeight())
+	ws.current().SetPosition(0, m.mainContentInset())
 	return nil
 }
 
@@ -255,8 +308,8 @@ func (m *appModel) reviewContentView() string {
 		return model.View()
 	}
 	chatWidth := m.reviewDockChatWidth()
-	sep := strings.TrimSuffix(strings.Repeat(styles.MutedStyle.Render("│")+"\n", m.contentHeight), "\n")
-	return lipgloss.JoinHorizontal(lipgloss.Top, paneClipped(m.chatPage.View(), chatWidth, m.contentHeight), sep, model.View())
+	sep := strings.TrimSuffix(strings.Repeat(styles.MutedStyle.Render("│")+"\n", m.mainContentHeight()), "\n")
+	return lipgloss.JoinHorizontal(lipgloss.Top, paneClipped(m.chatPage.View(), chatWidth, m.mainContentHeight()), sep, model.View())
 }
 
 func (m *appModel) captureReviewFocus() gitReviewFocus {
@@ -312,6 +365,16 @@ func (m *appModel) focusBeforeReview() tea.Cmd {
 func (m *appModel) focusComposerFromContent() tea.Cmd {
 	if model := m.reviewModel(); model != nil {
 		model.Blur()
+	}
+	if ws := m.activeReview(); ws != nil && m.reviewModel() != nil {
+		if m.editor.HasContextBar() {
+			m.chatPage.BlurMessages()
+			m.focusedPanel = PanelEditor
+			m.editor.SetContextBarFocused(true)
+			m.editor.Blur()
+			return nil
+		}
+		return m.startReviewGeneralInput(ws.anchor)
 	}
 	m.chatPage.BlurMessages()
 	m.focusedPanel = PanelEditor
@@ -387,6 +450,7 @@ func (m *appModel) openGitReview(files bool) tea.Cmd {
 	scopeChanged := ws.sessionID != sess.ID || filepath.Clean(ws.workingDir) != filepath.Clean(sess.WorkingDir) || ws.route != route
 	if scopeChanged {
 		// Review data never outlives its scope; the user's draft does.
+		m.detachGitReviewScope(ws)
 		draft, preview, sent, splitPref := ws.draft, ws.preview, ws.sent, ws.splitPref
 		*ws = *newGitReviewWorkspace(anchor)
 		ws.draft, ws.preview, ws.sent, ws.splitPref = draft, preview, sent, splitPref
@@ -396,11 +460,23 @@ func (m *appModel) openGitReview(files bool) tea.Cmd {
 	if files {
 		mode = view.ModeFiles
 	}
+	standaloneFiles := mode == view.ModeFiles
+	if ws.open && m.gitReviewOwner == anchor && ws.inspecting && (standaloneFiles || ws.mode != mode) {
+		cmds = append(cmds, m.hideGitInspector(ws))
+	}
 	if ws.open && m.gitReviewOwner == anchor && ws.mode != mode {
 		ws.current().Blur()
 	}
 	_, existed := ws.models[mode]
 	ws.mode = mode
+	ws.sidebarMode = mode
+	ws.scopePane = !standaloneFiles
+	if standaloneFiles {
+		ws.inspecting = false
+		if model := ws.models[view.ModeFiles]; model != nil {
+			model.SetInspector(false)
+		}
+	}
 	if !existed {
 		model := ws.current()
 		if ws.snapshot != nil {
@@ -417,10 +493,21 @@ func (m *appModel) openGitReview(files bool) tea.Cmd {
 		m.cancelGitReviewRequests()
 	}
 	m.focusReview()
+	if page, ok := m.gitPage(anchor); ok {
+		cmds = append(cmds, page.SetGitMode(mode))
+	}
 	cmds = append(cmds, m.layoutGitReview(), m.syncReviewSession())
-	if ws.provider != nil {
+	if policyCmd, changed := m.revalidateGitReviewScope(ws, runner.App); changed {
+		cmds = append(cmds, policyCmd)
+		m.viewCacheValid = false
+		return tea.Batch(cmds...)
+	}
+	switch {
+	case ws.provider != nil && standaloneFiles:
+		cmds = append(cmds, m.filesRootRequest(ws))
+	case ws.provider != nil:
 		cmds = append(cmds, m.submitGitReviewRequest(view.RefreshRequestMsg{Owner: anchor}))
-	} else {
+	default:
 		cmds = append(cmds, m.loadGitReviewProvider(anchor, runner.App))
 	}
 	m.viewCacheValid = false
@@ -435,20 +522,34 @@ func (m *appModel) gitReviewProviderFactory() gitReviewProviderFactory {
 }
 
 func (m *appModel) loadGitReviewProvider(anchor string, a *app.App) tea.Cmd {
-	ws := m.gitReviews[anchor]
+	return m.loadGitReviewIdentity(anchor, a)
+}
+
+// startGitReviewBootstrap reads the workspace's first snapshot, through the shared
+// scope when one is attached. Files reads only the root; Changes scans.
+func (m *appModel) startGitReviewBootstrap(ws *gitReviewWorkspace, scope *gitReviewScope, a *app.App, browse bool) tea.Cmd {
+	ws.loadBrowse = browse
+	m.setGitReviewLease(ws, !browse)
 	ctx, token := m.beginGitReviewRequest("provider")
 	factory := m.gitReviewProviderFactory()
-	generation, sessionID, workingDir := m.gitReviewGeneration, ws.sessionID, ws.workingDir
+	generation, anchor, sessionID, workingDir := m.gitReviewGeneration, ws.anchor, ws.sessionID, ws.workingDir
 	return func() tea.Msg {
 		result := gitReviewTaskResult{owner: anchor, key: "provider", token: token, generation: generation}
-		provider, unavailable, err := factory(a, sessionID, workingDir)
+		var provider gitreview.Provider
+		var unavailable *view.Snapshot
+		var err error
+		if scope != nil {
+			provider, unavailable, err = scope.open(factory, a, anchor, sessionID, workingDir)
+		} else {
+			provider, unavailable, err = factory(a, sessionID, workingDir)
+		}
 		switch {
 		case err != nil:
 			result.err = err
 		case unavailable != nil:
 			result.snapshot = unavailable
 		default:
-			snapshot, err := provider.Snapshot(ctx)
+			snapshot, err := reviewBootstrapSnapshot(provider, browse)(ctx)
 			if err != nil {
 				result.err = err
 				break
@@ -482,10 +583,19 @@ func (m *appModel) beginGitReviewRequest(key string) (context.Context, uint64) {
 }
 
 func (m *appModel) cancelGitReviewRequests() {
-	for _, req := range m.gitReviewPending {
+	cancelledDirectories := false
+	for key, req := range m.gitReviewPending {
 		req.cancel()
+		if strings.HasPrefix(key, "dir:") {
+			cancelledDirectories = true
+		}
 	}
 	clear(m.gitReviewPending)
+	if cancelledDirectories {
+		if ws := m.activeReview(); ws != nil {
+			ws.directoryGeneration++
+		}
+	}
 }
 
 // validGitReviewScope reports whether results for owner still match what is shown.
@@ -576,6 +686,17 @@ func (m *appModel) toggleGitReviewDock(owner string) tea.Cmd {
 // syncGitReview runs after every update: it follows workspace switches, scope
 // changes and session activity without touching hidden workspaces.
 func (m *appModel) syncGitReview() tea.Cmd {
+	m.sweepGitReviewWorkspaces()
+	var policy tea.Cmd
+	if ws := m.activeReview(); ws != nil {
+		if a := m.gitReviewApp(ws.anchor); a != nil {
+			policy, _ = m.revalidateGitReviewScope(ws, a)
+		}
+	}
+	return tea.Batch(policy, m.syncGitReviewState())
+}
+
+func (m *appModel) syncGitReviewState() tea.Cmd {
 	mark := m.markGitSidebar()
 	watchCmd := tea.Cmd(nil)
 	if owner := m.paneFocus(); owner != "" {
@@ -669,7 +790,8 @@ func (m *appModel) syncReviewMismatch() tea.Cmd {
 	// One concise target line, only while typing, and only when the reviewed
 	// checkout is not the session's own folder.
 	_, mismatch := ws.current().TargetMismatch()
-	if !mismatch || m.focusedPanel != PanelEditor || m.editor.IsContextBarFocused() {
+	visible := ws.mode != view.ModeChanges || ws.inspecting
+	if !visible || !mismatch || m.focusedPanel != PanelEditor || m.editor.IsContextBarFocused() {
 		return m.clearReviewHint(ws)
 	}
 	text := "sends to " + fallbackString(ws.session.Title, "this session")
@@ -690,6 +812,27 @@ func fallbackString(s, def string) string {
 	return s
 }
 
+func (m *appModel) invalidateGitDirectories(ws *gitReviewWorkspace) {
+	if ws == nil {
+		return
+	}
+	cancelled := false
+	for key, req := range m.gitReviewPending {
+		if strings.HasPrefix(key, "dir:") {
+			req.cancel()
+			delete(m.gitReviewPending, key)
+			cancelled = true
+		}
+	}
+	if cancelled {
+		ws.directoryGeneration++
+	}
+	clear(ws.directories)
+	if model := ws.models[view.ModeFiles]; model != nil {
+		model.ClearDirectories()
+	}
+}
+
 func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 	ws := m.activeReview()
 	if ws == nil || ws.provider == nil {
@@ -699,11 +842,17 @@ func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 	var documentKey view.DocumentKey
 	delay := time.Duration(0)
 	switch x := msg.(type) {
+	case gitDiscoveryContinuationRequest:
+		owner, key = x.Owner, "snapshot.continue"
+		if _, pending := m.gitReviewPending[key]; pending {
+			return nil
+		}
 	case view.RefreshRequestMsg:
 		owner, key = x.Owner, "snapshot"
 		if _, pending := m.gitReviewPending[key]; pending {
 			return nil
 		}
+		m.invalidateGitDirectories(ws)
 		for pending, req := range m.gitReviewPending {
 			if pending != "snapshot" {
 				req.cancel()
@@ -735,18 +884,33 @@ func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 	if owner != m.gitReviewOwner || !m.validGitReviewScope(owner, m.gitReviewGeneration) {
 		return nil
 	}
+	if request, ok := msg.(view.LoadDirectoryRequestMsg); ok {
+		if ws.directories == nil {
+			ws.directories = map[string]view.Directory{}
+		}
+		directory := view.Directory{WorktreeID: request.WorktreeID, Path: request.Path, State: view.StateLoading}
+		ws.directories[request.WorktreeID+"\x00"+request.Path] = directory
+		if model := ws.models[view.ModeFiles]; model != nil {
+			model.SetDirectory(directory)
+		}
+	}
 	provider := ws.provider
+	// A refresh in Files re-reads the root only; Changes keeps the full scan.
+	browse := ws.sidebarMode == view.ModeFiles
+	if _, refresh := msg.(view.RefreshRequestMsg); refresh {
+		ws.snapshotBrowse = browse
+	}
 	ctx, token := m.beginGitReviewRequest(key)
 	if key == "doc" {
 		req := m.gitReviewPending[key]
 		req.key = documentKey
 		m.gitReviewPending[key] = req
 	}
-	result := gitReviewTaskResult{request: msg, owner: owner, key: key, token: token, generation: m.gitReviewGeneration}
+	result := gitReviewTaskResult{request: msg, owner: owner, key: key, token: token, generation: m.gitReviewGeneration, browse: browse}
 	if ws.snapshot != nil {
 		result.snapshotGeneration = ws.snapshot.Generation
 	}
-	return func() tea.Msg {
+	work := func() tea.Msg {
 		if delay > 0 {
 			select {
 			case <-ctx.Done():
@@ -757,7 +921,18 @@ func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 		}
 		switch x := msg.(type) {
 		case view.RefreshRequestMsg:
-			s, err := provider.Snapshot(ctx)
+			s, err := reviewScanSnapshot(provider, browse)(ctx)
+			if result.err = err; err == nil {
+				v := reviewSnapshot(s)
+				result.snapshot = &v
+			}
+		case gitDiscoveryContinuationRequest:
+			continuation, ok := provider.(gitDiscoveryContinuation)
+			if !ok || !continuation.CanContinueDiscovery() {
+				result.err = errors.New("this Git review provider cannot continue discovery")
+				break
+			}
+			s, err := continuation.ContinueDiscovery(ctx)
 			if result.err = err; err == nil {
 				v := reviewSnapshot(s)
 				result.snapshot = &v
@@ -767,7 +942,7 @@ func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 			var err error
 			if x.Refresh {
 				if refresher, ok := provider.(interface {
-					RefreshWorktree(context.Context, string) (gitreview.Worktree, error)
+					RefreshWorktree(ctx context.Context, id string) (gitreview.Worktree, error)
 				}); ok {
 					w, err = refresher.RefreshWorktree(ctx, x.WorktreeID)
 				} else {
@@ -784,6 +959,8 @@ func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 			d, err := provider.Directory(ctx, x.WorktreeID, x.Path)
 			if result.err = err; err == nil {
 				v := reviewDirectory(d)
+				// Shared normalises the path; the view keys listings by what was requested.
+				v.WorktreeID, v.Path = x.WorktreeID, x.Path
 				result.directory = &v
 			}
 		case view.OpenDocumentRequestMsg:
@@ -795,6 +972,12 @@ func (m *appModel) submitGitReviewRequest(msg tea.Msg) tea.Cmd {
 		}
 		return result
 	}
+	workCmd := tea.Cmd(work)
+	switch msg.(type) {
+	case view.LoadDirectoryRequestMsg, view.RefreshRequestMsg:
+		return tea.Batch(workCmd, m.pushGitSidebar(ws))
+	}
+	return workCmd
 }
 
 func (m *appModel) applyGitReviewTask(result gitReviewTaskResult) tea.Cmd {
@@ -816,7 +999,15 @@ func (m *appModel) applyGitReviewTask(result gitReviewTaskResult) tea.Cmd {
 		if errors.Is(result.err, context.Canceled) {
 			return nil
 		}
-		return tea.Batch(m.applyGitReviewError(ws, result), m.pushGitSidebar(ws))
+		cmd := m.applyGitReviewError(ws, result)
+		if result.refreshDocument != nil {
+			if model := ws.models[result.refreshDocument.Mode]; model != nil {
+				if key, open := model.OpenKey(); open && key == *result.refreshDocument {
+					cmd = tea.Batch(cmd, model.ReloadDocument(*result.refreshDocument))
+				}
+			}
+		}
+		return tea.Batch(cmd, m.pushGitSidebar(ws))
 	}
 	var cmds []tea.Cmd
 	if result.provider != nil {
@@ -828,10 +1019,11 @@ func (m *appModel) applyGitReviewTask(result gitReviewTaskResult) tea.Cmd {
 			expanded = page.GitWatchState().ExpandedWorktrees
 		}
 		ws.snapshot = result.snapshot
-		// Worktree status loads only when the user expands a worktree.
+		cmds = append(cmds, m.prewarmGitSidebarMetadata(ws))
 		ws.each(func(model *view.Model) { cmds = append(cmds, model.SetSnapshot(*result.snapshot)) })
 		cmds = append(cmds, m.syncReviewSession())
-		if _, refresh := result.request.(view.RefreshRequestMsg); refresh {
+		// Only a full scan re-reads Git status; a root read leaves expanded worktrees alone.
+		if _, refresh := result.request.(view.RefreshRequestMsg); refresh && !result.browse {
 			for _, id := range expanded {
 				cmds = append(cmds, m.submitGitReviewRequest(view.LoadWorktreeRequestMsg{Owner: ws.anchor, WorktreeID: id, Refresh: true}))
 			}
@@ -848,15 +1040,26 @@ func (m *appModel) applyGitReviewTask(result gitReviewTaskResult) tea.Cmd {
 		}
 		ws.snapshot = &next
 		ws.each(func(model *view.Model) { cmds = append(cmds, model.SetSnapshot(next)) })
-		if req, ok := result.request.(view.LoadWorktreeRequestMsg); ok && req.Refresh {
-			if model := ws.models[view.ModeChanges]; model != nil {
+		if req, ok := result.request.(view.LoadWorktreeRequestMsg); ok && req.Refresh && result.refreshDocument == nil {
+			if model := ws.models[ws.mode]; model != nil {
 				if key, open := model.OpenKey(); open && key.WorktreeID == req.WorktreeID {
 					cmds = append(cmds, model.ReloadDocument(key))
 				}
 			}
 		}
 	}
+	if result.refreshDocument != nil && result.worktree != nil {
+		if model := ws.models[result.refreshDocument.Mode]; model != nil {
+			if key, open := model.OpenKey(); open && key == *result.refreshDocument {
+				cmds = append(cmds, model.ReloadDocument(*result.refreshDocument))
+			}
+		}
+	}
 	if result.directory != nil {
+		if ws.directories == nil {
+			ws.directories = map[string]view.Directory{}
+		}
+		ws.directories[result.directory.WorktreeID+"\x00"+result.directory.Path] = *result.directory
 		if model := ws.models[view.ModeFiles]; model != nil {
 			cmds = append(cmds, model.SetDirectory(*result.directory))
 		}
@@ -866,6 +1069,11 @@ func (m *appModel) applyGitReviewTask(result gitReviewTaskResult) tea.Cmd {
 			cmds = append(cmds, model.SetDocument(*result.document))
 		}
 	}
+	if result.snapshot != nil && ws.snapshot != nil {
+		// A root-only result that arrives after Changes was selected still scans.
+		cmds = append(cmds, m.ensureChangesScan(ws))
+	}
+	cmds = append(cmds, m.fanoutGitReviewScope(ws))
 	m.viewCacheValid = false
 	return tea.Batch(append(cmds, m.pushGitSidebar(ws))...)
 }
@@ -880,13 +1088,22 @@ func (m *appModel) applyGitReviewError(ws *gitReviewWorkspace, result gitReviewT
 			model.SetDocument(view.Document{Key: req.Key, State: view.StateError, Err: text})
 		}
 	case view.LoadDirectoryRequestMsg:
-		if model := ws.models[view.ModeFiles]; model != nil {
-			return model.SetDirectory(view.Directory{WorktreeID: req.WorktreeID, Path: req.Path, State: view.StateError, Err: text})
+		directory := view.Directory{WorktreeID: req.WorktreeID, Path: req.Path, State: view.StateError, Err: text}
+		if ws.directories == nil {
+			ws.directories = map[string]view.Directory{}
 		}
+		ws.directories[directory.WorktreeID+"\x00"+directory.Path] = directory
+		if model := ws.models[view.ModeFiles]; model != nil {
+			model.SetDirectory(directory)
+		}
+		return nil
 	case view.LoadWorktreeRequestMsg:
 		if req.Refresh {
-			if model := ws.models[view.ModeChanges]; model != nil {
-				if key, open := model.OpenKey(); open && key.WorktreeID == req.WorktreeID && model.DocumentState() == view.StateLoading {
+			if result.refreshDocument != nil {
+				return nil
+			}
+			if model := ws.models[ws.mode]; model != nil {
+				if key, open := model.OpenKey(); open && key.WorktreeID == req.WorktreeID {
 					return model.ReloadDocument(key)
 				}
 			}
@@ -942,7 +1159,29 @@ func reviewCurrentWorktree(snapshot view.Snapshot) string {
 
 func (m *appModel) handleReviewComponentMessage(msg tea.Msg) tea.Cmd {
 	switch x := msg.(type) {
-	case view.RefreshRequestMsg, view.LoadWorktreeRequestMsg, view.LoadDirectoryRequestMsg, view.OpenDocumentRequestMsg:
+	case view.CommentInputRequestMsg:
+		return m.startReviewComment(x)
+	case view.GeneralCommentRequestMsg:
+		return m.startReviewGeneralInput(x.Owner)
+	case view.OpenExternalEditorRequestMsg:
+		return m.openReviewExternalEditor(x)
+	case view.CounterpartRequestMsg:
+		return m.openReviewCounterpart(x)
+	case view.CommentResultMsg:
+		if ws := m.gitReviews[x.Owner]; ws != nil {
+			for _, model := range ws.models {
+				model.HandleCommentResult(x)
+			}
+		}
+		return nil
+	case view.RefreshRequestMsg:
+		ws := m.gitReviews[x.Owner]
+		if ws != nil {
+			m.invalidateGitDirectories(ws)
+			return tea.Batch(m.pushGitSidebar(ws), m.submitGitReviewRequest(x))
+		}
+		return m.submitGitReviewRequest(x)
+	case view.LoadWorktreeRequestMsg, view.LoadDirectoryRequestMsg, view.OpenDocumentRequestMsg:
 		return m.submitGitReviewRequest(x)
 	case view.CloseRequestMsg:
 		return m.closeGitReview(x.Owner)
@@ -975,6 +1214,9 @@ func (m *appModel) handleReviewComponentMessage(msg tea.Msg) tea.Cmd {
 // handleReviewKey routes keys while review owns content focus. It reports
 // whether the key was consumed.
 func (m *appModel) handleReviewKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
+	if handled, cmd := m.updateReviewCommentKey(msg); handled {
+		return true, cmd
+	}
 	model := m.reviewModel()
 	if model == nil {
 		return false, nil
@@ -997,6 +1239,21 @@ func (m *appModel) handleReviewKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		// Undocked review stands in for the hidden transcript; keys never reach it.
 		m.focusReview()
 	}
+	if isReviewCommentKey(msg) && model.CommentSelectionContext() {
+		if m.keyReleaseSupported {
+			if msg.IsRepeat {
+				return true, nil
+			}
+			m.reviewHoldC = true
+			model.BeginRangeSelection()
+			m.viewCacheValid = false
+			return true, nil
+		}
+		return true, model.StartComment()
+	}
+	if m.reviewHoldC && msg.String() == "esc" {
+		m.reviewHoldC = false
+	}
 	handled, cmd := model.HandleKey(msg)
 	m.viewCacheValid = false
 	if handled || model.Capturing() {
@@ -1004,8 +1261,10 @@ func (m *appModel) handleReviewKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "tab":
+		m.reviewHoldC = false
 		model.Blur()
 	case "shift+tab":
+		m.reviewHoldC = false
 		return true, m.focusBeforeReview()
 	}
 	return false, nil
@@ -1030,7 +1289,8 @@ func (m *appModel) handleGitWatch(msg sidebar.GitWatchMsg) tea.Cmd {
 		return nil
 	}
 	var ids []string
-	if msg.Open && !m.hideSidebar && !m.leanMode {
+	// Files never runs Git status, so its expanded folders do not schedule it.
+	if msg.Open && !m.hideSidebar && !m.leanMode && ws.sidebarMode != view.ModeFiles {
 		ids = append(ids, msg.ExpandedWorktrees...)
 	}
 	// An open inspector is itself visible Git context even when its sidebar
@@ -1100,7 +1360,7 @@ func (m *appModel) handleGitAutoRefresh(msg gitAutoRefreshMsg) tea.Cmd {
 		return nil
 	}
 	var ids []string
-	if watch.Open && !m.hideSidebar && !m.leanMode {
+	if watch.Open && !m.hideSidebar && !m.leanMode && ws.sidebarMode != view.ModeFiles {
 		ids = append(ids, watch.ExpandedWorktrees...)
 	}
 	if review := m.activeReview(); review != nil && review.anchor == msg.owner && review.inspecting {
@@ -1137,4 +1397,108 @@ func findReviewWorktree(snapshot *view.Snapshot, id string) (view.Worktree, bool
 		}
 	}
 	return view.Worktree{}, false
+}
+
+func (m *appModel) openReviewCounterpart(msg view.CounterpartRequestMsg) tea.Cmd {
+	ws := m.gitReviews[msg.Owner]
+	if ws == nil || ws != m.activeReview() || ws.provider == nil {
+		return nil
+	}
+	if msg.Key.Mode != view.ModeChanges && msg.Key.Mode != view.ModeFiles {
+		return nil
+	}
+	paneScoped := ws.scopePane
+	if ws.mode != msg.Key.Mode {
+		if model := ws.models[ws.mode]; model != nil {
+			model.Blur()
+		}
+		ws.mode = msg.Key.Mode
+	}
+	ws.scopePane = paneScoped
+	ws.sidebarMode = msg.Key.Mode
+	model := ws.current()
+	if ws.snapshot != nil {
+		model.SetSnapshot(*ws.snapshot)
+	}
+	model.SetDraft(ws.draftView())
+	model.SetInspector(true)
+	ws.inspecting = true
+	ws.scopePane = true
+	var pageCmd tea.Cmd
+	if page, ok := m.gitPage(ws.anchor); ok {
+		pageCmd = page.SetGitMode(msg.Key.Mode)
+		page.SetContentOverlay(model)
+	}
+	model.Focus()
+	m.focusReview()
+	cmd := model.OpenCounterpart(msg.Key, msg.OldLine, msg.NewLine, msg.Top)
+	m.viewCacheValid = false
+	return tea.Batch(pageCmd, cmd, m.pushGitSidebar(ws))
+}
+
+type reviewExternalEditorDone struct {
+	owner, sessionID                    string
+	route, generation, reviewGeneration uint64
+	key                                 view.DocumentKey
+	err                                 error
+}
+
+func (m *appModel) openReviewExternalEditor(msg view.OpenExternalEditorRequestMsg) tea.Cmd {
+	ws := m.gitReviews[msg.Owner]
+	if ws == nil || ws != m.activeReview() || ws.provider == nil || msg.Key.Mode != view.ModeFiles || ws.mode != view.ModeFiles {
+		return nil
+	}
+	model := ws.models[view.ModeFiles]
+	if model == nil {
+		return nil
+	}
+	current, open := model.OpenKey()
+	if !open || current != msg.Key {
+		return nil
+	}
+	editable, ok := reviewLocalEditor(ws.provider)
+	if !ok {
+		return notification.InfoCmd("External editing is available only for local workspace files")
+	}
+	path, err := editable.EditablePath(msg.Key.WorktreeID, msg.Key.Path)
+	if err != nil {
+		return notification.ErrorCmd("Cannot edit review file: " + err.Error())
+	}
+	cmd, err := editorname.PrepareCommandFromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"), path)
+	if err != nil {
+		return notification.ErrorCmd("Cannot open external editor: " + err.Error())
+	}
+	ws.externalEditorGeneration++
+	owner, key, sessionID, route, generation, reviewGeneration := msg.Owner, msg.Key, ws.sessionID, ws.route, ws.externalEditorGeneration, m.gitReviewGeneration
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return reviewExternalEditorDone{owner: owner, sessionID: sessionID, route: route, generation: generation, reviewGeneration: reviewGeneration, key: key, err: err}
+	})
+}
+
+func (m *appModel) finishReviewExternalEditor(msg reviewExternalEditorDone) tea.Cmd {
+	ws := m.gitReviews[msg.owner]
+	if ws == nil || ws != m.activeReview() || ws.provider == nil || ws.sessionID != msg.sessionID || ws.route != msg.route || ws.externalEditorGeneration != msg.generation || m.gitReviewGeneration != msg.reviewGeneration || ws.mode != view.ModeFiles {
+		return nil
+	}
+	model := ws.models[view.ModeFiles]
+	if model == nil {
+		return nil
+	}
+	key, open := model.OpenKey()
+	if !open || key != msg.key {
+		return nil
+	}
+	refresh := m.submitGitReviewRequest(view.LoadWorktreeRequestMsg{Owner: msg.owner, WorktreeID: msg.key.WorktreeID, Refresh: true})
+	cmd := core.MapCommand(refresh, func(result tea.Msg) tea.Msg {
+		if task, ok := result.(gitReviewTaskResult); ok {
+			task.refreshDocument = &msg.key
+			return task
+		}
+		return result
+	})
+	if msg.err != nil {
+		return tea.Batch(cmd, notification.ErrorCmd("External editor error: "+msg.err.Error()))
+	}
+	m.viewCacheValid = false
+	return cmd
 }

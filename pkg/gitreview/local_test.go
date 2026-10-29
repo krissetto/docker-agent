@@ -1,7 +1,9 @@
 package gitreview
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -104,6 +107,56 @@ func TestLocalScopeSubdirectoryAndNestedRepoContainment(t *testing.T) {
 	require.NoError(t, os.Symlink(root, link))
 	_, err = local.Directory(t.Context(), ownerWT, "escape")
 	require.ErrorIs(t, err, ErrOutsideScope)
+}
+
+func TestLocalLinkedCheckoutDiscoveredFirstUsesCanonicalMainAndOrdersMainFirst(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "z-main-project")
+	initRepo(t, main)
+	linked := filepath.Join(root, "a-linked-checkout")
+	gitTest(t, main, "worktree", "add", "--quiet", "-b", "linked", linked)
+
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	var repo *Repository
+	for i := range snapshot.Repositories {
+		if snapshot.Repositories[i].ID != "" && snapshot.Repositories[i].Name == "z-main-project" {
+			repo = &snapshot.Repositories[i]
+		}
+	}
+	require.NotNil(t, repo, "the linked checkout encountered first groups under the real main repository")
+	require.Len(t, repo.Worktrees, 2)
+	require.False(t, repo.Worktrees[0].Linked, "the main checkout is the stable top-level child")
+	require.Equal(t, "z-main-project", repo.Worktrees[0].Path)
+	require.True(t, repo.Worktrees[1].Linked)
+	require.Equal(t, "a-linked-checkout", repo.Worktrees[1].Path)
+	for _, candidate := range snapshot.Repositories {
+		require.NotEqual(t, "a-linked-checkout", candidate.Name, "linked path never becomes repository identity")
+	}
+}
+
+func TestLocalLinkedWorktreeFirstKeepsCanonicalMainNameAndSafeScope(t *testing.T) {
+	base := t.TempDir()
+	main := filepath.Join(base, "canonical-project")
+	initRepo(t, main)
+	linked := filepath.Join(base, "linked-checkout")
+	gitTest(t, main, "worktree", "add", "--quiet", "-b", "feature", linked)
+
+	local, err := NewLocal(linked)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Repositories, 1)
+	repo := snapshot.Repositories[0]
+	require.Equal(t, "canonical-project", repo.Name, "repository identity comes from the main checkout even when the linked checkout is the scope")
+	require.Equal(t, 1, repo.HiddenOutside, "the out-of-scope main checkout is counted but not exposed")
+	require.Len(t, repo.Worktrees, 1)
+	require.Equal(t, ".", repo.Worktrees[0].Path)
+	require.True(t, repo.Worktrees[0].Linked)
+	require.True(t, repo.Worktrees[0].Current)
+	require.NotContains(t, repo.Worktrees[0].Path, filepath.Base(main))
 }
 
 func TestLocalLinkedWorktreesUseCheckoutIdentityAndFilterOutside(t *testing.T) {
@@ -232,7 +285,7 @@ func TestLocalStagedDeletionDocumentRemainsReadable(t *testing.T) {
 	require.NotEmpty(t, doc.Lines)
 }
 
-func TestLocalDiscoversNestedRepositoriesRecursively(t *testing.T) {
+func TestLocalDiscoversNestedRepositoriesWithoutDescendingIntoThem(t *testing.T) {
 	root := t.TempDir()
 	initRepo(t, root)
 	first := filepath.Join(root, "one")
@@ -243,7 +296,8 @@ func TestLocalDiscoversNestedRepositoriesRecursively(t *testing.T) {
 	require.NoError(t, err)
 	snapshot, err := local.Snapshot(t.Context())
 	require.NoError(t, err)
-	require.Len(t, snapshot.Repositories, 3)
+	require.Len(t, snapshot.Repositories, 2)
+	require.Empty(t, snapshot.Scope.LimitReason, "repository internals are separate scope, not a partial scan")
 }
 
 func TestLocalRefreshWorktreeInvalidatesCachedStatusAndDocuments(t *testing.T) {
@@ -414,4 +468,354 @@ func TestLocalWorktreeLoadsCoalesceAndCanceledWaiterDoesNotCancelPeer(t *testing
 	data, err := os.ReadFile(trace)
 	require.NoError(t, err)
 	require.Equal(t, 3, strings.Count(string(data), "x"), "three status/binary Git commands should run once for both callers")
+}
+
+func TestLocalWorktreeLineCountsCoverGroupsUntrackedBinaryAndRenames(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	tracked := filepath.Join(root, "tracked.txt")
+	require.NoError(t, os.WriteFile(tracked, []byte("one\nstaged\n"), 0o600))
+	gitTest(t, root, "add", "tracked.txt")
+	require.NoError(t, os.WriteFile(tracked, []byte("one\nstaged\nworking\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "new file.txt"), []byte("first\nsecond"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "image.bin"), []byte{0, 1, 2}, 0o600))
+
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	loaded, err := local.LoadWorktree(t.Context(), snapshot.Repositories[0].Worktrees[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, StateReady, loaded.CountsState)
+	byKey := map[string]FileChange{}
+	for _, file := range loaded.Files {
+		byKey[string(file.Group)+":"+file.Path] = file
+	}
+	require.Equal(t, FileChange{Path: "tracked.txt", Group: GroupStaged, Status: "M", Added: 1, Removed: 1}, byKey["staged:tracked.txt"])
+	require.Equal(t, FileChange{Path: "tracked.txt", Group: GroupUnstaged, Status: "M", Added: 1, Removed: 0}, byKey["unstaged:tracked.txt"])
+	require.Equal(t, 2, byKey["untracked:new file.txt"].Added)
+	require.Equal(t, 0, byKey["untracked:new file.txt"].Removed)
+	binary := byKey["untracked:image.bin"]
+	require.True(t, binary.Binary)
+	require.Equal(t, -1, binary.Added, "binary counts are explicitly unavailable")
+	require.Equal(t, -1, binary.Removed)
+
+	// Git's rename numstat record has an empty path field followed by two NUL paths.
+	parsed := parseNumstat([]byte("0\t0\t\x00old name.txt\x00new name.txt\x00"))
+	require.Equal(t, numstatCount{added: 0, removed: 0}, parsed["new name.txt"])
+}
+
+func TestLocalWorktreeCountsBecomeUnavailableWhenUntrackedBudgetExceeded(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	large := make([]byte, MaxCountFileBytes+1)
+	for i := range large {
+		large[i] = 'x'
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "too-large.txt"), large, 0o600))
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	loaded, err := local.LoadWorktree(t.Context(), snapshot.Repositories[0].Worktrees[0].ID)
+	require.NoError(t, err, "status remains useful even when optional line metadata is over its bound")
+	require.Equal(t, StateError, loaded.CountsState)
+	var largeFile FileChange
+	for _, file := range loaded.Files {
+		if file.Path == "too-large.txt" {
+			largeFile = file
+		}
+	}
+	require.Equal(t, -1, largeFile.Added)
+	require.Equal(t, -1, largeFile.Removed)
+}
+
+func TestParseNumstatBinaryAndRename(t *testing.T) {
+	got := parseNumstat([]byte("-\t-\timage.bin\x000\t3\t\x00old.txt\x00new.txt\x002\t1\tname with\ttab.txt\x00"))
+	require.Equal(t, numstatCount{added: -1, removed: -1, binary: true}, got["image.bin"])
+	require.Equal(t, numstatCount{added: 0, removed: 3}, got["new.txt"])
+	require.Equal(t, numstatCount{added: 2, removed: 1}, got["name with\ttab.txt"])
+}
+
+func TestLocalWorktreeNumstatMapsRenameToNewPath(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	old := filepath.Join(root, "tracked.txt")
+	// A sufficiently similar file makes Git report a staged rename.
+	contents := strings.Repeat("same line\n", 20) + "old tail\n"
+	require.NoError(t, os.WriteFile(old, []byte(contents), 0o600))
+	gitTest(t, root, "add", "tracked.txt")
+	gitTest(t, root, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "second")
+	gitTest(t, root, "mv", "tracked.txt", "renamed file.txt")
+	renamed := filepath.Join(root, "renamed file.txt")
+	require.NoError(t, os.WriteFile(renamed, []byte(strings.Repeat("same line\n", 20)+"new tail\n"), 0o600))
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	loaded, err := local.LoadWorktree(t.Context(), snapshot.Repositories[0].Worktrees[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, StateReady, loaded.CountsState)
+	var stagedRename, unstagedRename FileChange
+	for _, file := range loaded.Files {
+		if file.Path == "renamed file.txt" && file.Group == GroupStaged {
+			stagedRename = file
+		}
+		if file.Path == "renamed file.txt" && file.Group == GroupUnstaged {
+			unstagedRename = file
+		}
+	}
+	require.Equal(t, "tracked.txt", stagedRename.OldPath)
+	require.Equal(t, 0, stagedRename.Added)
+	require.Equal(t, 0, stagedRename.Removed)
+	require.Equal(t, 1, unstagedRename.Added)
+	require.Equal(t, 1, unstagedRename.Removed)
+}
+
+func TestCountUntrackedCountsSymlinkTargetWithoutFollowingIt(t *testing.T) {
+	rootPath := t.TempDir()
+	link := filepath.Join(rootPath, "link.txt")
+	require.NoError(t, os.Symlink("outside\ncontent", link))
+	root, err := os.OpenRoot(rootPath)
+	require.NoError(t, err)
+	defer root.Close()
+	lines, binary, bytesRead, err := countUntracked(t.Context(), root, "link.txt", MaxCountBytes, "unspecified")
+	require.NoError(t, err)
+	assert.Equal(t, 2, lines, "symlink target text uses newline accounting without reading through the link")
+	assert.False(t, binary)
+	assert.Equal(t, len("outside\ncontent"), bytesRead)
+}
+
+func TestLocalUntrackedMetadataHasFileOperationBound(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	for i := range MaxCountFiles + 1 {
+		require.NoError(t, os.WriteFile(filepath.Join(root, fmt.Sprintf("empty-%04d", i)), nil, 0o600))
+	}
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	loaded, err := local.LoadWorktree(t.Context(), snapshot.Repositories[0].Worktrees[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, StateError, loaded.CountsState, "status remains useful when count metadata exceeds its file-operation bound")
+	require.Len(t, loaded.Files, MaxCountFiles+1)
+}
+
+func TestCountUntrackedHonorsContext(t *testing.T) {
+	rootPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rootPath, "file.txt"), []byte("line\n"), 0o600))
+	root, err := os.OpenRoot(rootPath)
+	require.NoError(t, err)
+	defer root.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	lines, binary, bytesRead, err := countUntracked(ctx, root, "file.txt", MaxCountBytes, "unspecified")
+	require.Zero(t, lines)
+	require.False(t, binary)
+	require.Zero(t, bytesRead)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLocalUntrackedBinaryClassificationHonorsDiffAttributesAndGitHeuristic(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("*.forcedbin -diff\n*.forcedtext diff\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "forced.forcedbin"), []byte("plain text\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "text.forcedtext"), []byte{'a', 0, 'b', '\n'}, 0o600))
+	beforeNUL := append(bytes.Repeat([]byte{'x'}, 7_999), 0)
+	beforeNUL = append(beforeNUL, []byte("tail\n")...)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "early-nul.dat"), beforeNUL, 0o600))
+	afterNUL := append(bytes.Repeat([]byte{'x'}, 8_000), 0)
+	afterNUL = append(afterNUL, []byte("tail\n")...)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "late-nul.dat"), afterNUL, 0o600))
+
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	loaded, err := local.LoadWorktree(t.Context(), snapshot.Repositories[0].Worktrees[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, StateReady, loaded.CountsState)
+	byPath := make(map[string]FileChange, len(loaded.Files))
+	for _, file := range loaded.Files {
+		byPath[file.Path] = file
+	}
+	require.True(t, byPath["forced.forcedbin"].Binary, "-diff forces binary even when contents contain no NUL")
+	require.Equal(t, -1, byPath["forced.forcedbin"].Added)
+	require.False(t, byPath["text.forcedtext"].Binary, "diff forces text even when contents contain NUL")
+	require.Equal(t, 1, byPath["text.forcedtext"].Added)
+	require.True(t, byPath["early-nul.dat"].Binary, "default Git heuristic checks NUL in first 8000 bytes")
+	require.False(t, byPath["late-nul.dat"].Binary, "NUL after Git's heuristic prefix does not force binary")
+}
+
+func TestUntrackedDiffAttributesReturnUnknownForNamedDriver(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("*.ps diff=postscript\n"), 0o600))
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	ref, ok := local.worktree(snapshot.Repositories[0].Worktrees[0].ID)
+	require.True(t, ok)
+	attrs, err := untrackedDiffAttributes(t.Context(), ref.root, []string{"figure.ps"}, local)
+	require.NoError(t, err)
+	require.Equal(t, "unknown", attrs["figure.ps"], "driver config may set diff.<driver>.binary=true")
+}
+
+func TestLocalDiscoveryReportsActualDepthLimitAndContinuesWithinBound(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	deep := repo
+	for i := range DefaultDiscoveryDepth + 1 {
+		deep = filepath.Join(deep, fmt.Sprintf("d%02d", i))
+		require.NoError(t, os.Mkdir(deep, 0o755))
+	}
+	initRepo(t, filepath.Join(deep, "more", "nested"))
+
+	local, err := NewLocal(repo)
+	require.NoError(t, err)
+	first, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, DiscoveryLimitDepth, first.Scope.LimitReason)
+	require.Equal(t, DefaultDiscoveryDepth, first.Scope.LimitValue)
+	require.Contains(t, first.Scope.Note, fmt.Sprintf("depth limit reached (%d)", DefaultDiscoveryDepth))
+	require.True(t, local.CanContinueDiscovery())
+	require.Len(t, first.Repositories, 1)
+
+	continued, err := local.ContinueDiscovery(t.Context())
+	require.NoError(t, err)
+	require.Greater(t, continued.Generation, first.Generation)
+	require.Equal(t, DiscoveryLimitDepth, continued.Scope.LimitReason)
+	require.Equal(t, DefaultDiscoveryDepth+2, continued.Scope.LimitValue)
+	require.True(t, local.CanContinueDiscovery())
+
+	continued, err = local.ContinueDiscovery(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, continued.Scope.LimitReason)
+	require.False(t, local.CanContinueDiscovery())
+	require.Len(t, continued.Repositories, 2, "a later bounded pass discovers the nested checkout")
+	for _, repo := range continued.Repositories {
+		for _, wt := range repo.Worktrees {
+			require.Equal(t, "unscanned", wt.State, "continuation inventories only and never reads checkout status")
+		}
+	}
+}
+
+func TestLocalDiscoveryPrunesHiddenAndBuildDirectories(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	initRepo(t, filepath.Join(root, ".hidden", "hidden-repo"))
+	initRepo(t, filepath.Join(root, "agents-hidden", "hidden-repo"))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".agentsignore"), []byte("agents-hidden/\n"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "cagent-hidden"), 0o755))
+	initRepo(t, filepath.Join(root, "cagent-hidden", "hidden-repo"))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".cagentignore"), []byte("cagent-hidden/\n"), 0o600))
+	initRepo(t, filepath.Join(root, "node_modules", "dependency"))
+	initRepo(t, filepath.Join(root, "visible", "nested-repo"))
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Repositories, 2)
+	require.Empty(t, snapshot.Scope.LimitReason)
+	for _, repository := range snapshot.Repositories {
+		require.NotContains(t, repository.Name, "hidden")
+		require.NotContains(t, repository.Name, "dependency")
+		require.NotContains(t, repository.Name, "agents-hidden")
+		require.NotContains(t, repository.Name, "cagent-hidden")
+	}
+}
+
+func TestLocalDiscoveryEntryBoundIsPartialAndFast(t *testing.T) {
+	root := t.TempDir()
+	for i := range DefaultDiscoveryEntries + 1 {
+		require.NoError(t, os.Mkdir(filepath.Join(root, fmt.Sprintf("dir-%05d", i)), 0o755))
+	}
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	started := time.Now()
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Less(t, time.Since(started), 5*time.Second)
+	require.Equal(t, DiscoveryLimitEntries, snapshot.Scope.LimitReason)
+	require.Equal(t, DefaultDiscoveryEntries, snapshot.Scope.LimitValue)
+	require.Contains(t, snapshot.Scope.Note, "entry limit reached")
+}
+
+func TestLocalDiscoveryHonorsCanceledContext(t *testing.T) {
+	root := t.TempDir()
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = local.Snapshot(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLocalDiscoveryFindsWorktreeRootsAndDoesNotEnterTheirContents(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	worktree := filepath.Join(root, "worktree")
+	gitTest(t, root, "worktree", "add", "--quiet", "-b", "linked", worktree)
+	initRepo(t, filepath.Join(worktree, "nested"))
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Repositories, 1, "the linked checkout is inventoried from Git's worktree metadata; its contents are not traversed")
+	var linked bool
+	for _, repository := range snapshot.Repositories {
+		for _, wt := range repository.Worktrees {
+			if wt.Linked {
+				linked = true
+			}
+		}
+	}
+	require.True(t, linked)
+}
+
+func TestLocalDiscoveryLargeRepositoryDoesNotCountOrdinaryFilesAsWork(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	files := filepath.Join(root, "many-files")
+	require.NoError(t, os.Mkdir(files, 0o755))
+	for i := range DefaultDiscoveryEntries + 100 {
+		require.NoError(t, os.WriteFile(filepath.Join(files, fmt.Sprintf("file-%05d", i)), nil, 0o600))
+	}
+	gitTest(t, root, "add", "many-files")
+	gitTest(t, root, "commit", "--quiet", "-m", "many tracked files")
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	started := time.Now()
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Less(t, time.Since(started), 5*time.Second)
+	require.Empty(t, snapshot.Scope.LimitReason, "ordinary file content does not consume nested-repository traversal budget")
+	require.Len(t, snapshot.Repositories, 1)
+}
+
+func TestLocalDiscoveryFindsRepositoryAtDefaultDepthBoundary(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, root)
+	path := root
+	for i := 1; i < DefaultDiscoveryDepth; i++ {
+		path = filepath.Join(path, fmt.Sprintf("level-%d", i))
+		require.NoError(t, os.Mkdir(path, 0o755))
+	}
+	nearby := filepath.Join(path, "nearby-repo")
+	initRepo(t, nearby)
+
+	local, err := NewLocal(root)
+	require.NoError(t, err)
+	snapshot, err := local.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, snapshot.Scope.LimitReason)
+	var found bool
+	for _, repo := range snapshot.Repositories {
+		found = found || repo.Name == "nearby-repo"
+	}
+	require.True(t, found, "repositories at the configured shallow depth boundary are included")
 }

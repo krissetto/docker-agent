@@ -40,6 +40,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if bridged.Projection != nil {
 			m.lifecycle = bridged.Projection.Lifecycle
 			m.status.Dormant = bridged.Projection.Status.Dormant
+			m.status.Stopped = bridged.Projection.Status.Stopped
+			m.status.PauseArmed = bridged.Projection.Status.PauseArmed
+			m.status.Paused = bridged.Projection.Status.Paused
 			m.status.Pending = bridged.Projection.Status.Pending
 			m.status.Interrupted = bridged.Projection.Status.InterruptedTurns
 			m.status.Connection = connectionLabel(bridged.Projection.Connection)
@@ -63,6 +66,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.DormancyChangedEvent:
 		if m.app != nil && m.app.Session() != nil && e.SessionID == m.app.Session().ID {
 			m.status.Dormant = e.Dormant
+			m.status.Stopped = e.Stopped
 		}
 	case capabilityResult:
 		if m.app != nil && m.app.Session() != nil && e.sessionID == m.app.Session().ID && m.app.IsCurrentSessionEvent(e.identity) {
@@ -115,6 +119,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *app.SessionResetEvent:
 		m.clearInterruptIntent()
 		m.status.Dormant = e.Snapshot.Status.Dormant
+		m.status.Stopped = e.Snapshot.Status.Stopped
+		m.status.PauseArmed = e.Snapshot.Status.PauseArmed
+		m.status.Paused = e.Snapshot.Status.Paused
 		m.status.Pending = e.Snapshot.Status.Pending
 		m.status.Interrupted = e.Snapshot.Status.InterruptedTurns
 		m.lifecycle = lifecycle.FromSnapshot(e.Snapshot)
@@ -145,6 +152,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 				pause = service.PausePaused
 			}
 			m.sessionState.SetPauseState(pause)
+			m.status.Paused = e.Snapshot.Status.Paused
 		}
 		if !shared && m.screen.Confirm != nil {
 			projection := app.PresentationState{Interactions: e.Snapshot.Interactions}
@@ -235,11 +243,14 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.PauseChangedEvent:
 		if m.sessionState != nil {
 			if e.Paused {
+				m.status.PauseArmed = true
+				m.status.Paused = false
 				m.sessionState.SetPauseState(service.PausePausing)
 				if !seed {
 					m.addNotice("⏸ ", "Pausing after the current request", ui.StMuted())
 				}
 			} else {
+				m.status.PauseArmed, m.status.Paused = false, false
 				m.sessionState.SetPauseState(service.PauseNone)
 				if !seed {
 					m.addNotice("▶ ", "Resumed", ui.StMuted())
@@ -248,6 +259,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	case *runtime.PausedEvent:
 		if m.sessionState != nil {
+			m.status.PauseArmed = true
+			m.status.Paused = true
 			m.sessionState.SetPauseState(service.PausePaused)
 		}
 		if !seed {

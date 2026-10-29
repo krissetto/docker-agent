@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,6 +185,10 @@ func catalogEntryFromSession(sess *session.Session) sessionResourceDTO {
 }
 
 func (s *Server) getCanonicalSession(c echo.Context) error {
+	metadataProjection, projectionErr := sessionViewProjectionError(c, "prepare-info")
+	if projectionErr != nil {
+		return projectionErr
+	}
 	if views, present := c.QueryParams()["view"]; present {
 		if len(views) != 1 || views[0] != "prepare-info" {
 			return sessionRequestError("unknown session view")
@@ -189,6 +196,14 @@ func (s *Server) getCanonicalSession(c echo.Context) error {
 		info, err := s.sm.ConfirmedSessionViewInfo(c.Request().Context(), c.Param("id"))
 		if err != nil {
 			return sessionHTTPError(err)
+		}
+		if metadataProjection {
+			return c.JSON(http.StatusOK, struct {
+				Version    int                             `json:"version"`
+				View       string                          `json:"view"`
+				Projection string                          `json:"projection"`
+				Info       metadataPreparedSessionViewInfo `json:"info"`
+			}{Version: api.SessionAPIVersion, View: "prepare-info", Projection: api.SessionViewMetadataProjection, Info: metadataPreparedViewInfo(info)})
 		}
 		return c.JSON(http.StatusOK, struct {
 			Version int                             `json:"version"`
@@ -218,16 +233,146 @@ func (s *Server) getCanonicalSession(c echo.Context) error {
 }
 
 func (s *Server) canonicalSessionSnapshot(c echo.Context) error {
+	projection, limits, err := parseHistoryProjection(c, false, false)
+	if err != nil {
+		return sessionRequestError(err.Error())
+	}
 	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
 	if err != nil {
 		return sessionHTTPError(err)
+	}
+	if projection == "tail" {
+		observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{HistoryTail: &limits})
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		defer observation.Cancel()
+		dto := sessionSnapshotForRequest(observation.Primary(), c)
+		if session.BoundedJSONSize(dto, limits.MaxBytes) > limits.MaxBytes {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
+		}
+		data, err := json.Marshal(dto)
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		if len(data) > limits.MaxBytes {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
+		}
+		return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, data)
 	}
 	observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{})
 	if err != nil {
 		return sessionHTTPError(err)
 	}
 	observation.Cancel()
-	return c.JSON(http.StatusOK, sessionSnapshot(observation.Primary()))
+	return c.JSON(http.StatusOK, sessionSnapshotForRequest(observation.Primary(), c))
+}
+
+func (s *Server) canonicalSessionHistory(c echo.Context) error {
+	projection, limits, err := parseHistoryProjection(c, true, false)
+	if err != nil || projection != "tail" {
+		return sessionRequestError("history requires projection=tail")
+	}
+	cursor := c.QueryParam("cursor")
+	if cursor == "" {
+		return sessionRequestError("cursor is required")
+	}
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	reader, ok := handle.(runtime.SessionHistoryReader)
+	if !ok {
+		return sessionHTTPError(runtime.UnsupportedSessionOperation(handle.ID(), runtime.SessionOperationObserve))
+	}
+	var body []byte
+	var acceptedPage runtime.SessionSnapshot
+	err = reader.ReadHistoryPageBounded(c.Request().Context(), handle.ID(), cursor, limits, func(page runtime.SessionSnapshot) bool {
+		out := api.SessionHistoryPage{Projection: "tail", SessionID: handle.ID(), Epoch: page.Epoch, Cursor: page.Cursor, TranscriptPosition: page.TranscriptPosition, History: api.SessionHistory{StartPosition: page.History.StartPosition, EndPosition: page.History.BeforePosition, TotalItems: page.History.TotalItems, Truncated: page.History.HasMore, NextCursor: page.HistoryCursor}}
+		out.Items = make([]api.SessionHistoryItem, len(page.Items))
+		for i, item := range page.Items {
+			out.Items[i] = api.SessionHistoryItem{Position: item.Position, Item: item.Item}
+		}
+		out.History.OmittedRanges = historyOmittedRanges(page.History.OmittedPositions)
+		for _, position := range page.History.OmittedResponsePositions {
+			out.History.OmittedRanges = append(out.History.OmittedRanges, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_response_byte_limit"})
+		}
+		sort.Slice(out.History.OmittedRanges, func(i, j int) bool {
+			return out.History.OmittedRanges[i].StartPosition < out.History.OmittedRanges[j].StartPosition
+		})
+		if session.BoundedJSONSize(out, limits.MaxBytes) > limits.MaxBytes {
+			return false
+		}
+		data, e := json.Marshal(out)
+		if e != nil || len(data) > limits.MaxBytes {
+			return false
+		}
+		body = data
+		acceptedPage = page
+		return true
+	})
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	if acceptedPage.History == nil {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
+	}
+	return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, body)
+}
+
+func parseHistoryProjection(c echo.Context, allowCursor, allowStream bool) (string, runtime.SessionHistoryLimits, error) {
+	values := c.QueryParams()
+	for key, vals := range values {
+		if key != "projection" && key != "max_items" && key != "max_bytes" && key != "max_item_bytes" && !(allowCursor && key == "cursor") && !(allowStream && (key == "since" || key == "since_epoch" || key == "tree")) {
+			return "", runtime.SessionHistoryLimits{}, fmt.Errorf("unknown query parameter %q", key)
+		}
+		if len(vals) > 1 {
+			return "", runtime.SessionHistoryLimits{}, fmt.Errorf("duplicate query parameter %q", key)
+		}
+	}
+	projection := c.QueryParam("projection")
+	if projection == "" {
+		if c.QueryParam("max_items") != "" || c.QueryParam("max_bytes") != "" || c.QueryParam("max_item_bytes") != "" {
+			return "", runtime.SessionHistoryLimits{}, errors.New("history bounds require projection=tail")
+		}
+		return "", runtime.SessionHistoryLimits{}, nil
+	}
+	if projection != "tail" {
+		return "", runtime.SessionHistoryLimits{}, errors.New("projection must be tail")
+	}
+	limits := runtime.SessionHistoryLimits{}
+	var err error
+	if v := c.QueryParam("max_items"); v != "" {
+		limits.MaxItems, err = strconv.Atoi(v)
+		if err != nil {
+			return "", limits, errors.New("max_items must be an integer")
+		}
+	}
+	if v := c.QueryParam("max_bytes"); v != "" {
+		limits.MaxBytes, err = strconv.Atoi(v)
+		if err != nil {
+			return "", limits, errors.New("max_bytes must be an integer")
+		}
+	}
+	if v := c.QueryParam("max_item_bytes"); v != "" {
+		limits.MaxItemBytes, err = strconv.Atoi(v)
+		if err != nil {
+			return "", limits, errors.New("max_item_bytes must be an integer")
+		}
+	}
+	if _, err = runtime.NormalizeHistoryLimits(limits); err != nil {
+		return "", limits, err
+	}
+	return projection, limits, nil
+}
+
+func historyOmittedRanges(positions []int) []api.SessionHistoryOmittedRange {
+	out := make([]api.SessionHistoryOmittedRange, 0, len(positions))
+	for _, position := range positions {
+		out = append(out, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_item_byte_limit"})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartPosition < out[j].StartPosition })
+	return out
 }
 
 func (s *Server) sessionTodos(c echo.Context) error {

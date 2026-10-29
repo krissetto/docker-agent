@@ -45,3 +45,22 @@ func TestSubagentRefsAgentNamesDeduplicates(t *testing.T) {
 	refs := SubagentRefs{{Agent: "a"}, {Agent: "b"}, {Agent: "a", Name: "a2"}}
 	assert.Equal(t, []string{"a", "b"}, refs.AgentNames())
 }
+
+func TestSubagentAccessScopesValidateAndRoundTrip(t *testing.T) {
+	for _, scope := range []string{"children", "tree"} {
+		var cfg Config
+		err := yaml.Unmarshal([]byte("version: \"16\"\nagents:\n  root:\n    subagent_access:\n      list_agents: "+scope+"\n      send_message: "+scope+"\n"), &cfg)
+		require.NoError(t, err)
+		access := cfg.Agents[0].SubagentAccess
+		require.NotNil(t, access)
+		assert.Equal(t, SubagentAccessScope(scope), access.ListAgents)
+		assert.Equal(t, SubagentAccessScope(scope), access.SendMessage)
+	}
+	for _, invalid := range []string{"definitions", "all", "read", "stop"} {
+		var cfg Config
+		err := yaml.Unmarshal([]byte("version: \"16\"\nagents:\n  root:\n    subagent_access:\n      list_agents: "+invalid+"\n"), &cfg)
+		require.Error(t, err)
+	}
+	var cfg Config
+	require.Error(t, yaml.Unmarshal([]byte("version: \"16\"\nagents:\n  root:\n    subagent_access:\n      read_subagent: tree\n"), &cfg), "unknown access keys must be rejected")
+}

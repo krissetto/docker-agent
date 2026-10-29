@@ -85,12 +85,17 @@ func (p *chatPage) clickSidebarLine(t *testing.T, label string) tea.Cmd {
 func TestGitSidebarClicksOpenFileAndInspectorKeepsSidebar(t *testing.T) {
 	p := gitTestPage(t)
 	p.SetGitChanges(sidebar.GitChanges{Available: true})
-	reqs := gitRequests(p.clickSidebarLine(t, "Git changes"))
-	require.Equal(t, []sidebar.GitRequestMsg{{Action: sidebar.GitLoad}}, reqs, "clicking the collapsed section asks for discovery")
+	reqs := gitRequests(p.clickSidebarLine(t, "Files"))
+	require.Equal(t, []sidebar.GitRequestMsg{{Action: sidebar.GitBrowse}}, reqs, "the Files label opens one folder listing, never a repository scan")
 
 	snap := &review.Snapshot{Generation: 1, Repositories: []review.Repository{{ID: "r", Name: "work", Worktrees: []review.Worktree{{ID: "w", Branch: "main", State: review.StateReady, Files: []review.FileChange{{Path: "main.go", Group: review.GroupUnstaged, Status: "M", Added: 1}}}}}}}
 	p.SetGitChanges(sidebar.GitChanges{Available: true, Snapshot: snap})
-	p.clickSidebarLine(t, "work ⎇ main")
+	section, ok := p.gitSidebar()
+	require.True(t, ok)
+	section.SetGitMode(review.ModeChanges)
+	section.RevealGit()
+	p.clickSidebarLine(t, "work")
+	p.clickSidebarLine(t, "work  ⎇ main")
 	p.clickSidebarLine(t, "Unstaged")
 	reqs = gitRequests(p.clickSidebarLine(t, "main.go"))
 	require.Equal(t, []sidebar.GitRequestMsg{{Action: sidebar.GitOpen, WorktreeID: "w", Path: "main.go", Group: review.GroupUnstaged}}, reqs)
@@ -99,7 +104,7 @@ func TestGitSidebarClicksOpenFileAndInspectorKeepsSidebar(t *testing.T) {
 	p.SetContentOverlay(overlay)
 	view := ansi.Strip(p.View())
 	assert.Contains(t, view, "DIFF INSPECTOR", "the inspector replaces the transcript area")
-	assert.Contains(t, view, "work ⎇ main", "the normal sidebar stays")
+	assert.Contains(t, view, "work  ⎇ main", "the normal sidebar stays")
 	sl := p.computeSidebarLayout()
 	assert.Equal(t, sl.chatWidth, overlay.w, "sized exactly like the transcript")
 
@@ -119,4 +124,45 @@ func TestGitSidebarClicksOpenFileAndInspectorKeepsSidebar(t *testing.T) {
 
 	p.SetContentOverlay(nil)
 	assert.NotContains(t, ansi.Strip(p.View()), "DIFF INSPECTOR")
+}
+
+func TestGitSidebarCompactModeHitTargets(t *testing.T) {
+	p := gitTestPage(t)
+	p.SetGitChanges(sidebar.GitChanges{Available: true, Snapshot: &review.Snapshot{Repositories: []review.Repository{{ID: "r", Name: "repo", Worktrees: []review.Worktree{{ID: "w", State: review.StateReady}}}}}})
+	view := ansi.Strip(p.sidebar.View())
+	lines := strings.Split(view, "\n")
+	headerY := -1
+	for i, line := range lines {
+		if strings.Contains(line, "Files - Git") {
+			headerY = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, headerY, 0)
+	base := styles.AppPadding + p.computeSidebarLayout().sidebarStartX + sidebar.DefaultLayoutConfig().PaddingLeft
+	filesX, gitX := base+1, base+ansi.StringWidth("Files - ")+1
+	_, files := p.handleSidebarClickType(filesX, headerY)
+	_, git := p.handleSidebarClickType(gitX, headerY)
+	assert.Equal(t, "mode:browse", files, "the collapsed Files label opens Files mode")
+	assert.Equal(t, "mode:changes", git, "the collapsed Git label opens Changes mode")
+	p.clickSidebarLine(t, "Files - Git")
+	settleSidebarGesture(t, p)
+	_, files = p.handleSidebarClickType(filesX, headerY)
+	_, git = p.handleSidebarClickType(gitX, headerY)
+	assert.Equal(t, "mode:browse", files)
+	assert.Equal(t, "mode:changes", git)
+
+	requests := gitRequests(p.clickSidebarLine(t, "Files"))
+	assert.NotContains(t, requests, sidebar.GitRequestMsg{Action: sidebar.GitBrowse}, "the active Files label collapses instead of requesting the mode again")
+	section, ok := p.gitSidebar()
+	require.True(t, ok)
+	section.SetGitMode(review.ModeFiles)
+	view = ansi.Strip(p.sidebar.View())
+	assert.Contains(t, view, "Files - Git")
+	assert.NotContains(t, view, "Changes(0)")
+	assert.NotContains(t, view, "Browse")
+	_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: filesX, Y: headerY, Button: tea.MouseLeft})
+	assert.Empty(t, gitRequests(cmd), "the selected Files label opens details without another mode request")
+	_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: gitX, Y: headerY, Button: tea.MouseLeft})
+	assert.Contains(t, gitRequests(cmd), sidebar.GitRequestMsg{Action: sidebar.GitShowChanges}, "Git label switches mode while the header remains available")
 }

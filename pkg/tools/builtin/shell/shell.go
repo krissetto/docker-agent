@@ -26,16 +26,16 @@ import (
 	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shellprocess"
 )
 
 const ToolNameShell = "shell"
 
 // ToolSet provides synchronous shell command execution.
 type ToolSet struct {
-	handler             *shellHandler
-	jobs                *backgroundjobs.ToolSet
-	exposeJobInspectors bool
+	handler                  *shellHandler
+	processes                *shellprocess.Manager
+	exposeProcessDiagnostics bool
 }
 
 // Verify interface compliance
@@ -48,14 +48,13 @@ var (
 )
 
 type shellHandler struct {
-	shell               string
-	shellArgsPrefix     []string
-	env                 []string
-	timeout             time.Duration
-	workingDir          string
-	backgroundAfter     time.Duration
-	jobs                *backgroundjobs.ToolSet
-	exposeJobInspectors bool
+	shell           string
+	shellArgsPrefix []string
+	env             []string
+	timeout         time.Duration
+	workingDir      string
+	backgroundAfter time.Duration
+	processes       *shellprocess.Manager
 
 	// sudoAskpass opts this toolset into the one-time sudo privilege
 	// escalation flow (SUDO_ASKPASS bridged to the elicitation handler).
@@ -189,7 +188,7 @@ func (h *shellHandler) RunShell(ctx context.Context, params RunShellArgs, rt too
 const waitDelayAfterShellExit = 500 * time.Millisecond
 
 func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tools.Runtime, command, cwd string, timeout time.Duration) *tools.ToolCallResult {
-	if h.jobs != nil && h.jobs.SupportsShellBackground() && h.backgroundAfter > 0 && !commandInvokesSudo(command) {
+	if h.processes != nil && h.processes.SupportsShellBackground() && h.backgroundAfter > 0 && !commandInvokesSudo(command) {
 		owner := tools.ResourceOwnerFromContext(ctx)
 		var work tools.BackgroundWork
 		if bgRuntime, ok := rt.(tools.BackgroundWorkRuntime); ok && owner != nil {
@@ -202,9 +201,9 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tool
 		if work == nil {
 			return h.runForegroundCommand(timeoutCtx, ctx, rt, command, cwd, timeout)
 		}
-		result := h.jobs.RunShellCommand(ctx, owner, h.shell, h.shellArgsPrefix, command, cwd, h.env, timeout, h.backgroundAfter, rt, work)
+		result := h.processes.RunShellCommand(ctx, owner, h.shell, h.shellArgsPrefix, command, cwd, h.env, timeout, h.backgroundAfter, rt, work)
 		if result.JobID != "" {
-			return tools.ResultSuccess(fmt.Sprintf("Background job started with ID: %s\nCommand: %s\nWorking directory: %s\nInspect output with view_background_job.", result.JobID, command, cwd))
+			return tools.ResultSuccess(fmt.Sprintf("Command continues in the background as process ID %s. Completion output will be delivered automatically. %s", result.JobID, shellprocess.BackgroundFollowupGuidance))
 		}
 		if result.TimedOut {
 			return tools.ResultSuccess(formatCommandOutput(timeoutCtx, ctx, result.Err, result.Output, h.shell, timeout))
@@ -439,14 +438,14 @@ func (t *ToolSet) Instructions() string {
 }
 
 func (h *shellHandler) backgroundInstructions() string {
-	if h.jobs == nil || !h.jobs.SupportsShellBackground() || h.backgroundAfter <= 0 {
+	if h.processes == nil || !h.processes.SupportsShellBackground() || h.backgroundAfter <= 0 {
 		return "Automatic shell backgrounding is unavailable in this host or disabled."
 	}
-	return fmt.Sprintf("Commands still running after %s continue as background jobs; inspect with view_background_job.", h.backgroundAfter)
+	return fmt.Sprintf("Commands still running after %s continue internally. %s", h.backgroundAfter, shellprocess.BackgroundFollowupGuidance)
 }
 
-func (t *ToolSet) AttachBackgroundJobs(jobs *backgroundjobs.ToolSet, exposeInspectors bool) {
-	t.jobs, t.handler.jobs, t.exposeJobInspectors = jobs, jobs, exposeInspectors
+func (t *ToolSet) AttachProcessManager(manager *shellprocess.Manager, exposeDiagnostics bool) {
+	t.processes, t.handler.processes, t.exposeProcessDiagnostics = manager, manager, exposeDiagnostics
 }
 
 func (t *ToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
@@ -462,8 +461,8 @@ func (t *ToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
 			AddDescriptionParameter: true,
 		},
 	}
-	if t.jobs != nil && t.exposeJobInspectors {
-		inspectors, err := t.jobs.ShellInspectionTools()
+	if t.processes != nil && t.exposeProcessDiagnostics {
+		inspectors, err := t.processes.ShellInspectionTools()
 		if err != nil {
 			return nil, err
 		}
@@ -490,10 +489,10 @@ func (t *ToolSet) Stop(context.Context) error {
 }
 
 func (t *ToolSet) StopResourceOwner(ctx context.Context) error {
-	if t.jobs == nil {
+	if t.processes == nil {
 		return nil
 	}
-	return t.jobs.StopResourceOwner(ctx)
+	return t.processes.StopResourceOwner(ctx)
 }
 
 // shellToolDescription names the interpreter that will run the command.

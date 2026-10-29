@@ -2,18 +2,155 @@ package runtime
 
 import (
 	"context"
+	"errors"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 )
 
 // Resident views recheck persisted identity along the selected ancestry. Cold
 // trees and stores without targeted reads still use the complete restore preflight.
+// readResidentSessionView prepares a resident view. The root lifecycle lock is
+// held only while the persisted ancestry and live topology are read and
+// validated; it is released before the prepared view is returned, so an
+// in-flight child commit blocks this read rather than being observed half-way.
 func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, id string) (*preparedSessionView, error) {
+	root, ok, err := v.residentRootID(ctx, id)
+	if err != nil || !ok {
+		// A missing registry ancestor is the cold-path case; the locked body
+		// would return nil,nil there too. Never read resident state unlocked.
+		return nil, err
+	}
+	transition := v.runtime.subagents.transition(root)
+	if err := transition.LockContext(ctx); err != nil {
+		return nil, err
+	}
+	defer transition.Unlock()
+	p, err := v.readResidentSessionViewLocked(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if p != nil && (p.root == nil || p.root.ID != root) {
+		return nil, &SessionError{Kind: SessionErrorConflict, SessionID: id, Operation: "restore_ancestry"}
+	}
+	return p, nil
+}
+
+// residentRootID mirrors the locked read's ancestry order (ctx, capacity,
+// cycle, registry lookup) using only immutable registry parent links, so
+// capacity and cycle errors keep their existing contract without store reads.
+// ok=false with a nil error means the id is not resident in the registry.
+func (v *localSessionRuntimeView) residentRootID(ctx context.Context, id string) (string, bool, error) {
 	r := v.runtime
+	if _, _, ok := r.residentReaders(); !ok {
+		return "", false, nil
+	}
+	// The locked read checks the selected id's registry entry before any capacity
+	// or ancestry work, so an unregistered id stays on the cold path unchanged.
+	if _, ok := r.sessionDrivers.Lookup(id); !ok {
+		return "", false, nil
+	}
+	limit := r.maxSessions
+	if limit < 0 {
+		limit = DefaultSessionResourcePolicy().MaxSessions
+	}
+	seen := make(map[string]struct{})
+	current := id
+	for count := 0; ; count++ {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if count >= limit {
+			return "", false, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: "restore_ancestry", Limit: limit, Reason: SessionErrorReasonLimit}
+		}
+		if _, dup := seen[current]; dup {
+			return "", false, &SessionError{Kind: SessionErrorConflict, SessionID: id, Operation: "restore_ancestry"}
+		}
+		seen[current] = struct{}{}
+		driver, ok := r.sessionDrivers.Lookup(current)
+		if !ok {
+			return "", false, nil
+		}
+		if driver.identityParent == "" {
+			return current, true, nil
+		}
+		current = driver.identityParent
+	}
+}
+
+// residentReaders returns the targeted reads a resident view needs. Native
+// stores keep requiring their own readers. A non-coordination store without them
+// reads metadata through GetSession and child records from the live registry.
+func (r *LocalRuntime) residentReaders() (session.MetadataStore, session.ChildRecordReader, bool) {
+	if r.sessionStore == nil {
+		return nil, nil, false
+	}
 	metadata, metadataOK := r.sessionStore.(session.MetadataStore)
 	children, childrenOK := r.sessionStore.(session.ChildRecordReader)
-	if !metadataOK || !childrenOK {
+	if _, native := r.sessionStore.(session.CoordinationStore); native {
+		return metadata, children, metadataOK && childrenOK
+	}
+	if !metadataOK {
+		metadata = storeMetadataReader{store: r.sessionStore}
+	}
+	if !childrenOK {
+		children = liveChildReader{r: r}
+	}
+	return metadata, children, true
+}
+
+// storeMetadataReader serves metadata for stores without MetadataStore.
+type storeMetadataReader struct{ store session.Store }
+
+func (s storeMetadataReader) GetSessionMetadata(ctx context.Context, id string) (*session.Session, error) {
+	return s.store.GetSession(ctx, id)
+}
+
+// liveChildReader serves child records for stores without ChildRecordReader.
+type liveChildReader struct{ r *LocalRuntime }
+
+func (l liveChildReader) LoadChild(_ context.Context, id string) (session.ChildRecord, error) {
+	if record, ok := l.r.liveChildRecord(id); ok {
+		return record, nil
+	}
+	return session.ChildRecord{}, session.ErrNotFound
+}
+
+func (r *LocalRuntime) liveChildRecord(id string) (session.ChildRecord, bool) {
+	r.subagents.mu.Lock()
+	defer r.subagents.mu.Unlock()
+	for _, rec := range r.subagents.children {
+		if rec != nil && rec.sessionID == id {
+			return rec.durable, true
+		}
+	}
+	return session.ChildRecord{}, false
+}
+
+// loadResidentChildRecord reads a child's membership record. Stores without
+// CoordinationStore keep membership only in the volatile coordination store, so a
+// missing record falls back to the live child's durable copy. Native stores fail closed.
+func (r *LocalRuntime) loadResidentChildRecord(ctx context.Context, children session.ChildRecordReader, id string) (session.ChildRecord, error) {
+	record, err := children.LoadChild(ctx, id)
+	if !errors.Is(err, session.ErrNotFound) {
+		return record, err
+	}
+	if _, native := r.sessionStore.(session.CoordinationStore); native {
+		return record, err
+	}
+	if live, ok := r.liveChildRecord(id); ok {
+		return live, nil
+	}
+	return record, err
+}
+
+// readResidentSessionViewLocked requires the caller to hold the root lifecycle
+// transition for id's root (see readResidentSessionView and commitResident).
+func (v *localSessionRuntimeView) readResidentSessionViewLocked(ctx context.Context, id string) (*preparedSessionView, error) {
+	r := v.runtime
+	metadata, children, readersOK := r.residentReaders()
+	if !readersOK {
 		return nil, nil
 	}
 	if _, ok := r.sessionDrivers.Lookup(id); !ok {
@@ -60,7 +197,7 @@ func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, i
 			return nil, ErrSessionClosed
 		}
 		bound := row.AttributesSnapshot()[SessionAgentAttribute]
-		if bound == "" || bound != live.AttributesSnapshot()[SessionAgentAttribute] || row.AttributesSnapshot()[SessionAgentIDAttribute] != live.AttributesSnapshot()[SessionAgentIDAttribute] || row.ParentID != driver.identityParent || row.AttributesSnapshot()[SessionParentAgentAttribute] != live.AttributesSnapshot()[SessionParentAgentAttribute] || row.AttributesSnapshot()["docker-agent.actor.source"] != live.AttributesSnapshot()["docker-agent.actor.source"] {
+		if bound == "" || bound != live.AttributesSnapshot()[SessionAgentAttribute] || row.AttributesSnapshot()[SessionAgentIDAttribute] != live.AttributesSnapshot()[SessionAgentIDAttribute] || row.ParentID != driver.identityParent || row.AttributesSnapshot()[SessionParentAgentAttribute] != live.AttributesSnapshot()[SessionParentAgentAttribute] || row.AttributesSnapshot()[SessionParentAgentIDAttribute] != live.AttributesSnapshot()[SessionParentAgentIDAttribute] || row.AttributesSnapshot()["docker-agent.actor.source"] != live.AttributesSnapshot()["docker-agent.actor.source"] {
 			return nil, invalid("restore_binding")
 		}
 		_, currentCreation, identityOK := identityForBinding(r.teamForSession(row), row, SessionAgentAttribute, SessionAgentIDAttribute)
@@ -98,7 +235,7 @@ func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, i
 		if source := row.AttributesSnapshot()["docker-agent.actor.source"]; source != "" && source != parent.AttributesSnapshot()["docker-agent.actor.source"] {
 			return nil, invalid("restore_source")
 		}
-		record, err := children.LoadChild(ctx, row.ID)
+		record, err := r.loadResidentChildRecord(ctx, children, row.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -113,21 +250,14 @@ func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, i
 		if !childIdentityOK {
 			return nil, invalid("restore_tree_membership")
 		}
-		grant, _, grantOK := identityForBinding(r.teamForSession(row), row, SessionParentAgentAttribute, SessionParentAgentIDAttribute)
-		if !grantOK {
-			grant, _, grantOK = resolveAgentIdentity(r.teamForSession(parent), parent.AgentID, parent.AgentName)
-		}
+		grant, grantOK := recordedGrantor(r.teamForSession(row), row, func() (*agent.Agent, bool) {
+			a, _, ok := resolveAgentIdentity(r.teamForSession(parent), parent.AgentID, parent.AgentName)
+			return a, ok
+		})
 		if !grantOK {
 			return nil, invalid("restore_tree_membership")
 		}
-		allowed := false
-		for _, ref := range r.allowedFromAgentForTeam(r.teamForSession(parent), grant) {
-			if ref.Agent == childIdentity.Name() {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
+		if !r.restoreChildAuthorized(r.teamForSession(parent), grant, childIdentity.Name()) {
 			return nil, invalid("restore_tree_membership")
 		}
 		if record.Node.State == subagent.NodeStopped && !p.existing[row.ID].registrySnapshot().stoppedView {
@@ -244,9 +374,12 @@ func (p *preparedSessionView) commitResident(ctx context.Context) (CommittedSess
 			restore.Unlock()
 		}
 	}()
-	fresh, err := (&localSessionRuntimeView{runtime: p.r}).readResidentSessionView(ctx, p.info.SessionID)
+	fresh, err := (&localSessionRuntimeView{runtime: p.r}).readResidentSessionViewLocked(ctx, p.info.SessionID)
 	if err != nil {
 		return CommittedSessionView{}, err
+	}
+	if fresh != nil && (fresh.root == nil || fresh.root.ID != p.root.ID) {
+		return CommittedSessionView{}, &SessionError{Kind: SessionErrorConflict, SessionID: p.info.SessionID, Operation: "commit_view"}
 	}
 	if fresh == nil {
 		return CommittedSessionView{}, &SessionError{Kind: SessionErrorConflict, SessionID: p.info.SessionID, Operation: "commit_view"}

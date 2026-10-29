@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +23,8 @@ type Client struct {
 	httpClient *http.Client
 	authToken  string
 	registry   map[string]func() Event
+	// backendID is opaque and process-local; transports borrowing this Client share it.
+	backendID string
 }
 
 // ClientOption is a function for configuring the Client
@@ -69,7 +72,8 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	}
 
 	client := &Client{
-		baseURL: parsedURL,
+		baseURL:   parsedURL,
+		backendID: rand.Text(),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -78,6 +82,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 			"pending_user_message_accepted": func() Event { return &PendingUserMessageAcceptedEvent{} },
 			"pending_user_message_promoted": func() Event { return &PendingUserMessagePromotedEvent{} },
 			"turn_settled":                  func() Event { return &TurnSettledEvent{} },
+			"background_processes":          func() Event { return &BackgroundProcessesEvent{} },
 			"subagent_created":              func() Event { return &SubagentCreatedEvent{} },
 			"interaction_resolved":          func() Event { return &InteractionResolvedEvent{} },
 			"pending_user_message_canceled": func() Event { return &PendingUserMessageCanceledEvent{} },

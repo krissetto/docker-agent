@@ -210,3 +210,16 @@ func TestResolveIdentityDoesNotChangeNameLookup(t *testing.T) {
 	_, err := tm.Agent("worker-id")
 	require.Error(t, err, "execution lookup remains name-only")
 }
+
+func TestWithAgentConfigsCopiesSubagentAccessGrant(t *testing.T) {
+	access := &latest.SubagentAccessConfig{ListAgents: latest.SubagentAccessTree, SendMessage: latest.SubagentAccessChildren}
+	cfg := latest.AgentConfig{Name: "root", SubagentAccess: access}
+	tm := New(WithAgents(newAgent("root")), WithAgentConfigs(map[string]latest.AgentConfig{"root": cfg}))
+	access.SendMessage = latest.SubagentAccessTree
+	stored, ok := tm.AgentConfig("root")
+	require.True(t, ok)
+	assert.Equal(t, latest.SubagentAccessChildren, stored.SubagentAccess.SendMessage, "caller-owned config mutation cannot change captured grant")
+	stored.SubagentAccess.SendMessage = "invalid"
+	again, _ := tm.AgentConfig("root")
+	assert.Equal(t, latest.SubagentAccessChildren, again.SubagentAccess.SendMessage, "returned config cannot mutate captured grant")
+}

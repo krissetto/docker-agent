@@ -432,26 +432,26 @@ func TestLoadFromSessionPreservesCommittedReasoningBoundaries(t *testing.T) {
 
 	m.LoadFromSession(sess, nil)
 
-	// Each assistant commit owns its reasoning and tools, matching live boundaries.
-	require.Len(t, m.messages, 4)
-	for i, reasoning := range []string{"First reasoning chunk.", "Second reasoning chunk.", "Third reasoning chunk."} {
-		assert.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[i].Type)
-		assert.Equal(t, reasoning, m.messages[i].Content, "copy content preserves the exact message")
-		block, ok := m.views[i].(*reasoningblock.Model)
-		require.True(t, ok, "view should be a reasoning block")
-		assert.Equal(t, reasoning, block.Reasoning())
-		assert.Equal(t, 1, block.ToolCount(), "each committed message retains its own tool")
-		for j := range 3 {
-			assert.Equal(t, i == j, block.HasToolCall("call-"+strconv.Itoa(j+1)))
-		}
-		block.SetExpanded(true)
-		view := block.View()
+	// The adjacent reasoning runs share one presentation block; the canonical
+	// session records above remain separate and own their respective tools.
+	require.Len(t, m.messages, 2)
+	assert.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[0].Type)
+	assert.Equal(t, "First reasoning chunk.\n\nSecond reasoning chunk.\n\nThird reasoning chunk.", m.messages[0].Content)
+	block := m.views[0].(*reasoningblock.Model)
+	assert.Equal(t, "First reasoning chunk.\n\nSecond reasoning chunk.\n\nThird reasoning chunk.", block.Reasoning())
+	assert.Equal(t, 3, block.ToolCount())
+	for i := range 3 {
+		assert.True(t, block.HasToolCall("call-"+strconv.Itoa(i+1)))
+	}
+	block.SetExpanded(true)
+	view := block.View()
+	for i := range 3 {
 		assert.Contains(t, view, "tool"+strconv.Itoa(i+1))
 		assert.Contains(t, view, "Result "+strconv.Itoa(i+1), "committed tool results survive restoration")
 	}
 
-	assert.Equal(t, types.MessageTypeAssistant, m.messages[3].Type)
-	assert.Equal(t, "All done!", m.messages[3].Content)
+	assert.Equal(t, types.MessageTypeAssistant, m.messages[1].Type)
+	assert.Equal(t, "All done!", m.messages[1].Content)
 }
 
 func TestLoadFromSessionStandaloneToolCallsWithResults(t *testing.T) {
@@ -1284,7 +1284,7 @@ func TestAddOrUpdateToolCallFindsToolInNonActiveReasoningBlock(t *testing.T) {
 	assert.Equal(t, 1, block.ToolCount(), "reasoning block should still have exactly one tool call")
 }
 
-func TestAppendReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) {
+func TestAppendReasoningAfterTransferTaskOmitsAgentBadge(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -1308,11 +1308,9 @@ func TestAppendReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) {
 	require.True(t, ok)
 
 	view := ansi.Strip(block.View())
-	badgeIdx := strings.Index(view, "developer")
-	thinkingIdx := strings.Index(view, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "reasoning block should render the developer badge")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "agent badge should render before the Thinking header")
+	assert.NotContains(t, view, "developer", "transfers retain their own attribution without adding a reasoning badge")
+	assert.Contains(t, view, "Thinking")
+	assert.True(t, block.IsHeaderLine(0))
 }
 
 func TestAppendReasoningContinuingSameAgentOmitsAgentBadge(t *testing.T) {
@@ -1336,7 +1334,7 @@ func TestAppendReasoningContinuingSameAgentOmitsAgentBadge(t *testing.T) {
 	assert.Contains(t, view, "Thinking")
 }
 
-func TestLoadFromSessionReasoningBlockAgentBadges(t *testing.T) {
+func TestLoadFromSessionReasoningBlocksOmitAgentBadges(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -1375,16 +1373,16 @@ func TestLoadFromSessionReasoningBlockAgentBadges(t *testing.T) {
 
 	first, ok := m.views[1].(*reasoningblock.Model)
 	require.True(t, ok)
-	assert.Contains(t, ansi.Strip(first.View()), "root",
-		"the block starting the agent's turn should show its badge")
+	assert.NotContains(t, ansi.Strip(first.View()), "root",
+		"reasoning blocks do not repeat the agent name")
 
 	second, ok := m.views[3].(*reasoningblock.Model)
 	require.True(t, ok)
 	assert.NotContains(t, ansi.Strip(second.View()), "root",
-		"no badge when the block continues the same agent's content")
+		"later reasoning blocks do not repeat the agent name")
 }
 
-func TestLoadFromSessionReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) {
+func TestLoadFromSessionReasoningAfterTransferTaskOmitsAgentBadge(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -1430,11 +1428,9 @@ func TestLoadFromSessionReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) 
 	require.True(t, ok)
 
 	view := ansi.Strip(block.View())
-	badgeIdx := strings.Index(view, "developer")
-	thinkingIdx := strings.Index(view, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "reasoning block should render the developer badge")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "agent badge should render before the Thinking header")
+	assert.NotContains(t, view, "developer", "transfers retain their own attribution without adding a reasoning badge")
+	assert.Contains(t, view, "Thinking")
+	assert.True(t, block.IsHeaderLine(0))
 }
 
 func TestBindingsExcludesEditKeyWhenAssistantMessageSelected(t *testing.T) {
@@ -1594,6 +1590,48 @@ func TestHoverUserMessageShowsEditAndCopyLabels(t *testing.T) {
 	out = ansi.Strip(m.View())
 	assert.Contains(t, out, types.UserMessageEditLabel+types.MessageActionSeparator+types.MessageCopyLabel,
 		"hovered editable user message should show edit and copy labels")
+}
+
+func TestHoverActionsFadeWithFiniteLeaseWithoutChangingGeometryOrHits(t *testing.T) {
+	ar := animation.NewRuntimeWithScheduler(&referenceScheduler{now: time.Unix(1, 0), step: 50 * time.Millisecond})
+	m := newModel(ar, 80, 24, &service.SessionState{})
+	t.Cleanup(m.StopAnimations)
+	position := 0
+	user := &types.Message{Type: types.MessageTypeUser, Content: "fade me", SessionPosition: &position}
+	m.messages = append(m.messages, user)
+	m.views = append(m.views, m.createMessageView(user))
+	m.View()
+	base := m.View()
+	geometry := func() []int {
+		lines := strings.Split(m.View(), "\n")
+		widths := make([]int, len(lines))
+		for i, line := range lines {
+			widths[i] = ansi.StringWidth(line)
+		}
+		return widths
+	}
+	baseGeometry := geometry()
+	m.handleMouseMotion(tea.MouseMotionMsg{X: 5, Y: 1})
+	require.Equal(t, baseGeometry, geometry(), "entry reserves the same action row geometry")
+	require.True(t, ar.HasActive())
+	before := m.View()
+	referenceTick(t, m)
+	middle := m.View()
+	require.NotEqual(t, before, middle, "entry animates on a finite tick")
+	require.Equal(t, baseGeometry, geometry())
+	_, col := findLabel(t, m, types.UserMessageEditLabel)
+	m.ClearPointerHover()
+	require.Equal(t, -1, m.hoveredMessageIndex, "hit target clears immediately")
+	_, cmd := m.handleMouseClick(tea.MouseClickMsg{X: col, Y: 0, Button: tea.MouseLeft})
+	require.Nil(t, cmd, "fading edit text is not interactive")
+	faded := m.View()
+	require.NotEqual(t, base, faded, "fade-out does not snap the visible affordance")
+	referenceTick(t, m)
+	referenceTick(t, m)
+	require.Equal(t, base, m.View(), "settled fade removes the controls")
+	require.Equal(t, baseGeometry, geometry())
+	require.False(t, ar.HasActive(), "settled hover releases its lease")
+	require.Nil(t, ar.Continue(), "settled hover schedules no idle tick")
 }
 
 func TestHoverNonEditableUserMessageShowsOnlyCopyLabel(t *testing.T) {

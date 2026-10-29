@@ -8,10 +8,13 @@ import (
 )
 
 type driverStopRequest struct {
-	done     chan struct{}
-	deleting atomic.Bool
-	applied  atomic.Bool
-	withdraw atomic.Bool
+	done            chan struct{}
+	deleting        atomic.Bool
+	applied         atomic.Bool
+	withdraw        atomic.Bool
+	explicitStopped atomic.Bool
+	// retiring marks an internal stop issued while the driver is being removed.
+	retiring atomic.Bool
 }
 
 // Control requests have bounded, coalescing mailboxes independent of ordinary
@@ -21,6 +24,14 @@ func (d *sessionDriver) requestStop(deleting bool) bool {
 }
 
 func (d *sessionDriver) requestStopWithIntent(deleting, withdraw bool) bool {
+	return d.requestStopIntent(deleting, withdraw, false, false)
+}
+
+func (d *sessionDriver) requestStopWithExplicitStopped() bool {
+	return d.requestStopIntent(false, false, true, false)
+}
+
+func (d *sessionDriver) requestStopIntent(deleting, withdraw, explicitStopped, retiring bool) bool {
 	var request *driverStopRequest
 	for {
 		previous := d.stopRequest.Load()
@@ -32,6 +43,12 @@ func (d *sessionDriver) requestStopWithIntent(deleting, withdraw bool) bool {
 			if withdraw {
 				request.withdraw.Store(true)
 			}
+			if explicitStopped {
+				request.explicitStopped.Store(true)
+			}
+			if retiring {
+				request.retiring.Store(true)
+			}
 			if d.stopRequest.Load() == request && !request.applied.Load() {
 				break
 			}
@@ -40,6 +57,8 @@ func (d *sessionDriver) requestStopWithIntent(deleting, withdraw bool) bool {
 		next := &driverStopRequest{done: make(chan struct{})}
 		next.deleting.Store(deleting)
 		next.withdraw.Store(withdraw)
+		next.explicitStopped.Store(explicitStopped)
+		next.retiring.Store(retiring)
 		if d.stopRequest.CompareAndSwap(previous, next) {
 			request = next
 			break
@@ -74,19 +93,44 @@ func (d *sessionDriver) applyStopLocked() {
 	if request == nil {
 		return
 	}
-	if request.deleting.Load() {
-		d.events.FenceDelete(d.sessionIDLocked())
-	}
 	if request.applied.Load() {
 		return
 	}
+	// Seal the joinable receipt before consuming its atomic intents. A late
+	// joiner retries with a fresh request and wake rather than racing cleanup.
+	request.applied.Store(true)
+	if request.deleting.Load() {
+		d.events.FenceDelete(d.sessionIDLocked())
+	}
+	// Dormancy is observable only for stops that leave the view alive; deletion
+	// and internal retirement end it without a transient dormancy notification.
+	suppressDormancy := request.deleting.Load() || request.retiring.Load()
 	(driverRegistryState{cancel: d.cancel, compactCancel: d.compactCancel, skillCancel: d.skillCancel}).cancelExecution()
 	if d.pauseCh != nil {
 		close(d.pauseCh)
 		d.pauseCh = nil
 	}
+	if !request.deleting.Load() {
+		d.flushAllDeferredAcceptedLocked()
+	}
+	d.deferredAccepted = nil
+	d.deferredAcceptedOrder = nil
+	d.causalReportOnly = false
+	d.causalReports = nil
+	d.causalReportOrder = nil
+	d.deferredCompletionReportTurnID = ""
 	d.pending = nil
 	d.stopped = true
+	if request.withdraw.Swap(false) {
+		d.durableStopRequested = true
+		d.explicitStopped = true
+	}
+	if request.explicitStopped.Swap(false) {
+		d.explicitStopped = true
+	}
+	if !suppressDormancy {
+		d.events.Publish(d.sessionIDLocked(), &DormancyChangedEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "session_dormancy_changed", SessionID: d.sessionIDLocked(), Dormant: d.viewDormant, Stopped: d.explicitStopLocked()})
+	}
 	d.invalidateTitleLocked()
 	d.stoppedView = false
 	d.resolveInteractionsLocked()
@@ -95,11 +139,6 @@ func (d *sessionDriver) applyStopLocked() {
 	d.skillOperationID = ""
 	d.skillCancel = nil
 	d.signalStartDoneLocked()
-	// Close joining before consuming intent; late joiners retain it in a new request.
-	request.applied.Store(true)
-	if request.withdraw.Swap(false) {
-		d.durableStopRequested = true
-	}
 	close(request.done)
 }
 

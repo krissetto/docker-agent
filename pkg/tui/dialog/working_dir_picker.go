@@ -746,6 +746,9 @@ func (d *workingDirPickerDialog) dialogSize() (dialogWidth, maxHeight, contentWi
 func (d *workingDirPickerDialog) View() string { return d.renderBody(false) }
 
 func (d *workingDirPickerDialog) renderBody(prepare bool) string {
+	d.SetScrollviewActive(d.pinnedScroll, d.section == sectionPinned)
+	d.SetScrollviewActive(d.recentScroll, d.section == sectionRecent)
+	d.SetScrollviewActive(d.browseScroll, d.section == sectionBrowse)
 	input := d.textInput
 	input.SetStyles(styles.DialogInputStyle)
 	width, _, inner := d.dialogSize()
@@ -971,6 +974,9 @@ func (d *workingDirPickerDialog) SetSize(width, height int) tea.Cmd {
 
 	browseVis := max(1, maxHeight-dirPickerOverheadBrowse)
 	d.browseScroll.SetSize(regionWidth, browseVis)
+	d.SetScrollviewActive(d.pinnedScroll, d.section == sectionPinned)
+	d.SetScrollviewActive(d.recentScroll, d.section == sectionRecent)
+	d.SetScrollviewActive(d.browseScroll, d.section == sectionBrowse)
 
 	return cmd
 }

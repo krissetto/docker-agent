@@ -15,6 +15,21 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
+func TestSendStatusIconKeepsSubagentActionGapStable(t *testing.T) {
+	for _, status := range []types.ToolStatus{types.ToolStatusRunning, types.ToolStatusCompleted, types.ToolStatusError} {
+		msg := testMessage("send_message", `{"to":"worker-id"}`, "", status)
+		view := NewSend(animation.NewRuntime(), msg, nil, func(subagent.NodeID) (string, bool) { return "worker", true }).(*sendModel)
+		plain := ansi.Strip(view.View())
+		action := "Messaged"
+		if status != types.ToolStatusCompleted {
+			action = "Messaging"
+		}
+		require.Contains(t, plain, action+" worker")
+		require.Equal(t, strings.Index(plain, action)+len(action)+1, strings.Index(plain, "worker"), "the name follows the action at a single stable gap")
+		view.StopAnimation()
+	}
+}
+
 func TestFailedSendHeaderKeepsStatusAndErrorWhenExpanded(t *testing.T) {
 	const detail = "Cannot send message: subagent engineer (43140) has stopped."
 	msg := testMessage("send_message", `{"to":"43140-child","message":"Please continue."}`, detail, types.ToolStatusError)
@@ -27,11 +42,12 @@ func TestFailedSendHeaderKeepsStatusAndErrorWhenExpanded(t *testing.T) {
 		if expanded {
 			chevron = "v"
 		}
-		require.Contains(t, ansi.Strip(out), "✗ Messaging engineer (43140) "+chevron)
-		iconStyle, _, _ := strings.Cut(styles.ToolErrorIcon.Render("✗"), "✗")
+		plain := ansi.Strip(out)
+		require.Contains(t, plain, "✗ Messaging engineer (43140) "+chevron)
+		require.Contains(t, plain, "✗ Messaging", "status and action use the shared single-space separator")
 		verbStyle, _, _ := strings.Cut(styles.MutedStyle.Render("Messaging"), "Messaging")
 		identityStyle, _, _ := strings.Cut(styles.AgentIdentityStyle("engineer", false).Render("engineer"), "engineer")
-		require.Contains(t, out, strings.TrimLeft(iconStyle, " ")+"✗")
+		require.Contains(t, ansi.Strip(out), "✗", "error status icon stays visible")
 		require.Contains(t, out, verbStyle+"Messaging")
 		require.Contains(t, out, identityStyle+"engineer")
 		require.Contains(t, ansi.Strip(out), detail)

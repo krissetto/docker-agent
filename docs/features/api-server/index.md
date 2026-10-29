@@ -72,10 +72,12 @@ The canonical endpoints are:
 | `PATCH` | `/api/v2/sessions/:id` | Canonical edit: `kind` is `policy`, `permissions`, `title`, `message`, `summary`, `tokens`, or `attachment`; returns the updated session. Transcript edits require a quiescent session. |
 | `GET` | `/api/v2/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
 | `GET` | `/api/v2/sessions/:id/recent-chat` | Read a bounded, chronological recent chat window and page older with an opaque cursor; never attaches or restores a session. |
-| `GET` | `/api/v2/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
-| `GET` | `/api/v2/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
+| `GET` | `/api/v2/sessions/:id/snapshot` | Canonical full snapshot by default; capability-gated `?projection=tail` bounds transcript records and returns original positions plus an older-history cursor. |
+| `GET` | `/api/v2/sessions/:id/history` | Page older complete typed history using the opaque cursor from a tail snapshot; append-safe, but stale after transcript edits/compaction. |
+| `GET` | `/api/v2/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes; optional capability-gated tail projection bounds baselines/resets. |
 | `POST` | `/api/v2/sessions/:id/workflow/wait` | Wait for the session and active descendants, pending reports, and follow-up turns to settle; returns the journal epoch and output cursor. Disconnecting cancels only the wait. |
 | `GET` | `/api/v2/sessions/:id/git-review` | Discover repositories and worktrees within the authorized session workspace using bounded read-only inspection. |
+| `POST` | `/api/v2/sessions/:id/git-review/browse` | Initialize the authorized working-directory scope without nearby-repository discovery or Git status. Returns a root-only browse snapshot, or reuses the existing inventory and generation; directory contents are requested separately. |
 | `POST` | `/api/v2/sessions/:id/git-review/worktree` | Read status for a discovered worktree at the requested review generation. |
 | `POST` | `/api/v2/sessions/:id/git-review/directory` | Read a bounded directory listing within the session review scope. |
 | `POST` | `/api/v2/sessions/:id/git-review/document` | Read a bounded file or diff within the session review scope; stale generations are rejected. |
@@ -135,6 +137,18 @@ Additional canonical metadata and editing endpoints:
 | `GET` | `/api/v2/sessions/:id/recovery` | Read recovery data. |
 | `POST` | `/api/v2/sessions/batch/delete` | Delete sessions in a batch. |
 | `POST` | `/api/v2/sessions/batch/export` | Export sessions in a batch. |
+
+### Files/Git workspace sharing
+
+Files/Git inspection is read-only. Sessions with the same server-canonical workspace,
+source, and effective policy share bounded in-memory results and matching requests
+already in progress within the server's authentication boundary. A session ID alone
+does not create a separate workspace cache. Every request still resolves and authorizes
+its own session before accessing shared results; sharing is not an access grant.
+Different workspace or policy scopes remain isolated, and stale review generations
+are rejected. Generations are opaque, process-local values: eviction and recreation
+within a running server do not reuse them, but they are not durable identities across
+server restarts. No cache state is persisted or added to the message history.
 
 ### Catalog pagination and confirmed views
 

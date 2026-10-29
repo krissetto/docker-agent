@@ -1,24 +1,32 @@
 # Native Apple app build
 
-`DockerAgent.xcodeproj` is the native SwiftUI application project for iPhone,
-iPad, and macOS 26. It is an iOS/iPadOS app plus a native macOS app, not
-Mac Catalyst. The project explicitly lists each Swift file under
-`Sources/DockerAgentApp` in both native targets and links the `AgentKit`
-product from the local `Package.swift`; there are no third-party packages or
-generated/binary assets. The SwiftUI `@main` entry point and
-`WindowGroup` scenes are shared across platforms.
+`DockerAgent.xcodeproj` contains native SwiftUI app targets for iPhone/iPad
+and macOS 26 (not Mac Catalyst), plus a WidgetKit extension built for both
+iOS/iPadOS and macOS hosts. The platform-matched extension is embedded by each
+host; macOS supports only the systemSmall and systemMedium widget families.
+The project explicitly lists every app source in both app targets and
+`Sources/DockerAgentWidget/TeamSummary.swift` in the widget target.
+`build-native.sh` validates membership before SDK builds.
+The app and widget share only a small summary in the App Group
+`group.dev.dockeragent.apple`; tokens, transcripts, session titles and prompt
+content are not written to the shared container. The app keeps its existing
+Keychain access-group identifier.
 
-When adding or renaming Swift files under `Sources/DockerAgentApp`, update the
-explicit PBX file references and the shared app group/source phase in
-`project.pbxproj`. `build-native.sh` runs
-`python3 Scripts/check-xcode-sources.py` first; this verifies both native targets
-compile every app source exactly once and reports missing or duplicate membership
-before the compiler runs.
+When adding or renaming app or widget sources, update the explicit PBX file
+references, source phases and target membership in `project.pbxproj`.
+`build-native.sh` runs `python3 Scripts/check-xcode-sources.py` first; this
+verifies both app targets compile every app source exactly once and that the
+widget target compiles its source exactly once.
 
-The initial bundle identifier is the neutral, provisional `dev.dockeragent.apple`
-and the display name is `Docker Agent`. Set a distribution-owned unique bundle
-identifier before publishing. There is no team, signing identity, provisioning
-profile, or Keychain access group configured.
+The initial bundle identifier is the neutral, provisional
+`dev.dockeragent.apple` and the display name is `Docker Agent`. Set a
+distribution-owned unique bundle identifier before publishing. The iOS and
+macOS app/widget targets declare the App Group
+`group.dev.dockeragent.apple`; simulator builds use the existing deterministic
+ad-hoc signing identity and can access the shared simulator group. Device and
+distribution provisioning must enable that same App Group on both host and
+extension. This project does not include a distribution team, signing identity
+or provisioning profile. Do not change existing Keychain access-group names.
 
 ## Build checks
 
@@ -30,11 +38,14 @@ Requires an installed Xcode with iOS, iOS Simulator, and macOS SDKs. From the
 ```
 
 The script first lists project schemes and targets, then builds the iOS
-Simulator SDK, iOS device SDK, and generic macOS destination in sequence with
-`CODE_SIGNING_ALLOWED=NO`. The iOS builds use the
-explicit native target and SDK rather than a simulator/device destination, so
-they compile/link the full app without requiring a simulator runtime or
-connected device. The macOS build uses the generic destination. Build products
+Simulator SDK with deterministic ad-hoc simulator signing, the iOS device SDK
+unsigned, and the generic macOS destination unsigned. The simulator build uses
+a fixed simulator-only team identifier (`FAKETEAMID`) to generate the
+simulator's `application-identifier` and matching Keychain access group; this is
+not a distribution identity and is not applied to device builds. The iOS builds use the explicit native target and SDK rather than a
+simulator/device destination, so they compile/link the full app without
+requiring a simulator runtime or connected device. The macOS build uses the
+generic destination. Build products
 and intermediates are isolated under `$TMPDIR/DockerAgent-XcodeDerivedData`
 (override with `DERIVED_DATA_ROOT`), separate from SwiftPM's `.build`. This
 compiles the simulator app but does not launch or exercise it.
@@ -46,8 +57,14 @@ xcodebuild -project DockerAgent.xcodeproj -target DockerAgent-iOS \
   -sdk iphonesimulator \
   SYMROOT="$TMPDIR/DockerAgent-XcodeDerivedData/ios-simulator/Build/Products" \
   OBJROOT="$TMPDIR/DockerAgent-XcodeDerivedData/ios-simulator/Build/Intermediates.noindex" \
-  CODE_SIGNING_ALLOWED=NO build
+  CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES \
+  CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=FAKETEAMID \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
 ```
+
+Use `CODE_SIGNING_ALLOWED=NO` for device-SDK compile-only checks. The simulator
+build embeds its simulated application identifier and Keychain group in the
+app executable so Keychain calls work when the simulator launches it.
 
 ## Network and sandbox configuration
 
@@ -56,10 +73,14 @@ into `NSAllowsLocalNetworking` for local-development networking. The app's
 runtime `URLPolicy` is stricter: HTTPS is the default and plain HTTP is
 permitted only after explicit user opt-in for `localhost`, `127.0.0.1`, or
 `::1`. It never enables `NSAllowsArbitraryLoads`. The local-network usage
-string explains loopback development access to the user. On macOS the app is
-sandboxed and receives only the outbound `com.apple.security.network.client`
-entitlement needed to connect to configured servers. No shared Keychain group
-is used.
+string explains loopback development access to the user. On macOS the app is sandboxed and receives only the outbound
+`com.apple.security.network.client` entitlement needed to connect to configured
+servers, plus the shared App Group entitlement for its widget. The widget has no
+network client or Keychain entitlement; it reads a minimal summary snapshot and
+shows an unavailable/stale state if the container has no recent data. Widget
+updates are foreground-published on a bounded five-minute cadence, not a
+background server connection. Distribution provisioning is required for the
+shared widget on physical devices.
 
 ## Revalidate after Xcode or SDK upgrades
 
@@ -69,38 +90,39 @@ changed SDK deprecations and ATS/sandbox behavior rather than weakening the
 transport policy to make a build pass. If platform minimums change, update both
 `Package.swift` and the Xcode target deployment settings together. iOS/iPadOS runtime smoke testing requires a simulator runtime/device or physical
 device and should be performed separately from these unsigned generic build
-checks. The macOS app supports a separate launch-only local smoke mode described
-below. Signing and
-distribution setup are intentionally outside this project bootstrap.
+checks. The macOS app has a separate local smoke mode, but no new launch-only smoke
+was run for this increment. Distribution setup is intentionally outside this
+project bootstrap.
 
-## Verified build and launch environment
+## Verified build environment
 
-Validated on 2026-10-18 with Xcode 26.6 (build 17F113), Swift 6.3.3, and the
-iOS, iOS Simulator, and macOS 26.5 SDKs. The final lifecycle checkpoint command was
-`DERIVED_DATA_ROOT=/tmp/DockerAgentProofFinal sh apple/Scripts/build-native.sh`.
-All 115 Swift tests across 14 suites also passed with
-`swift test --scratch-path /tmp/docker-agent-native-final-unfiltered` (exit 0);
-full test log: `/tmp/docker-agent-native-final-unfiltered.log`. `xcodebuild -list`
-reported both native targets and all three unsigned build steps ended in
-`BUILD SUCCEEDED`:
+Validated on 2026-10-19 with Xcode 26.6 (build 17F113), Swift 6.3.3 and
+iOS/iOS Simulator/macOS 26.5 SDKs. `swift test --scratch-path
+/tmp/DockerAgentCombinedFinal` passed all 137 tests in 14 suites (log:
+`/tmp/DockerAgentCombinedFinal-tests.log`).
+`DERIVED_DATA_ROOT=/tmp/DockerAgentCombinedFinal sh Scripts/build-native.sh`
+completed with exit 0 (log: `/tmp/DockerAgentCombinedFinal-build.log`): the
+simulator-signed iOS app plus embedded widget, unsigned iOS device app plus
+embedded widget, and unsigned generic macOS app plus embedded widget all built
+successfully. The processed simulator widget `Info.plist` was inspected and
+contains `CFBundleExecutable=DockerAgentWidget`, bundle ID
+`dev.dockeragent.apple.widget`, version/package metadata, and the WidgetKit
+extension point. `ValidateEmbeddedBinary` succeeded. The source-membership
+checker confirmed all 50 app sources compile exactly once in both native app
+targets and the widget source exactly once in `DockerAgentWidget`; project and
+entitlement plists passed `plutil -lint`.
 
-- `DockerAgent-iOS` with `-sdk iphonesimulator` — Simulator SDK compile/link
-- `DockerAgent-iOS` with `-sdk iphoneos` — iOS device SDK compile/link
-- `DockerAgent-macOS` with `-destination generic/platform=macOS`
-
-The source-membership checker confirmed that every one of the 47 Swift files
-currently under `Sources/DockerAgentApp` is included exactly once in the shared
-source phase for both app targets. The simulator SDK build is not a simulator launch. `xcrun simctl list runtimes`
-and `xcrun simctl list devices available` reported no installed runtimes or
-devices, so simulator runtime testing was unavailable. A separate macOS
-launch-only smoke check ran the built executable at
-`/tmp/DockerAgentProofFinal/macos/Build/Products/Debug/DockerAgent.app/Contents/MacOS/DockerAgent`
-with `--ui-smoke-test`. It remained alive for four seconds as PID 71181 with
-empty captured stdout/stderr, then only that launched PID was terminated. The
-smoke mode uses temporary stores, an in-memory credential store, disables
-network access, and shows a local-only banner. This checks launch/liveness only;
-no screenshot or visual behavior validation was performed. Successful builds
-emitted non-fatal Xcode warnings: App Intents metadata extraction was skipped because the app has
-no `AppIntents.framework` dependency, and the simulator SwiftPM `AgentKit`
-build noted `ONLY_ACTIVE_ARCH=YES` with no active architecture available and
-built all applicable architectures. No source compile errors occurred.
+The simulator SDK build validates compile, packaging and extension metadata.
+Designer installed the final app+widget build over the existing simulator app
+without uninstalling it or resetting profiles/Keychain, then observed the home
+screen with the saved `mbp` profile and 50 sessions. The screenshot is
+`/tmp/apple-design/05-home-mbp-portrait.png`. No session was opened. Automation
+could not obtain assistive access, so the Agents map, actual widget gallery and
+landscape behavior were not visually exercised; do not infer those flows from
+the home capture. No live child/session work was attached or mutated. The focused synthetic tests
+exercise team layout/zoom hit-testing and widget aggregate, deduplication and
+offline projection. No live sub-agent was attached and no server work was
+mutated. Distribution and physical-device App Group sharing require a profile
+provisioning `group.dev.dockeragent.apple`; no distribution team/profile is
+configured. No repository-wide Go build was needed because this increment
+contains no Go changes.

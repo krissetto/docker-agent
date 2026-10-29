@@ -14,6 +14,12 @@ public struct SessionRef: Codable, Hashable, Identifiable, Sendable {
 }
 
 public enum ConnectionState: String, Codable, Sendable { case unknown, testing, live, reconnecting, offline, unauthorized }
+
+public enum ServerConnectionIssue: String, Codable, Sendable, Equatable {
+    case identityChanged
+
+    public var message: String { "The server identity changed. Edit and test this server before reconnecting." }
+}
 public enum SessionState: String, Codable, Sendable { case idle, queued, running, cancelling, waiting, settled, failed, unknown }
 
 public struct ServerIdentity: Codable, Equatable, Sendable {
@@ -24,6 +30,8 @@ public struct ServerIdentity: Codable, Equatable, Sendable {
     public let workspaceRoot: String?
     public let source: String?
     public let capabilities: [String]
+    public var supportsMetadataSessionView: Bool { version == 1 && sessionAPIVersion == 2 && capabilities.contains("session_view_metadata") }
+    public var supportsSessionHistoryPages: Bool { version == 1 && sessionAPIVersion == 2 && capabilities.contains("session_history_pages") }
     enum CodingKeys: String, CodingKey { case version, sessionAPIVersion = "session_api_version", instanceID = "instance_id", ready, workspaceRoot = "workspace_root", source, capabilities }
     public init(version: Int, sessionAPIVersion: Int, instanceID: String, ready: Bool, workspaceRoot: String? = nil, source: String? = nil, capabilities: [String] = []) {
         self.version = version; self.sessionAPIVersion = sessionAPIVersion; self.instanceID = instanceID; self.ready = ready; self.workspaceRoot = workspaceRoot; self.source = source; self.capabilities = capabilities
@@ -47,11 +55,12 @@ public struct ServerProjection: Identifiable, Sendable, Equatable {
     public let baseURL: String
     public var identity: ServerIdentity?
     public var state: ConnectionState
+    public var connectionIssue: ServerConnectionIssue?
     public var allowsLocalHTTP: Bool
     public var sessionCount: Int
     public var refreshedAt: Date?
-    public init(id: UUID, name: String, baseURL: String, identity: ServerIdentity? = nil, state: ConnectionState = .unknown, allowsLocalHTTP: Bool = false, sessionCount: Int = 0, refreshedAt: Date? = nil) {
-        self.id = id; self.name = name; self.baseURL = baseURL; self.identity = identity; self.state = state; self.allowsLocalHTTP = allowsLocalHTTP; self.sessionCount = sessionCount; self.refreshedAt = refreshedAt
+    public init(id: UUID, name: String, baseURL: String, identity: ServerIdentity? = nil, state: ConnectionState = .unknown, connectionIssue: ServerConnectionIssue? = nil, allowsLocalHTTP: Bool = false, sessionCount: Int = 0, refreshedAt: Date? = nil) {
+        self.id = id; self.name = name; self.baseURL = baseURL; self.identity = identity; self.state = state; self.connectionIssue = connectionIssue; self.allowsLocalHTTP = allowsLocalHTTP; self.sessionCount = sessionCount; self.refreshedAt = refreshedAt
     }
 }
 
@@ -86,6 +95,14 @@ public struct AgentOption: Codable, Sendable, Equatable, Identifiable {
     public var id: String { name }
     enum CodingKeys: String, CodingKey { case name, rootAgentName = "root_agent_name", description, multi, commands }
     public init(name: String, rootAgentName: String? = nil, description: String = "", multi: Bool = false, commands: [String] = []) { self.name = name; self.rootAgentName = rootAgentName; self.description = description; self.multi = multi; self.commands = commands }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        rootAgentName = try container.decodeIfPresent(String.self, forKey: .rootAgentName)
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        multi = try container.decodeIfPresent(Bool.self, forKey: .multi) ?? false
+        commands = try container.decodeIfPresent([String].self, forKey: .commands) ?? []
+    }
 }
 
 public struct SessionCapabilities: Codable, Sendable, Equatable {
@@ -146,6 +163,10 @@ public struct SessionBranchAnchor: Sendable, Equatable, Hashable {
     }
 }
 
+public enum UserInputState: String, Sendable, Equatable {
+    case queued
+}
+
 public struct TranscriptItem: Identifiable, Sendable, Equatable {
     public enum Kind: String, Sendable { case message, tool, reasoning, activity, error, delegation }
     public let id: String
@@ -159,13 +180,22 @@ public struct TranscriptItem: Identifiable, Sendable, Equatable {
     public let toolArguments: String?
     public let toolOutput: String?
     public let toolStatus: String?
+    /// Exact provider call ID when this tool row is backed by a recorded tool call.
+    public let toolCallID: String?
+    public let turnID: String?
+    public let userInputState: UserInputState?
+    /// Original zero-based canonical `session.messages` source record position, when supplied.
+    public let sourcePosition: Int?
+    /// Stable zero-based projected part within the canonical source record.
+    public let sourcePartIndex: Int?
+    public let sourceHistoryGeneration: String?
     public let child: SessionRef?
     public let attachments: [MessageAttachmentSummary]
     public let generatedMedia: [GeneratedMediaReference]
     public let userMessageIndex: Int?
     public let branchAnchor: SessionBranchAnchor?
-    public init(id: String, kind: Kind, owner: String? = nil, role: String? = nil, text: String, isStreaming: Bool = false, origin: String? = nil, toolName: String? = nil, toolArguments: String? = nil, toolOutput: String? = nil, toolStatus: String? = nil, child: SessionRef? = nil, attachments: [MessageAttachmentSummary] = [], generatedMedia: [GeneratedMediaReference] = [], userMessageIndex: Int? = nil, branchAnchor: SessionBranchAnchor? = nil) {
-        self.id = id; self.kind = kind; self.owner = owner; self.role = role; self.text = text; self.isStreaming = isStreaming; self.origin = origin; self.toolName = toolName; self.toolArguments = toolArguments; self.toolOutput = toolOutput; self.toolStatus = toolStatus; self.child = child; self.attachments = attachments; self.generatedMedia = generatedMedia; self.userMessageIndex = userMessageIndex; self.branchAnchor = branchAnchor
+    public init(id: String, kind: Kind, owner: String? = nil, role: String? = nil, text: String, isStreaming: Bool = false, origin: String? = nil, toolName: String? = nil, toolArguments: String? = nil, toolOutput: String? = nil, toolStatus: String? = nil, toolCallID: String? = nil, turnID: String? = nil, userInputState: UserInputState? = nil, sourcePosition: Int? = nil, sourcePartIndex: Int? = nil, sourceHistoryGeneration: String? = nil, child: SessionRef? = nil, attachments: [MessageAttachmentSummary] = [], generatedMedia: [GeneratedMediaReference] = [], userMessageIndex: Int? = nil, branchAnchor: SessionBranchAnchor? = nil) {
+        self.id = id; self.kind = kind; self.owner = owner; self.role = role; self.text = text; self.isStreaming = isStreaming; self.origin = origin; self.toolName = toolName; self.toolArguments = toolArguments; self.toolOutput = toolOutput; self.toolStatus = toolStatus; self.toolCallID = toolCallID; self.turnID = turnID; self.userInputState = userInputState; self.sourcePosition = sourcePosition; self.sourcePartIndex = sourcePartIndex; self.sourceHistoryGeneration = sourceHistoryGeneration; self.child = child; self.attachments = attachments; self.generatedMedia = generatedMedia; self.userMessageIndex = userMessageIndex; self.branchAnchor = branchAnchor
     }
 }
 
@@ -200,6 +230,54 @@ public struct AgentNodeProjection: Identifiable, Sendable, Equatable {
     public init(id: String, session: SessionRef? = nil, agentName: String, state: SessionState = .unknown, needsAttention: Bool = false, waitingOn: String? = nil, cost: Double = 0, inputTokens: Int64 = 0, outputTokens: Int64 = 0, children: [AgentNodeProjection] = []) { self.id = id; self.session = session; self.agentName = agentName; self.state = state; self.needsAttention = needsAttention; self.waitingOn = waitingOn; self.cost = cost; self.inputTokens = inputTokens; self.outputTokens = outputTokens; self.children = children }
 }
 
+/// Coverage of the transcript currently retained by a session projection.
+/// This is descriptive metadata, never a substitute for a canonical snapshot proof.
+public struct TranscriptOmittedRange: Sendable, Equatable, Hashable {
+    public let startPosition: Int
+    public let endPosition: Int
+    public let reason: String
+    public init(startPosition: Int, endPosition: Int, reason: String) {
+        self.startPosition = startPosition; self.endPosition = endPosition; self.reason = reason
+    }
+}
+
+public struct TranscriptWindow: Sendable, Equatable {
+    public var isComplete: Bool
+    /// Number of canonical source records before this retained window, not rendered rows.
+    public var omittedItemCount: Int
+    /// Opaque cursor for loading older history; nil means no older page is available.
+    public var olderCursor: String?
+    /// Stable history generation used to reject stale pages; independent of the live event cursor.
+    public var historyGeneration: String?
+    /// Stable initial page position and total record count; these anchor older-page responses.
+    public var anchorEndPosition: Int?
+    public var anchorCursor: UInt64?
+    /// Lowest absolute record position scanned in pages loaded so far.
+    public var startPosition: Int?
+    public var totalItemCount: Int?
+    /// At least one source item was too large for the negotiated bounded page.
+    public var containsTruncatedItems: Bool
+    public var omittedRanges: [TranscriptOmittedRange]
+
+    public init(isComplete: Bool = true, omittedItemCount: Int = 0, olderCursor: String? = nil, historyGeneration: String? = nil, anchorEndPosition: Int? = nil, anchorCursor: UInt64? = nil, startPosition: Int? = nil, totalItemCount: Int? = nil, containsTruncatedItems: Bool = false, omittedRanges: [TranscriptOmittedRange] = []) {
+        self.isComplete = isComplete
+        self.omittedItemCount = max(0, omittedItemCount)
+        self.olderCursor = olderCursor
+        self.historyGeneration = historyGeneration
+        self.anchorEndPosition = anchorEndPosition
+        self.anchorCursor = anchorCursor
+        self.startPosition = startPosition
+        self.totalItemCount = totalItemCount
+        self.containsTruncatedItems = containsTruncatedItems || !omittedRanges.isEmpty
+        self.omittedRanges = omittedRanges
+    }
+
+    /// Whether the loaded window covers all canonical source records. This never creates or validates proof.
+    public var hasCompleteCanonicalCoverage: Bool { isComplete && olderCursor == nil && !containsTruncatedItems }
+    public var hasOlderOnServer: Bool { olderCursor != nil }
+    public var omittedOlderItemCount: Int { max(0, startPosition ?? omittedItemCount) }
+}
+
 public struct OpenSessionProjection: Identifiable, Sendable, Equatable {
     public let ref: SessionRef
     public var id: SessionRef { ref }
@@ -213,6 +291,8 @@ public struct OpenSessionProjection: Identifiable, Sendable, Equatable {
     public var refreshedAt: Date?
     public var currentActivity: String?
     public var transcript: [TranscriptItem]
+    public var transcriptWindow: TranscriptWindow
+    public var omittedTranscriptItemCount: Int
     public var interactions: [InteractionProjection]
     public var capabilities: SessionCapabilities
     public var agentTree: [AgentNodeProjection]
@@ -225,8 +305,17 @@ public struct OpenSessionProjection: Identifiable, Sendable, Equatable {
     public var cursor: UInt64
     public var epoch: String
     public var pendingInputCount: Int
-    public init(ref: SessionRef, parentSession: SessionRef? = nil, title: String, agentName: String, source: String? = nil, state: SessionState = .unknown, turnID: String? = nil, connection: ConnectionState = .unknown, refreshedAt: Date? = nil, currentActivity: String? = nil, transcript: [TranscriptItem] = [], interactions: [InteractionProjection] = [], capabilities: SessionCapabilities = .init(), agentTree: [AgentNodeProjection] = [], inputTokens: Int64 = 0, outputTokens: Int64 = 0, contextLength: Int64 = 0, contextLimit: Int64 = 0, compactionThreshold: Double? = nil, cost: Double = 0, cursor: UInt64 = 0, epoch: String = "", pendingInputCount: Int = 0) {
-        self.ref = ref; self.parentSession = parentSession; self.title = title; self.source = source; self.agentName = agentName; self.state = state; self.turnID = turnID; self.connection = connection; self.refreshedAt = refreshedAt; self.currentActivity = currentActivity; self.transcript = transcript; self.interactions = interactions; self.capabilities = capabilities; self.agentTree = agentTree; self.inputTokens = inputTokens; self.outputTokens = outputTokens; self.contextLength = contextLength; self.contextLimit = contextLimit; self.compactionThreshold = compactionThreshold; self.cost = cost; self.cursor = cursor; self.epoch = epoch; self.pendingInputCount = pendingInputCount
+    public init(ref: SessionRef, parentSession: SessionRef? = nil, title: String, agentName: String, source: String? = nil, state: SessionState = .unknown, turnID: String? = nil, connection: ConnectionState = .unknown, refreshedAt: Date? = nil, currentActivity: String? = nil, transcript: [TranscriptItem] = [], transcriptWindow: TranscriptWindow = .init(), omittedTranscriptItemCount: Int = 0, interactions: [InteractionProjection] = [], capabilities: SessionCapabilities = .init(), agentTree: [AgentNodeProjection] = [], inputTokens: Int64 = 0, outputTokens: Int64 = 0, contextLength: Int64 = 0, contextLimit: Int64 = 0, compactionThreshold: Double? = nil, cost: Double = 0, cursor: UInt64 = 0, epoch: String = "", pendingInputCount: Int = 0) {
+        self.ref = ref; self.parentSession = parentSession; self.title = title; self.source = source; self.agentName = agentName; self.state = state; self.turnID = turnID; self.connection = connection; self.refreshedAt = refreshedAt; self.currentActivity = currentActivity
+        if transcriptWindow.hasCompleteCanonicalCoverage {
+            self.transcript = transcript
+        } else {
+            self.transcript = transcript.map { item in
+                guard item.branchAnchor != nil || item.userMessageIndex != nil else { return item }
+                return TranscriptItem(id: item.id, kind: item.kind, owner: item.owner, role: item.role, text: item.text, isStreaming: item.isStreaming, origin: item.origin, toolName: item.toolName, toolArguments: item.toolArguments, toolOutput: item.toolOutput, toolStatus: item.toolStatus, toolCallID: item.toolCallID, turnID: item.turnID, userInputState: item.userInputState, sourcePosition: item.sourcePosition, sourcePartIndex: item.sourcePartIndex, sourceHistoryGeneration: item.sourceHistoryGeneration, child: item.child, attachments: item.attachments, generatedMedia: item.generatedMedia, userMessageIndex: nil, branchAnchor: nil)
+            }
+        }
+        self.transcriptWindow = transcriptWindow; self.omittedTranscriptItemCount = omittedTranscriptItemCount; self.interactions = interactions; self.capabilities = capabilities; self.agentTree = agentTree; self.inputTokens = inputTokens; self.outputTokens = outputTokens; self.contextLength = contextLength; self.contextLimit = contextLimit; self.compactionThreshold = compactionThreshold; self.cost = cost; self.cursor = cursor; self.epoch = epoch; self.pendingInputCount = pendingInputCount
     }
 }
 

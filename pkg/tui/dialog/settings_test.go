@@ -78,7 +78,7 @@ func TestSettingsDialogTabSwitching(t *testing.T) {
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.Equal(t, settingsControls, d.focus)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	require.Equal(t, rowInterruptConfirmation, d.selected[d.tab])
+	require.Equal(t, rowYOLO, d.selected[d.tab])
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	require.Equal(t, settingsActions, d.focus)
 	before := d.focusedAction
@@ -238,7 +238,13 @@ func TestSettingsDialogTogglesActiveAgentsOnly(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.selected[tabAppearance] = rowActiveAgents
+	for range appearanceRowCount {
+		if d.selected[tabAppearance] == rowActiveAgents {
+			break
+		}
+		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	require.Equal(t, rowActiveAgents, d.selected[tabAppearance])
 
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	msgs := collectMsgs(cmd)
@@ -275,6 +281,44 @@ func TestSettingsDialogActiveAgentsRowDisabledWhenAgentsHidden(t *testing.T) {
 	assert.Equal(t, rowActiveAgents, d.selected[tabAppearance])
 }
 
+func TestSettingsDialogVisibleRepliesOptions(t *testing.T) {
+	t.Parallel()
+	preferences := messages.Preferences{VisibleReplies: messages.VisibleRepliesThree}
+	d := NewSettingsDialog(preferences, true).(*settingsDialog)
+	d.SetSize(100, 50)
+	assert.Equal(t, messages.VisibleRepliesThree, d.current.VisibleReplies)
+	d.selected[tabAppearance] = rowVisibleReplies
+	for _, value := range []messages.VisibleReplies{messages.VisibleRepliesFive, messages.VisibleRepliesAll, messages.VisibleRepliesLatest, messages.VisibleRepliesThree} {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+		assert.Equal(t, value, d.current.VisibleReplies)
+		assert.True(t, hasMsg[messages.PreviewSettingsMsg](collectMsgs(cmd)))
+	}
+	d.current.CompactWorkLog = false
+	assert.True(t, d.selectable(tabAppearance, rowVisibleReplies), "replies remain selectable when work-log compaction is disabled")
+	assert.Contains(t, ansi.Strip(d.View()), "Visible replies")
+	withoutVisuals := NewSettingsDialog(preferences, false).(*settingsDialog)
+	withoutVisuals.SetSize(100, 50)
+	assert.True(t, withoutVisuals.selectable(tabAppearance, rowVisibleReplies))
+	assert.Contains(t, ansi.Strip(withoutVisuals.View()), "Visible replies")
+}
+
+func TestSettingsDialogTogglesInputAlignmentAndPreviews(t *testing.T) {
+	t.Parallel()
+
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[tabAppearance] = rowAlignInputWithMessages
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.True(t, d.current.Layout.AlignInputWithMessages)
+	preview, ok := findMsg[messages.PreviewSettingsMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.True(t, preview.Preferences.Layout.AlignInputWithMessages)
+	assert.Contains(t, ansi.Strip(d.View()), "Align input with messages")
+
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	_, ok = findMsg[messages.CancelSettingsMsg](collectMsgs(cmd))
+	require.True(t, ok, "cancel restores the pre-preview layout")
+}
+
 func TestSettingsDialogTogglesSessionPath(t *testing.T) {
 	t.Parallel()
 
@@ -290,23 +334,6 @@ func TestSettingsDialogTogglesSessionPath(t *testing.T) {
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	assert.False(t, d.current.Layout.HideSessionPath, "space must toggle back")
-}
-
-func TestSettingsDialogTogglesSendModeWithoutPreview(t *testing.T) {
-	t.Parallel()
-
-	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.selectTab(tabBehavior)
-	d.prepareBody()
-	require.Equal(t, tabBehavior, d.tab)
-	require.Equal(t, messages.SendModeSteer, d.current.SendMode)
-
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-	assert.Nil(t, cmd, "the send mode has no live preview")
-	assert.Equal(t, messages.SendModeQueue, d.current.SendMode)
-
-	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-	assert.Equal(t, messages.SendModeSteer, d.current.SendMode, "cycling wraps around")
 }
 
 func TestSettingsDialogTogglesCacheStablePrompts(t *testing.T) {
@@ -355,23 +382,7 @@ func TestSettingsDialogApplyEmitsApplySettings(t *testing.T) {
 	applied, ok := msgs[0].(messages.ApplySettingsMsg)
 	require.True(t, ok)
 	assert.True(t, applied.Preferences.Layout.HideTools)
-	assert.Equal(t, messages.SendModeQueue, applied.Preferences.SendMode)
-}
-
-func TestSettingsDialogApplySendModeChangeOnly(t *testing.T) {
-	t.Parallel()
-
-	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.selectTab(tabBehavior)
-	d.prepareBody()
-	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-
-	_, cmd := d.Update(tea.KeyPressMsg{Code: settingsSaveKey})
-	msgs := collectMsgs(cmd)
-	require.Len(t, msgs, 1)
-	applied, ok := msgs[0].(messages.ApplySettingsMsg)
-	require.True(t, ok, "a send-mode-only change must still be applied")
-	assert.Equal(t, messages.SendModeQueue, applied.Preferences.SendMode)
+	assert.Equal(t, messages.SendModeSteer, applied.Preferences.SendMode, "legacy value remains untouched when applying other settings")
 }
 
 func TestSettingsDialogApplyWithoutChangesOnlyCloses(t *testing.T) {
@@ -401,21 +412,6 @@ func TestSettingsDialogEscapeRestoresOriginal(t *testing.T) {
 	cancel, ok := msgs[0].(messages.CancelSettingsMsg)
 	require.True(t, ok, "esc after a change must restore the original layout")
 	assert.Equal(t, d.transactionID, cancel.TransactionID)
-}
-
-func TestSettingsDialogEscapeWithSendModeChangeOnlyCloses(t *testing.T) {
-	t.Parallel()
-
-	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.selectTab(tabBehavior)
-	d.prepareBody()
-	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	msgs := collectMsgs(cmd)
-	require.Len(t, msgs, 1, "the send mode never previews, so there is nothing to roll back")
-	_, ok := msgs[0].(messages.CancelSettingsMsg)
-	assert.True(t, ok)
 }
 
 func TestSettingsDialogViewShowsVisualsRows(t *testing.T) {
@@ -450,17 +446,15 @@ func TestSettingsDialogViewShowsBehaviorRows(t *testing.T) {
 	d.prepareBody()
 	view := ansi.Strip(d.View())
 
-	assert.Contains(t, view, "While agent is working")
-	assert.Contains(t, view, "‹ Steer ›", "single enum shows the current mode")
-	assert.NotContains(t, view, "○")
-	assert.Contains(t, view, "mid-turn")
-	assert.NotContains(t, view, "Hold until the current turn ends")
+	assert.Contains(t, view, "Enter queues; Alt+Enter steers")
+	assert.NotContains(t, view, "While agent is working")
+	assert.NotContains(t, view, "‹ Steer ›")
 	assert.NotContains(t, view, "Sidebar position", "behavior tab must not render visuals rows")
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	view = ansi.Strip(d.View())
-	assert.Contains(t, view, "‹ Queue ›")
-	assert.Contains(t, view, "Hold until the current turn ends.")
+	assert.Contains(t, view, "‹ Double-tap ›", "right still adjusts interrupt confirmation")
+	assert.NotContains(t, view, "‹ Queue ›")
 }
 
 func TestStepValueClamps(t *testing.T) {
@@ -751,7 +745,8 @@ func TestSettingsDialogDefaultsToQueue(t *testing.T) {
 	d.selectTab(tabBehavior)
 	d.prepareBody()
 	require.Equal(t, messages.SendModeQueue, d.current.SendMode)
-	assert.Contains(t, ansi.Strip(d.View()), "‹ Queue ›")
+	assert.Contains(t, ansi.Strip(d.View()), "Enter queues; Alt+Enter steers")
+	assert.NotContains(t, ansi.Strip(d.View()), "‹ Queue ›")
 	assert.NotContains(t, ansi.Strip(d.View()), "○")
 }
 

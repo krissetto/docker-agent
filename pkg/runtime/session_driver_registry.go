@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"hash/maphash"
 	"maps"
 	"slices"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 // sessionDriverRegistry owns the per-session drivers for a LocalRuntime.
@@ -18,6 +20,7 @@ type sessionDriverRegistry struct {
 
 	mu                 sync.Mutex
 	publishing         [64]sync.Mutex
+	initializing       [64]sync.Mutex
 	publicationSeed    maphash.Seed
 	drivers            map[string]*sessionDriver
 	deleted            map[string]struct{}
@@ -49,11 +52,34 @@ func (g *sessionDriverRegistry) GetInitialized(ctx context.Context, sess *sessio
 }
 
 func (g *sessionDriverRegistry) getInitialized(ctx context.Context, sess *session.Session) (*sessionDriver, error) {
-	if g.r == nil || g.r.team == nil && g.r.teamEnvironments == nil {
-		return g.publishInitialized(sess, "", nil)
-	}
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "register"}
+	}
+	// Initialization for one session ID is serialized, so a first publication's
+	// writes to the caller's pointer never overlap another initializer's reads or
+	// writes. A resident driver owns its session: those callers initialize a
+	// private snapshot and never write the shared pointer.
+	initLock := &g.initializing[maphash.String(g.publicationSeed, sess.ID)%uint64(len(g.initializing))]
+	initLock.Lock()
+	defer initLock.Unlock()
+	_, resident := g.Lookup(sess.ID)
+	found := false
+	if !resident {
+		var err error
+		if found, err = g.adoptStoredIdentity(ctx, sess); err != nil {
+			return nil, err
+		}
+	}
+	if g.r == nil || g.r.team == nil && g.r.teamEnvironments == nil {
+		if !resident && !found {
+			if _, err := g.persistFirstTime(ctx, sess, nil); err != nil {
+				return nil, err
+			}
+		}
+		return g.publishInitialized(sess, "", nil)
+	}
+	if resident {
+		sess = sess.OwnSnapshot()
 	}
 	tm := g.r.team
 	var initialLease *TeamEnvironmentLease
@@ -76,20 +102,20 @@ func (g *sessionDriverRegistry) getInitialized(ctx context.Context, sess *sessio
 			}
 		}()
 	}
-	if sess.AgentName != "" {
-		if _, _, ok := tm.ResolveLegacyName(sess.AgentName); !ok {
-			return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ID, Operation: "resolve_agent_name"}
-		}
-	} else {
-		a, err := tm.DefaultAgent()
+	if err := resolveInitialAgent(tm, sess); err != nil {
+		return nil, err
+	}
+	if !resident && !found {
+		adopted, err := g.persistFirstTime(ctx, sess, tm)
 		if err != nil {
 			return nil, err
 		}
-		sess.AgentName = a.Name()
+		if adopted {
+			if err := resolveInitialAgent(tm, sess); err != nil {
+				return nil, err
+			}
+		}
 	}
-	// This path initializes a caller-owned, not yet canonical session. Never trust
-	// an AgentID supplied by the template; derive it from the current config.
-	sess.AgentID = configuredAgentID(tm, sess.AgentName)
 	modelRef, providers, err := g.r.resolveSessionModelBinding(environmentScopedContext(ctx, initialLease), sess, "")
 	if err != nil {
 		return nil, err
@@ -99,6 +125,178 @@ func (g *sessionDriverRegistry) getInitialized(ctx context.Context, sess *sessio
 		initialLease = nil
 	}
 	return driver, err
+}
+
+func persistenceError(id string, err error) error {
+	return &SessionError{Kind: SessionErrorPersistence, SessionID: id, Operation: SessionOperationRegister, Detail: err.Error()}
+}
+
+// resolveInitialAgent binds the live session's active agent from the team. The
+// AgentID is derived from the current config, never trusted from the caller.
+func resolveInitialAgent(tm *team.Team, sess *session.Session) error {
+	if sess.AgentName != "" {
+		if _, _, ok := tm.ResolveLegacyName(sess.AgentName); !ok {
+			return &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ID, Operation: "resolve_agent_name"}
+		}
+	} else {
+		a, err := tm.DefaultAgent()
+		if err != nil {
+			return err
+		}
+		sess.AgentName = a.Name()
+	}
+	sess.AgentID = configuredAgentID(tm, sess.AgentName)
+	return nil
+}
+
+// persistFirstTime writes the first row for an unregistered session before model
+// resolution and publication. A row created by a concurrent writer is adopted, not
+// rejected: the same creation rule as adoptStoredIdentity applies. It reports whether
+// that adoption happened, so the caller re-resolves the active agent. Nothing is
+// deleted on failure, and a failed revision write leaves the row in place.
+func (g *sessionDriverRegistry) persistFirstTime(ctx context.Context, sess *session.Session, tm *team.Team) (bool, error) {
+	if g.r == nil || g.r.sessionStore == nil {
+		return false, nil
+	}
+	g.mu.Lock()
+	_, deleted := g.deleted[sess.ID]
+	_, stopped := g.stoppedTrees[sess.ID]
+	blocked := g.closed || deleted || stopped || g.reservations[sess.ID] != nil
+	g.mu.Unlock()
+	if blocked {
+		// Publication reports the terminal or reservation error; no row is written.
+		return false, nil
+	}
+	creation := sess.AttributesSnapshot()[SessionAgentAttribute]
+	if creation == "" {
+		creation = sess.AgentName
+	}
+	row := sess.OwnSnapshot()
+	// The transcript is written by the run's own persistence, never by this first row.
+	row.Messages = nil
+	if creation != "" {
+		row.SetAttribute(SessionAgentAttribute, creation)
+		row.SetAttribute(SessionAgentIDAttribute, configuredAgentID(tm, creation))
+	}
+	store := g.r.sessionStore
+	if err := store.AddSession(ctx, row); err != nil {
+		if !errors.Is(err, session.ErrAlreadyExists) {
+			return false, persistenceError(sess.ID, err)
+		}
+		found, adoptErr := g.adoptStoredIdentity(ctx, sess)
+		if adoptErr != nil {
+			return false, adoptErr
+		}
+		if !found {
+			return false, persistenceError(sess.ID, errors.New("row disappeared during first write"))
+		}
+		return true, nil
+	}
+	if creation != "" {
+		sess.SetAttribute(SessionAgentAttribute, creation)
+		sess.SetAttribute(SessionAgentIDAttribute, configuredAgentID(tm, creation))
+	}
+	if err := recordTeamRevision(ctx, store, tm, row, creation); err != nil {
+		return false, persistenceError(sess.ID, err)
+	}
+	return false, nil
+}
+
+// canonicalAttributes are the creation and provenance keys an existing row owns.
+var canonicalAttributes = []string{
+	SessionAgentAttribute,
+	SessionAgentIDAttribute,
+	SessionParentAgentAttribute,
+	SessionParentAgentIDAttribute,
+	"docker-agent.actor.source",
+}
+
+// adoptStoredIdentity makes an existing row's canonical identity the live
+// session's, before name and model resolution, and reports whether the row exists.
+// Creation and provenance attributes, origin, parent, workspace, active agent and
+// title are adopted; transcript and other caller settings are kept. A template
+// creation agent that differs from the stored one is a conflict.
+func (g *sessionDriverRegistry) adoptStoredIdentity(ctx context.Context, sess *session.Session) (bool, error) {
+	if g.r == nil || g.r.sessionStore == nil {
+		return false, nil
+	}
+	stored, err := session.ReadSessionMetadata(ctx, g.r.sessionStore, sess.ID)
+	if errors.Is(err, session.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, persistenceError(sess.ID, err)
+	}
+	attrs := stored.AttributesSnapshot()
+	template := sess.AttributesSnapshot()[SessionAgentAttribute]
+	if template != "" && attrs[SessionAgentAttribute] != "" && template != attrs[SessionAgentAttribute] {
+		return false, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: SessionOperationRegister, Detail: "creation agent differs from stored session"}
+	}
+	for _, key := range canonicalAttributes {
+		if value, ok := attrs[key]; ok {
+			sess.SetAttribute(key, value)
+		} else {
+			sess.DeleteAttribute(key)
+		}
+	}
+	sess.ParentID = stored.ParentID
+	if stored.WorkingDir != "" {
+		sess.WorkingDir = stored.WorkingDir
+	}
+	// A nonempty caller title is live state; the stored title is only a fallback.
+	if sess.Title == "" && stored.Title != "" {
+		sess.Title = stored.Title
+	}
+	if stored.AgentName != "" {
+		sess.AgentName = stored.AgentName
+	}
+	return true, nil
+}
+
+// markRemoval records a removal. A final removal takes the ID's initialization
+// fence first, so an in-flight first-time save completes before the tombstone or
+// observes it. The fence wait honors ctx; a timed-out removal changes nothing.
+func (g *sessionDriverRegistry) markRemoval(ctx context.Context, sessionID string, expected *sessionDriver, final bool) (*sessionDriver, bool, error) {
+	if final {
+		fence := &g.initializing[maphash.String(g.publicationSeed, sessionID)%uint64(len(g.initializing))]
+		if err := lockFence(ctx, fence); err != nil {
+			return nil, false, err
+		}
+		defer fence.Unlock()
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	d := g.drivers[sessionID]
+	if expected != nil && d != expected {
+		return nil, true, nil
+	}
+	if d != nil {
+		d.maintenanceRetired = true
+	}
+	if final {
+		g.deleted[sessionID] = struct{}{}
+	}
+	return d, false, nil
+}
+
+// lockFence acquires mu or returns ctx's error. An abandoned acquisition is
+// released by a helper goroutine once it succeeds, so no waiter leaks the fence.
+func lockFence(ctx context.Context, mu *sync.Mutex) error {
+	acquired := make(chan struct{})
+	go func() {
+		mu.Lock()
+		close(acquired)
+	}()
+	select {
+	case <-acquired:
+		return nil
+	case <-ctx.Done():
+		go func() {
+			<-acquired
+			mu.Unlock()
+		}()
+		return ctx.Err()
+	}
 }
 
 // Get returns the driver for test and internal convenience callers. Production
@@ -413,6 +611,24 @@ type restoreDriverReservation struct {
 	driver   *sessionDriver
 	id       string
 	replaces *sessionDriver
+	// done closes exactly once when the reservation leaves the registry, on
+	// publish, discard, or registry shutdown. A colliding prepare waits on it.
+	done       chan struct{}
+	settleOnce sync.Once
+}
+
+func (r *restoreDriverReservation) settle() {
+	if r == nil || r.done == nil {
+		return
+	}
+	r.settleOnce.Do(func() { close(r.done) })
+}
+
+// reservationFor returns the in-flight reservation for id, or nil.
+func (g *sessionDriverRegistry) reservationFor(id string) *restoreDriverReservation {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.reservations[id]
 }
 
 // PrepareRestore constructs a driver and resolves its model binding while it is
@@ -487,7 +703,7 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 		initialLease = nil
 	}
 	d.SetModelBinding(modelRef, providers)
-	reservation := &restoreDriverReservation{registry: g, driver: d, id: sess.ID, replaces: replaces}
+	reservation := &restoreDriverReservation{registry: g, driver: d, id: sess.ID, replaces: replaces, done: make(chan struct{})}
 	reserved := false
 	defer func() {
 		if !reserved {
@@ -528,6 +744,7 @@ func (r *restoreDriverReservation) Discard() {
 	if r == nil || r.registry == nil {
 		return
 	}
+	defer r.settle()
 	r.registry.mu.Lock()
 	discarded := false
 	defer func() {
@@ -594,6 +811,9 @@ func (g *sessionDriverRegistry) ActivateRestoreBatch(batch []*restoreDriverReser
 		delete(g.reservations, reservation.id)
 	}
 	g.mu.Unlock()
+	for _, reservation := range batch {
+		reservation.settle()
+	}
 	for _, reservation := range batch {
 		if reservation.replaces != nil {
 			reservation.replaces.closeOwner()
@@ -734,19 +954,13 @@ func (g *sessionDriverRegistry) ReleaseDriver(ctx context.Context, sessionID str
 }
 
 func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, expected *sessionDriver, final bool) error {
-	g.mu.Lock()
-	d := g.drivers[sessionID]
-	if expected != nil && d != expected {
-		g.mu.Unlock()
+	d, skip, err := g.markRemoval(ctx, sessionID, expected, final)
+	if err != nil {
+		return err
+	}
+	if skip {
 		return nil
 	}
-	if d != nil {
-		d.maintenanceRetired = true
-	}
-	if final {
-		g.deleted[sessionID] = struct{}{}
-	}
-	g.mu.Unlock()
 	if d != nil {
 		if final {
 			d.StopAllForDelete()
@@ -832,6 +1046,7 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 	}
 	for id := range g.reservations {
 		drivers = append(drivers, g.reservations[id].driver)
+		g.reservations[id].settle()
 		g.releasePersistence(id)
 	}
 	g.reservations = map[string]*restoreDriverReservation{}
@@ -989,4 +1204,12 @@ func (g *sessionDriverRegistry) reserveCreation(ctx context.Context, id string) 
 		g.mu.Unlock()
 		return func() { g.mu.Lock(); defer g.mu.Unlock(); delete(g.creating, id); close(done) }, nil
 	}
+}
+
+// restoreReserved reports whether a restore currently reserves id. It takes the
+// registry lock only briefly and never mutates state.
+func (g *sessionDriverRegistry) restoreReserved(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.reservations[id] != nil
 }

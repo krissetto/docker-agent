@@ -123,6 +123,12 @@ func renderInputFrame(frame lipgloss.Style, width int, view string) string {
 func (i *Input) SurfaceView() string { return renderInputFrame(i.Frame(), i.Width(), i.View()) }
 func (i *Input) SurfaceHeight() int  { return i.Height() + i.Frame().GetVerticalFrameSize() }
 
+// Cursor returns the focused text cursor for inline embeddings.
+func (i *Input) Cursor() *tea.Cursor { return i.Textarea.Cursor() }
+
+// SetVirtualCursor configures whether cursor position is owned by the outer renderer.
+func (i *Input) SetVirtualCursor(enabled bool) { i.Textarea.SetVirtualCursor(enabled) }
+
 func (i *Input) PlaceSurfaceCursor(cell, row int) {
 	frame := i.Frame()
 	i.PlaceCursor(cell-frame.GetMarginLeft()-frame.GetBorderLeftSize()-frame.GetPaddingLeft(), row-frame.GetMarginTop()-frame.GetBorderTopSize()-frame.GetPaddingTop())

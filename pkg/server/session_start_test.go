@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -51,6 +52,54 @@ func TestSessionStartConcurrentRetryAndConflict(t *testing.T) {
 	require.Equal(t, 1, users)
 	conflict := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/start", `{"session_id":"idempotent-start","agent_name":"root","input":{"request_id":"first","content":"different"}}`, "")
 	require.Equal(t, http.StatusConflict, conflict.Code, conflict.Body.String())
+}
+
+func TestSessionStartRequestsTitleOnlyWhenTitleIsBlank(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{name: "blank title generates", want: "HTTP title"},
+		{name: "explicit title wins", title: "Keep my title", want: "Keep my title"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &presentationTitleProvider{entered: make(chan struct{}), release: make(chan struct{})}
+			store := session.NewInMemorySessionStore()
+			srv, owner := newCanonicalLocalServer(t, store,
+				agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{}), agent.WithTitleModel(provider)))
+			sessionID := "start-title-blank"
+			if tc.title != "" {
+				sessionID = "start-title-explicit"
+			}
+			body, err := json.Marshal(map[string]any{
+				"session_id": sessionID, "agent_name": "root", "title": tc.title,
+				"input": map[string]any{"request_id": "first", "content": "first prompt", "generate_title": true},
+			})
+			require.NoError(t, err)
+			response := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/start", string(body), "")
+			require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+			var submitted sessionSubmissionDTO
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &submitted))
+			handle, err := owner.Runtime().SessionByID(sessionID)
+			require.NoError(t, err)
+			if tc.title == "" {
+				select {
+				case <-provider.entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("blank first turn did not start title generation")
+				}
+				close(provider.release)
+			} else {
+				require.NoError(t, handle.AwaitTurn(t.Context(), submitted.TurnID))
+				require.Zero(t, provider.calls.Load(), "the server must preserve an explicit title")
+			}
+			require.Eventually(t, func() bool {
+				stored, getErr := store.GetSession(t.Context(), sessionID)
+				return getErr == nil && stored.TitleSnapshot() == tc.want
+			}, 5*time.Second, 10*time.Millisecond)
+		})
+	}
 }
 
 func TestSessionStartRetriesAfterCreationWithoutSubmission(t *testing.T) {

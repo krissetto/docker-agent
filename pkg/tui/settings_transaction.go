@@ -57,6 +57,9 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	runtime := original
 	runtime.Layout, runtime.Panel = m.layoutSettings, messages.NormalizePanelSettings(m.panelSettings)
 	runtime.ShowBanner, runtime.DimInactivePanes, runtime.TransparentBackground = m.showBanner, m.dimInactivePanes, m.transparentBackground
+	runtime.CompactWorkLog = m.compactWorkLog
+	runtime.ShowAgentContext = m.agentContextReadings
+	runtime.VisibleReplies = m.visibleReplies
 	if m.imageWriter != nil {
 		runtime.RenderImages = m.imageWriter.Enabled()
 	}
@@ -108,6 +111,32 @@ func (m *appModel) previewSettings(before, p messages.Preferences) tea.Cmd {
 	if !before.Panel.Equal(p.Panel) {
 		_, cmd := m.applyPanelSettings(p.Panel)
 		cmds = append(cmds, cmd)
+	}
+	if before.VisibleReplies != p.VisibleReplies {
+		m.visibleReplies = messages.ParseVisibleReplies(string(p.VisibleReplies))
+		for _, page := range m.chatPages {
+			if owner, ok := page.(interface {
+				SetVisibleReplies(policy messages.VisibleReplies) tea.Cmd
+			}); ok {
+				cmds = append(cmds, owner.SetVisibleReplies(m.visibleReplies))
+			}
+		}
+	}
+	if before.CompactWorkLog != p.CompactWorkLog {
+		m.compactWorkLog = p.CompactWorkLog
+		for _, page := range m.chatPages {
+			if owner, ok := page.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
+				cmds = append(cmds, owner.SetCompactWorkLog(p.CompactWorkLog))
+			}
+		}
+	}
+	if before.ShowAgentContext != p.ShowAgentContext {
+		m.agentContextReadings = p.ShowAgentContext
+		for _, page := range m.chatPages {
+			if owner, ok := page.(interface{ SetAgentContextReadings(enabled bool) }); ok {
+				owner.SetAgentContextReadings(p.ShowAgentContext)
+			}
+		}
 	}
 	if before.ShowBanner != p.ShowBanner {
 		m.showBanner = p.ShowBanner
@@ -174,12 +203,6 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	p := msg.Preferences
 	if p.CloseTabChoice != tx.original.CloseTabChoice {
 		m.closeTabChoice = messages.ParseCloseTabChoice(string(p.CloseTabChoice))
-	}
-	if p.SendMode != tx.original.SendMode || m.sendMode != p.SendMode {
-		m.sendMode = p.SendMode
-		for _, page := range m.chatPages {
-			page.SetSendMode(p.SendMode)
-		}
 	}
 	if p.InterruptConfirmation != tx.original.InterruptConfirmation || m.interruptMode != p.InterruptConfirmation {
 		m.interruptMode = p.InterruptConfirmation

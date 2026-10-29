@@ -124,9 +124,10 @@ func (h *sessionHandle) reactivateStoppedView(ctx context.Context, msg QueuedMes
 					}
 				}
 				position := owned.AddMessageAt(accepted)
+				owned.MarkHistoryChanged()
 				d.sess = owned
 				d.pending = []QueuedMessage{queuedSessionInput(accepted, position, true)}
-				d.stopped, d.stoppedView = false, false
+				d.stopped, d.stoppedView, d.explicitStopped = false, false, false
 				d.authorizeViewLocked()
 				d.events.PublishForRequest(h.sessionID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(h.sessionID, msg.RequestID, msg.Content, msg.MultiContent, position), msg))
 				return nil

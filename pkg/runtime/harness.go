@@ -35,9 +35,10 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	}
 
 	var presentation []chat.AssistantPart
+	var presentationText chat.AssistantTextAppender
 	liveEvents := events
 	events = EventSinkFunc(func(event Event) {
-		presentation = captureAssistantPresentation(presentation, event)
+		presentation = capturePresentation(&presentationText, presentation, event)
 		liveEvents.Emit(event)
 	})
 

@@ -1557,3 +1557,216 @@ func (p *httpPreparedFixture) Commit(ctx context.Context) (runtime.CommittedSess
 	}
 	return runtime.CommittedSessionView{SessionHandle: handle, Info: p.Info()}, nil
 }
+
+type tailHTTPHandle struct {
+	*httpSession
+	tail runtime.SessionSnapshot
+	page runtime.SessionSnapshot
+}
+
+func (h *tailHTTPHandle) Observe(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.HistoryTail == nil {
+		return h.httpSession.Observe(context.Background(), options)
+	}
+	return runtime.Observation{Initial: []runtime.SessionSnapshot{h.tail}, Events: make(chan runtime.SessionEvent), Cancel: func() {}}, nil
+}
+func (h *tailHTTPHandle) ReadHistoryPage(context.Context, string, string, runtime.SessionHistoryLimits) (runtime.SessionSnapshot, error) {
+	return h.page, nil
+}
+func (h *tailHTTPHandle) ReadHistoryPageBounded(_ context.Context, _, _ string, _ runtime.SessionHistoryLimits, accept func(runtime.SessionSnapshot) bool) error {
+	if !accept(h.page) {
+		return runtime.ErrHistoryMetadataTooLarge
+	}
+	return nil
+}
+
+type tailHTTPRegistry struct {
+	*httpSessionRegistry
+	handle *tailHTTPHandle
+}
+
+func (r *tailHTTPRegistry) SessionByID(id string) (runtime.SessionHandle, error) {
+	if id == r.handle.id {
+		return r.handle, nil
+	}
+	return r.httpSessionRegistry.SessionByID(id)
+}
+
+func TestTailSnapshotHTTPAdvertisesAndBoundsCompletePage(t *testing.T) {
+	sess := session.New(session.WithID("tail-wire"))
+	for i := 0; i < 120; i++ {
+		sess.AddMessage(session.UserMessage(fmt.Sprintf("row-%03d %s", i, strings.Repeat("x", 2048))))
+	}
+	sess.AddMessage(session.UserMessage(strings.Repeat("huge", (17<<20)/4)))
+	items, err := sess.ReadBoundedItems(121, 101, 4096, 256<<10)
+	require.NoError(t, err)
+	header, err := sess.HistoryHeaderSnapshot(1 << 20)
+	require.NoError(t, err)
+	tail := runtime.SessionSnapshot{Projection: "tail", Session: header, Status: runtime.SessionStatus{SessionID: sess.ID, AgentName: "root", State: runtime.SessionStateSettled}, Epoch: "epoch", Cursor: 7, TranscriptPosition: 121, Items: items.Items, History: &items}
+	base := &httpSession{id: sess.ID, agent: "root", snapshot: sess}
+	registry := &tailHTTPRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, handle: &tailHTTPHandle{httpSession: base, tail: tail}}
+	store := session.NewInMemorySessionStore()
+	srv := NewWithManager(NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry)), "")
+	query := "projection=tail&max_items=100&max_bytes=262144&max_item_bytes=4096"
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/tail-wire/snapshot?"+query, "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.LessOrEqual(t, rec.Body.Len(), 262144)
+	var wire map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &wire))
+	require.Equal(t, `"tail"`, string(wire["projection"]))
+	require.NotContains(t, string(wire["session"]), `"messages"`)
+	require.NotEmpty(t, wire["items"])
+	var history struct {
+		OmittedRanges []struct {
+			StartPosition int    `json:"start_position"`
+			EndPosition   int    `json:"end_position"`
+			Reason        string `json:"reason"`
+		} `json:"omitted_ranges"`
+	}
+	require.NoError(t, json.Unmarshal(wire["history"], &history))
+	require.Len(t, history.OmittedRanges, 1)
+	require.Equal(t, 120, history.OmittedRanges[0].StartPosition)
+	require.Equal(t, 121, history.OmittedRanges[0].EndPosition)
+	require.Equal(t, "item_exceeds_item_byte_limit", history.OmittedRanges[0].Reason)
+	serverInfo := sessionRequest(t, srv, http.MethodGet, "/api/v2/server", "", "")
+	require.Contains(t, serverInfo.Body.String(), "session_history_pages")
+
+	streamServer := httptest.NewServer(srv.e)
+	defer streamServer.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, streamServer.URL+"/api/v2/sessions/tail-wire/events?"+query, http.NoBody)
+	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	reader := bufio.NewReader(response.Body)
+	var chunked bool
+	var assembled []byte
+	for {
+		line, readErr := reader.ReadString('\n')
+		require.NoError(t, readErr)
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var frame sessionStreamMessage
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame))
+		switch frame.Type {
+		case "snapshot":
+			data, e := json.Marshal(frame.Snapshot)
+			require.NoError(t, e)
+			assembled = data
+			goto assembledSnapshot
+		case "snapshot_begin":
+			chunked = true
+		case "snapshot_chunk":
+			assembled = append(assembled, frame.Chunk...)
+		case "snapshot_end":
+			goto assembledSnapshot
+		}
+	}
+assembledSnapshot:
+	require.True(t, chunked, "fixture should exercise chunked SSE snapshot reassembly")
+	require.LessOrEqual(t, len(assembled), 262144)
+	require.Contains(t, string(assembled), `"projection":"tail"`)
+	require.NotContains(t, string(assembled), `"messages"`)
+}
+
+func TestTailSnapshotNearBudgetPacksCompleteItemsAndSSEUsesSameBoundary(t *testing.T) {
+	sess := session.New(session.WithID("tail-near-budget"))
+	content := strings.Repeat("x", 132<<10)
+	for i := 0; i < 16; i++ {
+		sess.AddMessage(session.UserMessage(content))
+	}
+	sess.AddMessage(session.UserMessage(strings.Repeat("oversized", (17<<20)/9)))
+	header, err := sess.HistoryHeaderSnapshot(2 << 20)
+	require.NoError(t, err)
+	limits := runtime.SessionHistoryLimits{MaxItems: 17, MaxBytes: 2 << 20, MaxItemBytes: 256 << 10}
+	status := runtime.SessionStatus{SessionID: sess.ID, AgentName: "root", State: runtime.SessionStateSettled}
+	read := func() runtime.SessionSnapshot {
+		base := runtime.SessionSnapshot{Projection: "tail", Session: header, Status: status, Epoch: "epoch", Cursor: 42, TranscriptPosition: 17}
+		page, e := sess.ReadBoundedItemsWithBudget(17, limits.MaxItems, limits.MaxItemBytes, func(candidate session.BoundedItemPage) bool {
+			candidate.TotalItems = 17
+			candidate.BeforePosition = 17
+			view := base
+			view.Items = candidate.Items
+			view.History = &candidate
+			view.HistoryCursor = "opaque-cursor"
+			return boundedHistoryDTO(sessionSnapshot(view), limits.MaxBytes)
+		})
+		require.NoError(t, e)
+		page.TotalItems = 17
+		page.BeforePosition = 17
+		base.Items = page.Items
+		base.History = &page
+		base.HistoryCursor = "opaque-cursor"
+		return base
+	}
+	tail := read()
+	require.Len(t, tail.Items, 15, "the complete response envelope should leave the 16th normal item for another page")
+	require.True(t, tail.History.HasMore)
+	require.Equal(t, []int{16}, tail.History.OmittedPositions)
+	require.Empty(t, tail.History.OmittedResponsePositions)
+	baseHandle := &httpSession{id: sess.ID, agent: "root", snapshot: header}
+	registry := &tailHTTPRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, handle: &tailHTTPHandle{httpSession: baseHandle, tail: tail}}
+	store := session.NewInMemorySessionStore()
+	srv := NewWithManager(NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry)), "")
+	query := "projection=tail&max_items=17&max_bytes=2097152&max_item_bytes=262144"
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v2/sessions/tail-near-budget/snapshot?"+query, http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.e.ServeHTTP(rec, request)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.LessOrEqual(t, rec.Body.Len(), 2<<20)
+	var snapshotWire struct {
+		Items   []json.RawMessage `json:"items"`
+		History struct {
+			NextCursor string `json:"next_cursor"`
+		} `json:"history"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &snapshotWire))
+	require.Len(t, snapshotWire.Items, 15)
+	require.NotEmpty(t, snapshotWire.History.NextCursor)
+
+	streamServer := httptest.NewServer(srv.e)
+	defer streamServer.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	streamRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, streamServer.URL+"/api/v2/sessions/tail-near-budget/events?"+query, http.NoBody)
+	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(streamRequest)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	reader := bufio.NewReader(response.Body)
+	var chunked bool
+	var assembled []byte
+	for {
+		line, readErr := reader.ReadString('\n')
+		require.NoError(t, readErr)
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var frame sessionStreamMessage
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame))
+		switch frame.Type {
+		case "snapshot":
+			data, e := json.Marshal(frame.Snapshot)
+			require.NoError(t, e)
+			assembled = data
+			goto assembledNearBudget
+		case "snapshot_begin":
+			chunked = true
+		case "snapshot_chunk":
+			assembled = append(assembled, frame.Chunk...)
+		case "snapshot_end":
+			goto assembledNearBudget
+		}
+	}
+assembledNearBudget:
+	require.True(t, chunked)
+	require.LessOrEqual(t, len(assembled), 2<<20)
+	require.Equal(t, 15, strings.Count(string(assembled), `"item":`))
+}

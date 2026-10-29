@@ -140,3 +140,45 @@ func TestProjectionOrderedElicitationResolutionDoesNotResurrectPrompt(t *testing
 	sink.Apply(runtime.SessionEvent{Version: 1, SessionID: "s", Sequence: 2, InteractionID: prompt.RequestID, Event: &runtime.InteractionResolvedEvent{Type: "interaction_resolved", SessionID: "s", InteractionID: prompt.RequestID, Reason: runtime.InteractionResponded}})
 	require.Empty(t, a.Presentation().Interactions)
 }
+
+func TestProjectionDormancyEventsUpdateStoppedStatusAndResumeIt(t *testing.T) {
+	a := newMetadataTestApp(t)
+	a.projectEvent(&SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: session.New(session.WithID("s")), Status: runtime.SessionStatus{SessionID: "s", Stopped: true}}})
+	stopped := a.Presentation()
+	assert.True(t, stopped.Status.Stopped)
+
+	a.projectEvent(&runtime.DormancyChangedEvent{SessionID: "s", Dormant: false, Stopped: false})
+	reactivated := a.Presentation()
+	assert.False(t, reactivated.Status.Stopped, "authorized user input clears stopped status")
+	assert.True(t, stopped.Status.Stopped, "published projection remains immutable")
+
+	a.projectEvent(&runtime.DormancyChangedEvent{SessionID: "s", Dormant: false, Stopped: true})
+	assert.True(t, a.Presentation().Status.Stopped, "runtime stop reestablishes stopped status")
+}
+
+func TestProjectionImmediateAcceptedDoesNotBecomePending(t *testing.T) {
+	a := newMetadataTestApp(t)
+	seed := session.New(session.WithID("s"))
+	pending := session.UserMessage("now admitted")
+	pending.TurnID, pending.Pending, pending.Accepted = "immediate", true, true
+	seed.AddMessage(pending)
+	a.projectEvent(&SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: seed, Status: runtime.SessionStatus{SessionID: "s", Pending: 1}, PendingInputs: []runtime.PendingInput{{TurnID: "immediate", Content: "now admitted"}}}})
+	assert.Equal(t, []string{"immediate"}, a.Presentation().Lifecycle.Pending)
+	accepted := &runtime.PendingUserMessageAcceptedEvent{SessionID: "s", TurnID: "immediate", Message: "now admitted", Immediate: true, SessionPosition: 0}
+	a.projectEvent(accepted)
+	assert.Empty(t, a.Presentation().PendingInputs)
+	assert.Empty(t, a.Presentation().Lifecycle.Pending)
+	assert.Equal(t, 0, a.Presentation().Status.Pending)
+	require.Len(t, a.Session().ItemsSnapshot(), 1, "durably promoted input remains in the canonical transcript mirror")
+	assert.False(t, a.Session().ItemsSnapshot()[0].Message.Pending)
+	assert.Equal(t, "immediate", a.Session().ItemsSnapshot()[0].Message.TurnID)
+	a.projectEvent(&runtime.PendingUserMessagePromotedEvent{SessionID: "s", TurnID: "immediate", Message: "now admitted", SessionPosition: 0})
+	assert.Empty(t, a.Presentation().Lifecycle.Pending)
+	assert.Empty(t, a.Presentation().PendingInputs)
+	require.Len(t, a.Session().ItemsSnapshot(), 1, "promotion is idempotent after the immediate accepted event")
+
+	queuedAccepted := &runtime.PendingUserMessageAcceptedEvent{SessionID: "s", TurnID: "queued", Message: "must stay queuedAccepted", SessionPosition: 1}
+	a.projectEvent(queuedAccepted) // false is the compatibility default for older servers
+	assert.Equal(t, []string{"queued"}, a.Presentation().Lifecycle.Pending)
+	assert.Equal(t, []string{"queued"}, []string{a.Presentation().PendingInputs[0].TurnID})
+}

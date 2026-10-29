@@ -45,6 +45,15 @@ func newSidebarGesturePage(t *testing.T, position msgtypes.SidebarPosition) (*ch
 	y := renderedLineContaining(t, p.sidebar.View(), "subagents")
 	p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	settleSidebarGesture(t, p)
+	view := ansi.Strip(p.sidebar.View())
+	if !strings.Contains(view, "reviewer") {
+		// Idle branches now start folded. Explicitly open this fixture branch
+		// so these gesture tests continue to exercise its descendants.
+		branchY := renderedLineContaining(t, view, "作業planner")
+		branchX := styles.AppPadding + p.computeSidebarLayout().sidebarStartX + sidebar.DefaultLayoutConfig().PaddingLeft
+		p.handleMouseClick(tea.MouseClickMsg{X: branchX, Y: branchY, Button: tea.MouseLeft})
+		settleSidebarGesture(t, p)
+	}
 	require.Contains(t, ansi.Strip(p.sidebar.View()), "reviewer")
 	return p, &now
 }

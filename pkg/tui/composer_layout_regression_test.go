@@ -215,7 +215,12 @@ func TestComposerLayoutTabsRemainInteractiveBelowAttachments(t *testing.T) {
 	}
 	require.True(t, found, "second tab has a rendered label")
 	root.Update(tea.MouseClickMsg{X: x, Y: g.tabsTop, Button: tea.MouseLeft})
-	require.True(t, root.tabBar.HasPointerCapture(), "banner offset is removed from tab press")
+	if root.paneGesture != nil {
+		// A registered session's tab press starts the same pane gesture as without a banner.
+		require.Equal(t, "second", root.paneGesture.source, "banner offset is removed from tab press")
+	} else {
+		require.True(t, root.tabBar.HasPointerCapture(), "banner offset is removed from tab press")
+	}
 	require.False(t, root.isDragging, "tab press does not acquire composer resize")
 	root.Update(tea.MouseMotionMsg{X: x + 3, Y: g.tabsTop, Button: tea.MouseLeft})
 	require.True(t, root.tabBar.HasFloatingOverlay())
@@ -224,6 +229,7 @@ func TestComposerLayoutTabsRemainInteractiveBelowAttachments(t *testing.T) {
 	require.Equal(t, g.tabsTop, layer.Y)
 	root.Update(tea.MouseReleaseMsg{X: x + 3, Y: g.tabsTop, Button: tea.MouseLeft})
 	require.False(t, root.tabBar.HasPointerCapture(), "release retains tab-local coordinates")
+	require.Nil(t, root.paneGesture, "release ends the pane-owned tab gesture too")
 }
 
 func TestComposerLayoutClippedBannerLeanAndTinyCompletion(t *testing.T) {

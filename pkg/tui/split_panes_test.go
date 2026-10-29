@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
+	"github.com/docker/docker-agent/pkg/tui/components/grip"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -352,6 +353,45 @@ func TestTiledSidebarGeometryDoesNotFollowPerTabPreferences(t *testing.T) {
 	require.Equal(t, second, root.chatPage.GetSidebarSettings())
 }
 
+func TestPaneFooterRestoredTerminalAndReadOnlyLabels(t *testing.T) {
+	root := splitTestRoot(t)
+	tests := []struct {
+		name   string
+		status runtime.SessionStatus
+		want   string
+		avoid  []string
+	}{
+		{name: "dormant", status: runtime.SessionStatus{Dormant: true}, want: "Restored · dormant · message or /resume", avoid: []string{"paused"}},
+		{name: "queued dormant", status: runtime.SessionStatus{Dormant: true, Pending: 2}, want: "2 inputs queued"},
+		{name: "stopped", status: runtime.SessionStatus{Stopped: true}, want: "· stopped", avoid: []string{"/resume", "idle"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := ansi.Strip(root.paneActivityForStatus("profile", test.status, true))
+			require.Contains(t, got, test.want)
+			for _, avoid := range test.avoid {
+				require.NotContains(t, got, avoid)
+			}
+		})
+	}
+
+	root.supervisor.GetRunner("second").App = app.New(t.Context(), nil, session.New(session.WithID("second")), runtime.SessionBinding{}, app.WithReadOnly())
+	readOnly := ansi.Strip(root.paneActivity("second"))
+	require.Contains(t, readOnly, "· read-only")
+	require.NotContains(t, readOnly, "/resume")
+	require.NotContains(t, readOnly, "idle")
+
+	root.tabInfos = []messages.TabInfo{{SessionID: "profile", Activity: messages.TabActivityRunning}}
+	running := root.paneActivityForStatus("profile", runtime.SessionStatus{}, true)
+	require.Contains(t, ansi.Strip(running), "running")
+	require.NotContains(t, ansi.Strip(running), "Restored")
+	root.sessionStates["profile"].SetPauseState(service.PausePaused)
+	paused := ansi.Strip(root.paneActivityForStatus("profile", runtime.SessionStatus{Dormant: true, PauseArmed: true, Paused: true}, true))
+	require.Contains(t, paused, "⏸ paused")
+	require.NotContains(t, paused, "message or /resume")
+	require.NotContains(t, paused, "Restored")
+}
+
 func TestPaneHeaderOwnsActivityWithoutSharedSeparator(t *testing.T) {
 	root := splitTestRoot(t)
 	root.splitPane("second", "profile", splitRight)
@@ -529,13 +569,13 @@ func TestPaneHeaderUsesOneImmutableStatusSnapshotDuringComposition(t *testing.T)
 	root := splitTestRoot(t)
 	root.composingPaneStatuses = map[string]runtime.SessionStatus{"profile": {SessionID: "profile", Dormant: true, Pending: 2}}
 	first := ansi.Strip(root.paneTitle("profile", 120))
-	require.Contains(t, first, "Restored · paused")
+	require.Contains(t, first, "Restored · dormant · message or /resume")
 	// Simulate a newer canonical head becoming observable while composing.
 	// The published frame must remain coherent with its captured key.
 	root.viewPaneStatuses = root.composingPaneStatuses
 	root.composingPaneStatuses = map[string]runtime.SessionStatus{"profile": {SessionID: "profile", Dormant: false, Pending: 2}}
 	second := ansi.Strip(root.paneTitle("profile", 120))
-	require.NotContains(t, second, "Restored · paused")
+	require.NotContains(t, second, "Restored · dormant · message or /resume")
 	require.True(t, root.viewPaneStatuses["profile"].Dormant, "previous frame key remains immutable")
 	root.composingPaneStatuses = nil
 }
@@ -555,7 +595,7 @@ func TestPaneHeadersSeparateRecipientAndTranscriptFromTabs(t *testing.T) {
 		require.NotContains(t, ansi.Strip(frame), "Send to", "single visible pane never has a heading")
 		require.NotContains(t, ansi.Strip(frame), "Composer")
 		if root.contentHeight > paneMinHeight {
-			require.Contains(t, ansi.Strip(rows[root.contentHeight]), "─", "the restored separator separates transcript/sidebar from tabs")
+			require.Equal(t, strings.Repeat(" ", root.width), ansi.Strip(rows[root.contentHeight]), "the resize track stays hidden at rest")
 			for _, rect := range root.paneGeometry.Panes {
 				require.LessOrEqual(t, rect.Y+rect.H, root.contentHeight)
 			}
@@ -619,8 +659,15 @@ func TestSharedSidebarAndPaneHeaderGeometryAcrossWidthsFocusAndTheme(t *testing.
 				require.LessOrEqual(t, root.paneShell.Sidebar.Height, 2)
 			}
 			if root.contentHeight > paneMinHeight {
-				rows := strings.Split(ansi.Strip(frame), "\n")
-				require.Contains(t, rows[root.contentHeight], "─")
+				// The divider grip is blank at rest and reveals on hover.
+				root.composerGrip = grip.NewReveal(nil)
+				divider := func() string {
+					return strings.Split(ansi.Strip(root.View().Content), "\n")[root.contentHeight]
+				}
+				require.NotContains(t, divider(), "─", "divider grip is blank at rest")
+				root.Update(tea.MouseMotionMsg{X: styles.AppPadding, Y: root.contentHeight})
+				require.Contains(t, divider(), "─", "divider grip reveals on hover")
+				root.Update(tea.MouseMotionMsg{X: -1, Y: -1})
 			}
 		}
 	}
@@ -714,7 +761,9 @@ func TestPureBaseThemesRenderCanonicalPaneShellAndDialog(t *testing.T) {
 			root.splitPane("second", "profile", splitRight)
 			_, teamCmd := root.Update(runtime.TeamInfo([]runtime.AgentDetails{{Name: "reviewer", Provider: "provider", Model: "fixture alias", ModelID: "canonical-model", ModelName: "Friendly Model", ThinkingMode: "effort", ThinkingLevel: "high", CanCycleThinking: true}}, "reviewer"))
 			_, agentCmd := root.Update(runtime.AgentInfo("reviewer", "provider/canonical-model", "Reviewer", ""))
-			settleRootChrome(t, root, tea.Batch(teamCmd, agentCmd))
+			// The usage block renders only after the session reports usage.
+			_, usageCmd := root.Update(&runtime.TokenUsageEvent{SessionID: "profile", AgentContext: runtime.AgentContext{AgentName: "reviewer"}, Usage: &runtime.Usage{}})
+			settleRootChrome(t, root, tea.Batch(teamCmd, agentCmd, usageCmd))
 			root.dimInactivePanes = true
 			frame := root.View().Content
 			plain := ansi.Strip(frame)

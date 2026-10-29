@@ -33,7 +33,9 @@ func TestPanePreparationReusesUnchangedVisibleComponents(t *testing.T) {
 	// A routed stream modifies exactly one visible pane. The other authoritative
 	// views are still read, but their ANSI clipping/padding is not repeated.
 	generation, _ := root.supervisor.RouteGeneration("second")
-	root.Update(messages.RoutedMsg{SessionID: "second", RouteGeneration: generation, Inner: runtime.AgentChoice("root", "second", "\nnew visible stream λ界")})
+	_, routed := root.Update(messages.RoutedMsg{SessionID: "second", RouteGeneration: generation, Inner: runtime.AgentChoice("root", "second", "\nnew visible stream λ界")})
+	require.NotNil(t, routed, "a routed stream chunk schedules its visible update")
+	settlePaneReplay(root, scheduler)
 	root.composePanes()
 	require.Greater(t, builds("second"), before["second"])
 	require.Equal(t, before["profile"], builds("profile"))

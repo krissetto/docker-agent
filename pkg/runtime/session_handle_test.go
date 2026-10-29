@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -389,7 +391,7 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 	for _, content := range []string{"hello", "again"} {
 		submission, err := h.Submit(t.Context(), TurnInput{Content: content})
 		require.NoError(t, err)
-		var terminal bool
+		var terminal, started bool
 		var stopped int
 		for !terminal {
 			select {
@@ -397,7 +399,14 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 				require.True(t, ok, "observation closed after a settled turn")
 				assert.Greater(t, envelope.Sequence, previous)
 				previous = envelope.Sequence
-				assert.Equal(t, submission.TurnID, envelope.TurnID)
+				if envelope.TurnID == "" {
+					// Only a session-scoped tree snapshot may precede the turn's first envelope.
+					_, sessionScoped := envelope.Event.(*SubagentTreeEvent)
+					assert.True(t, sessionScoped && !started, "turn-less envelope must be a pre-turn SubagentTreeEvent")
+				} else {
+					started = true
+					assert.Equal(t, submission.TurnID, envelope.TurnID)
+				}
 				switch event := envelope.Event.(type) {
 				case *StreamStoppedEvent:
 					stopped++
@@ -479,4 +488,167 @@ func TestDeleteTombstonesSessionAgainstStaleRecreation(t *testing.T) {
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Equal(t, SessionErrorStopped, sessionErr.Kind)
 	assert.Equal(t, "session register: stopped", err.Error())
+}
+
+func TestTailHistoryPagesAreBoundedAppendSafeAndMutationFenced(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	for i := 0; i < 5; i++ {
+		sess.AddMessage(session.UserMessage(fmt.Sprintf("item-%d", i)))
+	}
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	limits := SessionHistoryLimits{MaxItems: 2, MaxBytes: 2 << 20, MaxItemBytes: 128 << 10}
+	obs, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer obs.Cancel()
+	anchor := obs.Primary()
+	require.Equal(t, "tail", anchor.Projection)
+	require.Equal(t, 5, anchor.TranscriptPosition)
+	require.Len(t, anchor.Items, 2)
+	require.NotContains(t, anchor.Session.MessagesSnapshot(), session.Item{})
+	cursor := anchor.HistoryCursor
+	require.NotEmpty(t, cursor)
+	// Appending after the snapshot does not slide the opaque history anchor.
+	sess.AddMessage(session.UserMessage("newer"))
+	page, err := handle.(SessionHistoryReader).ReadHistoryPage(t.Context(), sess.ID, cursor, limits)
+	require.NoError(t, err)
+	require.Equal(t, anchor.Epoch, page.Epoch)
+	require.Equal(t, anchor.Cursor, page.Cursor)
+	require.Equal(t, anchor.TranscriptPosition, page.TranscriptPosition)
+	require.Equal(t, 5, page.History.TotalItems)
+	require.Equal(t, []int{1, 2}, []int{page.Items[0].Position, page.Items[1].Position})
+	// In-place edits invalidate the next cursor without invalidating append-only paging.
+	driver := handle.(*sessionHandle).driver
+	require.NoError(t, driver.ownerCall(t.Context(), func() error { driver.sess.MarkHistoryChanged(); return nil }))
+	_, err = handle.(SessionHistoryReader).ReadHistoryPage(t.Context(), sess.ID, page.HistoryCursor, limits)
+	require.ErrorIs(t, err, ErrHistoryCursorStale)
+}
+
+func TestTailHistoryRejectsWrongSessionCursor(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	sess.AddMessage(session.UserMessage("one"))
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	limits := SessionHistoryLimits{MaxItems: 1, MaxBytes: 2 << 20, MaxItemBytes: 128 << 10}
+	obs, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer obs.Cancel()
+	_, err = handle.(SessionHistoryReader).ReadHistoryPage(t.Context(), "other", obs.Primary().HistoryCursor, limits)
+	require.ErrorIs(t, err, ErrHistoryCursorInvalid)
+}
+
+func TestTailSnapshotDetachesPendingInputDocuments(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	payload := []byte("owned document bytes")
+	parts := []chat.MessagePart{{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "file.txt", MimeType: "text/plain", Source: chat.DocumentSource{InlineData: payload}}}}
+	driver := handle.(*sessionHandle).driver
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.pending = []QueuedMessage{{ID: "pending-turn", Content: "queued", MultiContent: parts, AcceptedPosition: 0}}
+		return nil
+	}))
+	limits := SessionHistoryLimits{MaxItems: 1, MaxBytes: 1 << 20, MaxItemBytes: 128 << 10}
+	observation, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	pending := observation.Primary().PendingInputs
+	require.Len(t, pending, 1)
+	parts[0].Document.Source.InlineData[0] = 'X'
+	require.Equal(t, []byte("owned document bytes"), pending[0].MultiContent[0].Document.Source.InlineData)
+}
+
+func TestTailSnapshotRejectsOversizedPendingBeforeDetachedCopy(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	payload := []byte("x")
+	parts := []chat.MessagePart{{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "large", MimeType: "application/octet-stream", Source: chat.DocumentSource{InlineData: payload}}}}
+	tooLarge := session.UserMessage(strings.Repeat("p", 2<<20))
+	require.NoError(t, handle.(*sessionHandle).driver.ownerCall(t.Context(), func() error {
+		handle.(*sessionHandle).driver.pending = []QueuedMessage{{ID: "large-pending", Content: tooLarge.Message.Content, MultiContent: parts}}
+		return nil
+	}))
+	limits := SessionHistoryLimits{MaxItems: 1, MaxBytes: 16 << 10, MaxItemBytes: 4096}
+	_, err = handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.ErrorIs(t, err, ErrHistoryMetadataTooLarge)
+}
+
+func TestTailHistoryPacksCompleteRecordsAroundMetadataBudget(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	content := strings.Repeat("x", 132<<10)
+	for i := 0; i < 16; i++ {
+		sess.AddMessage(session.UserMessage(content))
+	}
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	limits := SessionHistoryLimits{MaxItems: 20, MaxBytes: 2 << 20, MaxItemBytes: 256 << 10}
+	observation, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	initial := observation.Primary()
+	require.Len(t, initial.Items, 15, "full response envelope, not raw item bytes, determines fit")
+	require.True(t, initial.History.HasMore)
+	require.Empty(t, initial.History.OmittedResponsePositions, "the last complete record remains pageable when this page is full")
+	require.NotEmpty(t, initial.HistoryCursor)
+	page, err := handle.(SessionHistoryReader).ReadHistoryPage(t.Context(), sess.ID, initial.HistoryCursor, limits)
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, 0, page.Items[0].Position)
+	require.Equal(t, initial.Cursor, page.Cursor)
+	require.Equal(t, initial.TranscriptPosition, page.TranscriptPosition)
+}
+
+func TestTailHistoryReportsItemThatCannotFitResponseBudget(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	sess.AddMessage(session.UserMessage(strings.Repeat("y", 20<<10)))
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	limits := SessionHistoryLimits{MaxItems: 1, MaxBytes: 16 << 10, MaxItemBytes: 64 << 10}
+	observation, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	tail := observation.Primary()
+	require.Empty(t, tail.Items)
+	require.Equal(t, []int{0}, tail.History.OmittedResponsePositions)
+	require.False(t, tail.History.HasMore)
+}
+
+func TestTailHistoryReportsMixedOmissionRangesChronologically(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	for _, content := range []string{strings.Repeat("r", 15<<10), strings.Repeat("a", 2<<10), strings.Repeat("i", 17<<10), strings.Repeat("b", 2<<10), strings.Repeat("r", 15<<10)} {
+		sess.AddMessage(session.UserMessage(content))
+	}
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	limits := SessionHistoryLimits{MaxItems: 4, MaxBytes: 16 << 10, MaxItemBytes: 16 << 10}
+	observation, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	page := observation.Primary()
+	require.True(t, page.History.HasMore)
+	ranges := historyPageWire(page).History.OmittedRanges
+	require.Equal(t, []int{2, 4}, []int{ranges[0].StartPosition, ranges[1].StartPosition})
+	require.Equal(t, "item_exceeds_item_byte_limit", ranges[0].Reason)
+	require.Equal(t, "item_exceeds_response_byte_limit", ranges[1].Reason)
+	older, err := handle.(SessionHistoryReader).ReadHistoryPage(t.Context(), sess.ID, page.HistoryCursor, limits)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, []int{older.Items[0].Position})
+	olderRanges := historyPageWire(older).History.OmittedRanges
+	require.Empty(t, olderRanges)
+}
+
+func TestTailHistoryUsesResponseByteOmissionWhenHeaderConsumesBudget(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	sess.AddMessage(session.UserMessage(strings.Repeat("y", 20<<10)))
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	limits := SessionHistoryLimits{MaxItems: 1, MaxBytes: 16 << 10, MaxItemBytes: 64 << 10}
+	observation, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &limits})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	page := observation.Primary()
+	require.Empty(t, page.Items)
+	require.Equal(t, []int{0}, page.History.OmittedResponsePositions)
+	require.False(t, page.History.HasMore)
 }

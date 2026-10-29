@@ -235,14 +235,16 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 
 	config := &Config{
 		Settings: &Settings{
+			VisibleReplies: "5",
 			Layout: &LayoutSettings{
-				SidebarPosition:  "left",
-				SectionSpacing:   "compact",
-				SidebarInfoMode:  "detailed",
-				ActiveAgentsOnly: true,
-				HideSessionPath:  true,
-				HideUsage:        true,
-				HideTodos:        true,
+				SidebarPosition:        "left",
+				SectionSpacing:         "compact",
+				SidebarInfoMode:        "detailed",
+				ActiveAgentsOnly:       true,
+				HideSessionPath:        true,
+				HideUsage:              true,
+				HideTodos:              true,
+				AlignInputWithMessages: true,
 			},
 		},
 	}
@@ -254,6 +256,8 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 	assert.Contains(t, string(data), "hide_session_path: true")
 	assert.Contains(t, string(data), "sidebar_info_mode: detailed")
 	assert.Contains(t, string(data), "active_agents_only: true")
+	assert.Contains(t, string(data), "align_input_with_messages: true")
+	assert.Contains(t, string(data), "visible_replies: \"5\"")
 
 	loaded, err := loadFrom(configFile, "")
 	require.NoError(t, err)
@@ -268,6 +272,8 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 	assert.False(t, layout.HideAgents)
 	assert.False(t, layout.HideTools)
 	assert.True(t, layout.HideTodos)
+	assert.True(t, layout.AlignInputWithMessages)
+	assert.Equal(t, "5", loaded.GetSettings().GetVisibleReplies())
 }
 
 func TestSettings_GetLayoutDefaults(t *testing.T) {
@@ -276,6 +282,17 @@ func TestSettings_GetLayoutDefaults(t *testing.T) {
 	var nilSettings *Settings
 	assert.Equal(t, LayoutSettings{}, nilSettings.GetLayout())
 	assert.Equal(t, LayoutSettings{}, (&Settings{}).GetLayout())
+}
+
+func TestSettings_GetVisibleRepliesDefaultsAndNormalizes(t *testing.T) {
+	t.Parallel()
+	var nilSettings *Settings
+	assert.Equal(t, "3", nilSettings.GetVisibleReplies())
+	assert.Equal(t, "3", (&Settings{}).GetVisibleReplies())
+	for _, value := range []string{"latest", "3", "5", "all"} {
+		assert.Equal(t, value, (&Settings{VisibleReplies: value}).GetVisibleReplies())
+	}
+	assert.Equal(t, "3", (&Settings{VisibleReplies: "invalid"}).GetVisibleReplies())
 }
 
 func TestConfig_MigrateFromLegacy(t *testing.T) {

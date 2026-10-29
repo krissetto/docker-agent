@@ -113,8 +113,9 @@ type (
 		Content     string       // Full content sent to the agent (with file contents expanded)
 		Attachments []Attachment // Attached files or inline content (e.g. pastes)
 		BypassQueue bool         // Process immediately even while the agent is working.
-		Queue       bool         // Force local end-of-turn queueing regardless of the configured send mode.
-		FollowUp    bool         // Enqueue as a runtime follow-up when the agent is working.
+		Queue       bool         // Queue until the current turn ends when the agent is working.
+		Steer       bool         // Inject into the current turn when the agent is working.
+		FollowUp    bool         // Legacy alias for Queue; enqueue as a runtime follow-up.
 	}
 
 	// SendAttachmentMsg is a message for the first message with an attachment.

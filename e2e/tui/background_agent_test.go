@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
@@ -122,7 +124,7 @@ func (stubModelStore) GetDatabase(context.Context) (*modelsdev.Database, error) 
 // background_agents toolset and a worker sub-agent, both backed by scripted
 // providers. Tools are pre-approved so the dispatch needs no confirmation
 // dialog.
-func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
+func newBackgroundAgentTUI(t *testing.T, width, height int) (*tuitest.Driver, *runtime.LocalRuntime) {
 	t.Helper()
 
 	isolateState(t)
@@ -169,7 +171,7 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 
 	wd, _ := os.Getwd()
 	model := tui.New(t.Context(), nil /* no spawner: single tab */, application, wd, func() {})
-	return tuitest.New(t, model, width, height)
+	return tuitest.New(t, model, width, height), rt
 }
 
 // TestBackgroundAgent_PerAgentContextInSidebar drives the full journey: the
@@ -180,20 +182,24 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 // Session Token Usage independently settles at 10% (the root's final turn consumed
 // 100 of 1000 tokens).
 func TestBackgroundAgent_PerAgentContextInSidebar(t *testing.T) {
-	d := newBackgroundAgentTUI(t, 120, 40)
+	d, rt := newBackgroundAgentTUI(t, 120, 40)
 
-	// Before any task runs, the current agent has no descendant rows.
-	d.WaitFor(tuitest.ContainsAll("fake-root", "Context 0%", "$0.00"))
+	// Before any task runs, the current agent has no descendant rows and no
+	// per-agent cost line (docs: per-agent Cost is omitted until the agent has run).
+	d.WaitFor(tuitest.ContainsAll("fake-root", "Context 0%"))
 	frame := d.Frame()
 	require.NotContains(t, frame, "worker")
 	require.NotContains(t, frame, "Agents ─")
 	require.NotContains(t, frame, "Tools ─")
 	require.NotContains(t, frame, "45%")
 	require.NotContains(t, frame, "0 total")
+	require.NotContains(t, frame, "Cost")
 
 	d.Type("Please dispatch the worker.").
 		Enter().
-		WaitFor(tuitest.Contains("Dispatched the worker.")).
+		WaitFor(tuitest.Contains("Dispatched the worker."))
+	requireWorkerSettled(t, rt)
+	expandSettledWorkerTree(t, d).
 		WaitFor(tuitest.Contains("45%")).
 		WaitFor(tuitest.Contains("10%"))
 }
@@ -202,12 +208,13 @@ func TestBackgroundAgent_PerAgentContextInSidebar(t *testing.T) {
 // Inspector by right-clicking its compact tree row after the background task
 // completes, then checks the exact per-agent context line.
 func TestBackgroundAgent_InspectorShowsWorkerContext(t *testing.T) {
-	d := newBackgroundAgentTUI(t, 120, 40)
+	d, rt := newBackgroundAgentTUI(t, 120, 40)
 
 	d.Type("Please dispatch the worker.").
 		Enter().
-		WaitFor(tuitest.Contains("Dispatched the worker.")).
-		WaitFor(tuitest.Contains("45%"))
+		WaitFor(tuitest.Contains("Dispatched the worker."))
+	requireWorkerSettled(t, rt)
+	expandSettledWorkerTree(t, d).WaitFor(tuitest.Contains("45%"))
 
 	// "45%" renders only on the worker's compact tree row, so its coordinates
 	// are a reliable right-click target for the existing agent inspector.
@@ -215,4 +222,37 @@ func TestBackgroundAgent_InspectorShowsWorkerContext(t *testing.T) {
 	d.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight}).
 		Send(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseRight}).
 		WaitFor(tuitest.Contains("Context: 450 of 1.0K tokens (45%)"))
+}
+
+// expandSettledWorkerTree explicitly opens the subagent tree once it has
+// auto-collapsed after the worker settled. The tree is never open beforehand
+// (fresh fixture, no user toggle), so the test waits for the collapsed header
+// and clicks exactly once; a missing collapse fails at the bounded wait.
+func expandSettledWorkerTree(t *testing.T, d *tuitest.Driver) *tuitest.Driver {
+	t.Helper()
+	d.WaitFor(tuitest.Matches(`1 subagents\s+›`))
+	d.ClickText("1 subagents")
+	return d.WaitFor(tuitest.Matches(`1 subagents\s+⌄`)).
+		WaitFor(tuitest.Matches(`worker\s+(idle|completed)`))
+}
+
+// requireWorkerSettled waits on the canonical subagent tree, not a frame, so the
+// 45% assertion runs only after the worker has finished.
+func requireWorkerSettled(t *testing.T, rt *runtime.LocalRuntime) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return workerNodeSettled(rt.SubagentTree().Snapshot().Nodes)
+	}, 10*time.Second, 20*time.Millisecond)
+}
+
+func workerNodeSettled(nodes []subagent.NodeSnapshot) bool {
+	for _, n := range nodes {
+		if n.Node.Agent == "worker" && (n.Node.State == subagent.NodeCompleted || n.Node.State == subagent.NodeIdle) {
+			return true
+		}
+		if workerNodeSettled(n.Children) {
+			return true
+		}
+	}
+	return false
 }

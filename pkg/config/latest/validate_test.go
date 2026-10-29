@@ -72,6 +72,7 @@ func TestModelConfigValidateFirstAvailable(t *testing.T) {
 		{name: "with routing", model: ModelConfig{FirstAvailable: candidates, Routing: []RoutingRule{{Model: "openai/gpt-4o-mini", Examples: []string{"hi"}}}}, wantErr: "first_available cannot be combined with routing"},
 		{name: "with title_model", model: ModelConfig{FirstAvailable: candidates, TitleModel: "small"}, wantErr: "first_available cannot be combined with title_model"},
 		{name: "with compaction_model", model: ModelConfig{FirstAvailable: candidates, CompactionModel: "small"}, wantErr: "first_available cannot be combined with compaction_model"},
+		{name: "with compaction_prompt", model: ModelConfig{FirstAvailable: candidates, CompactionPrompt: "summarize"}, wantErr: "first_available cannot be combined with compaction_prompt"},
 		{name: "with compaction_threshold", model: ModelConfig{FirstAvailable: candidates, CompactionThreshold: new(0.5)}, wantErr: "first_available cannot be combined with compaction_threshold"},
 		{name: "with cost", model: ModelConfig{FirstAvailable: candidates, Cost: &CostConfig{Input: 1}}, wantErr: "first_available cannot be combined with cost"},
 		{name: "with output_capabilities", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(true)}}, wantErr: "first_available cannot be combined with output_capabilities"},
@@ -128,6 +129,7 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 		name             string
 		harness          *HarnessConfig
 		compactionModel  string
+		compactionPrompt string
 		structuredOutput *StructuredOutput
 		wantErr          string
 	}{
@@ -151,6 +153,7 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 		{name: "thinking on opencode", harness: &HarnessConfig{Type: "opencode", Thinking: true}},
 		{name: "thinking on wrong type", harness: &HarnessConfig{Type: "codex", Thinking: true}, wantErr: "harness.thinking can only be used with harness.type 'opencode'"},
 		{name: "compaction model on harness", harness: &HarnessConfig{Type: "claude-code"}, compactionModel: "fast", wantErr: "compaction_model cannot be used with a harness"},
+		{name: "compaction prompt on harness", harness: &HarnessConfig{Type: "claude-code"}, compactionPrompt: "summarize", wantErr: "compaction_prompt cannot be used with a harness"},
 		{name: "nil harness with tool-mode structured output", harness: nil, structuredOutput: &StructuredOutput{Mode: StructuredOutputModeTool}},
 		{name: "native structured output on harness", harness: &HarnessConfig{Type: "claude-code"}, structuredOutput: &StructuredOutput{Mode: StructuredOutputModeNative}},
 		{name: "default-mode structured output on harness", harness: &HarnessConfig{Type: "claude-code"}, structuredOutput: &StructuredOutput{Name: "out"}},
@@ -160,7 +163,7 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			agent := AgentConfig{Name: "root", Harness: tt.harness, CompactionModel: tt.compactionModel, StructuredOutput: tt.structuredOutput}
+			agent := AgentConfig{Name: "root", Harness: tt.harness, CompactionModel: tt.compactionModel, CompactionPrompt: tt.compactionPrompt, StructuredOutput: tt.structuredOutput}
 			err := agent.validateHarness()
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -187,7 +190,7 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "deny_list on unsupported toolset", toolset: Toolset{Type: "shell", DenyList: []string{"/etc"}}, wantErr: "deny_list can only be used with type 'filesystem' or 'file'"},
 		{name: "blank allow_list entry", toolset: Toolset{Type: "filesystem", AllowList: []string{"  "}}, wantErr: "allow_list[0] must not be empty"},
 		{name: "blank deny_list entry", toolset: Toolset{Type: "filesystem", DenyList: []string{"/etc", ""}}, wantErr: "deny_list[1] must not be empty"},
-		{name: "env on wrong type", toolset: Toolset{Type: "filesystem", Env: map[string]string{"A": "b"}}, wantErr: "env can only be used with type 'shell', 'background_jobs', 'script', 'mcp' or 'lsp'"},
+		{name: "env on wrong type", toolset: Toolset{Type: "filesystem", Env: map[string]string{"A": "b"}}, wantErr: "env can only be used with type 'shell', 'script', 'mcp' or 'lsp'"},
 		{name: "file_types on non-lsp", toolset: Toolset{Type: "shell", FileTypes: []string{"go"}}, wantErr: "file_types can only be used with type 'lsp'"},
 		{name: "allowed_servers on non-mcp_catalog", toolset: Toolset{Type: "shell", AllowedServers: []string{"github"}}, wantErr: "allowed_servers can only be used with type 'mcp_catalog'"},
 		{name: "blocked_servers on non-mcp_catalog", toolset: Toolset{Type: "shell", BlockedServers: []string{"github"}}, wantErr: "blocked_servers can only be used with type 'mcp_catalog'"},
@@ -199,7 +202,6 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "sudo_askpass on non-shell", toolset: Toolset{Type: "fetch", SudoAskpass: new(true)}, wantErr: "sudo_askpass can only be used with type 'shell'"},
 		{name: "background_after on non-shell", toolset: Toolset{Type: "fetch", BackgroundAfter: new(2)}, wantErr: "background_after can only be used with type 'shell'"},
 		{name: "negative background_after", toolset: Toolset{Type: "shell", BackgroundAfter: new(-1)}, wantErr: "background_after must not be negative"},
-		{name: "recall on non-background_jobs", toolset: Toolset{Type: "shell", Recall: new(true)}, wantErr: "recall can only be used with type 'background_jobs'"},
 		{name: "allowed and blocked domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"a.example.com"}, BlockedDomains: []string{"b.example.com"}}, wantErr: "allowed_domains and blocked_domains are mutually exclusive"},
 		{name: "invalid allowed_domains pattern", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"foo.*"}}, wantErr: `allowed_domains[0] "foo.*" is invalid`},
 		{name: "invalid blocked_domains pattern", toolset: Toolset{Type: "fetch", BlockedDomains: []string{"10.0.0.0/33"}}, wantErr: `blocked_domains[0] "10.0.0.0/33" is invalid: not a valid CIDR`},
@@ -315,7 +317,6 @@ func TestToolsetValidateValidToolsets(t *testing.T) {
 		toolset Toolset
 	}{
 		{name: "shell", toolset: Toolset{Type: "shell", Env: map[string]string{"A": "b"}, SudoAskpass: new(true)}},
-		{name: "background_jobs", toolset: Toolset{Type: "background_jobs", Env: map[string]string{"A": "b"}, Recall: new(true)}},
 		{name: "memory with path", toolset: Toolset{Type: "memory", Path: "/tmp/memory.db"}},
 		{name: "memory without path", toolset: Toolset{Type: "memory"}},
 		{name: "tasks", toolset: Toolset{Type: "tasks", Path: "./tasks.json"}},
@@ -767,4 +768,11 @@ func TestStableIdentityValidation(t *testing.T) {
 			require.Error(t, cfg.Validate())
 		})
 	}
+}
+
+func TestBackgroundJobsToolsetIsRemoved(t *testing.T) {
+	toolset := Toolset{Type: "background_jobs"}
+	err := toolset.validate()
+	require.ErrorContains(t, err, "toolset type 'background_jobs' was removed")
+	require.ErrorContains(t, err, "configure shell background_after and env instead")
 }

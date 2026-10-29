@@ -3,6 +3,22 @@ import Testing
 @testable import AgentKit
 
 struct SSETests {
+    @Test func batchedByteAppendMatchesSingleByteFrames() throws {
+        let raw = Array("event: snapshot\ndata: {\"type\":\"snapshot\"}\n\n: heartbeat\n\ndata: {\"type\":\"ready\"}\n\n".utf8)
+        var batched = SSEParser()
+        var single = SSEParser()
+        var batchedFrames: [SSEFrame] = []
+        for chunk in stride(from: 0, to: raw.count, by: 7) {
+            batchedFrames += try batched.append(Array(raw[chunk..<min(raw.count, chunk + 7)]))
+        }
+        var singleFrames: [SSEFrame] = []
+        for byte in raw { singleFrames += try single.append(byte) }
+        #expect(batchedFrames == singleFrames)
+
+        var truncated = SSEParser()
+        #expect(try truncated.append(Array("data: final".utf8)).isEmpty)
+        #expect(try truncated.finish() == [SSEFrame(data: "final")])
+    }
     @Test func parsesSplitCRLFMultilineCommentsAndUTF8() throws {
         var parser = SSEParser()
         let first = try parser.append(Data("event: event\r\ndata: {\"message\":\"caf".utf8))
@@ -100,6 +116,20 @@ struct SSETests {
         }
     }
 
+    @Test func boundedTailSnapshotUsesSameProjectionAndRejectsInvalidOmissionAndMissingCoverage() throws {
+        let valid = SessionSnapshotWireTest.validTail
+        try valid.validateTail(expectedSessionID: "tail-s")
+        let projection = valid.project(ref: SessionRef(serverID: UUID(), sessionID: "tail-s"), connection: .live,
+                                      rawProof: nil, branchInstanceID: "instance")
+        #expect(projection.transcript.map(\.sourcePosition) == [0, 1])
+        #expect(projection.transcript.allSatisfy { $0.branchAnchor == nil && $0.userMessageIndex == nil })
+
+        let wrongReason = try JSONDecoder().decode(SessionSnapshotWire.self, from: Data(#"{"projection":"tail","session":{"id":"tail-s"},"status":{"session_id":"tail-s"},"epoch":"e","cursor":0,"transcript_position":2,"items":[{"position":0,"item":{"summary":"one"}}],"history":{"start_position":0,"end_position":2,"total_items":2,"omitted_ranges":[{"start_position":1,"end_position":2,"reason":"item_exceeds_byte_limit"}],"truncated":false}}"#.utf8))
+        #expect(throws: APIError.self) { try wrongReason.validateTail(expectedSessionID: "tail-s") }
+        let gap = try JSONDecoder().decode(SessionSnapshotWire.self, from: Data(#"{"projection":"tail","session":{"id":"tail-s"},"status":{"session_id":"tail-s"},"epoch":"e","cursor":0,"transcript_position":2,"items":[{"position":0,"item":{"summary":"one"}}],"history":{"start_position":0,"end_position":2,"total_items":2,"omitted_ranges":[],"truncated":false}}"#.utf8))
+        #expect(throws: APIError.self) { try gap.validateTail(expectedSessionID: "tail-s") }
+    }
+
     @Test func snapshotCursorMismatchIsRejected() throws {
         var assembler = SnapshotAssembler()
         _ = try assembler.accept(StreamMessage(type: "snapshot_begin", cursor: 3))
@@ -178,4 +208,11 @@ struct SSETests {
         {"parent_session_id":"","session":{"id":"session-1","messages":[]},"status":{"session_id":"session-1","agent_name":"agent","state":"running","pending":0},"interactions":[],"pending_inputs":[],"epoch":"\(epoch)","cursor":\(cursor),"transcript_position":0}
         """
     }
+}
+
+private enum SessionSnapshotWireTest {
+    static let validTail: SessionSnapshotWire = {
+        let data = Data(#"{"projection":"tail","session":{"id":"tail-s"},"status":{"session_id":"tail-s"},"epoch":"e","cursor":7,"transcript_position":2,"items":[{"position":0,"item":{"summary":"one"}},{"position":1,"item":{"summary":"two"}}],"history":{"start_position":0,"end_position":2,"total_items":2,"omitted_ranges":[],"truncated":false}}"#.utf8)
+        return try! JSONDecoder().decode(SessionSnapshotWire.self, from: data)
+    }()
 }

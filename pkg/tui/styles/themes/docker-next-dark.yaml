@@ -1,0 +1,108 @@
+version: 1
+name: "Docker Next - Dark"
+# Ether page, Ink raised surfaces, Base-family accents.
+# Trailing comments name the exact brand anchor or the derivation from anchors.
+colors:
+  # Text
+  text_bright: "#FFFDFA"  # Zero
+  text_primary: "#DDD4C9"  # Neutral
+  text_secondary: "#97918A"  # Neutral +34% toward Ether
+  text_muted: "#97918A"  # Neutral +34% toward Ether
+  text_faint: "#4E4B48"  # Neutral +70% toward Ether
+  # Accent
+  accent: "#6F7FFE"  # Base +22% toward Zero
+  accent_muted: "#A0A5E6"  # Base lift +45% toward Neutral
+  # Surfaces
+  background: "#101010"  # Ether
+  background_alt: "#1D1D1D"  # Ink
+  # Borders
+  border_secondary: "#76726C"  # Neutral +50% toward Ether
+  # Status
+  success: "#00E476"  # Flux
+  error: "#FF3D40"  # Trigger
+  warning: "#FFCEA5"  # Sand
+  info: "#D1E4FF"  # Air
+  highlight: "#D4A6DD"  # Bloom hue, HSL 290/45/76
+  # Brand
+  brand: "#475BFF"  # Base
+  brand_bg: "#1A1E3B"  # Base 18% over Ether
+  # Errors
+  error_strong: "#FF3D40"  # Trigger
+  error_dark: "#281415"  # Trigger 10% over Ether
+  # Spinner ramp
+  spinner_dim: "#919CFD"  # Base +40% toward Zero
+  spinner_bright: "#B2B9FC"  # Base +58% toward Zero
+  spinner_brightest: "#D3D6FB"  # Base +76% toward Zero
+  # Diff
+  diff_add_bg: "#0E2E1E"  # Flux 14% over Ether
+  diff_remove_bg: "#281415"  # Trigger 10% over Ether
+  # UI elements
+  line_number: "#97918A"  # Neutral +34% toward Ether
+  separator: "#56534F"  # Neutral +66% toward Ether
+  selected: "#1E244E"  # Base 26% over Ether
+  selected_fg: "#FFFDFA"  # Zero
+  suggestion_ghost: "#97918A"  # Neutral +34% toward Ether
+  tab_bg: "#101010"  # Ether
+  tab_active_bg: "#1D1D1D"  # Ink
+  tab_active_fg: "#FFFDFA"  # Zero
+  tab_inactive_fg: "#97918A"  # Neutral +34% toward Ether
+  tab_border: "#6F7FFE"  # Base +22% toward Zero
+  # Shared shell/editor semantic roles
+  placeholder: "#97918A"  # Neutral +34% toward Ether
+  editor_bg: "#1D1D1D"  # Ink
+  card_bg: "#1D1D1D"  # Ink
+  shell_bg: "#101010"  # Ether
+  tab_hover_bg: "#1D1D1D"  # Ink
+  tab_hover_fg: "#FFFDFA"  # Zero
+  tab_drag_bg: "#3345D6"  # Console
+  tab_drag_fg: "#FFFDFA"  # Zero
+  tab_busy: "#FF6A3D"  # Launch
+  context_empty: "#101010"  # Ether
+  context_fill: "#D1E4FF"  # Air
+  context_text: "#97918A"  # Neutral +34% toward Ether
+  resize: "#56534F"  # Neutral +66% toward Ether
+  resize_hover: "#6F7FFE"  # Base +22% toward Zero
+  resize_active: "#FFFDFA"  # Zero
+  hint: "#97918A"  # Neutral +34% toward Ether
+  focus: "#6F7FFE"  # Base +22% toward Zero
+  disabled: "#4E4B48"  # Neutral +70% toward Ether
+  status_adjacent: "#97918A"  # Neutral +34% toward Ether
+  scrollbar_track: "#2D2B2A"  # Neutral 14% over Ether
+  # Badges
+  badge_accent: "#D4A6DD"  # Bloom hue, HSL 290/45/76
+  badge_info: "#D1E4FF"  # Air
+  badge_success: "#00E476"  # Flux
+  agent_hues: [233, 14, 151, 290, 200, 35, 330, 170, 312, 55]
+
+chroma:
+  error_fg: "#FFFDFA"  # Zero
+  error_bg: "#5C0909"  # Root
+  success: "#00E476"  # Flux
+  comment: "#97918A"  # Neutral +34% toward Ether
+  comment_preproc: "#FF6A3D"  # Launch
+  keyword: "#6F7FFE"  # Base +22% toward Zero
+  keyword_reserved: "#D4A6DD"  # Bloom hue, HSL 290/45/76
+  keyword_namespace: "#FF7778"  # Trigger +30% toward Zero
+  keyword_type: "#D1E4FF"  # Air
+  operator: "#FF7778"  # Trigger +30% toward Zero
+  punctuation: "#DDD4C9"  # Neutral
+  name_builtin: "#FF6A3D"  # Launch
+  name_tag: "#6F7FFE"  # Base +22% toward Zero
+  name_attribute: "#D1E4FF"  # Air
+  name_decorator: "#FF6A3D"  # Launch
+  literal_number: "#D4A6DD"  # Bloom hue, HSL 290/45/76
+  literal_string: "#FFCEA5"  # Sand
+  literal_string_escape: "#FF6A3D"  # Launch
+  generic_deleted: "#FF3D40"  # Trigger
+  generic_subheading: "#97918A"  # Neutral +34% toward Ether
+  background: "#1D1D1D"  # Ink
+
+markdown:
+  heading: "#6F7FFE"  # Base +22% toward Zero
+  link: "#D1E4FF"  # Air
+  strong: "#FFFDFA"  # Zero
+  code: "#FFCEA5"  # Sand
+  code_bg: "#1D1D1D"  # Ink
+  blockquote: "#97918A"  # Neutral +34% toward Ether
+  list: "#DDD4C9"  # Neutral
+  hr: "#76726C"  # Neutral +50% toward Ether

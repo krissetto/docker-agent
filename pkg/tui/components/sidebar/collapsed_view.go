@@ -9,17 +9,18 @@ import (
 // CollapsedViewModel holds the content of the compact horizontal sidebar.
 // Rendering and hit testing share the same bounded two-row layout.
 type CollapsedViewModel struct {
-	TitleWithStar    string
-	WorkingIndicator string
-	WorkingDir       string
-	Branch           string
-	Yolo             string
-	AgentIdentity    string
-	ModelInfo        string
-	Thinking         string
-	CanCycleThinking bool
-	UsageSummary     string
-	InfoLine         string
+	TitleWithStar     string
+	WorkingIndicator  string
+	WorkingDir        string
+	Branch            string
+	Yolo              string
+	AgentIdentity     string
+	ModelInfo         string
+	Thinking          string
+	CanCycleThinking  bool
+	UsageSummary      string
+	InfoLine          string
+	BackgroundSummary string
 
 	TitleAndIndicatorOnOneLine bool
 	WdAndUsageOnOneLine        bool
@@ -98,6 +99,7 @@ func (vm CollapsedViewModel) spans() []collapsedSpan {
 	}{
 		{vm.WorkingDir, ClickWorkingDir},
 		{vm.Branch, ClickNone},
+		{vm.BackgroundSummary, ClickNone},
 	} {
 		if part.text == "" || x >= leftBudget {
 			continue

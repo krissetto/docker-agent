@@ -308,6 +308,7 @@ func TestLayoutRosterPreferencesPreserveActiveModelAndTreeGeometry(t *testing.T)
 	t.Parallel()
 
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	setSidebarUsageFixture(p)
 	p.sessionState.SetCurrentAgentName("root")
 	p.sidebar.SetTeamInfo([]runtime.AgentDetails{
 		{Name: "root", Provider: "openai", Model: "gpt-4", Thinking: "high"},
@@ -336,6 +337,7 @@ func TestWithLayoutSettingsPreservesActiveModelAndTreeGeometry(t *testing.T) {
 		messages:     messages.New(animation.NewRuntime(), sessionState),
 		sessionState: sessionState,
 	}
+	setSidebarUsageFixture(p)
 	settings := msgtypes.LayoutSettings{SidebarInfoMode: msgtypes.InfoModeDetailed, ActiveAgentsOnly: true}
 	WithLayoutSettings(settings)(p)
 	p.sidebar.SetTeamInfo([]runtime.AgentDetails{

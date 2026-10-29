@@ -147,3 +147,47 @@ func TestLeanDirectTypedInputMode(t *testing.T) {
 		})
 	}
 }
+
+func TestLeanStoppedStatusClearsOnDormancyAuthorizationEvent(t *testing.T) {
+	m, handle := sessionModel(t)
+	sess := m.app.Session()
+	m.handleEvent(t.Context(), &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{
+		Session: sess,
+		Status:  runtime.SessionStatus{SessionID: handle.id, Stopped: true},
+	}})
+	assert.True(t, m.status.Stopped)
+	assert.Contains(t, ansi.Strip(strings.Join(ui.RenderStatus(m.status, 120), "\n")), "· stopped")
+
+	m.handleEvent(t.Context(), &runtime.DormancyChangedEvent{SessionID: handle.id, Dormant: false, Stopped: false})
+	assert.False(t, m.status.Stopped)
+	plain := ansi.Strip(strings.Join(ui.RenderStatus(m.status, 120), "\n"))
+	assert.NotContains(t, plain, "· stopped")
+	assert.NotContains(t, plain, "Restored")
+}
+
+func TestLeanFooterStatusTracksStoppedPauseAndReadOnlyFacts(t *testing.T) {
+	m, handle := sessionModel(t)
+	sess := m.app.Session()
+	m.handleEvent(t.Context(), &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{
+		Session: sess,
+		Status:  runtime.SessionStatus{SessionID: handle.id, Stopped: true},
+	}})
+	plain := ansi.Strip(strings.Join(ui.RenderStatus(m.status, 120), "\n"))
+	assert.Contains(t, plain, "· stopped")
+	assert.NotContains(t, plain, "/resume")
+
+	m.handleEvent(t.Context(), &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{
+		Session: sess,
+		Status:  runtime.SessionStatus{SessionID: handle.id, Dormant: true, PauseArmed: true, Paused: true},
+	}})
+	plain = ansi.Strip(strings.Join(ui.RenderStatus(m.status, 120), "\n"))
+	assert.Contains(t, plain, "⏸ paused")
+	assert.NotContains(t, plain, "Restored")
+	assert.NotContains(t, plain, "message or /resume")
+
+	m.app = app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithReadOnly())
+	m.status.ReadOnly = m.app.IsReadOnly()
+	plain = ansi.Strip(strings.Join(ui.RenderStatus(m.status, 120), "\n"))
+	assert.Contains(t, plain, "· read-only")
+	assert.NotContains(t, plain, "/resume")
+}

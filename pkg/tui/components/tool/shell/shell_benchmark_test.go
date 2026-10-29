@@ -4,6 +4,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/docker/docker-agent/pkg/tools"
+	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 var shellOutputBenchmarkResult string
@@ -42,4 +48,22 @@ func shellBuildLogFixture(count int, newline string, color bool) string {
 	}
 	output.WriteString("PASS" + newline)
 	return output.String()
+}
+
+var expandedShellViewBenchmarkResult string
+
+func BenchmarkExpandedShellViewCached5000OutputLines(b *testing.B) {
+	ar := animation.NewRuntime()
+	defer ar.Stop()
+	msg := types.ToolCallMessage("root", tools.ToolCall{ID: "bench", Function: tools.FunctionCall{Name: builtinshell.ToolNameShell, Arguments: `{"cmd":"printf build"}`}}, tools.Tool{Name: builtinshell.ToolNameShell}, types.ToolStatusRunning)
+	msg.Content = shellBuildLogFixture(5000, "\n", false)
+	view := New(ar, msg, service.StaticSessionState{}).(*shellModel)
+	view.SetSize(100, 0)
+	view.SetExpanded(true)
+	view.View()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		expandedShellViewBenchmarkResult = view.View()
+	}
 }

@@ -79,9 +79,10 @@ type startupToolSeed struct {
 
 // LocalRuntime manages the execution of agents
 type LocalRuntime struct {
-	sessionService   *SessionService
-	harnessFactory   *harness.Factory
-	commandEvaluator *CommandEvaluatorFactory
+	gitReviewIdentity string
+	sessionService    *SessionService
+	harnessFactory    *harness.Factory
+	commandEvaluator  *CommandEvaluatorFactory
 
 	ctx                       func() context.Context
 	lifecycleCancel           context.CancelFunc
@@ -727,6 +728,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 
 	lifecycleCtx, lifecycleCancel := context.WithCancel(ctx)
 	r := &LocalRuntime{
+		gitReviewIdentity:            newGitReviewIdentity(),
 		lifecycleCancel:              lifecycleCancel,
 		ctx:                          func() context.Context { return context.WithoutCancel(ctx) },
 		lifecycleCtx:                 lifecycleCtx,
@@ -1958,7 +1960,13 @@ func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 			teams = append(teams, env.Team())
 		}
 	}
-	seen := make(map[notifierIdentity]struct{})
+	// One subscription per shared notifier; every agent sharing it receives its own event.
+	type sharedNotifier struct {
+		notifier tools.ChangeSubscriber
+		agents   []*agent.Agent
+	}
+	var groups []*sharedNotifier
+	index := make(map[notifierIdentity]int)
 	for _, tm := range teams {
 		if tm == nil {
 			continue
@@ -1974,16 +1982,27 @@ func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 					continue
 				}
 				if key, identifiable := notifierDedupKey(n); identifiable {
-					if _, dup := seen[key]; dup {
+					if i, dup := index[key]; dup {
+						if !slices.ContainsFunc(groups[i].agents, func(seen *agent.Agent) bool { return seen == a }) {
+							groups[i].agents = append(groups[i].agents, a)
+						}
 						continue
 					}
-					seen[key] = struct{}{}
+					index[key] = len(groups)
 				}
-				release := n.SubscribeToolsChanged(func() { r.emitToolsChanged(a) })
-				stop := context.AfterFunc(r.lifetime(), release)
-				r.toolsChangedReleases = append(r.toolsChangedReleases, func() { stop(); release() })
+				groups = append(groups, &sharedNotifier{notifier: n, agents: []*agent.Agent{a}})
 			}
 		}
+	}
+	for _, g := range groups {
+		agents := g.agents
+		release := g.notifier.SubscribeToolsChanged(func() {
+			for _, a := range agents {
+				r.emitToolsChanged(a)
+			}
+		})
+		stop := context.AfterFunc(r.lifetime(), release)
+		r.toolsChangedReleases = append(r.toolsChangedReleases, func() { stop(); release() })
 	}
 }
 

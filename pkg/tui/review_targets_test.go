@@ -15,6 +15,8 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	view "github.com/docker/docker-agent/pkg/tui/components/review"
+	"github.com/docker/docker-agent/pkg/tui/reviewdraft"
 )
 
 type fakeCatalog struct {
@@ -69,7 +71,7 @@ func newHiddenHarness(t *testing.T) (*reviewHarness, *fakeSubmitter, *fakeResolv
 // pickHidden loads one catalog page and chooses the first hidden session.
 func (h *reviewHarness) pickHidden() {
 	h.t.Helper()
-	h.key("R", "s")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
 	require.True(h.t, h.m.dialogMgr.Open())
 	h.key("end", "enter") // Load more…
 	h.key("h", "i", "d", "d", "e", "n", " ", "0", "enter")
@@ -104,7 +106,7 @@ func TestReviewHiddenCancelReleasesAndFailureRetains(t *testing.T) {
 	f2.failNext = errors.New("timeout")
 	h2.key("enter")
 	assert.Zero(t, res2.released, "an unresolved send keeps its recipient")
-	h2.key("esc", "s")
+	h2.key("esc", "R", "s")
 	h2.key("enter")
 	require.Len(t, f2.calls, 2)
 	assert.Equal(t, f2.calls[0], f2.calls[1], "retry reuses the request ID")
@@ -125,7 +127,7 @@ func TestReviewTargetPagesAreBoundedAndStaleResultsIgnored(t *testing.T) {
 	h, _, _, catalog := newHiddenHarness(t)
 	catalog.total = 1000
 	h.comment("pages")
-	h.key("R", "s")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
 	for range gitReviewTargetMaxPages {
 		h.key("end", "enter")
 	}
@@ -175,7 +177,8 @@ func TestReviewNewSessionRefusesUnknownSource(t *testing.T) {
 	factory := &fakeFactory{}
 	h.m.reviewSessionFactory = factory
 	h.comment("needs a source")
-	h.key("R", "s", "N", "e", "w", "enter")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
+	h.key("N", "e", "w", "enter")
 	h.key("r", "e", "v", "i", "e", "w", "e", "r", "enter")
 	assert.NotContains(t, h.content(), "Send review to new", "no preview without an authoritative source")
 	assert.Empty(t, factory.requests, "nothing is created")
@@ -187,7 +190,8 @@ func TestReviewNewSessionCreatesOnlyAfterConfirm(t *testing.T) {
 	factory := &fakeFactory{source: "local:hackerspace"}
 	h.m.reviewSessionFactory = factory
 	h.comment("new reviewer please")
-	h.key("R", "s", "N", "e", "w", "enter")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
+	h.key("N", "e", "w", "enter")
 	require.True(t, h.m.dialogMgr.Open(), "the agent chooser opens")
 	h.key("r", "e", "v", "i", "e", "w", "e", "r", "enter")
 	assert.Contains(t, h.content(), "Send review to new reviewer session in /work · local:hackerspace")
@@ -206,7 +210,9 @@ func TestReviewNewSessionCreatesOnlyAfterConfirm(t *testing.T) {
 	assert.Equal(t, "reviewer", second.AgentName)
 	assert.Equal(t, "/work", second.WorkingDir)
 	assert.Equal(t, "local:hackerspace", second.Source, "the chosen agent's source is passed through")
-	assert.Contains(t, second.Body, "Comment (literal user text):\nnew reviewer please")
+	parsed, ok := reviewdraft.ParseReferences(second.Body)
+	require.True(t, ok)
+	require.Equal(t, "new reviewer please", parsed.Comments[0].Comment)
 	assert.Empty(t, h.draft().Comments)
 	tabs, _ := h.m.supervisor.GetTabs()
 	assert.Len(t, tabs, 1, "the new session does not take a tab or focus")
@@ -224,14 +230,15 @@ func TestReviewPickerDefaultsToFocusedSession(t *testing.T) {
 	h.comment("to the focused one")
 	h.m.paneWorkspaces.active = &paneWorkspace{anchor: "s1"}
 	h.m.supervisor.SwitchTo("s2")
-	h.key("R", "s", "enter")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
+	h.key("enter")
 	assert.Contains(t, h.content(), "Send review to ◆ focused child", "the focused session is the default recipient")
 }
 
 func TestReviewStaleResolveLeavesNewPickerOpen(t *testing.T) {
 	h, _, res, _ := newHiddenHarness(t)
 	h.comment("stale")
-	h.key("R", "s")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
 	old := h.m.gitReviewPicker
 	h.key("esc")
 	h.key("s")
@@ -245,7 +252,7 @@ func TestReviewStaleResolveLeavesNewPickerOpen(t *testing.T) {
 func TestReviewNewSessionHiddenWithoutFactory(t *testing.T) {
 	h, _ := newFilesDraftHarness(t)
 	h.comment("x")
-	h.key("R", "s")
+	h.pump(h.m.openGitReviewTargetPicker(view.PreviewDraftMsg{Owner: "s1", Revision: h.m.activeReview().draft.Snapshot().Revision}))
 	require.True(t, h.m.dialogMgr.Open())
 	h.key("N", "e", "w", "enter")
 	assert.True(t, h.m.dialogMgr.Open(), "without a factory there is no New session row to choose")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -194,6 +195,16 @@ func TestHistoricalRemovedChildRemotePrepareCommitAndMutationDenial(t *testing.T
 	require.NoError(t, err)
 	info := prepared.Info()
 	require.True(t, info.Historical)
+	metadataChild := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/history-child?view=prepare-info&projection=metadata", "", "secret")
+	require.Equal(t, http.StatusOK, metadataChild.Code, metadataChild.Body.String())
+	var metadataChildBody map[string]any
+	require.NoError(t, json.Unmarshal(metadataChild.Body.Bytes(), &metadataChildBody))
+	metadataChildInfo := metadataChildBody["info"].(map[string]any)
+	require.Equal(t, "metadata", metadataChildBody["projection"])
+	require.Equal(t, string(record.Node.ID), metadataChildInfo["attach"].(map[string]any)["NodeID"])
+	assert.NotContains(t, metadataChildInfo["attach"].(map[string]any), "Session")
+	assert.Equal(t, root.ID, metadataChildInfo["binding"].(map[string]any)["ParentSessionID"])
+	require.True(t, info.Historical)
 	require.Equal(t, "removed-worker", info.ActiveAgentName)
 	require.NotNil(t, info.Attach)
 	committed, err := prepared.Commit(t.Context())
@@ -254,4 +265,164 @@ func (serverEmptyCatalogStore) GetModel(context.Context, modelsdev.ID) (*modelsd
 }
 func (serverEmptyCatalogStore) GetDatabase(context.Context) (*modelsdev.Database, error) {
 	return &modelsdev.Database{}, nil
+}
+
+func TestSessionViewMetadataProjectionBoundsPrepareWithoutChangingDefault(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	archived := session.New(
+		session.WithID("large-view"),
+		session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root", "custom": "preserved"}),
+		session.WithUserMessage(strings.Repeat("large transcript ", 350_000)),
+	)
+	archived.WorkingDir = "/synthetic/workspace"
+	require.NoError(t, store.AddSession(t.Context(), archived))
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{})))), runtime.WithSessionStore(store), runtime.WithWorkingDir(archived.WorkingDir))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	sm := NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(owner.Runtime()))
+	srv := NewWithManager(sm, "secret")
+
+	legacy := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/large-view?view=prepare-info", "", "secret")
+	require.Equal(t, http.StatusOK, legacy.Code, legacy.Body.String())
+	require.Greater(t, legacy.Body.Len(), 5*1024*1024)
+	var legacyBody map[string]any
+	require.NoError(t, json.Unmarshal(legacy.Body.Bytes(), &legacyBody))
+	assert.NotContains(t, legacyBody, "projection", "legacy clients retain the old envelope")
+	legacyInfo := legacyBody["info"].(map[string]any)
+	legacySession := legacyInfo["session"].(map[string]any)
+	assert.Contains(t, legacySession, "messages")
+
+	metadata := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/large-view?view=prepare-info&projection=metadata", "", "secret")
+	require.Equal(t, http.StatusOK, metadata.Code, metadata.Body.String())
+	require.Less(t, metadata.Body.Len(), 4*1024*1024, "metadata response must fit the native 4 MiB response bound and not scale with transcript bytes")
+	var metadataBody map[string]any
+	require.NoError(t, json.Unmarshal(metadata.Body.Bytes(), &metadataBody))
+	require.Equal(t, api.SessionViewMetadataProjection, metadataBody["projection"])
+	metadataInfo := metadataBody["info"].(map[string]any)
+	metadataSession := metadataInfo["session"].(map[string]any)
+	assert.Equal(t, "large-view", metadataSession["id"])
+	assert.Equal(t, archived.WorkingDir, metadataSession["working_dir"])
+	assert.Equal(t, "root", metadataSession["attributes"].(map[string]any)[runtime.SessionAgentAttribute])
+	assert.Equal(t, "preserved", metadataSession["attributes"].(map[string]any)["custom"])
+	assert.NotContains(t, metadataSession, "messages")
+	assert.NotContains(t, metadataSession, "subagent_tree")
+	assert.NotContains(t, metadata.Body.String(), "large transcript")
+}
+
+func TestSessionViewMetadataProjectionOpenAndConfirmationSemantics(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("metadata-open"), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))
+	root.WorkingDir = "/synthetic/workspace"
+	root.AddMessage(session.UserMessage(strings.Repeat("open transcript ", 10_000)))
+	require.NoError(t, store.AddSession(t.Context(), root))
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{})))), runtime.WithSessionStore(store), runtime.WithWorkingDir(root.WorkingDir))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	sm := NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(owner.Runtime()))
+	srv := NewWithManager(sm, "secret")
+
+	prepared := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/metadata-open?view=prepare-info&projection=metadata", "", "secret")
+	require.Equal(t, http.StatusOK, prepared.Code, prepared.Body.String())
+	var response struct {
+		Projection string                          `json:"projection"`
+		Info       runtime.PreparedSessionViewInfo `json:"info"`
+	}
+	require.NoError(t, json.Unmarshal(prepared.Body.Bytes(), &response))
+	require.Equal(t, api.SessionViewMetadataProjection, response.Projection)
+	require.NotNil(t, response.Info.Session)
+	assert.Equal(t, root.ID, response.Info.Session.ID)
+	assert.Nil(t, response.Info.Session.Messages, "metadata projection must not hydrate transcript into its response DTO")
+	confirmation := response.Info.Confirmation()
+	assert.Equal(t, root.ID, confirmation.SessionID)
+	assert.Equal(t, response.Info.RootSessionID, confirmation.RootSessionID)
+	assert.Equal(t, response.Info.Binding, confirmation.Binding)
+
+	badConfirmation := confirmation
+	badConfirmation.WorkingDir = "/foreign"
+	body, err := json.Marshal(runtime.SessionEdit{Kind: runtime.SessionEditOpenView, ViewConfirmation: &badConfirmation})
+	require.NoError(t, err)
+	mismatch := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/metadata-open?view=open-view&projection=metadata", string(body), "secret")
+	require.Equal(t, http.StatusConflict, mismatch.Code, mismatch.Body.String())
+	_, published := owner.Runtime().SessionByID(root.ID)
+	require.Error(t, published, "confirmation mismatch must not publish a session owner")
+
+	body, err = json.Marshal(runtime.SessionEdit{Kind: runtime.SessionEditOpenView, ViewConfirmation: &confirmation})
+	require.NoError(t, err)
+	opened := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/metadata-open?view=open-view&projection=metadata", string(body), "secret")
+	require.Equal(t, http.StatusOK, opened.Code, opened.Body.String())
+	var openedBody map[string]any
+	require.NoError(t, json.Unmarshal(opened.Body.Bytes(), &openedBody))
+	assert.Equal(t, api.SessionViewMetadataProjection, openedBody["projection"])
+	assert.Contains(t, openedBody, "metadata")
+	assert.Contains(t, openedBody, "status")
+	openedSession := openedBody["info"].(map[string]any)["session"].(map[string]any)
+	assert.NotContains(t, openedSession, "messages")
+	assert.NotContains(t, openedSession, "subagent_tree")
+
+	legacyOpen := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/metadata-open?view=open-view", string(body), "secret")
+	require.Equal(t, http.StatusOK, legacyOpen.Code, legacyOpen.Body.String())
+	var legacyOpenBody map[string]any
+	require.NoError(t, json.Unmarshal(legacyOpen.Body.Bytes(), &legacyOpenBody))
+	assert.NotContains(t, legacyOpenBody, "projection")
+	legacyOpenSession := legacyOpenBody["info"].(map[string]any)["session"].(map[string]any)
+	assert.Contains(t, legacyOpenSession, "messages")
+}
+
+func TestSessionViewMetadataProjectionRejectsUnsupportedOptionBeforePrepare(t *testing.T) {
+	base := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("cold-projection"), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}))
+	require.NoError(t, base.AddSession(t.Context(), root))
+	registry := &httpSessionRegistry{sessions: map[string]*httpSession{}}
+	sm := NewSessionManager(t.Context(), nil, base, 0, nil, WithSessionRuntime(registry))
+	srv := NewWithManager(sm, "secret")
+	for _, path := range []string{
+		"/api/v2/sessions/cold-projection?view=prepare-info&projection=unknown",
+		"/api/v2/sessions/cold-projection?view=prepare-info&projection=metadata&projection=metadata",
+		"/api/v2/sessions/cold-projection?projection=metadata",
+	} {
+		response := sessionRequest(t, srv, http.MethodGet, path, "", "secret")
+		assert.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+	}
+	assert.Zero(t, registry.createCount)
+	patch := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/cold-projection?projection=metadata", `{"kind":"open_view"}`, "secret")
+	assert.Equal(t, http.StatusBadRequest, patch.Code, patch.Body.String())
+	assert.Zero(t, registry.createCount)
+}
+
+func TestMetadataPreparedViewInfoSizeIgnoresSessionAndAttachHistory(t *testing.T) {
+	selected := session.New(session.WithID("metadata-size"), session.WithAttributes(map[string]string{sessionSourceAttribute: "source"}))
+	attachSession := selected.Clone()
+	info := runtime.PreparedSessionViewInfo{
+		ActiveAgentName: "worker",
+		SessionID:       selected.ID,
+		RootSessionID:   "metadata-root",
+		RootWorkingDir:  "/workspace",
+		RootBinding:     runtime.SessionBinding{AgentName: "root"},
+		Session:         selected,
+		Binding:         runtime.SessionBinding{AgentName: "worker", ParentSessionID: "metadata-root"},
+		WorkingDir:      "/workspace",
+		Attach:          &runtime.SubagentAttachInfo{NodeID: subagent.NodeID("metadata-node"), Agent: "worker", Name: "Worker", Session: attachSession, ParentSessionID: "metadata-root", ParentAgent: "root"},
+	}
+	encode := func() []byte {
+		data, err := json.Marshal(struct {
+			Version    int                             `json:"version"`
+			View       string                          `json:"view"`
+			Projection string                          `json:"projection"`
+			Info       metadataPreparedSessionViewInfo `json:"info"`
+		}{Version: api.SessionAPIVersion, View: "prepare-info", Projection: api.SessionViewMetadataProjection, Info: metadataPreparedViewInfo(info)})
+		require.NoError(t, err)
+		return data
+	}
+	before := encode()
+	largeHistory := strings.Repeat("history must not affect response size ", 100_000)
+	selected.AddMessage(session.UserMessage(largeHistory))
+	attachSession.AddMessage(session.UserMessage(largeHistory))
+	tree := &subagent.Snapshot{Version: subagent.SnapshotVersion, Root: subagent.NodeID("tree-root")}
+	selected.SetSubagentTree(tree)
+	attachSession.SetSubagentTree(tree)
+	after := encode()
+	assert.Equal(t, before, after, "selected and attached transcript/topology are not serialized")
+	assert.NotContains(t, string(after), "history must not affect response size")
 }

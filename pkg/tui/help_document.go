@@ -84,6 +84,11 @@ func (m *appModel) helpDocument() help.Document {
 	}
 	appEntries = append(appEntries, bindingHelp("app.help", keys.Help, "Open contextual help"))
 	add(helpSection("application", "Application", "", appEntries...))
+	if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
+		doc.Context = "Review comment"
+		add(helpSection("review.comment-input", "Review comment", "", helpEntry("review.comment.save", []string{"enter"}, "Save comment to the review draft"), helpEntry("review.comment.cancel", []string{"esc"}, "Cancel and restore composer draft")))
+		return doc
+	}
 	if m.chatPage.IsTitleEditing() {
 		doc.Context = "Sidebar title editing"
 		add(titleHelp())
@@ -265,8 +270,8 @@ func composerEarlyInputHelp() help.Section {
 func composerHelp(enhanced, history bool) help.Section {
 	k := core.GetKeys()
 	entries := []help.Entry{
-		bindingHelp("composer.send", k.EditorSend, "Send message"),
-		helpEntry("composer.followup", []string{"alt+enter"}, "Send end-of-turn follow-up"),
+		bindingHelp("composer.send", k.EditorSend, "Send message; queue for the next turn while working"),
+		helpEntry("composer.steer", []string{"alt+enter"}, "While working, steer into the active turn; sends normally while idle"),
 		helpEntry("composer.newline", core.EditorNewlineKeys(enhanced), "Insert newline"),
 		{ID: "completion.commands", Keys: []string{"/"}, Description: "Open command completion", Condition: "Empty composer"},
 		helpEntry("completion.files", []string{"@"}, "Open file completion"),
@@ -310,6 +315,8 @@ func transcriptHelp() help.Section {
 		helpEntry("transcript.previous", []string{"up", "k"}, "Select previous message"), helpEntry("transcript.next", []string{"down", "j"}, "Select next message"),
 		help.Entry{ID: "transcript.copy", Keys: []string{"c"}, Description: "Copy selected message", Condition: "Message selected"},
 		help.Entry{ID: "transcript.edit", Keys: []string{"e"}, Description: "Edit selected message", Condition: "Persisted user message selected"},
+		help.Entry{ID: "transcript.preview", Keys: []string{"p"}, Description: "Preview first attachment", Condition: "User message with attachments selected"},
+		help.Entry{ID: "transcript.preview-indexed", Keys: []string{"1–9"}, Description: "Preview attachment by number", Condition: "User message with attachments selected"},
 		helpEntry("transcript.page-up", []string{"pgup"}, "Scroll page up"), helpEntry("transcript.page-down", []string{"pgdown"}, "Scroll page down"),
 		helpEntry("transcript.top", []string{"home", "g"}, "Scroll to top"), helpEntry("transcript.bottom", []string{"end", "G"}, "Scroll to bottom"),
 		help.Entry{ID: "queue.restore", Keys: []string{"alt+up"}, Description: "Withdraw eligible pending messages and restore composer draft", Condition: "Content focus only; queue double-click instead edits the canonical pending item"})
@@ -367,7 +374,7 @@ func (m *appModel) referenceHelp() []help.Section {
 
 func paneHelp() help.Section {
 	return helpSection("panes", "Session panes", "Full TUI only; no pane gestures behind dialogs",
-		helpEntry("panes.resume", []string{"/resume"}, "Restored · paused: Any queued work or reports will wait until you resume this session. Relatives require their own resume."),
+		helpEntry("panes.resume", []string{"/resume"}, "Restored sessions wake on a new message or /resume; already queued work and reports wait for /resume. Relatives require their own resume."),
 		helpEntry("panes.actions", []string{"/panes"}, "Open dedicated Panes chooser; /panes left|right|up|down [session], next|prev|remove|single; resize [divider number] previews with arrows, Enter commits, Esc cancels"),
 		helpEntry("panes.split", []string{"drag tab upward to transcript edge"}, "Tile the whole workspace at a pane edge; center/sidebar/composer/self drops cancel"),
 		helpEntry("panes.detach", []string{"drag pane title to tab strip"}, "Detach into fullscreen workspace at insertion marker; same running session; drag title to another pane edge to rearrange"),
@@ -382,7 +389,7 @@ func paneHelp() help.Section {
 func leanSessionHelp() help.Section {
 	return helpSection("lean.sessions", "Lean session navigation", "Normal-screen layout; dialogs remain keyboard-operable; panes and tour require the full TUI",
 		helpEntry("lean.subagents", []string{"/subagents"}, "Browse the tree; /subagents on|off saves Use subagents (default ON); Tab selects actions, u toggles"),
-		helpEntry("lean.resume", []string{"/resume"}, "Restored · paused: Any queued work or reports will wait until you resume this session. Relatives require their own resume."),
+		helpEntry("lean.resume", []string{"/resume"}, "Restored sessions wake on a new message or /resume; already queued work and reports wait for /resume. Relatives require their own resume."),
 		helpEntry("lean.back", []string{"/back"}, "Return to the previous still-open session; preserve drafts and ongoing work"),
 		helpEntry("lean.operations", []string{"/settings", "/plans", "/permissions", "/pause"}, "Use the ordinary nonvisual command handlers and keyboard dialogs"))
 }

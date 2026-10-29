@@ -98,7 +98,10 @@ func (h *sessionHandle) reservePendingMessageEdit(edit *PendingMessageEdit, snap
 		if index >= len(*queue) || (*queue)[index].RequestID != edit.TurnID {
 			return stale()
 		}
-		d.sess.ReplacePendingUserMessagePayload(edit.TurnID, next.Message.Content, next.Message.MultiContent)
+		d.flushAllDeferredAcceptedLocked()
+		if d.sess.ReplacePendingUserMessagePayload(edit.TurnID, next.Message.Content, next.Message.MultiContent) {
+			d.sess.MarkHistoryChanged()
+		}
 		msg := &(*queue)[index]
 		msg.Content, msg.MultiContent = next.Message.Content, next.Message.MultiContent
 		eventPayload := d.sess.MessagesSnapshot()[position].Message.Message

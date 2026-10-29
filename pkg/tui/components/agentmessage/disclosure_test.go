@@ -246,3 +246,19 @@ func backgroundAt(line string, col int) color.Color {
 	}
 	return nil
 }
+
+func TestDisclosureSessionDefaultIsSilentAndYieldsToUser(t *testing.T) {
+	ar := animation.NewRuntimeWithScheduler(&clock{now: time.Unix(1, 0)})
+	d := New(ar)
+	require.True(t, d.SetDefault(true))
+	require.True(t, d.Expanded())
+	require.True(t, d.Visible())
+	require.False(t, d.NeedsTick(), "a default opens without a disclosure transition")
+	require.Zero(t, ar.ActiveCount())
+	require.True(t, d.SetDefault(false), "an unset default may close again")
+	require.False(t, d.Visible())
+	require.True(t, d.SetDefault(true))
+	d.Toggle()
+	require.False(t, d.SetDefault(true), "the user's toggle outranks later defaults")
+	require.False(t, d.SetDefault(false), "the user's toggle outranks later defaults in both directions")
+}

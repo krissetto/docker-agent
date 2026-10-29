@@ -21,7 +21,7 @@ func (m *model) handleSettings(arg string) {
 		return
 	}
 	if key == "" {
-		m.reportCapability("/settings theme [ref], theme-dark <ref>, theme-light <ref>; /settings <key> <value>: send-mode steer|queue; interrupt-confirmation always|double-tap|none; render-images, show-banner, expand-thinking, hide-tool-results, split-diff true|false (applied now); snapshot, cache-stable-prompts, warn-on-cache-miss, restore-tabs, lean true|false (next launch); sound true|false and sound-threshold <seconds> (applied now). Safety changes use /yolo confirm. Pane geometry and the tour require the full TUI.", nil)
+		m.reportCapability("/settings theme [ref], theme-dark <ref>, theme-light <ref>; /settings <key> <value>: interrupt-confirmation always|double-tap|none; render-images, show-banner, expand-thinking, hide-tool-results, split-diff true|false (applied now); snapshot, cache-stable-prompts, warn-on-cache-miss, restore-tabs, lean true|false (next launch); sound true|false and sound-threshold <seconds> (applied now). Safety changes use /yolo confirm. Pane geometry and the tour require the full TUI.", nil)
 		return
 	}
 	value = strings.TrimSpace(value)
@@ -35,13 +35,6 @@ func (m *model) handleSettings(arg string) {
 		}
 		apply = func(settings *userconfig.Settings) { settings.InterruptConfirmation = value }
 		live = func(viewer *model) { viewer.interruptMode = value }
-	case "send-mode":
-		if value != "steer" && value != "queue" {
-			m.reportCapability(nil, errors.New("send-mode must be steer or queue"))
-			return
-		}
-		apply = func(settings *userconfig.Settings) { settings.BusySendMode = value }
-		live = func(viewer *model) { viewer.queueSendMode = value == "queue" }
 	case "sound-threshold":
 		seconds, err := strconv.Atoi(value)
 		if err != nil || seconds < 0 {

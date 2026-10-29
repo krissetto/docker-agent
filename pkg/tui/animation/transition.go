@@ -135,6 +135,19 @@ func (tr *Transition) Cancel() {
 	tr.boundRuntime().Unregister()
 }
 
+// Resume reacquires a cancelled transition without restarting its clock.
+func (tr *Transition) Resume() tea.Cmd {
+	if tr.running || tr.duration <= 0 {
+		return nil
+	}
+	tr.elapsed = tr.currentElapsed()
+	if tr.elapsed >= tr.duration {
+		return nil
+	}
+	tr.running = true
+	return tr.boundRuntime().start()
+}
+
 // Running reports whether the transition is in progress.
 func (tr *Transition) Running() bool { return tr.running }
 

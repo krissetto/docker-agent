@@ -2,12 +2,15 @@ package runtime
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
@@ -167,10 +170,10 @@ func TestCommunicationExplicitMessagesAndCompletionHaveIndependentIdentity(t *te
 	parent := session.New(session.WithID("reply-parent"))
 	child := session.New(session.WithID("reply-child"))
 	m.registerChild(parent, "root", "36c92-full", "engineer", child)
-	m.children["36c92-full"].durable.Result = "same body"
-	m.reportTurn(t, "36c92-full", subagent.NodeIdle, "")
 	m.r.team = team.New(team.WithAgents(agent.New("root", "root"), agent.New("engineer", "engineer")))
 	m.r.agents = newAgentRouter(m.r.team, "root")
+	m.children["36c92-full"].durable.Result = "same body"
+	m.reportTurn(t, "36c92-full", subagent.NodeIdle, "")
 	child.AgentName = "engineer"
 	d, ok := m.r.sessionDrivers.Lookup(parent.ID)
 	require.True(t, ok)
@@ -225,4 +228,92 @@ func TestCommunicationExplicitMessagesAndCompletionHaveIndependentIdentity(t *te
 		storedIDs[item.Message.TurnID] = true
 	}
 	assert.Equal(t, ids, storedIDs)
+}
+
+func TestTreeMessageGrantAllowsSameRootSiblingAndDeniesCrossRoot(t *testing.T) {
+	m := newTestSubagentManager(t)
+	rootA := session.New(session.WithID("message-root-a"))
+	rootB := session.New(session.WithID("message-root-b"))
+	sender := session.New(session.WithID("message-sender"), session.WithAgentName("worker"))
+	target := session.New(session.WithID("message-target"), session.WithAgentName("worker"))
+	foreign := session.New(session.WithID("message-foreign"), session.WithAgentName("worker"))
+	m.registerChild(rootA, "root", "a0001", "worker", sender)
+	m.registerChild(rootA, "root", "a0002", "worker", target)
+	m.registerChild(rootB, "root", "b0001", "worker", foreign)
+	m.mu.Lock()
+	m.children["a0001"].durable = session.ChildRecord{RootSessionID: rootA.ID, ParentSessionID: rootA.ID, Node: subagent.Node{ID: "a0001", Agent: "worker", Parent: subagent.SessionRootID(rootA.ID), SessionID: sender.ID, State: subagent.NodeIdle}}
+	m.children["a0002"].parentSession = sender.ID
+	m.children["a0002"].durable = session.ChildRecord{RootSessionID: rootA.ID, ParentSessionID: sender.ID, Node: subagent.Node{ID: "a0002", Agent: "worker", Parent: "a0001", SessionID: target.ID, State: subagent.NodeIdle}}
+	m.children["b0001"].durable = session.ChildRecord{RootSessionID: rootB.ID, ParentSessionID: rootB.ID, Node: subagent.Node{ID: "b0001", Agent: "worker", Parent: subagent.SessionRootID(rootB.ID), SessionID: foreign.ID, State: subagent.NodeIdle}}
+	m.mu.Unlock()
+	access := &latest.SubagentAccessConfig{SendMessage: latest.SubagentAccessTree}
+	m.r.team = team.New(team.WithAgents(agent.New("root", "root"), agent.New("worker", "worker")), team.WithAgentConfigs(map[string]latest.AgentConfig{"worker": {Name: "worker", SubagentAccess: access}}))
+	m.r.agents = newAgentRouter(m.r.team, "root")
+	call := func(target string) (*tools.ToolCallResult, error) {
+		return m.r.handleSendMessage(t.Context(), sender, tools.ToolCall{ID: "send-" + target, Function: tools.FunctionCall{Arguments: `{"to":"` + target + `","message":"hello"}`}}, nil, tools.NopRuntime{})
+	}
+	result, err := call("a0002")
+	require.NoError(t, err)
+	require.False(t, result.IsError, result.Output)
+	var receipt subagent.DeliveryReceipt
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &receipt))
+	assert.True(t, receipt.Accepted)
+	foreignResult, err := call("b0001")
+	require.NoError(t, err)
+	require.True(t, foreignResult.IsError)
+	require.NoError(t, json.Unmarshal([]byte(foreignResult.Output), &receipt))
+	assert.Equal(t, "invalid", receipt.Rejection)
+}
+
+func TestTreeMessageRejectsForgedParentAndStoppedTarget(t *testing.T) {
+	m := newTestSubagentManager(t)
+	parent := session.New(session.WithID("forged-parent"))
+	caller := session.New(session.WithID("forged-caller"), session.WithParentID(parent.ID), session.WithAgentName("worker"))
+	m.r.team = team.New(team.WithAgents(agent.New("root", "root"), agent.New("worker", "worker")), team.WithAgentConfigs(map[string]latest.AgentConfig{"worker": {Name: "worker", SubagentAccess: &latest.SubagentAccessConfig{SendMessage: latest.SubagentAccessTree}}}))
+	m.r.agents = newAgentRouter(m.r.team, "root")
+	result, err := m.r.handleSendMessage(t.Context(), caller, tools.ToolCall{Function: tools.FunctionCall{Arguments: `{"to":"parent","message":"should not pass"}`}}, nil, tools.NopRuntime{})
+	require.NoError(t, err)
+	require.True(t, result.IsError, "caller-supplied ParentID is not runtime membership authority")
+
+	root := session.New(session.WithID("stopped-root"))
+	child := session.New(session.WithID("stopped-child"), session.WithAgentName("worker"))
+	m.registerChild(root, "root", "c0001", "worker", child)
+	m.mu.Lock()
+	m.children["c0001"].durable = session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: "c0001", Agent: "worker", Parent: subagent.SessionRootID(root.ID), SessionID: child.ID, State: subagent.NodeStopped}}
+	m.mu.Unlock()
+	result, err = m.r.handleSendMessage(t.Context(), root, tools.ToolCall{Function: tools.FunctionCall{Arguments: `{"to":"c0001","message":"no"}`}}, nil, tools.NopRuntime{})
+	require.NoError(t, err)
+	require.True(t, result.IsError, "stopped members remain visible but cannot receive messages")
+}
+
+func TestTreeMessageRaceStopRoot(t *testing.T) {
+	m := newTestSubagentManager(t)
+	root := session.New(session.WithID("race-stop-root"))
+	sender := session.New(session.WithID("race-stop-sender"), session.WithAgentName("worker"))
+	target := session.New(session.WithID("race-stop-target"), session.WithAgentName("worker"))
+	m.registerChild(root, "root", "d0001", "worker", sender)
+	m.registerChild(root, "root", "d0002", "worker", target)
+	m.mu.Lock()
+	m.children["d0001"].durable = session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: "d0001", Agent: "worker", Parent: subagent.SessionRootID(root.ID), SessionID: sender.ID, State: subagent.NodeIdle}}
+	m.children["d0002"].durable = session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: "d0002", Agent: "worker", Parent: subagent.SessionRootID(root.ID), SessionID: target.ID, State: subagent.NodeIdle}}
+	m.mu.Unlock()
+	m.r.team = team.New(team.WithAgents(agent.New("root", "root"), agent.New("worker", "worker")), team.WithAgentConfigs(map[string]latest.AgentConfig{"worker": {Name: "worker", SubagentAccess: &latest.SubagentAccessConfig{SendMessage: latest.SubagentAccessTree}}}))
+	m.r.agents = newAgentRouter(m.r.team, "root")
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			for range 10 {
+				_, _ = m.sendCommunicationToTree(t.Context(), sender.ID, "d0002", "message", fmt.Sprintf("race-%d", i), subagent.DeliveryGuidance, "worker")
+			}
+		})
+	}
+	m.mu.Lock()
+	if m.stopping == nil {
+		m.stopping = map[string]bool{}
+	}
+	m.stopping[root.ID] = true
+	m.mu.Unlock()
+	wg.Wait()
+	_, err := m.sendCommunicationToTree(t.Context(), sender.ID, subagent.SessionRootID(root.ID), "after-stop", "after-stop", subagent.DeliveryGuidance, "worker")
+	require.Error(t, err, "stopping root messaging must be rejected at the boundary")
 }

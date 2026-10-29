@@ -24,6 +24,9 @@ type workspaceCloseRequest struct {
 type workspaceCloseConfirmedMsg struct{ request *workspaceCloseRequest }
 
 func (m *appModel) handleCloseWorkspace(sessionID string) (tea.Model, tea.Cmd) {
+	if cmd, ok := m.prepareReviewInputTransition(); !ok {
+		return m, cmd
+	}
 	if m.dialogMgr.Open() || m.dialogMgr.Closing() {
 		return m, nil
 	}
@@ -47,6 +50,9 @@ func (m *appModel) handleCloseWorkspace(sessionID string) (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) confirmCloseWorkspace(request *workspaceCloseRequest) (tea.Model, tea.Cmd) {
+	if cmd, ok := m.prepareReviewInputTransition(); !ok {
+		return m, cmd
+	}
 	if request == nil || request.consumed || m.contextClosed {
 		return m, nil
 	}

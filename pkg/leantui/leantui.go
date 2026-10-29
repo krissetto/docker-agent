@@ -275,7 +275,6 @@ type model struct {
 	themeLoad               func(string) (*styles.Theme, error)
 	themeApply              func(*styles.Theme)
 	settingsSave            func(func(*userconfig.Config) error) error
-	queueSendMode           bool
 	interruptMode           string
 	interruptPending        bool
 	interruptCancel         func() runtime.CancelOutcome
@@ -365,7 +364,6 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		spawnSession:     cfg.SpawnSession,
 		transcriber:      cfg.Transcriber,
 		interruptMode:    interruptMode,
-		queueSendMode:    settings.GetBusySendMode() == "queue",
 		settingsSave:     userconfig.Update,
 		soundEnabled:     settings.GetSound(),
 		soundThreshold:   time.Duration(settings.GetSoundThreshold()) * time.Second,
@@ -376,9 +374,9 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		width:            w,
 		height:           h,
 		screen:           ui.NewScreen(cfg.WorkingDir, branch, "Type a message, / for commands", cfg.History),
-		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: branch},
+		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: branch, ReadOnly: cfg.App != nil && cfg.App.IsReadOnly()},
 		sessionState:     sessionState,
-		usage:            ui.NewUsageTracker(),
+		usage:            newUsageTrackerFor(cfg.App),
 		appName:          appName,
 		banner:           cfg.Banner,
 		disabledCommands: disabled,

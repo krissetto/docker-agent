@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -25,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/review"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
@@ -83,9 +85,12 @@ type Model interface {
 	SetTokenUsage(event *runtime.TokenUsageEvent)
 	SetTodos(result *tools.ToolCallResult) error
 	SetMode(mode Mode)
-	// SetMirroredPadding swaps the horizontal edge padding so the sidebar hugs
-	// the terminal edge when rendered on the left of the chat.
+	// SetMirroredPadding gives both docks terminal-edge padding and places the
+	// chat-side gap on the inside edge of a left-docked sidebar.
 	SetMirroredPadding(mirrored bool)
+	// SetScrollbarDecorator changes only scrollbar paint, without rebuilding
+	// sidebar content or placement.
+	SetScrollbarDecorator(scrollview.ScrollbarDecorator)
 	SetAgentInfo(agentName, model, description string, contextLimit int64, compactionModel string, primaryContextLimit int64) tea.Cmd
 	SetTeamInfo(availableAgents []runtime.AgentDetails)
 	// SetAgentSwitching records the start (switching=true) or end of a
@@ -122,6 +127,9 @@ type Model interface {
 	// collapsed band) to agents active in the current session instead of the
 	// whole configured team.
 	SetActiveAgentsOnly(enabled bool)
+	// SetAgentContextReadings shows each agent's context fill (its session's own
+	// usage) in the sidebar. Off by default.
+	SetAgentContextReadings(enabled bool)
 	GetSize() (width, height int)
 	LoadFromSession(sess *session.Session)
 	// ResetStreamTracking clears the active-stream stack so a new top-level run
@@ -168,6 +176,8 @@ type Model interface {
 	VisualGeneration() uint64
 	// ClearSubagentHover resets the hovered subagent row (mouse left the sidebar).
 	ClearSubagentHover() tea.Cmd
+	// SetBackgroundProcesses replaces the adopted background-process snapshot for a session.
+	SetBackgroundProcesses(sessionID string, processes []tools.BackgroundProcess) tea.Cmd
 	// SetSubagentContext marks this sidebar as belonging to a tab attached to
 	// a subagent's sub-session: the Subagents section roots at that subagent's
 	// node and a clickable "parent: <agent>" line links back to the parent tab.
@@ -356,6 +366,7 @@ type model struct {
 	ragIndexing       map[string]*ragIndexingState // strategy name -> indexing state
 	spinner           spinner.Spinner
 	spinnerActive     bool // true when spinner is registered with animation coordinator
+	gitLoading        bool
 	mode              Mode
 	sessionTitle      string
 	sessionStarred    bool
@@ -404,6 +415,7 @@ type model struct {
 	sectionGap           int               // blank lines between sections in vertical mode
 	agentInfoMode        AgentInfoMode     // how the vertical Agents section renders each agent
 	activeAgentsOnly     bool              // filter the Agents roster to session-active agents
+	agentContextReadings bool              // show per-agent context fill beside each agent (off by default)
 
 	// Transfer-box animation: a single animation.Subscription drives the rail
 	// dot while any transfer_task hop is in flight, using accepted elapsed time.
@@ -425,6 +437,7 @@ type model struct {
 	visualGeneration    uint64
 	cacheInvalidations  uint64
 	sectionRenders      uint64
+	sectionRenderCounts map[string]uint64
 	themeGeneration     uint64
 	renderedActiveAgent string
 
@@ -459,17 +472,48 @@ type model struct {
 	// to a subagent's sub-session, the Subagents section roots at that
 	// subagent's node and a clickable "parent: <agent>" line links back to the
 	// parent tab.
-	subagentRootNode subagent.NodeID
-	parentAgent      string
-	parentSessionID  string
-	parentLineZone   int  // content line of the parent line, -1 when absent
-	hoveredParent    bool // mouse over the parent line
+	subagentRootNode            subagent.NodeID
+	parentAgent                 string
+	parentSessionID             string
+	parentLineZone              int  // content line of the parent line, -1 when absent
+	hoveredParent               bool // mouse over the parent line
+	backgroundSessionID         string
+	backgroundProcesses         []tools.BackgroundProcess
+	backgroundProcessesByID     map[string]tools.BackgroundProcess
+	backgroundCollapsed         bool
+	backgroundManual            bool
+	backgroundShowAll           bool
+	backgroundMoreOffset        int
+	backgroundExpiry            map[string]time.Time
+	backgroundNextExpiry        time.Time
+	backgroundRunningCount      int
+	backgroundDisclosureAlpha   float64
+	backgroundDisclosureTarget  float64
+	backgroundDisclosureRunning bool
+	backgroundDisclosureFrom    int
+	backgroundAnimation         animation.Subscription
+	backgroundFrame             string
+	backgroundRowCache          map[string]backgroundRowCacheEntry
+	backgroundRows              []string
+	backgroundLines             []string
+	backgroundRowIDs            []string
+	backgroundRowTools          []string
+	backgroundStart             int
+	backgroundEnd               int
+	backgroundMoreLine          int
+	backgroundHeader            int
+	backgroundRowRenders        uint64
+	backgroundOnlyDirty         bool
+	backgroundNowFunc           func() time.Time
 	// subagentRowOffset is the number of section body lines before the first
 	// child row (the parent line + spacer on attached tabs).
 	subagentRowOffset    int
 	delegationRootLine   int
 	transferAgentLines   map[int]string
 	collapsedBranches    map[subagent.NodeID]bool
+	manualBranches       map[subagent.NodeID]bool
+	knownBranches        map[subagent.NodeID]bool
+	autoOpenedBranches   map[subagent.NodeID]bool
 	branchSpans          map[subagent.NodeID]branchSpans
 	branchCapture        branchCapture
 	treeCollapsed        bool
@@ -484,6 +528,7 @@ type model struct {
 	treeControls         map[int][]treeControl
 	treeSectionStart     int
 	git                  gitSection
+	gitHoverLines        []int
 	gitStart, gitEnd     int
 	summaryLine          int
 	hoveredTreeRow       int
@@ -503,6 +548,7 @@ type model struct {
 	presentationSub      animation.Subscription
 	reconcileDirty       bool
 	presentationActive   bool
+	scrollbarVisible     bool
 }
 
 // New creates a new sidebar bound to the given session state.
@@ -518,30 +564,37 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 	branchWatcher, _ := watchBranch(ctx, rawDir)
 
 	m := &model{
-		parentLineZone:     -1,
-		treeCollapsed:      true,
-		todosCollapsed:     true,
-		presentationActive: true,
-		hoveredTreeRow:     -1,
-		ctx:                func() context.Context { return context.WithoutCancel(ctx) },
-		ar:                 ar,
-		width:              20,
-		layoutCfg:          DefaultLayoutConfig(),
-		height:             24,
-		sessionUsage:       make(map[string]*runtime.Usage),
-		sessionOwnCost:     make(map[string]float64),
-		costParents:        make(map[string]string),
-		embeddedCosts:      make(map[string]float64),
-		todoComp:           todotool.NewSidebarComponent(),
-		transferAnimation:  ar.Subscribe(),
-		hoverAnimation:     ar.Subscribe(),
-		presentationSub:    ar.Subscribe(),
-		spinner:            spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
-		subagentSpinner:    spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
-		sessionTitle:       "New session",
-		ragIndexing:        make(map[string]*ragIndexingState),
-		sessionState:       sessionState,
+		parentLineZone:      -1,
+		backgroundHeader:    -1,
+		backgroundMoreLine:  -1,
+		backgroundStart:     -1,
+		backgroundEnd:       -1,
+		treeCollapsed:       true,
+		todosCollapsed:      true,
+		presentationActive:  true,
+		scrollbarVisible:    true,
+		hoveredTreeRow:      -1,
+		ctx:                 func() context.Context { return context.WithoutCancel(ctx) },
+		ar:                  ar,
+		width:               20,
+		layoutCfg:           DefaultLayoutConfig(),
+		height:              24,
+		sessionUsage:        make(map[string]*runtime.Usage),
+		sessionOwnCost:      make(map[string]float64),
+		costParents:         make(map[string]string),
+		embeddedCosts:       make(map[string]float64),
+		todoComp:            todotool.NewSidebarComponent(),
+		transferAnimation:   ar.Subscribe(),
+		backgroundAnimation: ar.Subscribe(),
+		hoverAnimation:      ar.Subscribe(),
+		presentationSub:     ar.Subscribe(),
+		spinner:             spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
+		subagentSpinner:     spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
+		sessionTitle:        "New session",
+		ragIndexing:         make(map[string]*ragIndexingState),
+		sessionState:        sessionState,
 		scrollview: scrollview.New(
+			scrollview.WithAnimationRuntime(ar),
 			scrollview.WithWheelStep(1),
 			scrollview.WithKeyMap(nil), // Sidebar has no keyboard scroll — only mouse
 		),
@@ -565,7 +618,7 @@ func (m *model) Init() tea.Cmd {
 
 // needsSpinner returns true if any spinner-driving state is active.
 func (m *model) needsSpinner() bool {
-	return m.workingAgent != "" || m.toolsLoading || m.titleRegenerating || m.compacting
+	return m.workingAgent != "" || m.toolsLoading || m.titleRegenerating || m.compacting || m.gitLoading
 }
 
 // startSpinner registers the spinner with the animation coordinator if not already active.
@@ -975,6 +1028,15 @@ func (m *model) SetActiveAgentsOnly(enabled bool) {
 	m.invalidateCache()
 }
 
+// SetAgentContextReadings toggles the per-agent context readings.
+func (m *model) SetAgentContextReadings(enabled bool) {
+	if m.agentContextReadings == enabled {
+		return
+	}
+	m.agentContextReadings = enabled
+	m.invalidateCache()
+}
+
 // SetSubagentContext marks this sidebar as attached to a subagent's session.
 func (m *model) SetSubagentContext(root subagent.NodeID, parentAgent, parentSessionID string) {
 	if m.subagentRootNode != root || m.parentSessionID != parentSessionID {
@@ -1032,6 +1094,7 @@ func (m *model) SetSubagentTree(snapshot subagent.Snapshot) tea.Cmd {
 		m.invalidateCache()
 	}
 	m.pruneCollapsedBranches()
+	m.syncDefaultBranchExpansion()
 	return m.syncSubagentSpinner()
 }
 
@@ -1085,7 +1148,7 @@ func (m *model) syncSubagentSpinner() tea.Cmd {
 
 func hasRunningSubagent(nodes []subagent.NodeSnapshot) bool {
 	for i := range nodes {
-		if isActiveSubagentState(nodes[i].Node.State) || hasRunningSubagent(nodes[i].Children) {
+		if isActiveSubagentState(nodes[i].Node.State) || hasSubagentBackgroundActivity(nodes[i].Node) || hasRunningSubagent(nodes[i].Children) {
 			return true
 		}
 	}
@@ -1097,6 +1160,10 @@ func hasRunningSubagent(nodes []subagent.NodeSnapshot) bool {
 // once the runtime reports actual work.
 func isActiveSubagentState(s subagent.NodeState) bool {
 	return subagentview.Active(s)
+}
+
+func hasSubagentBackgroundActivity(n subagent.Node) bool {
+	return n.State != subagent.NodeStopped && n.BackgroundProcesses > 0
 }
 
 // flattenRootChildren lifts the subagents out from under their synthetic
@@ -1177,6 +1244,7 @@ const (
 	ClickModel               // Click on the active model/provider region
 	ClickSubagentParent      // Click on the "parent: <agent>" line of an attached tab (payload: parent session id)
 	ClickGit                 // Click in the Git changes section (payload: section line)
+	ClickBackgroundProcess   // Click on an adopted process row (payload: ToolCallID)
 )
 
 // HandleClick checks if click is on the star or title and returns true if it was
@@ -1200,6 +1268,9 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 		return ClickNone, ""
 	}
 
+	if _, ok := m.backgroundControlAt(x, y); ok {
+		return ClickNone, ""
+	}
 	if m.placement != nil && m.mode == ModeVertical {
 		return m.placementClick(x, y)
 	}
@@ -1298,9 +1369,25 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	if id, ok := m.subagentHoverZone[contentY]; ok && id != "" {
 		return ClickSubagent, string(id)
 	}
+	if contentY >= m.backgroundStart && contentY < m.backgroundEnd && m.backgroundStart >= 0 {
+		index := contentY - m.backgroundStart - 1
+		if index >= 0 && index < len(m.backgroundRowTools) && m.backgroundRowTools[index] != "" {
+			return ClickBackgroundProcess, m.backgroundRowTools[index]
+		}
+	}
 
 	if m.gitStart >= 0 && contentY >= m.gitStart && contentY < m.gitEnd {
 		line := contentY - m.gitStart
+		if line == 0 {
+			mode, ok := m.git.modeAtX(adjustedX)
+			if ok {
+				if mode == review.ModeFiles {
+					return ClickGit, "mode:browse"
+				}
+				return ClickGit, "mode:changes"
+			}
+			return ClickGit, "0"
+		}
 		if m.git.interactive(line) {
 			return ClickGit, strconv.Itoa(line)
 		}
@@ -1373,6 +1460,7 @@ func (m *model) LoadFromSession(sess *session.Session) {
 	// stack entries.
 	m.rootSessionID = sess.ID
 	m.sessionStack = nil
+	m.resetBackgroundProcesses(sess.ID)
 	m.clearTransferPresentation()
 
 	// Restore the subagent swarm view. rootSessionID scopes live snapshots
@@ -1486,23 +1574,52 @@ func usageContextPercent(usage *runtime.Usage) string {
 	return fmt.Sprintf("%.0f%%", percent)
 }
 
-// agentContextPercent returns the latest known context usage percentage for
-// the named agent ("N%"), or "" when the agent has not run yet or its
-// context limit is unknown.
-func (m *model) agentContextPercent(agentName string) string {
-	if usage, ok := m.sessionState.AgentUsage(agentName); ok {
-		return usageContextPercent(&usage)
+// SessionUsage returns the latest token-usage snapshot for one session, so an
+// inspector can show that exact session rather than a same-named agent's usage.
+func (m *model) SessionUsage(sessionID string) (runtime.Usage, bool) {
+	usage, ok := m.sessionUsage[sessionID]
+	if !ok || usage == nil {
+		return runtime.Usage{}, false
 	}
-	return ""
+	return *usage, true
+}
+
+// contextReading returns the context-fill label ("N%") and warning level for a
+// row, or "" when readings are off or the usage is unknown. A row that names a
+// session reads only that session's snapshot, so same-named agents never share
+// a value. Rows without a session (roster and participant names) read the
+// agent's latest snapshot.
+func (m *model) contextReading(sessionID, agentName string) (string, styles.ContextGaugeLevel) {
+	if !m.agentContextReadings {
+		return "", styles.ContextGaugeNormal
+	}
+	var usage *runtime.Usage
+	switch {
+	case sessionID != "":
+		usage = m.sessionUsage[sessionID]
+	case m.sessionState != nil:
+		if u, ok := m.sessionState.AgentUsage(agentName); ok {
+			usage = &u
+		}
+	}
+	if usage == nil {
+		return "", styles.ContextGaugeNormal
+	}
+	return usageContextPercent(usage), usageGaugeLevel(usage)
+}
+
+// agentContextPercent returns the named agent's latest context reading, or ""
+// when readings are off, the agent has not run, or its context limit is unknown.
+func (m *model) agentContextPercent(agentName string) string {
+	label, _ := m.contextReading("", agentName)
+	return label
 }
 
 // agentContextGaugeLevel returns the warning level of the named agent's
 // context gauge, [styles.ContextGaugeNormal] when the agent has not run yet.
 func (m *model) agentContextGaugeLevel(agentName string) styles.ContextGaugeLevel {
-	if usage, ok := m.sessionState.AgentUsage(agentName); ok {
-		return usageGaugeLevel(&usage)
-	}
-	return styles.ContextGaugeNormal
+	_, level := m.contextReading("", agentName)
+	return level
 }
 
 // usageGaugeLevel classifies a usage snapshot's context fill against the
@@ -1584,7 +1701,7 @@ func (m *model) updateScrollviewMouse(msg tea.Msg) tea.Cmd {
 		m.CancelHover()
 		m.visualGeneration++
 	}
-	return cmd
+	return tea.Batch(cmd, m.syncBackgroundAnimation())
 }
 
 // Update handles messages and updates the component state.
@@ -1641,6 +1758,10 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		if msg.Button == tea.MouseLeft {
 			if cmd, handled := m.todoClick(msg.X-m.xPos, msg.Y-m.yPos); handled {
+				return m, cmd
+			}
+			if control, ok := m.backgroundControlAt(msg.X-m.xPos, msg.Y-m.yPos); ok {
+				cmd := m.toggleBackgroundControl(control)
 				return m, cmd
 			}
 			control, explicit := m.treeControlAt(msg.X-m.xPos, msg.Y-m.yPos)
@@ -1785,6 +1906,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			m.costParents[msg.SessionID] = m.sessionStack[len(m.sessionStack)-1]
 		}
 		m.sessionStack = append(m.sessionStack, msg.SessionID)
+		m.syncBackgroundDefaultOpen()
 		m.invalidateCache()
 		cmd := m.startSpinner()
 		return m, cmd
@@ -1794,6 +1916,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			m.sessionStack = m.sessionStack[:n-1]
 		}
 		if len(m.sessionStack) == 0 {
+			m.syncBackgroundDefaultOpen()
 			// The outermost stream ended: no delegation can outlive it. Drop
 			// any presentation that outlasted its timers — e.g. on a
 			// background tab whose tick commands were discarded.
@@ -1810,6 +1933,9 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 	case *runtime.SubagentTreeEvent:
 		cmd := m.SetSubagentTree(msg.Snapshot)
+		return m, cmd
+	case *runtime.BackgroundProcessesEvent:
+		cmd := m.SetBackgroundProcesses(msg.SessionID, msg.Processes)
 		return m, cmd
 	case *runtime.AgentSwitchingEvent:
 		// Standalone dispatch: no routing identity exists at this level, so
@@ -1842,12 +1968,13 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.streamCancelled = true
 		m.workingAgent = ""
 		m.sessionStack = nil
+		m.syncBackgroundDefaultOpen()
 		m.clearTransferPresentation()
 		m.toolsLoading = false
 		m.titleRegenerating = false
 		m.compacting = false
 		// Force-stop main spinner if it was active (state is now cleared)
-		if m.spinnerActive {
+		if m.spinnerActive && !m.needsSpinner() {
 			m.spinnerActive = false
 			m.spinner.Stop()
 		}
@@ -1895,10 +2022,14 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		m.todoComp.InvalidateCache() // Cached todo lines embed theme styling
-		m.invalidateCache()          // Theme affects all styling
+		m.backgroundRowCache = nil
+		m.invalidateCache() // Theme affects all styling
 		return m, tea.Batch(cmds...)
 	default:
 		if tick, ok := msg.(animation.TickMsg); ok {
+			if m.scrollview.UpdateAnimation(tick) {
+				m.invalidateAnimation()
+			}
 			m.tickHover(tick)
 			m.tickPlacement(tick)
 		}
@@ -1906,6 +2037,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		needsInvalidate := false
 		spinnerFrameChanged := false
 		if tick, ok := msg.(animation.TickMsg); ok {
+			m.tickBackgroundProcesses(tick)
 			// All sidebar spinners (including RAG Reset copies) use Chat in
 			// ModeSpinnerOnly. RawFrame already reads the accepted runtime clock,
 			// so comparing it around Update would miss changes. Compare the local
@@ -1927,10 +2059,13 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		// Update main spinner when tools are loading, agent is working, or title is regenerating
-		if m.toolsLoading || m.workingAgent != "" || m.titleRegenerating {
+		if m.toolsLoading || m.workingAgent != "" || m.titleRegenerating || m.gitLoading {
 			model, cmd := m.spinner.Update(msg)
 			m.spinner = model.(spinner.Spinner)
 			cmds = append(cmds, cmd)
+			if spinnerFrameChanged {
+				m.git.spinnerFrame = m.spinner.RawFrame()
+			}
 			needsInvalidate = needsInvalidate || spinnerFrameChanged
 		}
 
@@ -1950,9 +2085,6 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			needsInvalidate = needsInvalidate || spinnerFrameChanged
 		}
 
-		// Invalidate cache when animations advance to show their new frames.
-		// These are animation-only changes (fixed-width glyph swaps), so the
-		// cheaper path is used.
 		if needsInvalidate {
 			m.invalidateAnimation()
 		}
@@ -2050,17 +2182,18 @@ func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 		titleWithStar = star + m.sessionTitle
 	}
 	vm := CollapsedViewModel{
-		TitleWithStar:    titleWithStar,
-		WorkingIndicator: m.workingIndicatorCollapsed(),
-		WorkingDir:       m.workingDirLine(),
-		Branch:           m.branchLine(contentWidth),
-		Yolo:             m.yoloIndicator(contentWidth),
-		AgentIdentity:    styles.AgentIdentityStyle(m.activeAgentName(), false).Render(m.activeAgentName()),
-		ModelInfo:        m.activeModelInfo(contentWidth),
-		Thinking:         m.activeThinkingLabel(),
-		CanCycleThinking: m.activeModelDetails().ThinkingControl().CanCycle,
-		InfoLine:         m.collapsedInfoLine(contentWidth),
-		ContentWidth:     contentWidth,
+		TitleWithStar:     titleWithStar,
+		WorkingIndicator:  m.workingIndicatorCollapsed(),
+		WorkingDir:        m.workingDirLine(),
+		Branch:            m.branchLine(contentWidth),
+		Yolo:              m.yoloIndicator(contentWidth),
+		AgentIdentity:     styles.AgentIdentityStyle(m.activeAgentName(), false).Render(m.activeAgentName()),
+		ModelInfo:         m.activeModelInfo(contentWidth),
+		Thinking:          m.activeThinkingLabel(),
+		CanCycleThinking:  m.activeModelDetails().ThinkingControl().CanCycle,
+		InfoLine:          m.collapsedInfoLine(contentWidth),
+		BackgroundSummary: m.backgroundSummaryCollapsed(),
+		ContentWidth:      contentWidth,
 	}
 	if !m.sectionVisibility.HideUsage && m.usageReady {
 		vm.UsageSummary = m.tokenUsageSummary()
@@ -2102,6 +2235,10 @@ func (m *model) collapsedInfoLine(contentWidth int) string {
 	if !m.sectionVisibility.HideAgents {
 		appendPart(m.agentSummaryCollapsed())
 		appendPart(m.transferSummaryCollapsed(contentWidth))
+	}
+
+	if len(m.backgroundProcesses) > 0 {
+		appendPart(m.backgroundSummaryCollapsed())
 	}
 
 	if !m.sectionVisibility.HideTodos {
@@ -2158,7 +2295,8 @@ func (m *model) todosSummaryCollapsed() string {
 	default:
 		icon = styles.InProgressStyle.Render("◔")
 	}
-	return icon + styles.TabPrimaryStyle.Render(fmt.Sprintf(" %d/%d todos", completed, total))
+	// The collapsed band has no pointer region for this summary, so it stays a static muted line.
+	return icon + styles.MutedStyle.Render(fmt.Sprintf(" %d/%d todos", completed, total))
 }
 
 func (m *model) collapsedView() string {
@@ -2234,6 +2372,9 @@ func (m *model) renderFromCache() string {
 
 	m.scrollview.SetSize(regionWidth, m.viewportHeight())
 	lines := slices.Clone(m.cachedLines)
+	if m.git.loading() && m.mode == ModeVertical && m.gitStart >= 0 {
+		lines[m.gitStart] = m.git.summaryFrame(m.contentWidth(m.cachedNeedsScrollbar), m.spinner.RawFrame(), m.hoverValues)
+	}
 	for i, meta := range m.queueRows {
 		if y := m.queueStart + i; meta.turnID != "" && y < len(lines) {
 			lines[y] = m.actionRowText(lines[y], "queue:"+meta.turnID+":", meta.first, false)
@@ -2304,6 +2445,10 @@ func (m *model) renderSections(contentWidth int) []string {
 				return cachedSection
 			}
 		}
+		if m.sectionRenderCounts == nil {
+			m.sectionRenderCounts = make(map[string]uint64)
+		}
+		m.sectionRenderCounts[name]++
 		section := render(contentWidth)
 		m.sectionCache[name] = section
 		return section
@@ -2366,12 +2511,22 @@ func (m *model) renderSections(contentWidth int) []string {
 		m.agentClickZones[subagentSectionStart+row] = agent
 	}
 
+	m.backgroundHeader, m.backgroundMoreLine = -1, -1
+	m.backgroundStart, m.backgroundEnd = -1, -1
+	backgroundSection := cached("background", false, m.backgroundInfo)
+	if backgroundSection != "" {
+		markBlock()
+		sectionStart := appendSection(backgroundSection)
+		m.registerBackgroundGeometry(sectionStart)
+	}
+
 	m.gitStart, m.gitEnd = -1, -1
-	if gitLines := m.git.lines(contentWidth); len(gitLines) > 0 {
+	gitSection := cached("git", false, func(w int) string { return strings.Join(m.git.lines(w, m.hoverValues), "\n") })
+	if gitSection != "" {
 		if len(lines) > 0 {
 			lines = append(lines, "")
 		}
-		m.gitStart = appendSection(strings.Join(gitLines, "\n"))
+		m.gitStart = appendSection(gitSection)
 		m.gitEnd = len(lines)
 	}
 
@@ -2507,12 +2662,12 @@ func (m *model) tokenUsage(contentWidth int) string {
 func (m *model) tokenUsageLine() string {
 	s := m.computeUsageStats()
 
-	line := styles.MutedStyle.Render(styles.TokenGlyph+" ") + toolcommon.FormatTokenCount(s.tokens)
+	line := styles.MutedStyle.Render(styles.TokenGlyph+" ") + styles.MutedStyle.Render(toolcommon.FormatTokenCount(s.tokens))
 	switch {
 	case m.compacting:
 		line += " " + styles.WarningStyle.Render("(compacting…)")
 	case s.contextPct != "":
-		line += " " + contextGaugeStyle(s.contextLevel, styles.NoStyle).Render("("+s.contextPct+")")
+		line += " " + contextGaugeStyle(s.contextLevel, styles.MutedStyle).Render("("+s.contextPct+")")
 	}
 
 	if m.agentCompactionModel != "" {
@@ -2693,7 +2848,7 @@ func (m *model) activeModelInfo(contentWidth int) string {
 	if display == "" {
 		display = modelName
 	}
-	lines := []string{styles.BaseStyle.Render(toolcommon.TruncateText(display, contentWidth))}
+	lines := []string{styles.MutedStyle.Render(toolcommon.TruncateText(display, contentWidth))}
 	if provider != "" {
 		lines = append(lines, styles.MutedStyle.Render(toolcommon.TruncateText(provider, contentWidth)))
 	}
@@ -2825,10 +2980,8 @@ func (m *model) prepareTreeInfo(contentWidth int) string {
 	return strings.Join(lines, "\n")
 }
 
-// subagentLine renders one swarm row: branch guides start under the parent's
-// agent name, the state glyph sits just after this row's name, and status text
-// is right-aligned. Indentation recedes before the name truncates, so deep
-// trees stay readable without wrapping.
+// subagentLine renders a swarm row, preserving branch guides before truncating
+// the name and keeping status text right-aligned.
 func (m *model) subagentLine(n subagent.Node, guides string, contentWidth int) string {
 	return m.subagentRow(n, guides, contentWidth, -1, false)
 }
@@ -2839,74 +2992,101 @@ func (m *model) subagentRow(n subagent.Node, guides string, contentWidth, row in
 }
 
 func (m *model) subagentRowIdentity(n subagent.Node, guides string, contentWidth, row int, branch bool) (string, identityColumns) {
+	restingGuides := guides
 	hovered := m.hoveredSubagent == n.ID
+	span := m.branchSpans[n.ID]
+	revealID := hovered || span.idValue > 0 || span.idTarget > 0
+	nodeHover := m.hoverValues["node:"+string(n.ID)].value
 
 	nameStyle := styles.AgentIdentityStyle(n.Agent, false)
-
-	rightText := string(n.State)
+	restRight := restingStatus(n)
+	right := restRight
 	if hovered {
-		rightText = timeAgo(n.CreatedAt)
+		right = styles.MutedStyle.Render(timeAgo(n.CreatedAt))
 	}
-	right := styles.MutedStyle.Render(rightText)
 	rightWidth := lipgloss.Width(right)
-
 	rightReserve := rightWidth
 	if branch {
-		rightReserve = max(rightReserve, lipgloss.Width(string(n.State)), lipgloss.Width(timeAgo(n.CreatedAt)))
+		rightReserve = max(rightReserve, lipgloss.Width(string(n.State)), lipgloss.Width(timeAgo(n.CreatedAt)), lipgloss.Width(restRight))
+		if n.State == subagent.NodeIdle && n.BackgroundProcesses > 0 {
+			rightReserve = max(rightReserve, lipgloss.Width(fmt.Sprintf("%d background", n.BackgroundProcesses)))
+		}
 	}
 	leftBudget := contentWidth - rightReserve - 1
 	if leftBudget < 1 || (branch && leftBudget < 3 && contentWidth >= 3) {
-		right = ""
-		rightWidth = 0
-		leftBudget = contentWidth
+		right, rightWidth, leftBudget = "", 0, contentWidth
 	}
 
 	glyph := m.subagentGlyph(n)
-	glyphWidth := 0
-	if glyph != "" {
-		glyphWidth = lipgloss.Width(glyph)
-	}
-	baseName := n.DisplayName()
-	suffix := ""
-	if hovered || m.branchSpans[n.ID].idValue > 0 {
-		suffix = fmt.Sprintf(" (%s)", n.ID)
-	}
+	glyphWidth := lipgloss.Width(glyph)
 	controlReserve := 0
 	if branch && leftBudget >= 3 {
 		controlReserve = 2
 	}
-	badge := ""
-	badgeReserve := 0
-	badgeProgress := 0.0
-	if branch {
-		span := m.branchSpans[n.ID]
-		badgeProgress = span.value
-		if span.count > 0 {
-			badge = " " + strconv.Itoa(span.count)
-			badgeReserve = spanWidth(badge, badgeProgress)
+	if revealID && branch && leftBudget-controlReserve < 5 {
+		right, rightWidth, leftBudget = "", 0, contentWidth
+		controlReserve = 0
+		if leftBudget >= 3 {
+			controlReserve = 2
 		}
 	}
-	if leftBudget-controlReserve-badgeReserve < 1 {
-		badge = ""
-		badgeReserve = 0
+	// The reading is decided on the hover-free budget (see subagentReading) so it
+	// never moves with hover; the layout only has to honor that decision here.
+	reading, readingWidth := m.subagentReading(n, restingGuides, contentWidth, branch)
+	leftBudget -= readingWidth
+	badge := ""
+	badgeWidth, badgeProgress := 0, span.value
+	if branch && m.collapsedBranches[n.ID] && span.count > 0 {
+		badge = " " + strconv.Itoa(span.count)
+		badgeWidth = lipgloss.Width(badge)
 	}
-	// Hover IDs use only spare cells after the stable name/spinner/control run.
-	name, _, guideWidth, showGlyph := subagentLineParts(baseName, "", leftBudget-controlReserve-badgeReserve, glyphWidth)
+	suffix := ""
+	if revealID {
+		suffix = fmt.Sprintf(" (%s)", n.ID)
+	}
 
+	leftContent := max(0, leftBudget-controlReserve)
+	fullGuideWidth := lipgloss.Width(guides)
+	minGuideWidth := min(2, fullGuideWidth)
+	idWidth := 0
+	if suffix != "" {
+		idWidth = min(lipgloss.Width(suffix), max(0, leftContent-minGuideWidth))
+		if leftContent >= lipgloss.Width(suffix)+minGuideWidth {
+			idWidth = lipgloss.Width(suffix)
+		}
+	}
+	if badgeWidth > 0 {
+		if suffix != "" && (idWidth < lipgloss.Width(suffix) || leftContent < idWidth+badgeWidth+minGuideWidth) {
+			badge, badgeWidth = "", 0
+		} else if suffix == "" && leftContent < badgeWidth+minGuideWidth {
+			badge, badgeWidth = "", 0
+		}
+	}
+	guideWidth := min(fullGuideWidth, max(0, leftContent-idWidth-badgeWidth))
+	if suffix != "" && guideWidth < minGuideWidth && leftContent > idWidth {
+		guideWidth = min(minGuideWidth, leftContent-idWidth)
+	}
 	guides = subagentGuideTail(guides, guideWidth)
+	if suffix != "" {
+		suffix = fitSubagentIdentitySuffix(suffix, idWidth)
+	}
+	nameBudget := max(0, leftContent-guideWidth-lipgloss.Width(suffix)-badgeWidth)
+	if glyphWidth > 0 && nameBudget > glyphWidth+1 {
+		nameBudget -= glyphWidth + 1
+	} else if glyphWidth > 0 {
+		glyphWidth = 0
+	}
+	name := toolcommon.TruncateText(n.DisplayName(), nameBudget)
 	identity := identityColumns{nameStart: lipgloss.Width(guides), nameEnd: lipgloss.Width(guides) + lipgloss.Width(name)}
+	if revealID {
+		// Hover may replace the name with its ID and age; the click target must
+		// stay the resting name so the same coordinates keep addressing the node.
+		identity = m.restingSubagentIdentity(n, restingGuides, contentWidth, branch)
+	}
 	left := styles.MutedStyle.Render(guides) + m.hoverText(nameStyle.Render(name), "node-name:"+string(n.ID))
-
-	if badgeReserve > 0 {
-		left += neutralSpan(badge, badgeProgress, badgeReserve)
-	}
-	if showGlyph {
+	left += reading
+	if glyphWidth > 0 {
 		left += " " + glyph
-	}
-	idProgress := m.branchSpans[n.ID].idValue
-	idWidth := spanWidth(suffix, idProgress)
-	if suffix != "" && lipgloss.Width(left)+idWidth+controlReserve <= leftBudget {
-		left += neutralSpan(suffix, idProgress, idWidth)
 	}
 	if controlReserve > 0 {
 		x := lipgloss.Width(left) + 1
@@ -2923,6 +3103,13 @@ func (m *model) subagentRowIdentity(n subagent.Node, guides string, contentWidth
 		}
 		m.treeControls[row] = append(m.treeControls[row], treeControl{id: n.ID, x: x})
 	}
+	if badgeWidth > 0 {
+		visible := styles.HoverText(neutralSpan(badge, badgeProgress, spanWidth(badge, badgeProgress)), nodeHover, styles.TextPrimary)
+		left += visible + strings.Repeat(" ", max(0, badgeWidth-lipgloss.Width(visible)))
+	}
+	if suffix != "" {
+		left += idReservation(suffix, span.idValue, nodeHover)
+	}
 
 	if right == "" {
 		return left, identity
@@ -2931,33 +3118,132 @@ func (m *model) subagentRowIdentity(n subagent.Node, guides string, contentWidth
 	return left + strings.Repeat(" ", gap) + right, identity
 }
 
+// restingStatus is the right-aligned status cell when the row is not hovered:
+// the node state, or its background-process count. The context reading sits
+// beside the name instead (see subagentReading).
+func restingStatus(n subagent.Node) string {
+	return styles.MutedStyle.Render(subagentStateText(n))
+}
+
+// subagentStateText is the node's status word: its state, or the background
+// process count for an idle node that still runs background work.
+func subagentStateText(n subagent.Node) string {
+	if n.State == subagent.NodeIdle && n.BackgroundProcesses > 0 {
+		return fmt.Sprintf("%d background", n.BackgroundProcesses)
+	}
+	return string(n.State)
+}
+
+// subagentReading returns the row's gauge-styled context reading, led by the
+// separator that follows the name, with its width. It is "" when readings are
+// off, unknown, or the row cannot hold the reading beside the full name, glyph,
+// branch control, badge, and hover ID. The budget reserves the widest right-hand
+// cell either hover state can show, so the decision is identical at rest and on
+// hover, and the reading drops before any name or ID truncation.
+func (m *model) subagentReading(n subagent.Node, guides string, contentWidth int, branch bool) (string, int) {
+	label, level := m.contextReading(n.SessionID, n.Agent)
+	if label == "" {
+		return "", 0
+	}
+	need := lipgloss.Width(guides) + lipgloss.Width(n.DisplayName()) + 1 + lipgloss.Width(label) + lipgloss.Width(fmt.Sprintf(" (%s)", n.ID))
+	if glyph := lipgloss.Width(m.subagentGlyph(n)); glyph > 0 {
+		need += glyph + 1
+	}
+	if branch {
+		need += 2
+		if m.collapsedBranches[n.ID] && m.branchSpans[n.ID].count > 0 {
+			need += lipgloss.Width(" " + strconv.Itoa(m.branchSpans[n.ID].count))
+		}
+	}
+	reserve := max(lipgloss.Width(subagentStateText(n)), lipgloss.Width(string(n.State)), lipgloss.Width(timeAgo(n.CreatedAt)))
+	if need > contentWidth-reserve-1 {
+		return "", 0
+	}
+	return " " + contextGaugeStyle(level, styles.MutedStyle).Render(label), 1 + lipgloss.Width(label)
+}
+
+// restingSubagentIdentity is the name's hit span in the unrevealed row layout.
+// It mirrors subagentRowIdentity without the hover ID or age, so hover never
+// moves or removes the name target.
+func (m *model) restingSubagentIdentity(n subagent.Node, guides string, contentWidth int, branch bool) identityColumns {
+	restRight := restingStatus(n)
+	rightReserve := lipgloss.Width(restRight)
+	if branch {
+		rightReserve = max(rightReserve, lipgloss.Width(string(n.State)), lipgloss.Width(timeAgo(n.CreatedAt)), lipgloss.Width(restRight))
+		if n.State == subagent.NodeIdle && n.BackgroundProcesses > 0 {
+			rightReserve = max(rightReserve, lipgloss.Width(fmt.Sprintf("%d background", n.BackgroundProcesses)))
+		}
+	}
+	leftBudget := contentWidth - rightReserve - 1
+	if leftBudget < 1 || (branch && leftBudget < 3 && contentWidth >= 3) {
+		leftBudget = contentWidth
+	}
+	controlReserve := 0
+	if branch && leftBudget >= 3 {
+		controlReserve = 2
+	}
+	_, readingWidth := m.subagentReading(n, guides, contentWidth, branch)
+	leftContent := max(0, leftBudget-controlReserve-readingWidth)
+	fullGuideWidth := lipgloss.Width(guides)
+	badgeWidth := 0
+	if branch && m.collapsedBranches[n.ID] && m.branchSpans[n.ID].count > 0 {
+		badgeWidth = lipgloss.Width(" " + strconv.Itoa(m.branchSpans[n.ID].count))
+		if leftContent < badgeWidth+min(2, fullGuideWidth) {
+			badgeWidth = 0
+		}
+	}
+	guideWidth := min(fullGuideWidth, max(0, leftContent-badgeWidth))
+	nameBudget := max(0, leftContent-guideWidth-badgeWidth)
+	if glyphWidth := lipgloss.Width(m.subagentGlyph(n)); glyphWidth > 0 && nameBudget > glyphWidth+1 {
+		nameBudget -= glyphWidth + 1
+	}
+	name := toolcommon.TruncateText(n.DisplayName(), nameBudget)
+	nameStart := lipgloss.Width(subagentGuideTail(guides, guideWidth))
+	return identityColumns{nameStart: nameStart, nameEnd: nameStart + lipgloss.Width(name)}
+}
+
+func idReservation(suffix string, progress, hover float64) string {
+	visible := styles.HoverText(neutralSpan(suffix, progress, spanWidth(suffix, progress)), hover, styles.TextPrimary)
+	return visible + strings.Repeat(" ", max(0, lipgloss.Width(suffix)-lipgloss.Width(visible)))
+}
+
 func subagentLineParts(name, suffix string, leftBudget, glyphWidth int) (string, string, int, bool) {
 	if leftBudget <= 0 {
 		return "", "", 0, false
 	}
-	if glyphWidth <= 0 {
-		full := name + suffix
-		if lipgloss.Width(full) <= leftBudget {
-			return name, suffix, leftBudget - lipgloss.Width(full), false
+	if suffix != "" {
+		// A hovered ID outranks the display name. If the full ID cannot fit,
+		// retain its leading identity cells rather than spending them on name.
+		suffixBudget := min(leftBudget, lipgloss.Width(suffix))
+		suffix = fitSubagentIdentitySuffix(suffix, suffixBudget)
+		suffixWidth := lipgloss.Width(suffix)
+		nameBudget := leftBudget - suffixWidth
+		showGlyph := glyphWidth > 0 && nameBudget > glyphWidth+1
+		if showGlyph {
+			nameBudget -= glyphWidth + 1
 		}
-		if suffix != "" && lipgloss.Width(name) <= leftBudget {
-			return name, "", leftBudget - lipgloss.Width(name), false
-		}
-		return toolcommon.TruncateText(name, leftBudget), "", 0, false
+		return ansi.Truncate(name, nameBudget, "…"), suffix, 0, showGlyph
 	}
 	glyphReserve := glyphWidth + 1
-	if leftBudget > glyphReserve {
+	if glyphWidth > 0 && leftBudget > glyphReserve {
 		nameBudget := leftBudget - glyphReserve
-		full := name + suffix
-		if lipgloss.Width(full) <= nameBudget {
-			return name, suffix, nameBudget - lipgloss.Width(full), true
-		}
-		if suffix != "" && lipgloss.Width(name) <= nameBudget {
-			return name, "", nameBudget - lipgloss.Width(name), true
-		}
-		return toolcommon.TruncateText(name, nameBudget), "", 0, true
+		return ansi.Truncate(name, nameBudget, "…"), "", 0, true
 	}
 	return toolcommon.TruncateText(name, leftBudget), "", 0, false
+}
+
+func fitSubagentIdentitySuffix(suffix string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(suffix) <= width {
+		return suffix
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(suffix, " ("), ")")
+	if width >= 3 {
+		return "(" + ansi.Truncate(id, width-2, "") + ")"
+	}
+	return ansi.Truncate(id, width, "")
 }
 
 func subagentGuideTail(guides string, width int) string {
@@ -2967,16 +3253,29 @@ func subagentGuideTail(guides string, width int) string {
 	if lipgloss.Width(guides) <= width {
 		return guides
 	}
+	connectorAt := strings.LastIndexAny(guides, "├└")
+	if connectorAt >= 0 {
+		connectorRune, _ := utf8.DecodeRuneInString(guides[connectorAt:])
+		connector := string(connectorRune)
+		if width == 1 {
+			return connector
+		}
+		if width == 2 {
+			return connector + " "
+		}
+		prefix := strings.TrimRight(guides[:connectorAt], " ")
+		return subagentGuideTail(prefix, width-3) + " " + connector + " "
+	}
 	runes := []rune(guides)
 	start := len(runes)
 	used := 0
 	for start > 0 {
-		w := lipgloss.Width(string(runes[start-1]))
-		if used+w > width {
+		cellWidth := lipgloss.Width(string(runes[start-1]))
+		if used+cellWidth > width {
 			break
 		}
 		start--
-		used += w
+		used += cellWidth
 	}
 	return string(runes[start:])
 }
@@ -2997,6 +3296,8 @@ func (m *model) subagentGlyph(n subagent.Node) string {
 		return styles.AgentAccentStyleFor(n.Agent).Render("·")
 	case n.State == subagent.NodeFailed:
 		return styles.ErrorStyle.Render("✗")
+	case n.State == subagent.NodeIdle && n.BackgroundProcesses > 0:
+		return styles.AgentAccentStyleFor(n.Agent).Render(m.subagentSpinner.RawFrame())
 	case n.State == subagent.NodeIdle:
 		return ""
 	default:
@@ -3052,10 +3353,9 @@ func (m *model) updateSubagentHover(y int) {
 			m.hoveredTreeRow = -1
 		}
 		if ok && id != "" {
-			for targetRow, node := range m.subagentHoverZone {
-				if node == id {
-					m.hoveredTreeRow = targetRow - m.treeSectionStart
-					break
+			if prepared, found := m.preparedTrees[m.contentWidth(m.cachedNeedsScrollbar)]; found {
+				if row, exists := prepared.rowByID[id]; exists {
+					m.hoveredTreeRow = row
 				}
 			}
 		}
@@ -3084,6 +3384,12 @@ func (m *model) updateSubagentHover(y int) {
 // the sidebar.
 func (m *model) ClearSubagentHover() tea.Cmd {
 	m.ResetTodoClick()
+	if m.git.setHovered(-1) {
+		if m.git.previousHovered >= 0 {
+			m.gitHoverLines = append(m.gitHoverLines, m.git.previousHovered)
+		}
+		m.invalidateHover()
+	}
 	changed := m.hoveredTreeRow != -1 || m.hoveredRegion != ClickNone || m.hoveredSubagent != "" || m.hoveredParent
 	m.hoveredTreeRow = -1
 	m.hoveredRegion = ClickNone
@@ -3357,7 +3663,7 @@ func effortSegment(label string, narrow bool) metricSegment {
 		// Capable but disabled: dim, with an empty gauge on wide cards —
 		// distinct from a non-capable model (which renders no effort segment
 		// at all).
-		value = styles.MutedStyle.Faint(true).Render("off")
+		value = styles.MutedStyle.Render("off")
 		gauge = toolcommon.EffortGaugeEmpty()
 	case thinkingAdaptive:
 		value = styles.ThinkingBadgeStyle.Render("auto")
@@ -3393,12 +3699,12 @@ func (m *model) contextSegment(agentName string, narrow bool) metricSegment {
 	if narrow {
 		label = "Ctx"
 	}
-	value := m.agentContextPercent(agentName)
+	value, level := m.contextReading("", agentName)
 	if value == "" {
 		s := styles.MutedStyle.Render(label + " " + metricUnknown)
 		return metricSegment{full: s, minimal: s}
 	}
-	style := contextGaugeStyle(m.agentContextGaugeLevel(agentName), styles.MutedStyle)
+	style := contextGaugeStyle(level, styles.MutedStyle)
 	s := styles.MutedStyle.Render(label+" ") + style.Render(value)
 	return metricSegment{full: s, minimal: s}
 }
@@ -3429,18 +3735,18 @@ func padLeft(s string, width int) string {
 
 // renderAgentLine renders a single agent in the compact roster as two lines:
 //
-//	▶ name            <thinking> ^N
-//	  provider/model         <ctx%>
+//	▶ name 30%        <thinking> ^N
+//	  provider/model
 //
-// Line 1: the name is left-aligned in its accent color, the thinking badge is
-// right-aligned in a shared column, and the "^N" switch shortcut sits flush
-// against the right edge. The current agent is marked with ▶ (or the spinner
-// while it — or any agent — is working); other agents pad the marker column so
-// the names stay aligned. Line 2: the indented provider/model, left-truncated
-// so its informative tail survives, with the agent's latest known context
-// usage percentage right-aligned once the agent has run (background agent
-// tasks included). The description is omitted. Agents past the 9th have no
-// shortcut.
+// Line 1: the name is left-aligned in its accent color, followed by the agent's
+// latest known context reading when the whole name fits beside it (dropped
+// before the name is truncated). The thinking badge is right-aligned in a
+// shared column, and the "^N" switch shortcut sits flush against the right
+// edge. The current agent is marked with ▶ (or the spinner while it — or any
+// agent — is working); other agents pad the marker column so the names stay
+// aligned. Line 2: the indented provider/model, left-truncated so its
+// informative tail survives. The description is omitted. Agents past the 9th
+// have no shortcut.
 func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth, nameWidth, badgeWidth int, glyphOnly, current bool) []string {
 	agentStyle := styles.AgentAccentStyleFor(agent.Name)
 
@@ -3452,6 +3758,9 @@ func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth,
 		marker = agentStyle.Render("▶")
 	}
 	left := padRight(marker, agentMarkerWidth) + agentStyle.Render(toolcommon.TruncateText(agent.Name, nameWidth))
+	if ctxPercent, ctxLevel := m.contextReading("", agent.Name); ctxPercent != "" && lipgloss.Width(agent.Name)+1+lipgloss.Width(ctxPercent) <= nameWidth {
+		left += " " + contextGaugeStyle(ctxLevel, styles.MutedStyle).Render(ctxPercent)
+	}
 
 	badge, compact := thinkingBadge(agent.Thinking)
 	if glyphOnly {
@@ -3471,18 +3780,8 @@ func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth,
 	if agent.Provider != "" {
 		modelText = agent.Provider + "/" + agent.Model
 	}
-	ctxPercent := m.agentContextPercent(agent.Name)
-	ctxStyle := contextGaugeStyle(m.agentContextGaugeLevel(agent.Name), styles.MutedStyle)
-	modelWidth := contentWidth - agentMarkerWidth
-	if ctxPercent != "" {
-		modelWidth -= lipgloss.Width(ctxPercent) + 1
-	}
-	model := toolcommon.TruncateTextLeft(modelText, max(1, modelWidth))
+	model := toolcommon.TruncateTextLeft(modelText, max(1, contentWidth-agentMarkerWidth))
 	line2 := strings.Repeat(" ", agentMarkerWidth) + styles.MutedStyle.Render(model)
-	if ctxPercent != "" {
-		gap := max(1, contentWidth-lipgloss.Width(line2)-lipgloss.Width(ctxPercent))
-		line2 += strings.Repeat(" ", gap) + ctxStyle.Render(ctxPercent)
-	}
 
 	return []string{line1, line2}
 }
@@ -3570,7 +3869,10 @@ func (m *model) metricSegments(agent runtime.AgentDetails, narrow bool) []metric
 	if s := effortSegment(agent.Thinking, narrow); s.full != "" {
 		segments = append(segments, s)
 	}
-	return append(segments, m.contextSegment(agent.Name, narrow), m.costSegment(agent.Name))
+	if m.agentContextReadings {
+		segments = append(segments, m.contextSegment(agent.Name, narrow))
+	}
+	return append(segments, m.costSegment(agent.Name))
 }
 
 // metricLines builds the flowed metric lines of an agent card, fitted to
@@ -3802,7 +4104,7 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 	m.updateScrollviewPosition()
 	m.updateTitleInputWidth()
 	m.invalidateCache() // Width/height change affects layout
-	return m.ReconcileLayout()
+	return tea.Batch(m.ReconcileLayout(), m.syncBackgroundAnimation())
 }
 
 // updateTitleInputWidth sets the title input viewport width.
@@ -3847,16 +4149,46 @@ func (m *model) SetMode(mode Mode) {
 	}
 	m.ResetTodoClick()
 	m.mode = mode
+	m.scrollview.SetScrollbarActive(m.scrollbarVisible && mode == ModeVertical && m.presentationActive)
 	m.invalidateCache()
 }
 
-// SetMirroredPadding swaps the horizontal edge padding so the content hugs
-// the terminal edge when the sidebar is rendered on the left of the chat,
-// with the breathing room moved to the chat side.
+// SetScrollbarDecorator changes only the rendered scrollbar treatment. It
+// deliberately avoids content invalidation so resize-grip presentation does
+// not rebuild sidebar rows or disturb prepared hit geometry.
+// SetScrollbarPointer observes the terminal pointer without routing a drag.
+func (m *model) SetScrollbarPointer(x, y int) bool {
+	if m.scrollview.SetScrollbarPointer(x, y) {
+		m.invalidateAnimation()
+		return true
+	}
+	return false
+}
+
+// SetScrollbarActive suspends or resumes scrollbar visibility while the
+// sidebar is occluded by another surface.
+func (m *model) SetScrollbarActive(active bool) bool {
+	m.scrollbarVisible = active
+	changed := m.scrollview.SetScrollbarActive(active && m.presentationActive && m.mode == ModeVertical)
+	if changed {
+		m.invalidateAnimation()
+	}
+	return changed
+}
+
+func (m *model) SetScrollbarDecorator(decorator scrollview.ScrollbarDecorator) {
+	m.scrollview.SetScrollbarDecorator(decorator)
+	m.visualGeneration++
+}
+
+// SetMirroredPadding keeps one terminal-edge pad and moves the chat-side gap
+// inside the left dock; the right dock retains its default outer geometry.
 func (m *model) SetMirroredPadding(mirrored bool) {
 	cfg := DefaultLayoutConfig()
 	if mirrored {
-		cfg.PaddingLeft, cfg.PaddingRight = cfg.PaddingRight, cfg.PaddingLeft
+		// Keep terminal-edge breathing room on either dock while moving the
+		// content-to-chat gap with the panel.
+		cfg.PaddingRight = cfg.PaddingLeft
 	}
 	if m.layoutCfg == cfg {
 		return

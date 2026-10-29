@@ -319,8 +319,8 @@ func (d *themePickerDialog) renderTheme(theme ThemeChoice, selected bool, maxWid
 	currentBadgeStyle := styles.BadgeCurrentStyle
 	if selected {
 		nameStyle, descStyle = styles.PaletteSelectedActionStyle, styles.PaletteSelectedDescStyle
-		defaultBadgeStyle = defaultBadgeStyle.Background(styles.MobyBlue)
-		currentBadgeStyle = currentBadgeStyle.Background(styles.MobyBlue)
+		defaultBadgeStyle = defaultBadgeStyle.Foreground(styles.White).Background(styles.MobyBlue)
+		currentBadgeStyle = currentBadgeStyle.Foreground(styles.White).Background(styles.MobyBlue)
 	}
 
 	// For custom themes, show the filename as a description. Built-in themes

@@ -13,7 +13,7 @@ _Schedule instructions to run at a time or on a recurring interval._
 
 The scheduler toolset lets an agent make something happen at a chosen time or on a repeating cadence during a session. You give it an instruction and a schedule; when the schedule is due, the instruction is delivered back to the agent, which then carries out the action with its normal tools (`shell`, `api`, `fetch`, and so on).
 
-The scheduler does not run shell or API calls itself. When a schedule fires it injects the instruction into the agent loop via the runtime's recall mechanism — the same primitive [`background_jobs`](../background-jobs/index.md) uses to report completed work — and the agent decides how to act. This keeps every action under the agent's normal tools and permissions rather than adding a second, unattended
+The scheduler does not run shell or API calls itself. When a schedule fires it injects the instruction into the agent loop via the runtime's recall mechanism — and the agent decides how to act. This keeps every action under the agent's normal tools and permissions rather than adding a second, unattended
 command runner.
 
 > [!NOTE]
@@ -93,4 +93,4 @@ Every 15 minutes it is reminded, runs the command with the `shell` tool, and rep
 > [!TIP]
 > **When to use**
 >
-> Use the scheduler for recurring monitoring, timed one-shots, and unattended housekeeping loops during a long-running session. For work that should run immediately and be awaited, use [`background_jobs`](../background-jobs/index.md) instead.
+> Use the scheduler for recurring monitoring, timed one-shots, and unattended housekeeping loops during a long-running session. For long-running work, use the [`shell`](../shell/index.md) tool and receive completion output automatically.

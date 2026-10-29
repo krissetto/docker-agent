@@ -60,6 +60,7 @@ func TestAgentContextGaugeLevel_PerAgentSnapshots(t *testing.T) {
 	t.Parallel()
 
 	m := newTestSidebar(t)
+	m.SetAgentContextReadings(true) // readings are off by default
 	m.startStream("session-root", "root")
 	m.recordUsage("session-root", "root", 20_000, 100_000)
 	m.recordUsageWithThreshold("session-child", "developer", 88_000, 100_000, 0.9)

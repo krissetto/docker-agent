@@ -17,6 +17,7 @@ struct ServerEditorSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let target: ServerEditorTarget
+    var onSaved: ((UUID) -> Void)? = nil
 
     @State private var draft = ServerDraft(name: "", baseURL: "")
     @State private var tested: (draft: ServerDraft, identity: ServerIdentity)?
@@ -142,6 +143,7 @@ struct ServerEditorSheet: View {
         guard let tested, tested.draft == draft else { return }
         do {
             try await model.addOrUpdateServer(draft, identity: tested.identity)
+            onSaved?(draft.id)
             dismiss()
         } catch {
             self.error = error.localizedDescription

@@ -49,7 +49,7 @@ public struct SourceRegistrationError: Error, LocalizedError, Sendable, Equatabl
 
 public enum SessionAdvancedError: Error, LocalizedError, Sendable, Equatable {
     case unsupported, sessionNotExecutable, sessionBusy, identityMismatch, invalidTurnID
-    case invalidForkPosition, forkPositionUnavailable, invalidMessageID, invalidMessage
+    case invalidForkPosition, forkPositionUnavailable, transcriptWindowIncomplete, invalidMessageID, invalidMessage
     case invalidAttachmentPath, invalidSourcePath, invalidWorkdir, sourceRegistrationUnavailable, subtreeConfirmationRequired, autonomousConfirmationRequired, staleBranchAnchor, invalidResponse
     public var errorDescription: String? {
         switch self {
@@ -60,6 +60,7 @@ public enum SessionAdvancedError: Error, LocalizedError, Sendable, Equatable {
         case .invalidTurnID: "A stable accepted turn ID is required."
         case .invalidForkPosition: "Choose a nonnegative user-message position."
         case .forkPositionUnavailable: "Fork position needs to be within the available user messages."
+        case .transcriptWindowIncomplete: "Load the complete session history before forking from a message."
         case .invalidMessageID: "A positive durable message ID is required."
         case .invalidMessage: "An editable message is required."
         case .invalidAttachmentPath: "Choose an absolute path from this session's attached-file list."

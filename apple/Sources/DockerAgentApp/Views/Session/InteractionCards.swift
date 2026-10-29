@@ -10,15 +10,17 @@ enum InteractionReply {
 struct InteractionStack: View {
     let interactions: [InteractionProjection]
     let reply: (InteractionProjection, InteractionReply) async throws -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: Metrics.s) {
             ForEach(interactions) { interaction in
                 InteractionCard(interaction: interaction, reply: reply)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.snappy, value: interactions)
+        .animation(Motion.reveal(reduceMotion), value: interactions)
+        .sensoryFeedback(.warning, trigger: interactions.count) { old, new in new > old }
     }
 }
 
@@ -44,14 +46,22 @@ private struct InteractionCard: View {
                     .foregroundStyle(.red)
             }
         }
-        .padding(Metrics.m)
-        .background(.background, in: .rect(cornerRadius: Metrics.cardRadius, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: Metrics.cardRadius, style: .continuous)
-                .strokeBorder(Color.orange.opacity(0.45), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
+        .padding(.vertical, Metrics.m)
+        .padding(.trailing, Metrics.l)
+        // Same language as a board tag, with the Signal spine: this one asks for a decision.
+        .agentGutter(owner, inset: 0, attention: true)
+        .padding(.leading, Metrics.s)
+        // Opaque: a decision card sits over scrolling transcript and must never show text through it.
+        .background(.background.secondary, in: .rect(cornerRadius: Metrics.promptRadius, style: .continuous))
         .accessibilityElement(children: .contain)
+    }
+
+    private var owner: String {
+        switch interaction {
+        case let .confirmation(_, owner, _, _, _): owner
+        case let .elicitation(_, owner, _, _, _): owner
+        case let .maxIterations(_, owner, _): owner
+        }
     }
 
     private func send(_ value: InteractionReply) {
@@ -129,8 +139,14 @@ private struct ConfirmationContent: View {
             .cardBackground(.fill.quaternary)
         }
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: Metrics.s) { buttons }
-            VStack(alignment: .leading, spacing: Metrics.s) { buttons }
+            HStack(spacing: Metrics.s) { buttons(fill: false) }
+            // Two rows on narrow screens: the once/deny pair first, then the session-wide options.
+            // Half the height of a four-button stack, which matters in landscape on a small phone.
+            VStack(spacing: Metrics.s) {
+                HStack(spacing: Metrics.s) { primaryButtons(fill: true) }
+                HStack(spacing: Metrics.s) { secondaryButtons(fill: true) }
+            }
+            .controlSize(.large)
         }
         .disabled(busy)
         .focusable()
@@ -157,19 +173,33 @@ private struct ConfirmationContent: View {
     }
 
     @ViewBuilder
-    private var buttons: some View {
+    private func buttons(fill: Bool) -> some View {
+        primaryButtons(fill: fill)
+        secondaryButtons(fill: fill)
+    }
+
+    private func title(_ text: String, fill: Bool) -> some View {
+        Text(text).frame(maxWidth: fill ? .infinity : nil)
+    }
+
+    @ViewBuilder
+    private func primaryButtons(fill: Bool) -> some View {
         if allows(.approve) {
-            Button("Allow Once") { decide(.approve, nil) }
+            Button { decide(.approve, nil) } label: { title("Allow Once", fill: fill) }
                 .buttonStyle(.borderedProminent)
         }
+        if allows(.reject) {
+            Button(role: .destructive) { decide(.reject, nil) } label: { title("Deny", fill: fill) }
+                .buttonStyle(.bordered)
+        }
+    }
+
+    @ViewBuilder
+    private func secondaryButtons(fill: Bool) -> some View {
         if allows(.approveTool), let pattern = PermissionPattern.build(toolName: toolName, arguments: arguments) {
-            Button("Always Allow \(PermissionPattern.label(pattern))") { decide(.approveTool, nil) }
+            Button { decide(.approveTool, nil) } label: { title("Always Allow \(PermissionPattern.label(pattern))", fill: fill) }
                 .buttonStyle(.bordered)
                 .help("Allow matching calls for the rest of this session")
-        }
-        if allows(.reject) {
-            Button("Deny", role: .destructive) { decide(.reject, nil) }
-                .buttonStyle(.bordered)
         }
         if allows(.approveBalanced) || allows(.approveAutonomous) || allows(.reject) {
             Menu {

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -16,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/internal/clipboardhook"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
@@ -106,7 +106,7 @@ func (p *chatPage) persistSessionTitle(newTitle string) tea.Cmd {
 func copyWorkingDirToClipboard(wd string) tea.Cmd {
 	return core.Sequence(
 		func() tea.Msg {
-			_ = clipboard.WriteAll(wd)
+			_ = clipboardhook.WriteAll(wd)
 			return nil
 		},
 		core.SetClipboard(wd),
@@ -147,6 +147,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 	case TargetSidebarResizeHandle:
 		if msg.Button == tea.MouseLeft {
 			p.isDraggingSidebar = true
+			p.setSidebarGripDragging(true)
 			p.sidebarDragStartX = msg.X
 			p.sidebarDragStartWidth = p.presentationSidebarSettings().PreferredWidth
 			p.sidebarDragMoved = false
@@ -230,7 +231,23 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			return p, core.CmdHandler(msgtypes.ShowCostDialogMsg{})
 		}
 
+	case TargetSidebarBackgroundProcess:
+		if msg.Button == tea.MouseLeft && p.navigateToBackgroundProcess(hit.BackgroundToolCallID) {
+			return p, nil
+		}
+
 	case TargetSidebarSubagent:
+		// Right-click or Ctrl+left opens the node's own session inspector; it never attaches or switches.
+		if msg.Button == tea.MouseRight || (msg.Button == tea.MouseLeft && msg.Mod&tea.ModCtrl != 0) {
+			if p.app == nil {
+				return p, nil
+			}
+			target, ok := p.app.ResolveSubagentTarget(hit.SubagentID)
+			if !ok {
+				return p, nil
+			}
+			return p, core.CmdHandler(msgtypes.ShowAgentDetailsMsg{AgentName: target.Agent, SessionID: target.SessionID})
+		}
 		if msg.Button == tea.MouseLeft {
 			hintSession := p.routingID
 			if hintSession == "" {
@@ -307,7 +324,9 @@ func (p *chatPage) agentClickCmd(agentName string, button tea.MouseButton, mod t
 
 // handleMouseMotion handles mouse motion events.
 func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd) {
+	p.SetScrollbarPointer(msg.X, msg.Y)
 	if p.isDraggingSidebar {
+		p.messages.ClearPointerHover()
 		p.messages.CancelReferenceHover()
 		delta := p.sidebarDragStartX - msg.X
 		if max(delta, -delta) >= dragThreshold {
@@ -319,6 +338,8 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 		}
 		return p, nil
 	}
+	gripEdge := !p.isScrollbarDragging() && !p.messages.IsSelecting() && p.sidebarGripAt(msg.X, msg.Y)
+	p.setSidebarGripHover(gripEdge, gripEdge && p.sidebarGripHandleAt(msg.X, msg.Y))
 
 	// During a scrollbar drag, forward motion to both scrollable components
 	// so the drag continues even when the cursor drifts outside the component.
@@ -361,6 +382,9 @@ func (p *chatPage) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, te
 	if p.isDraggingSidebar {
 		p.isDraggingSidebar = false
 		cmd := p.SetSize(p.width, p.height)
+		p.setSidebarGripDragging(false)
+		gripEdge := p.sidebarGripAt(msg.X, msg.Y)
+		p.setSidebarGripHover(gripEdge, gripEdge && p.sidebarGripHandleAt(msg.X, msg.Y))
 		return p, cmd
 	}
 
@@ -388,6 +412,7 @@ func (p *chatPage) isScrollbarDragging() bool {
 
 // handleMouseWheel handles mouse wheel events.
 func (p *chatPage) handleWheelCoalesced(msg msgtypes.WheelCoalescedMsg) (layout.Model, tea.Cmd) {
+	p.SetScrollbarPointer(msg.X, msg.Y)
 	if msg.Delta == 0 {
 		return p, nil
 	}
@@ -414,6 +439,9 @@ const (
 )
 
 func (p *chatPage) wheelTarget(x, y int) wheelTarget {
+	if p.splitPresentation == nil && y < p.mainContentInset {
+		return wheelTargetNone
+	}
 	if g := p.splitPresentation; g != nil {
 		if p.sidebarInteractive() && g.Shell.Sidebar.contains(x, y) {
 			return wheelTargetSidebar

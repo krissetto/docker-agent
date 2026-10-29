@@ -138,6 +138,11 @@ func TestFromEnv(t *testing.T) {
 			editorEnv: "édit", // U+00E9 (é) is 2 bytes in UTF-8.
 			want:      "Édit", // First rune capitalised, rest preserved.
 		},
+		{
+			name:      "quoted executable with spaces",
+			editorEnv: `"/opt/My Editor/editor" --wait`,
+			want:      "Editor",
+		},
 	}
 
 	for _, tt := range tests {
@@ -187,18 +192,15 @@ func TestCommandFromEnv(t *testing.T) {
 			wantArgs: []string{fallback, "/tmp/draft.md"},
 		},
 		{
-			// cmp.Or picks the non-empty VISUAL even when it is only
-			// whitespace, so EDITOR is masked and the fallback launches.
-			name:      "whitespace-only VISUAL masks EDITOR",
+			name:      "whitespace-only VISUAL falls back to EDITOR",
 			visual:    "   ",
 			editorEnv: "vim",
-			wantArgs:  []string{fallback, "/tmp/draft.md"},
+			wantArgs:  []string{"vim", "/tmp/draft.md"},
 		},
 		{
-			// strings.Fields, not a shell: quotes are ordinary characters.
-			name:      "no shell evaluation",
+			name:      "quoted arguments remain one argv element",
 			editorEnv: `vim -c "set ft"`,
-			wantArgs:  []string{"vim", "-c", `"set`, `ft"`, "/tmp/draft.md"},
+			wantArgs:  []string{"vim", "-c", "set ft", "/tmp/draft.md"},
 		},
 	}
 

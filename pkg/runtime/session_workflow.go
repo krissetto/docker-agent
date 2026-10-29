@@ -101,7 +101,7 @@ func (h *sessionHandle) workflowSettlement(ctx context.Context) (WorkflowSettlem
 			quiet = !driver.running() && !driver.starting() && !driver.settling() &&
 				len(driver.pending) == 0 &&
 				driver.ioReservations == 0 && driver.reportRetry == nil &&
-				!driver.completionInFlight && !driver.retryRunning && driver.backgroundWorks == 0 &&
+				!driver.completionInFlight && !driver.retryRunning && driver.backgroundWorks == 0 && driver.deferredCompletionReportTurnID == "" &&
 				driver.skillOperationID == "" && !driver.compactReserved &&
 				!driver.switchReserved && !driver.editReserved
 			return nil

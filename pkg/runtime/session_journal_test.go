@@ -33,11 +33,12 @@ func TestUpdateTitlePersistsBeforeOrderedPublishAndSeedsLateAttach(t *testing.T)
 	defer attached.Cancel()
 	assert.Equal(t, "Canonical title", attached.Primary().Session.TitleSnapshot())
 	assert.Nil(t, attached.SessionsAdded)
-	require.Len(t, attached.Replay, 1)
-	title, ok := attached.Replay[0].Event.(*SessionTitleEvent)
+	sequenced := replayPrefix(t, attached.Replay)
+	require.Len(t, sequenced, 1)
+	title, ok := sequenced[0].Event.(*SessionTitleEvent)
 	require.True(t, ok)
 	assert.Equal(t, "Canonical title", title.Title)
-	assert.Equal(t, uint64(1), attached.Replay[0].Sequence)
+	assert.Equal(t, uint64(1), sequenced[0].Sequence)
 }
 
 func TestConcurrentAttachDetachDoesNotAffectSessionLifetime(t *testing.T) {
@@ -97,10 +98,33 @@ func TestInteractionJournalCarriesImmutableCorrelation(t *testing.T) {
 	replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 	require.NoError(t, err)
 	defer replayed.Cancel()
-	require.Len(t, replayed.Replay, len(events))
+	sequenced := replayPrefix(t, replayed.Replay)
+	require.Len(t, sequenced, len(events))
 	for i, event := range events {
-		assert.Equal(t, interactionEventID(event), replayed.Replay[i].InteractionID)
+		assert.Equal(t, interactionEventID(event), sequenced[i].InteractionID)
 	}
+}
+
+// replayPrefix returns the sequenced prefix of a replay. The only sequence-0 entry
+// allowed is exactly one BackgroundProcesses event trailing the prefix, in the same epoch.
+func replayPrefix(t *testing.T, replay []SessionEvent) []SessionEvent {
+	t.Helper()
+	require.NotEmpty(t, replay)
+	epoch := replay[0].Epoch
+	var prefix, trailing []SessionEvent
+	for _, item := range replay {
+		require.Equal(t, epoch, item.Epoch, "replay spans one epoch")
+		if item.Sequence == 0 {
+			trailing = append(trailing, item)
+			continue
+		}
+		require.Empty(t, trailing, "sequenced event after sequence-0 bookkeeping")
+		prefix = append(prefix, item)
+	}
+	require.Len(t, trailing, 1, "exactly one trailing sequence-0 event")
+	_, ok := trailing[0].Event.(*BackgroundProcessesEvent)
+	require.True(t, ok, "trailing sequence-0 event is BackgroundProcesses, got %T", trailing[0].Event)
+	return prefix
 }
 
 func interactionKindOf(event Event) InteractionKind {

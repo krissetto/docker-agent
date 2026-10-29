@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -63,10 +64,14 @@ func TestSharedTeamTodoOwnershipAcrossRuntimes(t *testing.T) {
 	}
 }
 
-type ownershipNotifier struct{ subscribers tools.ChangeSubscribers }
+type ownershipNotifier struct {
+	subscribers    tools.ChangeSubscribers
+	subscribeCalls atomic.Int32
+}
 
 func (*ownershipNotifier) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 func (n *ownershipNotifier) SubscribeToolsChanged(handler func()) func() {
+	n.subscribeCalls.Add(1)
 	return n.subscribers.Subscribe(handler)
 }
 
@@ -131,4 +136,19 @@ func TestSharedToolChangesPreserveAgentAndRuntimeAttribution(t *testing.T) {
 	notifier.subscribers.Notify()
 	require.Len(t, events[0], 2, "unsubscribing one runtime must not affect the other")
 	check(events[1])
+}
+
+// The same notifier listed twice on one agent yields one event for that agent.
+func TestSharedNotifierDuplicateToolsetsEmitOncePerAgent(t *testing.T) {
+	notifier := &ownershipNotifier{}
+	root := agent.New("root", "prompt", agent.WithModel(&mockProvider{id: "test/mock-model"}), agent.WithToolSets(notifier, notifier))
+	r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, r.Close()) })
+	var events []Event
+	r.OnToolsChanged(func(event Event) { events = append(events, event) })
+	require.EqualValues(t, 1, notifier.subscribeCalls.Load(), "one subscription per shared notifier")
+	notifier.subscribers.Notify()
+	require.Len(t, events, 1, "one event per unique agent")
+	assert.Equal(t, "root", events[0].(*ToolsetInfoEvent).AgentName)
 }

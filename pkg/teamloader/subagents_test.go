@@ -74,6 +74,9 @@ func TestLoadWithConfig_SubagentsAreAvailableOnAgent(t *testing.T) {
   root:
     model: openai/gpt-4o
     instruction: coordinate
+    subagent_access:
+      list_agents: tree
+      send_message: tree
     subagents:
       - agent: worker
         name: work
@@ -91,8 +94,14 @@ func TestLoadWithConfig_SubagentsAreAvailableOnAgent(t *testing.T) {
 	require.Len(t, root.AsyncSubagents(), 1)
 	assert.Equal(t, "worker", root.AsyncSubagents()[0].Agent)
 	assert.Equal(t, "work", root.AsyncSubagents()[0].Name)
+	captured, ok := result.Team.AgentConfig("root")
+	require.True(t, ok)
+	require.NotNil(t, captured.SubagentAccess)
+	assert.Equal(t, latest.SubagentAccessTree, captured.SubagentAccess.ListAgents)
+	assert.Equal(t, latest.SubagentAccessTree, captured.SubagentAccess.SendMessage)
 	assert.Contains(t, root.AsyncHarnessPrompt(), "# Async subagents")
-	assert.Contains(t, root.AsyncHarnessPrompt(), "- work: Does work")
+	assert.NotContains(t, root.AsyncHarnessPrompt(), "- work: Does work")
+	assert.NotContains(t, root.AsyncHarnessPrompt(), "Your subagents")
 
 	worker, err := result.Team.Agent("worker")
 	require.NoError(t, err)

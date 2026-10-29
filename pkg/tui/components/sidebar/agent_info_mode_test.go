@@ -27,6 +27,7 @@ func newCompactPanelSidebar(t *testing.T, width int, agents ...runtime.AgentDeta
 	m.sessionTitle = "Test"
 	m.currentAgent = "root"
 	m.availableAgents = agents
+	m.SetAgentContextReadings(true) // readings are off by default; these fixtures assert them
 	m.width = width
 	m.height = 200
 	t.Cleanup(m.transferAnimation.Stop)
@@ -67,7 +68,8 @@ func trimmedAgentBody(m *model) []string {
 // modes at the default (40) and minimum (20) sidebar widths. The compact
 // lines reproduce the pre-card roster: two lines per agent, the thinking
 // badge right-aligned on line 1 (single-cell glyph near MinWidth), the bare
-// context percent right-aligned on line 2, and no cost display. The detailed
+// context percent directly after the name on line 1 (when the whole name fits
+// beside it), and no cost display. The detailed
 // cards adapt their metric vocabulary to the roster: root's preferred wide
 // joined line ("Effort <gauge> high · Context 30% · Cost $0.13", 45 columns)
 // overflows both widths, so every card compacts — at 40 each card joins its
@@ -85,11 +87,11 @@ func TestAgentInfoModeExactOutputs(t *testing.T) {
 		{
 			name: "compact width 40", mode: AgentInfoCompact, width: 40,
 			want: []string{
-				"▶ root                        ▰▰▰▰▱▱ ^1",
-				"  anthropic/claude-opus-4-8         30%",
+				"▶ root 30%                    ▰▰▰▰▱▱ ^1",
+				"  anthropic/claude-opus-4-8",
 				"",
-				"  helper                      ▱▱▱▱▱▱ ^2",
-				"  openai/gpt-5.4-mini               91%",
+				"  helper 91%                  ▱▱▱▱▱▱ ^2",
+				"  openai/gpt-5.4-mini",
 				"",
 				"  budget                      ◉ 8.2K ^3",
 				"  openai/gpt-4o",
@@ -101,11 +103,11 @@ func TestAgentInfoModeExactOutputs(t *testing.T) {
 		{
 			name: "compact width 20", mode: AgentInfoCompact, width: 20,
 			want: []string{
-				"▶ root         ▰ ^1",
-				"  …ude-opus-4-8 30%",
+				"▶ root 30%     ▰ ^1",
+				"  …/claude-opus-4-8",
 				"",
-				"  helper       ▱ ^2",
-				"  …gpt-5.4-mini 91%",
+				"  helper 91%   ▱ ^2",
+				"  …nai/gpt-5.4-mini",
 				"",
 				"  budget       ◉ ^3",
 				"  openai/gpt-4o",
@@ -185,7 +187,7 @@ func TestCompactRosterIsDefault(t *testing.T) {
 	assert.NotContains(t, body, "Effort", "compact roster carries no labeled effort metric")
 	assert.NotContains(t, body, "Cost", "compact roster carries no cost display")
 	assert.NotContains(t, body, "Context", "compact roster shows the bare percent, not a label")
-	assert.Contains(t, body, "30%", "context percent still shows on the model line")
+	assert.Contains(t, body, "30%", "context percent still shows, beside the agent name")
 
 	counts := map[string]int{}
 	for _, owner := range m.agentLineOwners {

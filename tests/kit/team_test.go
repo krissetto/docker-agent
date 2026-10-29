@@ -16,10 +16,24 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 )
 
+func TestBundledTeamSubagentDescriptionParses(t *testing.T) {
+	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
+	require.NoError(t, err)
+	engineer, ok := cfg.Agents.Lookup("engineer")
+	require.True(t, ok)
+	for _, child := range engineer.Subagents {
+		if child.Agent == "greppy" {
+			assert.Equal(t, "Spawn one or more in parallel to explore codebases", child.Description)
+			return
+		}
+	}
+	t.Fatal("engineer is missing its greppy subagent declaration")
+}
+
 func TestTeam(t *testing.T) {
 	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
-	require.Len(t, cfg.Agents, 10)
+	require.Len(t, cfg.Agents, 11)
 	for _, expected := range []struct {
 		name      string
 		provider  string
@@ -30,16 +44,17 @@ func TestTeam(t *testing.T) {
 		toolsets  []string
 		readFile  bool
 	}{
-		{"root", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"dev-team", "engineer", "designer", "review-team"}, []string{"shell", "todo"}, false},
-		{"dev-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"greppy", "planner", "engineer", "designer", "technical-reviewer"}, []string{"shell"}, false},
-		{"greppy", "openai", "gpt-6.1-luna", "gpt-6.1-luna-xhigh", "xhigh", nil, []string{"shell", "todo"}, false},
+		{"root", "openai", "gpt-6-astra", "gpt-6-astra", "medium", []string{"orchestrator"}, []string{"shell", "todo"}, false},
+		{"orchestrator", "openai", "gpt-6.1-sol", "gpt-6.1-sol-xhigh", "xhigh", []string{"dev-team", "engineer", "designer", "review-team"}, []string{"todo"}, false},
+		{"dev-team", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", []string{"greppy", "planner", "engineer", "designer", "technical-reviewer"}, []string{"shell"}, false},
+		{"greppy", "anthropic", "claude-haiku-5-5", "haiku-5.5", "adaptive/medium", nil, []string{"shell", "todo"}, false},
 		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"shell", "todo"}, false},
-		{"engineer", "openai", "gpt-6.1-luna", "gpt-6.1-luna-xhigh", "xhigh", []string{"designer"}, []string{"shell", "todo"}, false},
+		{"engineer", "anthropic", "claude-haiku-5-5", "haiku-5.5-high", "adaptive/high", []string{"designer", "greppy"}, []string{"shell", "todo"}, false},
 		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"shell", "filesystem", "todo"}, true},
-		{"review-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer", "designer"}, []string{"shell"}, false},
-		{"technical-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell"}, false},
-		{"security-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell"}, false},
-		{"edge-case-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-high", "adaptive/high", nil, []string{"shell"}, false},
+		{"review-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer", "designer"}, []string{"shell", "todo"}, false},
+		{"technical-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell", "todo"}, false},
+		{"security-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell", "todo"}, false},
+		{"edge-case-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-high", "adaptive/high", nil, []string{"shell", "todo"}, false},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
@@ -78,8 +93,10 @@ func TestTeam(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "yo, shelly here.", root.WelcomeMessage)
 	allowed := []subagent.AllowedSubagent{{Agent: root.Subagents[0].Agent}}
-	_, ok = subagent.FindAllowed(allowed, "dev-team")
+	_, ok = subagent.FindAllowed(allowed, "orchestrator")
 	assert.True(t, ok)
+	_, ok = subagent.FindAllowed(allowed, "dev-team")
+	assert.False(t, ok, "root reaches dev-team only through orchestrator")
 	_, ok = subagent.FindAllowed(allowed, "undeclared")
 	assert.False(t, ok)
 	require.NoError(t, config.ApplyModelOverrides(cfg, []string{"openai/another-model"}))
@@ -95,7 +112,8 @@ func TestTeamReviewRouting(t *testing.T) {
 		name      string
 		reviewers []string
 	}{
-		{"root", []string{"review-team"}},
+		{"root", nil},
+		{"orchestrator", []string{"review-team"}},
 		{"dev-team", []string{"technical-reviewer"}},
 		{"review-team", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer", "designer"}},
 		{"technical-reviewer", nil},
@@ -134,52 +152,43 @@ func TestTeamModelPoolsResolve(t *testing.T) {
 func TestTeamGuidance(t *testing.T) {
 	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
-	for _, expected := range []struct {
-		name     string
-		guidance []string
-	}{
-		{"root", []string{"use engineer more often than designer", "only when the maker explicitly asks", "`dev-team`, led by development lead", "separate, dedicated review team"}},
-		{"dev-team", []string{"use engineer more often than designer", "don't micromanage", "poll for progress", "duplicate their work", "one optional reviewer", "only for quick checks of larger tasks", "never for routine small-task review", "as a required gate", "shelly keeps explicit user-requested independent reviews with the separate review team", "don't delegate review to another lead", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
-		{"planner", []string{"engineer handles most implementation", "targeted ux advice", "not as a mandatory ui stage", "not a step-by-step execution script"}},
-		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "directly recruit the declared designer subagent", "not routine ui delegation", "engineer retains implementation and integration ownership", "define file boundaries before assigning designer coding work", "other recruitment and material scope changes go through the assigning lead"}},
-		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change", "review lead assigns designer to an explicitly requested review", "use a read-only posture", "assess the assigned ux, interface architecture", "without editing project or reviewed artifacts", "does not change designer's implementation role elsewhere"}},
-		{"review-team", []string{"only when the user explicitly asks", "never as a routine gate", "smallest useful review team", "not duplicate full reviews", "one consolidated verdict", "don't modify project or reviewed artifacts", "explicitly requested review includes interface, ux, architecture, or design concerns", "bounded, read-only review of relevant interface architecture", "do not add designer when"}},
-		{"technical-reviewer", []string{"review lead for a user-requested review", "development lead for an optional quick check of a larger task", "never start a routine gate", "routine small-task review", "don't modify project or reviewed artifacts", "integration assumptions", "assigning lead rather than widening the assignment", "don't recruit other reviewers"}},
-		{"security-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "trust boundaries", "don't expose secrets"}},
-		{"edge-case-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "partial failures", "recovery"}},
-	} {
-		t.Run(expected.name, func(t *testing.T) {
-			a, ok := cfg.Agents.Lookup(expected.name)
-			require.True(t, ok)
-			instruction := strings.Join(strings.Fields(strings.ToLower(a.Instruction)), " ")
-			for _, guidance := range expected.guidance {
-				assert.Contains(t, instruction, guidance)
-			}
-			if expected.name == "root" || expected.name == "dev-team" {
-				for _, guidance := range []string{"a task is a few plain sentences, like a message to a teammate", "what needs doing, what to bring back, and only the facts that would change what they do", "a clear request may be the whole assignment", "explicit requirements", "leave the approach"} {
-					assert.Contains(t, instruction, guidance)
-				}
-				for _, checklist := range []string{"success criteria", "standalone goal", "don't copy your roster"} {
-					assert.NotContains(t, instruction, checklist)
-				}
-			}
-			if expected.name == "root" || expected.name == "dev-team" || expected.name == "engineer" || expected.name == "designer" {
-				for _, guidance := range []string{"simplicity", "safety or correctness", "single-line commit subjects", "descriptive branch names", "unless the user explicitly asks"} {
-					assert.Contains(t, instruction, guidance)
-				}
-			}
-		})
+	// Keep this prompt budget tied to the pre-shortening working-tree snapshot.
+	// orchestrator postdates that snapshot, so it is checked for guidance only.
+	baselineWords := map[string]int{
+		"root": 649, "dev-team": 369, "greppy": 175, "planner": 231,
+		"engineer": 430, "designer": 398, "review-team": 319,
+		"technical-reviewer": 200, "security-reviewer": 177, "edge-case-reviewer": 180,
 	}
-	for _, a := range cfg.Agents {
-		text := a.Description + " " + a.Instruction
-		for _, child := range a.Subagents {
-			text += " " + child.Description
+	guidance := map[string][]string{
+		"root":               {"warm makerspace counter", "default: 1–3 short bullets/sentences", "no routine progress, recap, or roleplay", "always delegate tasks of meaningful size to `orchestrator`", "reviews happen only on explicit request", "fresh children lack parent chat", "essential facts/constraints", "safety first"},
+		"orchestrator":       {"own delegation and coordination, never implementation", "dev team owns substantial development", "engineer handles bounded implementation/debugging/general tasks", "review team handles reviews only when the user explicitly requests one", "one owner per task", "fresh children lack parent chat", "default: 1–3 short friendly bullets/sentences", "distinguish verified results from assumptions"},
+		"dev-team":           {"lead the crew", "direct, don't implement", "engineer implements", "technical reviewer is optional on larger tasks, never routine", "user-requested reviews go to `review-team`", "fresh children lack parent chat", "one owner; parallelize, avoid polling/duplicates", "default: 1–3 short friendly bullets/sentences"},
+		"greppy":             {"greppy scouts the workshop shelves", "trace assigned questions", "don't edit/write tests", "default: 1–3 friendly bullets", "finding, evidence/paths, uncertainty", "no routine progress or recap"},
+		"planner":            {"planner maps the bench", "don't edit", "own routes, trade-offs, checks", "engineer implements", "designer offers targeted ux, never required", "default: 1–3 short friendly bullets/sentences"},
+		"engineer":           {"steady bench maker", "default for implementation, debugging, general work", "own integration", "work autonomously", "safety/correctness first", "only recruit declared designer for targeted ux/bounded frontend", "fresh children lack parent chat", "smallest complete change", "run focused checks", "default: 1–3 short friendly bullets/sentences", "no routine progress or recap"},
+		"designer":           {"engineer is default", "designer owns assigned ux/frontend work", "advice means no edits", "requested reviews are read-only", "accessible layouts/interactions", "don't recruit, widen, or redesign neighbors", "default: 1–3 brief friendly bullets/sentences", "no routine progress or recap"},
+		"review-team":        {"review lead keeps the makerspace side bench", "review only on explicit request, never routinely", "development lead owns fixes", "choose a small team", "designer only for requested ux review, read-only", "fresh children lack parent chat", "default: 1–3 short friendly bullets/sentences", "no routine progress or recap"},
+		"technical-reviewer": {"technical reviewer checks the measuring bench", "review assigned user requests", "never routine/dev", "read-only", "default: 1–3 short friendly bullets", "no routine progress/recap"},
+		"security-reviewer":  {"key keeper", "review assigned scope; no routine", "never expose, repeat, log, or report secrets", "read-only", "default: 1–3 friendly bullets", "no progress/recap"},
+		"edge-case-reviewer": {"edge case reviewer tests awkward corners", "review assigned scope; no routine/dev", "cancellation/retry", "recovery", "read-only", "default: 1–3 friendly bullets", "no progress/recap"},
+	}
+	require.Len(t, cfg.Agents, len(guidance))
+	for name, semantics := range guidance {
+		a, ok := cfg.Agents.Lookup(name)
+		require.True(t, ok, "missing agent %s", name)
+		if baseline, ok := baselineWords[name]; ok {
+			assert.LessOrEqual(t, len(strings.Fields(a.Instruction)), baseline/4, "%s prompt must be at least 75%% shorter", name)
 		}
-		text = strings.Join(strings.Fields(strings.ToLower(text)), " ")
-		for _, outdated := range []string{"must participate in every", "required for every task", "every frontend development or visual/ux code task", "require designer involvement"} {
-			assert.NotContains(t, text, outdated)
+		instruction := strings.Join(strings.Fields(strings.ToLower(a.Instruction)), " ")
+		for _, semantic := range semantics {
+			assert.Contains(t, instruction, semantic, "%s prompt", name)
 		}
 	}
+	root, ok := cfg.Agents.Lookup("root")
+	require.True(t, ok)
+	require.NotNil(t, root.CompactionThreshold)
+	assert.Equal(t, 0.25, *root.CompactionThreshold)
+	assert.Equal(t, "haiku-5.5", root.CompactionModel)
 }
 
 func TestNativeKit(t *testing.T) {

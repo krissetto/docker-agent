@@ -1,6 +1,7 @@
 package toolcommon
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -59,9 +60,11 @@ func TestEffortGaugeConstantWidth(t *testing.T) {
 func TestEffortGaugeEmpty(t *testing.T) {
 	t.Parallel()
 
-	filled, empty := gaugeCounts(EffortGaugeEmpty())
+	got := EffortGaugeEmpty()
+	filled, empty := gaugeCounts(got)
 	assert.Zero(t, filled)
 	assert.Equal(t, EffortGaugeCells, empty)
+	assert.True(t, effortEmptyStyle().GetFaint(), "empty gauge cells are decorative, unlike the readable disabled word")
 }
 
 // TestThinkingMarker covers the marker vocabulary used by the card and dialog.
@@ -103,8 +106,54 @@ func TestThinkingGaugeValue(t *testing.T) {
 		{"8192", styles.TokenGlyph + " 8.2K tokens"},
 	}
 	for _, c := range cases {
-		assert.Equalf(t, c.want, ansi.Strip(ThinkingGaugeValue(c.label)), "label %q", c.label)
+		got := ThinkingGaugeValue(c.label)
+		assert.Equalf(t, c.want, ansi.Strip(got), "label %q", c.label)
+		if c.label == "off" {
+			plain := ansi.Strip(got)
+			assert.False(t, faintAt(got, ansi.StringWidth(plain[:strings.LastIndex(plain, "off")])), "off remains readable through the muted semantic color")
+		}
 	}
 
 	assert.Empty(t, ThinkingGaugeValue(""), "empty label yields no summary")
+}
+
+func faintAt(rendered string, target int) bool {
+	p := ansi.GetParser()
+	defer ansi.PutParser(p)
+	var state byte
+	faint := false
+	for rendered != "" {
+		seq, width, n, next := ansi.DecodeSequence(rendered, state, p)
+		if n == 0 {
+			break
+		}
+		if ansi.HasCsiPrefix(seq) && p.Command() == 'm' {
+			params := p.Params()
+			if len(params) == 0 {
+				faint = false
+			}
+			for i := 0; i < len(params); i++ {
+				code := params[i].Param(0)
+				switch code {
+				case 0, 22:
+					faint = false
+				case 2:
+					faint = true
+				case 38, 48, 58:
+					var c color.Color
+					if consumed := ansi.ReadStyleColor(params[i:], &c); consumed > 0 {
+						i += consumed - 1
+					}
+				}
+			}
+		}
+		if width > 0 {
+			if target < width {
+				return faint
+			}
+			target -= width
+		}
+		state, rendered = next, rendered[n:]
+	}
+	return false
 }

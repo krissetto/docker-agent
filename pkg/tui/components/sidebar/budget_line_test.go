@@ -30,6 +30,7 @@ func TestBudgetLine_ShowsCeilingsAtZero(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID:    "s1",
 		AgentContext: runtime.AgentContext{AgentName: "root"},
@@ -69,6 +70,7 @@ func TestBudgetLine_ShowsEachBudgetByName(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID:    "s1",
 		AgentContext: runtime.AgentContext{AgentName: "developer"},
@@ -92,6 +94,7 @@ func TestBudgetLine_OmitsPerAgentBreakdown(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID:    "s1",
 		AgentContext: runtime.AgentContext{AgentName: "developer"},
@@ -115,6 +118,7 @@ func TestBudgetLine_SubCentUsesPreciseFormat(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID:    "s1",
 		AgentContext: runtime.AgentContext{AgentName: "root"},
@@ -130,6 +134,7 @@ func TestBudgetLine_TokensOnlyBudgetOmitsCost(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID:    "s1",
 		AgentContext: runtime.AgentContext{AgentName: "root"},
@@ -153,6 +158,7 @@ func TestBudgetLine_MarksUnpricedSpend(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID:    "s1",
 		AgentContext: runtime.AgentContext{AgentName: "root"},
@@ -167,6 +173,7 @@ func TestBudgetLine_UpdatesLive(t *testing.T) {
 
 	m := newTestSidebar(t)
 	m.startStream("s1", "root")
+	setUsageReadyForTest(m.model)
 	m.feedBudget(&runtime.BudgetUsageEvent{
 		SessionID: "s1", AgentContext: runtime.AgentContext{AgentName: "root"},
 		Budgets: []runtime.BudgetStatus{{Name: "run", Cost: 0.01, MaxCost: 0.50}},

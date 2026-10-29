@@ -78,7 +78,18 @@ func (s *Session) Clone() *Session {
 // OwnSnapshot copies this session, retaining descendants as ID-only references.
 // A writer must not snapshot or persist another session owner's mutable history.
 func (s *Session) OwnSnapshot() *Session {
-	return s.clone(true)
+	clone := s.clone(true)
+	if clone != nil && clone.SubagentTree != nil {
+		clearSubagentBackgroundProcessCounts(clone.SubagentTree.Nodes)
+	}
+	return clone
+}
+
+func clearSubagentBackgroundProcessCounts(nodes []subagent.NodeSnapshot) {
+	for i := range nodes {
+		nodes[i].Node.BackgroundProcesses = 0
+		clearSubagentBackgroundProcessCounts(nodes[i].Children)
+	}
 }
 
 func (s *Session) clone(referencesOnly bool) *Session {
@@ -131,6 +142,7 @@ func (s *Session) clone(referencesOnly bool) *Session {
 		AsyncSubagent:           s.AsyncSubagent,
 		SubagentTree:            cloneSubagentSnapshot(s.SubagentTree),
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
+		historyRevision:         s.historyRevision,
 	}
 
 	// Start from a shallow copy of each item so value fields (Summary,
@@ -179,6 +191,7 @@ func (s *Session) CommitCompactionFrom(src *Session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Messages = clone.Messages
+	s.historyRevision++
 	s.InputTokens = clone.InputTokens
 	s.OutputTokens = clone.OutputTokens
 	s.Cost = clone.Cost

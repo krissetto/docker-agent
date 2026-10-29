@@ -26,6 +26,8 @@ struct SessionMenu: View {
     let agents: [TeamAgentProjection]
     let readOnly: Bool
     let actions: SessionMenuActions
+    /// On iPhone the mode picker lives here so the title keeps its width; nil elsewhere.
+    var mode: Binding<SessionMode>? = nil
 
     @State private var renaming = false
     @State private var newTitle = ""
@@ -36,6 +38,14 @@ struct SessionMenu: View {
 
     var body: some View {
         Menu {
+            if let mode {
+                Picker("View", selection: mode) {
+                    ForEach(SessionMode.allCases) { mode in
+                        Label(mode.rawValue, systemImage: mode.symbol).tag(mode)
+                    }
+                }
+                .pickerStyle(.inline)
+            }
             if let openParent = actions.openParent {
                 Button("Open Parent Session", systemImage: "arrow.up.left", action: openParent)
                 Divider()
@@ -109,6 +119,7 @@ struct SessionMenu: View {
             Label("Session", systemImage: "ellipsis.circle")
         }
         .help("Session actions")
+        .accessibilityLabel(mode.map { "Session actions, showing \($0.wrappedValue.rawValue)" } ?? "Session actions")
         .alert("Rename Session", isPresented: $renaming) {
             TextField("Title", text: $newTitle)
             Button("Rename") {

@@ -43,6 +43,7 @@ capabilities:
     config:
       runtime:
         allow:
+          - models.dev
           - api.openai.com
           - api.anthropic.com
           - generativelanguage.googleapis.com

@@ -26,6 +26,7 @@ const (
 	TargetSidebarUsageContext
 	TargetSidebarUsage
 	TargetSidebarSubagent
+	TargetSidebarBackgroundProcess
 	TargetSidebarParent
 	TargetSidebarGit
 	TargetSidebarContent
@@ -41,9 +42,10 @@ type HitTest struct {
 	// SubagentID is the subagent node id when At() returns
 	// TargetSidebarSubagent; ParentSessionID is the parent tab's session id
 	// when it returns TargetSidebarParent.
-	QueueTurnID     string
-	SubagentID      string
-	ParentSessionID string
+	QueueTurnID          string
+	SubagentID           string
+	BackgroundToolCallID string
+	ParentSessionID      string
 	// GitLine is the Git section line when it returns TargetSidebarGit.
 	GitLine        string
 	OnSubagentName bool
@@ -58,7 +60,7 @@ func NewHitTest(page *chatPage) *HitTest {
 // It checks regions in priority order (most specific first).
 func (h *HitTest) At(x, y int) MouseTarget {
 	p := h.page
-	if p.presentationHidden {
+	if p.presentationHidden || (p.splitPresentation == nil && y < p.mainContentInset) {
 		return TargetNone
 	}
 	if g := p.splitPresentation; g != nil {
@@ -115,12 +117,12 @@ func (h *HitTest) isOnSidebarToggleGlyph(x, y int) bool {
 	}
 
 	if sl.mode == sidebarVertical {
-		// Toggle is at y=0 on the handle column
-		return y == 0 && h.isOnSidebarResizeHandle(x, y)
+		// The shell-owned top inset shifts the vertical edge column as a whole.
+		return y == p.mainContentInset && h.isOnSidebarResizeHandle(x, y)
 	}
 
 	// Collapsed horizontal: toggle is at right edge of the band's first content line
-	if sl.bandContentY(y) != 0 {
+	if sl.bandContentY(y-p.mainContentInset) != 0 {
 		return false
 	}
 	adjustedX := x - styles.AppPadding
@@ -135,7 +137,8 @@ func (h *HitTest) isOnSidebarResizeHandle(x, y int) bool {
 	if sl.mode != sidebarVertical {
 		return false
 	}
-	if y < 0 || y >= sl.chatHeight {
+	handleHeight := max(sl.chatHeight, p.sidebarPresentationExtent)
+	if y < p.mainContentInset || y >= p.mainContentInset+handleHeight {
 		return false
 	}
 	adjustedX := x - styles.AppPadding
@@ -174,15 +177,18 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 		return TargetSidebarUsageContext
 	case sidebar.ClickUsage:
 		return TargetSidebarUsage
+	case sidebar.ClickBackgroundProcess:
+		h.BackgroundToolCallID = agentName
+		if agentName == "" {
+			return TargetSidebarContent
+		}
+		return TargetSidebarBackgroundProcess
 	case sidebar.ClickSubagent:
 		h.SubagentID = agentName
 		if identities, ok := h.page.sidebar.(interface {
 			SubagentIdentityAt(x, y int) (subagent.Node, bool)
 		}); ok {
-			localX, localY := x-styles.AppPadding-h.page.computeSidebarLayout().sidebarStartX, y
-			if g := h.page.splitPresentation; g != nil {
-				localX, localY = x-g.Shell.Sidebar.X, y-g.Shell.Sidebar.Y
-			}
+			localX, localY := h.page.sidebarLocalPoint(x, y)
 			_, h.OnSubagentName = identities.SubagentIdentityAt(localX, localY)
 		}
 		return TargetSidebarSubagent

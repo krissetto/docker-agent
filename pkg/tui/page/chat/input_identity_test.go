@@ -54,7 +54,7 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 				app.WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: childNode, Session: sess, ParentSessionID: parentSession, ParentAgent: "director"})(a)
 			}
 			ar := animation.NewRuntimeWithScheduler(&referenceHoverScheduler{now: time.Unix(1, 0)})
-			p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			p := New(ar, t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 			t.Cleanup(func() { Cleanup(p); ar.Stop() })
 			p.SetSize(160, 40)
 			p.resetProjection(runtime.SessionSnapshot{Session: sess})
@@ -74,6 +74,7 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 				assert.Contains(t, ansi.Strip(frame), "sent a message >")
 			} else {
 				if tc.origin == session.InputOriginRuntime {
+					assert.Contains(t, ansi.Strip(frame), "From")
 					assert.Contains(t, ansi.Strip(frame), "· report received >")
 				} else {
 					assert.Contains(t, ansi.Strip(frame), "sent a message >")
@@ -127,7 +128,7 @@ func (m *referenceRefreshCounter) RefreshInputReferences() {
 func TestTreeMetricsDoNotRefreshTranscriptReferences(t *testing.T) {
 	sess := session.New()
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	counter := &referenceRefreshCounter{Model: p.messages}
 	p.messages = counter
 	tree := subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child", SessionID: "child-session", Agent: "worker"}}}}

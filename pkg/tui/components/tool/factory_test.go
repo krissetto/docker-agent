@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -202,4 +203,16 @@ func TestPlanToolsRouting(t *testing.T) {
 		_, ok := resolve(name)
 		assert.False(t, ok, "%q should fall through to the default renderer", name)
 	}
+}
+
+func TestNewUsesCompactListAgentsRenderer(t *testing.T) {
+	withCleanToolRegistry(t)
+	msg := types.ToolCallMessage("root", tools.ToolCall{Function: tools.FunctionCall{Name: subagent.ToolListAgents}}, tools.Tool{Name: subagent.ToolListAgents, Annotations: tools.ToolAnnotations{Title: "List Agents"}}, types.ToolStatusCompleted)
+	msg.Content = `{"current_agent":"root","children":[{"id":"abcde","agent":"coder","name":"implementation","state":"running"}]}`
+
+	view := New(animation.NewRuntime(), msg, service.StaticSessionState{})
+	plain := ansi.Strip(view.View())
+	assert.Contains(t, plain, "Listed 1 agent · 1 running")
+	assert.NotContains(t, plain, "children")
+	assert.NotContains(t, plain, "implementation")
 }

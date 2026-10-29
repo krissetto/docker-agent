@@ -225,7 +225,7 @@ func TestTreeCollapseWarmThemeRetainsStateAndColors(t *testing.T) {
 	assert.NotEqual(t, before, after)
 	assert.True(t, m.treeCollapsed)
 	assert.True(t, m.collapsedBranches["branch-full-identity"])
-	assert.Contains(t, after, styles.TabPrimaryStyle.Render("3 subagents"))
+	assert.Contains(t, after, styles.MutedStyle.Render("3 subagents"))
 	assert.Contains(t, after, styles.WarningStyle.Render("1 ⚠"))
 	assert.NotContains(t, ansi.Strip(after), "attention")
 	assert.Equal(t, after, m.View())
@@ -396,6 +396,7 @@ func TestRepeatedTrailingChevronClicksKeepIdentityHoverAndNeverAttach(t *testing
 			snap.Nodes[0].Children[0].Children[0].Node.State = subagent.NodeIdle // isolate hover lease; running spinner cadence is covered separately
 			m.rootSessionID = "collapse"
 			m.SetSubagentTree(snap)
+			testOpenAllSubagentBranches(m)
 			settleTreePresentation(t, m, m.ReconcileLayout())
 			m.View()
 			var row int
@@ -612,7 +613,7 @@ func TestCollapsedBranchPlainCountMovesInlineSpans(t *testing.T) {
 	m.collapsedBranches = make(map[subagent.NodeID]bool)
 	m.hoveredSubagent = node.ID
 	m.hoverTarget = "node:" + string(node.ID)
-	var nameX int
+	var nameX, controlX int
 	for _, progress := range []float64{0, .5, 1} {
 		m.branchSpans[node.ID] = branchSpans{count: 2, value: progress, target: 1, idValue: progress, idTarget: 1}
 		m.collapsedBranches[node.ID] = true
@@ -624,12 +625,14 @@ func TestCollapsedBranchPlainCountMovesInlineSpans(t *testing.T) {
 		x := strings.Index(plain, "planner")
 		if progress == 0 {
 			nameX = x
-			assert.Contains(t, plain, "planner ›")
+			controlX = m.treeControls[0][0].x
+			assert.Equal(t, "›", ansi.Cut(plain, controlX, controlX+1), "chevron follows reserved hidden count/ID cells")
 		} else {
 			assert.Equal(t, nameX, x)
+			assert.Equal(t, controlX, m.treeControls[0][0].x, "count/ID fade never shifts the chevron")
 		}
 		if progress == 1 {
-			assert.Contains(t, plain, "planner 2 (branch-full-identity) ›")
+			assert.Contains(t, plain, "planner › 2 (branch-full-identity)")
 			assert.Contains(t, line, neutralSpan(" 2", 1, 2), "plain count stays neutral")
 		}
 	}
@@ -670,6 +673,7 @@ func TestCountAndNewIDSpansShareElapsedReveal(t *testing.T) {
 	snap.Nodes[0].Children[0].Children[0].Node.State = subagent.NodeIdle
 	m.rootSessionID = "collapse"
 	m.SetSubagentTree(snap)
+	testOpenAllSubagentBranches(m)
 	m.ReconcileLayout()
 	m.CancelPresentation()
 	id := subagent.NodeID("branch-full-identity")
@@ -747,4 +751,26 @@ func TestCollapsedSpinnerReservesTrailingCellWithoutMovingLabelOrChevron(t *test
 			}
 		}
 	}
+}
+
+func testOpenAllSubagentBranches(m *model) {
+	if m.collapsedBranches == nil {
+		m.collapsedBranches = map[subagent.NodeID]bool{}
+	}
+	if m.manualBranches == nil {
+		m.manualBranches = map[subagent.NodeID]bool{}
+	}
+	var walk func([]subagent.NodeSnapshot)
+	walk = func(nodes []subagent.NodeSnapshot) {
+		for _, node := range nodes {
+			if len(node.Children) == 0 {
+				continue
+			}
+			m.collapsedBranches[node.Node.ID] = false
+			m.manualBranches[node.Node.ID] = true
+			walk(node.Children)
+		}
+	}
+	walk(m.subagentNodes)
+	m.invalidateCache()
 }

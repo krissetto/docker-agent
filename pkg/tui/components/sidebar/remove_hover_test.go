@@ -50,14 +50,10 @@ func TestRemoveHoverUsesErrorColorWithoutChangingItemText(t *testing.T) {
 						require.Equal(t, continuation, m.placementText(next, width))
 						require.Equal(t, "×", cells[width-1].glyph)
 						require.Nil(t, cells[width-1].bg, "remove has no opaque background")
-						r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))
-						er, eg, eb := styles.ColorToRGB(styles.Error)
-						emphasis := progress
-						want := styles.RGBToColor(r+(er-r)*emphasis, g+(eg-g)*emphasis, b+(eb-b)*emphasis)
+						// One shared ramp: the stable error color brightens with the single effective progress.
+						effective := max(progress, reveal)
+						want := sidebarCells(styles.HoverText(styles.BaseStyle.Foreground(styles.Error).Render("×"), effective, styles.TextPrimary))[0].fg
 						require.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(cells[width-1].fg), "progress=%v reveal=%v", progress, reveal)
-						if progress == 1 {
-							require.Equal(t, color.NRGBAModel.Convert(styles.Error), color.NRGBAModel.Convert(cells[width-1].fg), "remove stays exactly theme error red, without extra brightening")
-						}
 						require.Equal(t, first, requirePlaced(t, m, first.id), "canonical text stays intact")
 						require.Zero(t, m.ar.ActiveCount(), "painting does not schedule ticks")
 					}

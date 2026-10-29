@@ -51,12 +51,16 @@ FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae
 ARG ASYNC_AGENT_KIT_VERSION="0.1.0"
 LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION
 USER root
+# openssh-client provides ssh-keygen (SSH commit signing) and ssh-add (agent key discovery).
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder --chmod=0755 /docker-agent /opt/async-agent/docker-agent
 COPY --from=task --chown=root:root --chmod=0755 /task/task /usr/local/bin/task
 RUN install -d -m 0755 /usr/local/share/licenses /usr/local/share/licenses/task
 COPY --from=task --chown=root:root --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
 COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
 COPY --chmod=0755 kit/start.sh /opt/async-agent/start.sh
+COPY --chmod=0755 kit/git-signing.sh /opt/async-agent/git-signing.sh
 COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
 RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent /home/agent/.cagent
 COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml

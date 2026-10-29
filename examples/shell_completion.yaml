@@ -1,0 +1,11 @@
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Run long shell jobs and resume automatically when they finish.
+    instruction: |
+      Shell commands that exceed the foreground window complete in the background.
+      Their status and bounded output are delivered automatically when they finish.
+      Avoid killing long-running servers and watchers unless they are no longer needed.
+    toolsets:
+      - type: shell
+        background_after: 2

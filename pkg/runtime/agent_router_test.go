@@ -74,8 +74,7 @@ func TestAgentRouter_ResolveSession_UnknownPinFallsBackToCurrent(t *testing.T) {
 	sess.AgentName = "ghost"
 
 	a := r.ResolveSession(sess)
-	require.NotNil(t, a)
-	assert.Equal(t, "root", a.Name(), "unknown pin must fall back to Current rather than returning nil")
+	assert.Nil(t, a, "unknown pinned agent fails closed; it must not fall back to Current")
 }
 
 // TestAgentRouter_ConcurrentSafety drives many concurrent Name/Set/Current

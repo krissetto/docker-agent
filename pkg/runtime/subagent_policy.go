@@ -116,3 +116,40 @@ func (r *LocalRuntime) filterDelegationMessages(a *agent.Agent, sess *session.Se
 	}
 	return slices.Insert(filtered, index, chat.Message{Role: chat.MessageRoleSystem, Content: note})
 }
+
+const spawnCatalogMarker = "\n\nDeclared subagents (use one of these names with spawn_subagent):\n"
+
+// enrichSpawnToolDescription attaches the agent's pinned allow-list to its
+// caller-specific tools, keeping role descriptions out of instance listings
+// and shared/static tool definitions. Code-mode wraps its functions in one
+// tool, so its outer description receives the same scoped catalog.
+func enrichSpawnToolDescription(a *agent.Agent, agentTools []tools.Tool, allowed []subagent.AllowedSubagent) []tools.Tool {
+	if a == nil || !a.HasAsyncSubagents() || len(allowed) == 0 {
+		return agentTools
+	}
+	agentTools = slices.Clone(agentTools)
+	var catalog strings.Builder
+	catalog.WriteString(spawnCatalogMarker)
+	for _, entry := range allowed {
+		description := strings.TrimSpace(entry.Description)
+		if description == "" {
+			description = "(no description)"
+		}
+		fmt.Fprintf(&catalog, "- %s: %s\n", entry.DisplayName(), description)
+	}
+	for i := range agentTools {
+		tool := &agentTools[i]
+		if tool.Name == subagent.ToolSpawnSubagent {
+			for _, definition := range subagent.Definitions() {
+				if definition.Name == subagent.ToolSpawnSubagent {
+					tool.Description = definition.Description
+					break
+				}
+			}
+			tool.Description += catalog.String()
+		} else if tool.Name == "run_tools_with_javascript" {
+			tool.Description = strings.SplitN(tool.Description, spawnCatalogMarker, 2)[0] + catalog.String()
+		}
+	}
+	return agentTools
+}

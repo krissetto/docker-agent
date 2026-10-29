@@ -30,7 +30,6 @@ Docker Agent ships with several built-in tools that require no external dependen
 | --- | --- |
 | [Filesystem](../../tools/filesystem/index.md) | Read, write, list, search, and navigate files and directories |
 | [Shell](../../tools/shell/index.md) | Execute shell commands synchronously |
-| [Background Jobs](../../tools/background-jobs/index.md) | Run and manage long-running shell commands |
 | [Think](../../tools/think/index.md) | Step-by-step reasoning scratchpad for planning and decision-making |
 | [Todo](../../tools/todo/index.md) | Task list management for complex multi-step workflows |
 | [Tasks](../../tools/tasks/index.md) | Persistent task database shared across sessions |

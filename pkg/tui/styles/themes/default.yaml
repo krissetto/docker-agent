@@ -1,11 +1,11 @@
 version: 1
-name: "Default"
+name: "Old School"
 colors:
   # Text colors
   text_bright: "#E5F2FC"
   text_primary: "#C0C0C0"
-  text_secondary: "#808080"
-  text_muted: "#808080"
+  text_secondary: "#8f8f8f"
+  text_muted: "#8f8f8f"
   text_faint: "#404550"
 
   # Accent colors
@@ -31,7 +31,7 @@ colors:
   brand_bg: "#202a4b"
 
   # Error colors
-  error_strong: "#d74532"
+  error_strong: "#e06d5e"
   error_dark: "#4a2523"
 
   # Spinner colors
@@ -44,18 +44,18 @@ colors:
   diff_remove_bg: "#3C2A2A"
 
   # UI element colors
-  line_number: "#565F89"
+  line_number: "#888eac"
   separator: "#414868"
   selected: "#364A82"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#6B6B6B"
+  suggestion_ghost: "#8c8c8c"
   tab_bg: "#1C1C22"
   tab_active_bg: "#25252c"
   tab_active_fg: "#E5F2FC"
-  tab_inactive_fg: "#808080"
+  tab_inactive_fg: "#848484"
   tab_border: "#7AA2F7"
 
-  placeholder: "#808080"
+  placeholder: "#8c8c8c"
   # Shared shell/editor semantic colors
   editor_bg: "#25252c"
   card_bg: "#24283B"
@@ -67,14 +67,15 @@ colors:
   tab_busy: "#E0AF68"
   context_empty: "#1C1C22"
   context_fill: "#7DCFFF"
-  context_text: "#808080"
+  context_text: "#848484"
   resize: "#6B75A8"
   resize_hover: "#7DCFFF"
   resize_active: "#E5F2FC"
-  hint: "#808080"
+  hint: "#8c8c8c"
   focus: "#7AA2F7"
   disabled: "#404550"
-  status_adjacent: "#808080"
+  status_adjacent: "#848484"
+  scrollbar_track: "#38383d"
 
 
   # Badge colors
@@ -87,26 +88,26 @@ colors:
 
 chroma:
   # Syntax highlighting colors (Monokai-inspired)
-  error_fg: "#F1F1F1"
-  error_bg: "#F05B5B"
+  error_fg: "#272727"
+  error_bg: "#e06d5e"
   success: "#00D787"
-  comment: "#676767"
+  comment: "#8f8f8f"
   comment_preproc: "#FF875F"
   keyword: "#00AAFF"
   keyword_reserved: "#FF5FD2"
   keyword_namespace: "#FF5F87"
-  keyword_type: "#6E6ED8"
+  keyword_type: "#8686df"
   operator: "#EF8080"
   punctuation: "#E8E8A8"
   name_builtin: "#FF8EC7"
   name_tag: "#B083EA"
-  name_attribute: "#7A7AE6"
+  name_attribute: "#8585e8"
   name_decorator: "#FFFF87"
   literal_number: "#6EEFC0"
   literal_string: "#C69669"
   literal_string_escape: "#AFFFD7"
   generic_deleted: "#FD5B5B"
-  generic_subheading: "#777777"
+  generic_subheading: "#8f8f8f"
   background: "#373737"
 
 markdown:
@@ -115,6 +116,6 @@ markdown:
   strong: "#C0C0C0"
   code: "#C0C0C0"
   code_bg: "#24283B"
-  blockquote: "#808080"
+  blockquote: "#848484"
   list: "#C0C0C0"
   hr: "#6B75A8"

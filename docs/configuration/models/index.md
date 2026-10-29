@@ -52,6 +52,7 @@ models:
     title_model: string # Optional: model used for session-title generation
     compaction_model: string # Optional: model used for session-compaction (summary generation)
     compaction_threshold: float # Optional: context-window fraction that triggers auto-compaction (0–1, default: 0.9)
+    compaction_prompt: string # Optional: replaces the built-in compaction user prompt (system prompt unchanged)
     bypass_models_gateway: boolean # Optional: skip the models gateway for this model (implied by a custom base_url)
 ```
 
@@ -82,6 +83,7 @@ models:
 | `title_model`         | string     | ✗        | Model used for session-title generation. Can be a named model from the `models:` section or an inline `provider/model` string. When omitted, the agent's primary model generates titles. Cannot be combined with `first_available`. |
 | `compaction_model`    | string     | ✗        | Model used for session compaction (summary generation). Can be a named model or an inline `provider/model` string. The agent-level `compaction_model` takes precedence over this value, which in turn takes precedence over a provider-level default. When none is set, the primary model compacts. Cannot be combined with `first_available`. See the [Context & Compaction guide](../../guides/compaction/index.md). |
 | `compaction_threshold` | float     | ✗        | Fraction of the context window at which proactive auto-compaction triggers for agents running this model. Must be greater than `0` and at most `1`. Takes precedence over the agent-level `compaction_threshold`. Cannot be combined with `first_available`. Default: `0.9`. See the [Context & Compaction guide](../../guides/compaction/index.md). |
+| `compaction_prompt` | string    | ✗        | Replaces the built-in compaction user prompt for agents running this model. The built-in system prompt is kept. Precedence: agent-level `compaction_prompt`, then this value, then a provider-level default. Cannot be combined with `first_available`. See [Customizing the Compaction Prompt](#customizing-the-compaction-prompt). |
 | `bypass_models_gateway` | boolean  | ✗        | When `true`, this model connects directly to its provider even when a models gateway (`--models-gateway` / `DOCKER_AGENT_MODELS_GATEWAY`) is configured. Implied by a custom `base_url`. See [Gateway Bypass](#gateway-bypass). |
 
 ## Attachment Capability Overrides
@@ -332,6 +334,30 @@ models:
 > **Constraint**
 >
 > `compaction_model` cannot be combined with `first_available` model selection — the combination is rejected at validation time.
+
+### Customizing the Compaction Prompt
+
+`compaction_prompt` replaces the built-in compaction **user** prompt (the instruction that asks the model to write the summary). The built-in system prompt is always kept, so the summary still follows Docker Agent's compaction format. An empty value counts as unset, so resolution moves on to the next scope. The built-in prompt is used only when no applicable scope sets a non-empty value.
+
+```yaml
+models:
+  primary:
+    provider: anthropic
+    model: claude-sonnet-5
+    compaction_model: fast
+    compaction_prompt: |
+      Summarize the conversation for a code reviewer. Keep file paths, open
+      TODOs, and every decision that changed the design.
+  fast:
+    provider: anthropic
+    model: claude-haiku-4-5
+```
+
+Resolution priority mirrors `compaction_model`: an agent-level `compaction_prompt` wins, then the first configured model in the agent's `model` list that sets a value, then a provider-level default set in the `providers` section. If none is set, the built-in prompt is used.
+
+The prompt is read from the agent's own configured model(s), never from the compaction model. A `compaction_prompt` set on the `fast` model in the example above does not apply to agents running `primary`. Set it on the primary model, the agent, or the provider instead.
+
+Extra instructions are still appended to whichever prompt is in effect. Text passed to `/compact <text>` and `additional_context` returned by `pre_compact` hooks are added after the resolved prompt, so they steer the summary without replacing your custom prompt.
 
 See [`examples/compaction_model.yaml`](https://github.com/docker/docker-agent/blob/main/examples/compaction_model.yaml)
 and [`examples/compaction_threshold.yaml`](https://github.com/docker/docker-agent/blob/main/examples/compaction_threshold.yaml)

@@ -139,3 +139,31 @@ func TestPrimaryReasoningStatusKeepsFallbackTruthAndTwoRows(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoredAndPassiveStatusLabels(t *testing.T) {
+	tests := []struct {
+		name  string
+		state StatusModel
+		want  string
+		avoid []string
+	}{
+		{name: "dormant", state: StatusModel{Dormant: true}, want: "Restored · dormant · message or /resume", avoid: []string{"paused"}},
+		{name: "queued dormant", state: StatusModel{Dormant: true, Pending: 2}, want: "2 inputs queued"},
+		{name: "pausing", state: StatusModel{PauseArmed: true}, want: "⏸ pausing", avoid: []string{"Restored", "/resume"}},
+		{name: "true pause", state: StatusModel{PauseArmed: true, Paused: true}, want: "⏸ paused", avoid: []string{"Restored", "message or /resume"}},
+		{name: "pause overrides dormant", state: StatusModel{Dormant: true, PauseArmed: true, Paused: true}, want: "⏸ paused", avoid: []string{"Restored", "message or /resume"}},
+		{name: "stopped", state: StatusModel{Stopped: true}, want: "· stopped", avoid: []string{"/resume", "idle"}},
+		{name: "historical", state: StatusModel{ReadOnly: true}, want: "· read-only", avoid: []string{"/resume", "ready", "active"}},
+		{name: "active", state: StatusModel{Active: true, Agent: "worker"}, want: "active", avoid: []string{"Restored", "paused"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := strings.Join(RenderStatus(test.state, 160), "\n")
+			plain := ansi.Strip(got)
+			assert.Contains(t, plain, test.want)
+			for _, avoid := range test.avoid {
+				assert.NotContains(t, plain, avoid)
+			}
+		})
+	}
+}

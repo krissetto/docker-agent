@@ -2,7 +2,6 @@ package subagent
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -42,7 +41,7 @@ func (a AllowedSubagent) DisplayName() string {
 // SpawnArgs are the arguments for spawn_subagent.
 type SpawnArgs struct {
 	Agent string `json:"agent" jsonschema:"The name of the subagent to start (must be one of your declared subagents)."`
-	Task  string `json:"task" jsonschema:"What needs doing and what to bring back, in a few plain sentences. The subagent sees only this text."`
+	Task  string `json:"task" jsonschema:"Default to 1–3 short sentences with goal, essential facts, paths, constraints, and expected result; expand only for essential correctness details. The child sees only this task, not your conversation; don't refer to above or earlier context without including it. Default to 1–3 report bullets: result, checks, blockers; expand as needed so no essential detail is omitted. Skip routine progress, recaps, and roleplay. Follow-ups to the same child retain context."`
 }
 
 // DeliveryMode selects safe-boundary guidance or a separate FIFO turn.
@@ -55,7 +54,7 @@ const (
 
 // SendArgs are the arguments for send_message.
 type SendArgs struct {
-	To           string       `json:"to" jsonschema:"The id of one of your own direct children returned by spawn_subagent, or 'parent' if you were spawned. Sibling and unrelated agent ids are not addressable."`
+	To           string       `json:"to" jsonschema:"The target id returned by list_agents or spawn_subagent, or 'parent' if you were spawned. by default only your direct children and parent are addressable; subagent_access.send_message: tree permits other non-stopped instances in this root session's tree."`
 	Message      string       `json:"message" jsonschema:"The message body to deliver."`
 	RequestID    string       `json:"request_id,omitempty" jsonschema:"Stable identity for this message. Reuse it only when retrying exactly the same target, message and delivery mode; changed content is rejected."`
 	DeliveryMode DeliveryMode `json:"delivery_mode,omitempty" jsonschema:"guidance (default) joins a busy recipient at its next safe boundary ahead of ordinary turns; new_turn stays in the ordinary FIFO for a separate turn.,enum=guidance,enum=new_turn"`
@@ -83,8 +82,8 @@ type ReadArgs struct {
 
 // ListAgentsArgs are the arguments for list_agents.
 type ListAgentsArgs struct {
-	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of direct subagents to return (default 10, maximum 50)."`
-	Cursor string `json:"cursor,omitempty" jsonschema:"Continue after this direct subagent node id from the previous page."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of agents to return (default 10, maximum 50)."`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Continue after the canonical instance id from the previous page."`
 }
 
 // StopArgs are the arguments for stop_subagent.
@@ -102,14 +101,14 @@ func Definitions() []tools.Tool {
 		{
 			Name:        ToolSpawnSubagent,
 			Category:    "subagent",
-			Description: "Start a declared subagent in the background and return its id immediately. It sees only task: a few plain sentences, like a message to a colleague, saying what needs doing and what to bring back.",
+			Description: "Start a declared subagent in the background and return its id immediately. Default to a 1–3 sentence task with goal, essential facts, paths, constraints, and expected result; expand only for essential correctness details. The child sees only task, not your conversation; don't refer to above or earlier context without including it. Default to a 1–3 bullet report: result, checks, blockers; expand as needed so no essential detail is omitted. Skip routine progress, recaps, and roleplay. Follow-ups to this child retain context.",
 			Parameters:  tools.MustSchemaFor[SpawnArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Spawn Subagent"},
 		},
 		{
 			Name:        ToolSendMessage,
 			Category:    "subagent",
-			Description: "Send an actionable message to one of your own direct children by id, or to 'parent' if you were spawned; sibling and unrelated ids are not addressable. Use it for a needed decision or blocker, preventing wasted work, a material scope change or correction, or a follow-up task, not routine progress or nudges. Delivery is asynchronous: guidance (default) joins a busy recipient at its next safe boundary, ahead of ordinary queued turns; new_turn waits in the ordinary FIFO for a separate turn. An idle recipient wakes in either mode. The receipt acknowledges inbox admission, not model consumption; durable means admission survived storage commit. Reuse request_id for exact retries, never for changed content. Final responses are reported automatically as potentially truncated previews.",
+			Description: "Send an actionable message to an authorized instance id, or to 'parent' if you were spawned. by default only your direct children and parent are addressable; subagent_access.send_message: tree permits other non-stopped instances in this root session's tree, but never other roots. Use it for a needed decision or blocker, preventing wasted work, a material scope change or correction, or a follow-up task, not routine progress or nudges. Delivery is asynchronous: guidance (default) joins a busy recipient at its next safe boundary, ahead of ordinary queued turns; new_turn waits in the ordinary FIFO for a separate turn. An idle recipient wakes in either mode. The receipt acknowledges inbox admission, not model consumption; durable means admission survived storage commit. Reuse request_id for exact retries, never for changed content. Final responses are reported automatically as potentially truncated previews.",
 			Parameters:  tools.MustSchemaFor[SendArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Send Message"},
 		},
@@ -130,7 +129,7 @@ func Definitions() []tools.Tool {
 		{
 			Name:        ToolListAgents,
 			Category:    "subagent",
-			Description: "List your current agent identity, parent relationship, and a bounded page of your existing direct subagent instances. Results use canonical node ids, names, and state; use the returned next_cursor to continue. This does not list configured agents or spawn choices.",
+			Description: "List your current agent identity, parent relationship, and a bounded page of existing instances. By default this is your direct children; subagent_access.list_agents: tree opts into this root session's instance tree. Results use canonical node ids, names, parent ids, state, session titles when available, and per-node messageability; use next_cursor to continue. This does not list configured agents or spawn choices.",
 			Parameters:  tools.MustSchemaFor[ListAgentsArgs](),
 			Annotations: tools.ToolAnnotations{Title: "List Agents", ReadOnlyHint: true},
 		},
@@ -144,21 +143,22 @@ func Instructions() string {
 	return strings.TrimSpace(`
 # Async subagents
 
-A fresh subagent sees only your task, not this conversation. Write it the way
-you'd message a capable colleague: a few plain sentences on what needs doing
-and what to bring back, plus any fact they can't find themselves that would
-change what they do. Point at paths rather than pasting; if something from
-earlier matters, one sentence covers it. Mention concurrent work only as a
-concrete dependency or ownership boundary. A clear request may be the whole
-assignment: "The login form in web/src/Login.tsx submits twice on Enter. Find
-out why and fix it, then tell me the cause and what you ran to check."
+A fresh subagent sees only its task, not this conversation. Default to a
+self-contained 1–3 sentence task: goal, essential facts, paths, constraints,
+expected result; expand only for essential correctness details. Never refer to
+above or earlier context, or say "as discussed," without supplying it.
+Follow-ups to that child retain context. Default to 1–3 short report bullets:
+result, checks, blockers; expand as needed so no essential detail is omitted.
+Skip routine progress, recaps, and roleplay. Mention concurrent work only for
+a concrete dependency or ownership boundary. A clear request can stand alone:
+"The login form in web/src/Login.tsx submits twice on Enter. Find out why and
+fix it; report the cause and checks."
 
 Delegate when specialization or substantial independent work justifies the
 coordination cost; handle small tasks directly. Once delegation is warranted,
 start independent pieces in parallel. Give each piece one owner, don't redo
 their work yourself, and avoid unnecessary nested delegation.
-When your own reads or commands don't depend on each other's results, request
-them together in one response.
+Bundle independent reads and commands in one response.
 
 After spawn_subagent returns, do other non-overlapping work. If there is no
 independent work, end your turn without tool calls to delay or check progress:
@@ -196,8 +196,13 @@ func ChildInstructions() string {
 	return strings.TrimSpace(`
 # Spawned subagent role
 
-Another agent started you. Do the task in your first message. Your final
-response is reported to your parent automatically, often as a truncated preview;
+Another agent started you. Do the task in your first message. You received only
+its assigned task, not the conversation that led to it; ask your parent for any
+essential context you lack. Later messages from the same parent continue this
+session and retain its context. Default to 1–3 short final report bullets:
+result, checks, blockers; expand as needed so no essential detail is omitted.
+Skip routine progress, recaps, and roleplay. Your response is reported to your
+parent automatically, often as a truncated preview;
 they can retrieve the full result with read_subagent. Your session stays open
 for follow-ups. send_message can target your own direct children by id or
 "parent", not siblings or unrelated agents even if you know their ids.
@@ -220,24 +225,10 @@ micromanaging. Write that final response so it stands alone: what you
 did, what you checked, and what is still open.`)
 }
 
-// HarnessPrompt returns the core async-subagent harness guidance plus the
-// concrete allow-list for one agent. This belongs in the agent's core system
-// prompt, ahead of user instructions and toolset instructions; the ToolSet only
-// supplies tool definitions.
-func HarnessPrompt(allowed []AllowedSubagent) string {
-	var b strings.Builder
-	b.WriteString(Instructions())
-	if len(allowed) > 0 {
-		b.WriteString("\n\nYour subagents (use these names with spawn_subagent):\n")
-		for _, a := range allowed {
-			desc := a.Description
-			if desc == "" {
-				desc = "(no description)"
-			}
-			fmt.Fprintf(&b, "- %s: %s\n", a.DisplayName(), desc)
-		}
-	}
-	return strings.TrimSpace(b.String())
+// HarnessPrompt returns core async-subagent guidance. Spawnable names and
+// role descriptions are attached to the caller-specific spawn tool definition.
+func HarnessPrompt(_ []AllowedSubagent) string {
+	return Instructions()
 }
 
 // FindAllowed resolves a model-supplied subagent name against an agent's

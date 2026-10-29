@@ -63,11 +63,31 @@ func TestCompletionReferenceRecoversOnlyExactRuntimeHeader(t *testing.T) {
 			}
 			require.Equal(t, "abcde", msg.InputReference.DisplayID)
 			out := ansi.Strip(m.View())
-			require.Contains(t, out, "duplicate name (abcde) · report received >")
+			if tc.name == "typed sender wins" {
+				require.Contains(t, out, "duplicate name (abcde) · report received")
+				require.NotContains(t, out, ">", "a completion summary without a message has no disclosure")
+			} else {
+				require.Contains(t, out, "duplicate name (abcde) · report received >")
+			}
 			require.NotContains(t, out, "ref ")
 			require.Equal(t, tc.body, msg.ReceivedBody)
-			clickReplyChevron(t, m, ">")
-			require.Contains(t, ansi.Strip(m.View()), strings.ReplaceAll(tc.body, "\t", "    "))
+			if tc.name != "typed sender wins" {
+				clickReplyChevron(t, m, ">")
+			}
+			wantBody := strings.ReplaceAll(tc.body, "\t", "    ")
+			if tc.origin == session.InputOriginRuntime {
+				switch tc.name {
+				case "finished":
+					wantBody = "Full response: unchanged body"
+				case "failed":
+					wantBody = "Error: raw failure"
+				case "typed sender wins":
+					wantBody = ""
+				}
+			}
+			if wantBody != "" {
+				require.Contains(t, ansi.Strip(m.View()), wantBody)
+			}
 			require.Empty(t, msg.Content, "runtime copy field remains unchanged")
 			index.Clear()
 			m.RefreshInputReferences()

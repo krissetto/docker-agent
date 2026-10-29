@@ -88,7 +88,6 @@ func TestActualTUICancelImmediateSendShowsAcceptedTurnAndSettles(t *testing.T) {
 	model := tui.New(t.Context(), nil, a, "", func() {}, tui.WithHideSidebar())
 	d := tuitest.New(t, model, 100, 30, tuitest.WithTimeout(5*time.Second))
 	openBehaviorSettings(d).
-		Press(tea.KeyDown).
 		Press(tea.KeyRight).
 		Press(tea.KeyRight).
 		WaitFor(tuitest.Contains("None (immediate)"))

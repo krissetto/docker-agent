@@ -9,7 +9,8 @@
 package editorname
 
 import (
-	"cmp"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,16 +54,22 @@ var editorPrefixes = []struct {
 // FromEnv is pure: it takes the raw environment values as parameters so that
 // tests can exercise every code path without mutating os.Environ.
 func FromEnv(visual, editorEnv string) string {
-	editorCmd := cmp.Or(visual, editorEnv)
-	if editorCmd == "" {
+	if visual == "" && editorEnv == "" {
 		if goruntime.GOOS == "windows" {
 			return "Notepad"
 		}
 		return "Vi"
 	}
+	editorCmd := strings.TrimSpace(visual)
+	if editorCmd == "" {
+		editorCmd = strings.TrimSpace(editorEnv)
+	}
+	if editorCmd == "" {
+		return "$EDITOR"
+	}
 
-	parts := strings.Fields(editorCmd)
-	if len(parts) == 0 {
+	parts, err := splitCommand(editorCmd)
+	if err != nil || len(parts) == 0 {
 		return "$EDITOR"
 	}
 
@@ -86,25 +93,53 @@ func FromEnv(visual, editorEnv string) string {
 	return "$EDITOR"
 }
 
-// Command builds the *exec.Cmd that opens path in the configured external
-// editor, reading VISUAL and EDITOR from the process environment.
+// Command builds an editor command using VISUAL, EDITOR, or the platform default.
+// Invalid or unavailable configured editors produce a command that fails with
+// a useful error when started; callers that need synchronous validation should
+// use PrepareCommandFromEnv.
 func Command(path string) *exec.Cmd {
 	return CommandFromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"), path)
 }
 
-// CommandFromEnv builds the editor command from raw environment values so
-// tests can exercise every code path without mutating os.Environ. VISUAL
-// wins over EDITOR; the chosen value is split on whitespace (strings.Fields,
-// deliberately no shell evaluation), extra tokens become leading arguments,
-// and path is appended last. When neither variable yields a command, the
-// platform default is launched ("notepad" on Windows, "vi" elsewhere).
-//
-// Stdin/Stdout/Stderr are bound to the real terminal files: left nil,
-// tea.ExecProcess fills them from the Program, whose output is the
-// non-*os.File image-writer wrapper — the editor would then see a pipe
-// instead of a TTY ("Vim: Warning: Output is not to a terminal").
+// CommandFromEnv preserves the existing convenience API while using safe
+// argument parsing. Call PrepareCommandFromEnv when launch errors should be
+// reported before scheduling the process.
 func CommandFromEnv(visual, editorEnv, path string) *exec.Cmd {
-	parts := strings.Fields(cmp.Or(visual, editorEnv))
+	cmd, err := buildCommand(visual, editorEnv, path)
+	if err != nil {
+		return failedCommand(err)
+	}
+	return cmd
+}
+
+// PrepareCommandFromEnv constructs an argv-based editor command without a
+// shell. Quotes and backslash escapes in VISUAL/EDITOR only group arguments;
+// environment expansion, command substitution, and shell operators are not
+// evaluated. VISUAL takes precedence when it contains a command, then EDITOR.
+func PrepareCommandFromEnv(visual, editorEnv, path string) (*exec.Cmd, error) {
+	cmd, err := buildCommand(visual, editorEnv, path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := exec.LookPath(cmd.Args[0]); err != nil {
+		return nil, fmt.Errorf("external editor %q is unavailable: %w", cmd.Args[0], err)
+	}
+	return cmd, nil
+}
+
+func buildCommand(visual, editorEnv, path string) (*exec.Cmd, error) {
+	configured := strings.TrimSpace(visual)
+	if configured == "" {
+		configured = strings.TrimSpace(editorEnv)
+	}
+	var parts []string
+	if configured != "" {
+		parsed, err := splitCommand(configured)
+		if err != nil {
+			return nil, fmt.Errorf("parse external editor command: %w", err)
+		}
+		parts = parsed
+	}
 	if len(parts) == 0 {
 		if goruntime.GOOS == "windows" {
 			parts = []string{"notepad"}
@@ -112,11 +147,70 @@ func CommandFromEnv(visual, editorEnv, path string) *exec.Cmd {
 			parts = []string{"vi"}
 		}
 	}
-	args := append(parts[1:], path)
-	// The editor process is owned by tea.ExecProcess, so exec.Command is intentional.
+	args := append(append([]string(nil), parts[1:]...), path)
 	cmd := exec.Command(parts[0], args...) //nolint:noctx // owned by tea.ExecProcess
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd
+	return cmd, nil
+}
+
+func failedCommand(err error) *exec.Cmd {
+	return &exec.Cmd{Err: err, Args: []string{""}}
+}
+
+func splitCommand(command string) ([]string, error) {
+	var args []string
+	var word strings.Builder
+	var quote rune
+	runes := []rune(command)
+	escaped, started := false, false
+	for i, r := range runes {
+		if escaped {
+			word.WriteRune(r)
+			escaped, started = false, true
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			nextIsWhitespace := i+1 < len(runes) && strings.ContainsRune(" \t\r\n", runes[i+1])
+			if quote == '"' {
+				if i+1 < len(runes) && (runes[i+1] == '"' || runes[i+1] == '\\') {
+					escaped, started = true, true
+					continue
+				}
+			} else if i+1 < len(runes) && (nextIsWhitespace || runes[i+1] == '\'' || runes[i+1] == '"' || runes[i+1] == '\\') {
+				escaped, started = true, true
+				continue
+			}
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote, started = r, true
+			continue
+		}
+		if strings.ContainsRune(" \t\r\n", r) {
+			if started {
+				args = append(args, word.String())
+				word.Reset()
+				started = false
+			}
+			continue
+		}
+		word.WriteRune(r)
+		started = true
+	}
+	if escaped || quote != 0 {
+		return nil, errors.New("unterminated quote or escape")
+	}
+	if started {
+		args = append(args, word.String())
+	}
+	return args, nil
 }

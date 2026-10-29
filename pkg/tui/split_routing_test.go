@@ -310,6 +310,26 @@ func TestThinkingCycleCommandPreservesExactOriginAndUnrelatedMessages(t *testing
 	require.Contains(t, results, tea.Msg(messages.SwitchTabMsg{SessionID: "other"}))
 }
 
+// thinkingOwnerState pins the model and thinking projection a footer action
+// could mutate, not just the application pointer.
+type thinkingOwnerState struct {
+	application *app.App
+	metadata    runtime.SessionMetadata
+	agent       runtime.AgentDetails
+	model       string
+	reference   string
+}
+
+func captureThinkingOwnerState(root *appModel) thinkingOwnerState {
+	return thinkingOwnerState{
+		application: root.application,
+		metadata:    sessionMetadataOf(root.application),
+		agent:       root.sessionState.GetCurrentAgent(),
+		model:       root.application.CurrentAgentModel(root.ctx()),
+		reference:   root.thinkingModelReference(),
+	}
+}
+
 func TestThinkingCycleRejectsZeroStaleAndForeignProjection(t *testing.T) {
 	root := splitTestRoot(t)
 	generation, _ := root.supervisor.RouteGeneration("profile")
@@ -327,8 +347,10 @@ func TestThinkingCycleRejectsZeroStaleAndForeignProjection(t *testing.T) {
 		require.Nil(t, cmd)
 	}
 	root.handleSwitchTab("second")
+	before, gen := captureThinkingOwnerState(root), root.metadataGeneration
 	_, cmd := root.Update(messages.RoutedMsg{SessionID: "profile", RouteGeneration: generation, Inner: valid})
-	require.Nil(t, cmd, "queued footer action cannot switch or mutate the newly focused owner")
+	requireOnlyMetadataRefresh(t, root, gen, cmd)
+	require.Equal(t, before, captureThinkingOwnerState(root), "queued footer action cannot switch or mutate the newly focused owner")
 }
 
 func TestThinkingCycleCanonicalProjectionMatchesConfiguredAlias(t *testing.T) {

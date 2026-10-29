@@ -37,6 +37,7 @@ func newAgentPanelSidebar(t *testing.T, width int, agents ...runtime.AgentDetail
 	m.width = width
 	m.height = 200
 	m.SetAgentInfoMode(AgentInfoDetailed)
+	m.SetAgentContextReadings(true) // readings are off by default; these fixtures assert them
 	t.Cleanup(m.transferAnimation.Stop)
 	return m
 }

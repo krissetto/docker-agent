@@ -5,11 +5,11 @@ colors:
   text_bright: "#eceff4"
   text_primary: "#d8dee9"
   text_secondary: "#8fbcbb"
-  text_muted: "#616e88"
+  text_muted: "#a6aebc"
   text_faint: "#434c5e"
   
   # Accent colors
-  accent: "#81a1c1"
+  accent: "#96b1cb"
   accent_muted: "#5e81ac"
   
   # Background colors
@@ -21,10 +21,10 @@ colors:
   
   # Status colors
   success: "#a3be8c"
-  error: "#bf616a"
+  error: "#d89fa4"
   warning: "#ebcb8b"
   info: "#88c0d0"
-  highlight: "#b48ead"
+  highlight: "#c3a5bd"
   
   # Brand colors
   # NOTE: Used as selection background in dialogs - must be dark for white text
@@ -32,24 +32,24 @@ colors:
   brand_bg: "#2e3440"
   
   # Error colors
-  error_strong: "#bf616a"
+  error_strong: "#d89fa4"
   error_dark: "#3d2a2a"
   
   # Spinner colors
-  spinner_dim: "#81a1c1"
-  spinner_bright: "#88c0d0"
-  spinner_brightest: "#8fbcbb"
+  spinner_dim: "#96b1cb"
+  spinner_bright: "#a4bdd5"
+  spinner_brightest: "#b2c9de"
   
   # Diff colors
   diff_add_bg: "#2a3d2a"
   diff_remove_bg: "#3d2a2a"
   
   # UI element colors
-  line_number: "#616e88"
+  line_number: "#a6aebc"
   separator: "#616e88"
   selected: "#434c5e"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#616e88"
+  suggestion_ghost: "#a6aebc"
   tab_bg: "#2e3440"
   tab_active_bg: "#3b4252"
   tab_active_fg: "#eceff4"
@@ -76,6 +76,7 @@ colors:
   focus: "#81a1c1"
   disabled: "#4c566a"
   status_adjacent: "#8fbcbb"
+  scrollbar_track: "#474c57"
 
   
   # Badge colors
@@ -85,25 +86,25 @@ colors:
 
 chroma:
   # Syntax highlighting colors - Nord style
-  comment: "#616e88"
-  comment_preproc: "#5e81ac"
-  keyword: "#81a1c1"
-  keyword_reserved: "#5e81ac"
+  comment: "#a6aebc"
+  comment_preproc: "#9ab0cb"
+  keyword: "#96b1cb"
+  keyword_reserved: "#9ab0cb"
   keyword_namespace: "#88c0d0"
-  keyword_type: "#81a1c1"
-  operator: "#81a1c1"
+  keyword_type: "#96b1cb"
+  operator: "#96b1cb"
   punctuation: "#eceff4"
-  name_builtin: "#d08770"
-  name_tag: "#bf616a"
-  name_attribute: "#d08770"
-  name_decorator: "#d08770"
-  literal_number: "#b48ead"
+  name_builtin: "#daa08d"
+  name_tag: "#d89fa4"
+  name_attribute: "#daa08d"
+  name_decorator: "#daa08d"
+  literal_number: "#c3a5bd"
   literal_string: "#a3be8c"
   literal_string_escape: "#ebcb8b"
-  generic_deleted: "#bf616a"
-  generic_subheading: "#4c566a"
+  generic_deleted: "#d89fa4"
+  generic_subheading: "#a9aeb7"
   background: "#2e3440"
-  error_fg: "#bf616a"
+  error_fg: "#d89fa4"
   error_bg: "#3d2a2a"
   success: "#a3be8c"
 
@@ -113,6 +114,6 @@ markdown:
   strong: "#eceff4"
   code: "#88c0d0"
   code_bg: "#3b4252"
-  blockquote: "#616e88"
+  blockquote: "#939cad"
   list: "#d8dee9"
   hr: "#434c5e"

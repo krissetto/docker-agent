@@ -22,14 +22,17 @@ type sessionBackgroundWork struct {
 	generation  uint64
 	environment *TeamEnvironmentLease
 
-	closeOnce sync.Once
-	cancelMu  sync.Mutex
-	cancel    func()
-	canceled  bool
-	closeErr  error
+	closeOnce  sync.Once
+	cancelMu   sync.Mutex
+	cancel     func()
+	canceled   bool
+	agentName  string
+	toolCallID string
+	processID  string
+	closeErr   error
 }
 
-func (r *LocalRuntime) beginSessionBackgroundWork(ctx context.Context, sess *session.Session, driver *sessionDriver) (tools.BackgroundWork, error) {
+func (r *LocalRuntime) beginSessionBackgroundWork(ctx context.Context, sess *session.Session, driver *sessionDriver, calls ...tools.ToolCall) (tools.BackgroundWork, error) {
 	if ctx == nil || ctx.Err() != nil || sess == nil || driver == nil || sess.ID != driver.sessionID() {
 		return nil, ErrSessionClosed
 	}
@@ -55,7 +58,10 @@ func (r *LocalRuntime) beginSessionBackgroundWork(ctx context.Context, sess *ses
 		}
 		return nil, err
 	}
-	work := &sessionBackgroundWork{runtime: r, driver: driver, sessionID: sess.ID, requestID: requestID, workID: requestID, generation: identity.generation, environment: lease}
+	work := &sessionBackgroundWork{runtime: r, driver: driver, sessionID: sess.ID, requestID: requestID, workID: requestID, generation: identity.generation, environment: lease, agentName: sess.AgentName}
+	if len(calls) > 0 {
+		work.toolCallID = calls[0].ID
+	}
 	if err := driver.ownerCall(context.WithoutCancel(r.lifetime()), func() error {
 		if driver.stopped || driver.sess == nil || driver.sess.ID != sess.ID || driver.generation != identity.generation || !driver.running() {
 			return ErrSessionClosed
@@ -79,6 +85,27 @@ func (r *LocalRuntime) beginSessionBackgroundWork(ctx context.Context, sess *ses
 		return nil, err
 	}
 	return work, nil
+}
+
+func (w *sessionBackgroundWork) BackgroundProcessIdentity() (string, string, string) {
+	return w.sessionID, w.agentName, w.toolCallID
+}
+
+func (w *sessionBackgroundWork) AdoptBackgroundProcess(process tools.BackgroundProcess) error {
+	if err := w.driver.adoptBackgroundProcess(w.runtime.lifetime(), process); err != nil {
+		return err
+	}
+	w.cancelMu.Lock()
+	w.processID = process.ID
+	w.cancelMu.Unlock()
+	return nil
+}
+
+func (w *sessionBackgroundWork) FinishBackgroundProcess(state tools.BackgroundProcessState, finishedAt time.Time) {
+	w.cancelMu.Lock()
+	id := w.processID
+	w.cancelMu.Unlock()
+	w.driver.finishBackgroundProcess(w.runtime.lifetime(), id, state, finishedAt)
 }
 
 func (w *sessionBackgroundWork) Complete(message string) error {
@@ -160,6 +187,9 @@ func (w *sessionBackgroundWork) Close() error {
 		})
 		if w.environment != nil {
 			w.closeErr = errors.Join(w.closeErr, w.environment.Release(ctx))
+		}
+		if w.runtime.sessionDrivers != nil {
+			w.runtime.sessionDrivers.signalWork()
 		}
 	})
 	return w.closeErr

@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/docker/docker-agent/pkg/tui/image"
+	"github.com/docker/docker-agent/pkg/tui/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -139,4 +140,60 @@ func TestNativeImageDialogCentersActualPlacementAndUsesAvailableScreen(t *testin
 			}
 		}
 	}
+}
+
+func TestUserAttachmentPreviewUsesOnlyStoredPayloadAndBounds(t *testing.T) {
+	text := NewUserAttachmentPreviewDialog(newDialogRuntime(), types.UserAttachment{
+		Name: "notes 世界.txt", MediaType: "text/plain", SourcePath: "/deleted/notes.txt", Text: "stored text", Available: true,
+	}, false)
+	text.SetSize(90, 28)
+	plain := ansi.Strip(text.View())
+	assert.Contains(t, plain, "stored text")
+	assert.Contains(t, plain, "/deleted/notes.txt", "source path is provenance only")
+	CleanupDialog(text)
+
+	empty := NewUserAttachmentPreviewDialog(newDialogRuntime(), types.UserAttachment{
+		Name: "empty.txt", MediaType: "text/plain", Available: true,
+	}, false)
+	empty.SetSize(90, 28)
+	assert.NotContains(t, ansi.Strip(empty.View()), "Preview unavailable")
+	CleanupDialog(empty)
+
+	unavailable := NewUserAttachmentPreviewDialog(newDialogRuntime(), types.UserAttachment{
+		Name: "old.pdf", MediaType: "application/pdf", SourcePath: "/must/not/read.pdf", Available: false, UnavailableReason: "legacy attachment content unavailable",
+	}, false)
+	unavailable.SetSize(90, 28)
+	assert.Contains(t, ansi.Strip(unavailable.View()), "legacy attachment content unavai")
+	assert.Contains(t, ansi.Strip(unavailable.View()), "lable.")
+	assert.NotContains(t, ansi.Strip(unavailable.View()), "must not read")
+	CleanupDialog(unavailable)
+
+	oversized := NewUserAttachmentPreviewDialog(newDialogRuntime(), types.UserAttachment{
+		Name: "large.txt", MediaType: "text/plain", Text: strings.Repeat("x", (20<<20)+1), Available: true,
+	}, false)
+	oversized.SetSize(90, 28)
+	assert.Contains(t, ansi.Strip(oversized.View()), "20 MiB")
+	CleanupDialog(oversized)
+}
+
+func TestUserImageAttachmentPreviewHonorsGraphicsAndCorruptData(t *testing.T) {
+	data := previewPNG(t)
+	for _, enabled := range []bool{false, true} {
+		d := NewUserAttachmentPreviewDialog(newDialogRuntime(), types.UserAttachment{
+			Name: "inline.png", MediaType: "image/png", Data: data, Available: true,
+		}, enabled)
+		d.SetSize(90, 28)
+		if enabled {
+			assert.Contains(t, d.View(), "cagent-image;")
+		} else {
+			assert.Contains(t, ansi.Strip(d.View()), "does not support")
+		}
+		CleanupDialog(d)
+	}
+	bad := NewUserAttachmentPreviewDialog(newDialogRuntime(), types.UserAttachment{
+		Name: "bad.png", MediaType: "image/png", Data: []byte("not an image"), Available: true,
+	}, true)
+	bad.SetSize(90, 28)
+	assert.Contains(t, ansi.Strip(bad.View()), "invalid or unsupported")
+	CleanupDialog(bad)
 }

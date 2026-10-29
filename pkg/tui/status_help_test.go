@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -56,8 +56,8 @@ func TestHiddenFooterShortcutsStillDispatch(t *testing.T) {
 	}{
 		{'t', messages.SpawnSessionMsg{}},
 		{'w', messages.CloseTabMsg{SessionID: layoutTabs()[0].SessionID}},
-		{'p', messages.SwitchTabMsg{SessionID: layoutTabs()[1].SessionID}},
-		{'n', messages.SwitchTabMsg{SessionID: layoutTabs()[1].SessionID}},
+		{'p', messages.SwitchTabMsg{Workspace: true, SessionID: layoutTabs()[1].SessionID}},
+		{'n', messages.SwitchTabMsg{Workspace: true, SessionID: layoutTabs()[1].SessionID}},
 		{'y', messages.ToggleYoloMsg{}},
 		{'o', messages.ToggleHideToolResultsMsg{}},
 	}

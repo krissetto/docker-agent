@@ -2,6 +2,7 @@ package chat
 
 import (
 	tea "charm.land/bubbletea/v2"
+	"github.com/docker/docker-agent/pkg/tui/components/review"
 
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
@@ -23,6 +24,10 @@ func (p *chatPage) SetContentOverlay(overlay ContentOverlay) {
 	p.contentOverlay = overlay
 	p.shellVisualGeneration++
 	p.layoutOverlay()
+	p.applyScrollbarVisibility()
+	if overlay != nil {
+		p.SetScrollbarPointer(-1, -1)
+	}
 }
 
 func (p *chatPage) ContentOverlayActive() bool { return p.contentOverlay != nil }
@@ -44,9 +49,9 @@ func (p *chatPage) layoutOverlay() {
 		return
 	}
 	sl := p.computeSidebarLayout()
-	x, y := styles.AppPadding+sl.chatStartX, 0
+	x, y := styles.AppPadding+sl.chatStartX, p.mainContentInset
 	if sl.mode != sidebarVertical && !sl.bandAtBottom && !p.hideSidebar && !p.leanMode {
-		y = sl.sidebarHeight
+		y = sl.sidebarHeight + p.mainContentInset
 	}
 	p.contentOverlay.SetSize(sl.chatWidth, sl.chatHeight)
 	p.contentOverlay.SetPosition(x, y)
@@ -86,9 +91,9 @@ func (p *chatPage) overlayRect() PresentationRect {
 		return g.Transcript
 	}
 	sl := p.computeSidebarLayout()
-	ox, oy := styles.AppPadding+sl.chatStartX, 0
+	ox, oy := styles.AppPadding+sl.chatStartX, p.mainContentInset
 	if sl.mode != sidebarVertical && !sl.bandAtBottom && !p.hideSidebar && !p.leanMode {
-		oy = sl.sidebarHeight
+		oy = sl.sidebarHeight + p.mainContentInset
 	}
 	return PresentationRect{X: ox, Y: oy, Width: sl.chatWidth, Height: sl.chatHeight}
 }
@@ -109,6 +114,13 @@ func (p *chatPage) GitWatchState() sidebar.GitWatchMsg {
 func (p *chatPage) SetGitChanges(c sidebar.GitChanges) tea.Cmd {
 	if g, ok := p.gitSidebar(); ok {
 		return g.SetGitChanges(c)
+	}
+	return nil
+}
+
+func (p *chatPage) SetGitMode(mode review.Mode) tea.Cmd {
+	if g, ok := p.gitSidebar(); ok {
+		return g.SetGitMode(mode)
 	}
 	return nil
 }

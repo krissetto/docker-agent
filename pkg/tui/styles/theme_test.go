@@ -69,7 +69,7 @@ func TestRegisterBuiltinThemes_Integration(t *testing.T) { //nolint:paralleltest
 	assert.Equal(t, "embedder", applied.Ref)
 	assert.Equal(t, "Embedder", applied.Name)
 	assert.Equal(t, "#FF00AA", applied.Colors.Accent)
-	assert.Equal(t, DefaultTheme().Colors.Background, applied.Colors.Background)
+	assert.Equal(t, legacyBaseTheme().Colors.Background, applied.Colors.Background)
 	assert.Equal(t, "embedder", CurrentTheme().Ref)
 }
 
@@ -102,7 +102,7 @@ func TestRegisterBuiltinThemes(t *testing.T) {
 	t.Parallel()
 
 	registry := newThemeRegistry()
-	def := DefaultTheme()
+	def := legacyBaseTheme()
 
 	src := fstest.MapFS{
 		"themes/branded.yaml": &fstest.MapFile{
@@ -176,12 +176,12 @@ func TestRegisterBuiltinThemes_OverridesBuiltin(t *testing.T) {
 }
 
 // TestRegisterBuiltinThemes_MasksDefault verifies an embedder can replace the
-// "default" theme; the override merges onto cagent's pristine default base.
+// Old School "default" theme; the override merges onto cagent's pristine base.
 func TestRegisterBuiltinThemes_MasksDefault(t *testing.T) {
 	t.Parallel()
 
 	registry := newThemeRegistry()
-	cagentDefault := DefaultTheme()
+	oldSchool := legacyBaseTheme()
 
 	src := fstest.MapFS{
 		"themes/default.yaml": &fstest.MapFile{
@@ -190,14 +190,45 @@ func TestRegisterBuiltinThemes_MasksDefault(t *testing.T) {
 	}
 	require.NoError(t, registry.RegisterBuiltinThemes(src))
 
-	got, err := registry.LoadTheme(DefaultThemeRef)
+	got, err := registry.LoadTheme(LegacyDefaultThemeRef)
 	require.NoError(t, err)
 	assert.Equal(t, "#ABCDEF", got.Colors.Accent)
 	assert.Equal(t, "Branded Default", got.Name)
-	assert.Equal(t, cagentDefault.Colors.Background, got.Colors.Background)
+	assert.Equal(t, oldSchool.Colors.Background, got.Colors.Background)
 
-	// DefaultTheme() itself remains the pristine merge base.
-	assert.Equal(t, "Default", DefaultTheme().Name)
+	// The bundled default (Docker Next) is not masked by a "default" override.
+	dflt, err := registry.LoadTheme(DefaultThemeRef)
+	require.NoError(t, err)
+	assert.NotEqual(t, "#ABCDEF", dflt.Colors.Accent)
+	assert.Equal(t, DefaultTheme().Colors.Accent, dflt.Colors.Accent)
+
+	// DefaultTheme() itself remains the bundled, registry-independent default.
+	assert.Equal(t, "Default", legacyBaseTheme().Name)
+}
+
+// TestRegisterBuiltinThemes_MasksDockerNextDefault verifies an embedder can mask
+// the new default ref without changing DefaultTheme() or the Old School palette.
+func TestRegisterBuiltinThemes_MasksDockerNextDefault(t *testing.T) {
+	t.Parallel()
+
+	registry := newThemeRegistry()
+	src := fstest.MapFS{
+		"themes/" + DefaultThemeRef + ".yaml": &fstest.MapFile{
+			Data: []byte("name: Branded Dark\ncolors:\n  accent: \"#ABCDEF\"\n"),
+		},
+	}
+	require.NoError(t, registry.RegisterBuiltinThemes(src))
+
+	got, err := registry.LoadTheme(DefaultThemeRef)
+	require.NoError(t, err)
+	assert.Equal(t, "#ABCDEF", got.Colors.Accent)
+	assert.Equal(t, "Branded Dark", got.Name)
+	assert.Equal(t, legacyBaseTheme().Colors.Background, got.Colors.Background)
+
+	old, err := registry.LoadTheme(LegacyDefaultThemeRef)
+	require.NoError(t, err)
+	assert.Equal(t, legacyBaseTheme().Colors.Accent, old.Colors.Accent)
+	assert.NotEqual(t, "#ABCDEF", DefaultTheme().Colors.Accent)
 }
 
 // TestRegisterBuiltinThemes_OverrideAfterLoad verifies a registered override
@@ -210,12 +241,12 @@ func TestRegisterBuiltinThemes_OverrideAfterLoad(t *testing.T) {
 
 	registry := newThemeRegistry()
 
-	// Warm the theme cache with the bundled built-in and the bundled default.
+	// Warm the theme cache with the bundled built-in and the bundled Old School default.
 	bundledNord, err := registry.LoadTheme("nord")
 	require.NoError(t, err)
 	require.NotEqual(t, "#123456", bundledNord.Colors.Accent)
 
-	bundledDefault, err := registry.LoadTheme(DefaultThemeRef)
+	bundledDefault, err := registry.LoadTheme(LegacyDefaultThemeRef)
 	require.NoError(t, err)
 	require.NotEqual(t, "#ABCDEF", bundledDefault.Colors.Accent)
 
@@ -234,7 +265,7 @@ func TestRegisterBuiltinThemes_OverrideAfterLoad(t *testing.T) {
 	assert.Equal(t, "#123456", gotNord.Colors.Accent)
 	assert.Equal(t, "NotNord", gotNord.Name)
 
-	gotDefault, err := registry.LoadTheme(DefaultThemeRef)
+	gotDefault, err := registry.LoadTheme(LegacyDefaultThemeRef)
 	require.NoError(t, err)
 	assert.Equal(t, "#ABCDEF", gotDefault.Colors.Accent)
 	assert.Equal(t, "Branded Default", gotDefault.Name)
@@ -301,8 +332,9 @@ func TestRegisterBuiltinThemes_Errors(t *testing.T) {
 func TestDefaultThemeRef(t *testing.T) {
 	t.Parallel()
 
-	// DefaultThemeRef should be "default"
-	assert.Equal(t, "default", DefaultThemeRef)
+	assert.Equal(t, "docker-next-dark", DefaultThemeRef)
+	assert.Equal(t, "docker-next-light", DefaultLightThemeRef)
+	assert.Equal(t, "default", LegacyDefaultThemeRef)
 }
 
 func TestDefaultTheme(t *testing.T) {
@@ -312,7 +344,7 @@ func TestDefaultTheme(t *testing.T) {
 	require.NotNil(t, theme)
 
 	assert.Equal(t, 1, theme.Version)
-	assert.Equal(t, "Default", theme.Name)
+	assert.Equal(t, "Docker Next - Dark", theme.Name)
 	assert.Equal(t, DefaultThemeRef, theme.Ref)
 
 	// Check that colors are populated (values come from embedded default.yaml)
@@ -378,7 +410,7 @@ func TestLoadTheme_Default(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, theme)
 
-	assert.Equal(t, "Default", theme.Name)
+	assert.Equal(t, "Docker Next - Dark", theme.Name)
 	assert.Equal(t, DefaultThemeRef, theme.Ref)
 	assert.NotEmpty(t, theme.Colors.TextBright)
 }
@@ -456,9 +488,9 @@ colors:
 	assert.Equal(t, "#FF0000", theme.Colors.Accent)
 	assert.Equal(t, "#000000", theme.Colors.Background)
 
-	// Non-overridden values should be defaults (from default.yaml)
-	assert.Equal(t, DefaultTheme().Colors.TextBright, theme.Colors.TextBright)
-	assert.Equal(t, DefaultTheme().Colors.Success, theme.Colors.Success)
+	// Non-overridden values inherit the Old School base (default.yaml)
+	assert.Equal(t, legacyBaseTheme().Colors.TextBright, theme.Colors.TextBright)
+	assert.Equal(t, legacyBaseTheme().Colors.Success, theme.Colors.Success)
 }
 
 func TestLoadTheme_YmlExtension(t *testing.T) {
@@ -501,7 +533,7 @@ func TestApplyTheme(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates 
 func TestMergeTheme_AllFields(t *testing.T) {
 	t.Parallel()
 
-	base := DefaultTheme()
+	base := legacyBaseTheme()
 	override := &Theme{
 		Version: 2,
 		Name:    "Override",
@@ -527,10 +559,10 @@ func TestMergeTheme_AllFields(t *testing.T) {
 	assert.Equal(t, "#FF00FF", merged.Chroma.Keyword)
 	assert.Equal(t, "#00FF00", merged.Markdown.Heading)
 
-	// Non-overridden values from base (default theme)
-	assert.Equal(t, DefaultTheme().Colors.Background, merged.Colors.Background)
-	assert.Equal(t, DefaultTheme().Chroma.Comment, merged.Chroma.Comment)
-	assert.Equal(t, DefaultTheme().Markdown.Link, merged.Markdown.Link)
+	// Non-overridden values from base (Old School)
+	assert.Equal(t, legacyBaseTheme().Colors.Background, merged.Colors.Background)
+	assert.Equal(t, legacyBaseTheme().Chroma.Comment, merged.Chroma.Comment)
+	assert.Equal(t, legacyBaseTheme().Markdown.Link, merged.Markdown.Link)
 }
 
 // --- Theme Infrastructure Reliability Tests ---
@@ -720,7 +752,7 @@ func TestAllBuiltinThemes_HaveCoreColors(t *testing.T) {
 
 func TestLegacyEditorBackgroundCompatibility(t *testing.T) {
 	t.Parallel()
-	base := DefaultTheme()
+	base := legacyBaseTheme()
 	for _, tc := range []struct {
 		name     string
 		override ThemeColors
@@ -751,7 +783,7 @@ func TestAbsentAyuRegistryAndLegacyFixtureResolution(t *testing.T) {
 	t.Cleanup(func() { ApplyTheme(original) })
 	ApplyTheme(nil)
 	require.Equal(t, DefaultThemeRef, CurrentTheme().Ref)
-	require.Equal(t, "#25252c", CurrentTheme().Colors.EditorBg)
+	require.Equal(t, DefaultTheme().Colors.EditorBg, CurrentTheme().Colors.EditorBg)
 	// Synthetic legacy-theme values test resolution, not the unavailable user's palette.
 	require.NoError(t, registry.RegisterBuiltinThemes(fstest.MapFS{"themes/ayu-dark.yaml": {Data: []byte("name: Ayu fixture\ncolors:\n  tab_bg: '#123456'\n")}}))
 	theme, err := registry.LoadTheme("ayu-dark")

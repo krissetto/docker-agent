@@ -22,11 +22,11 @@ import (
 func oversizedHistory(t *testing.T) *session.Session {
 	t.Helper()
 	sess := session.New()
-	sess.AddMessage(session.UserMessage("inspect the job"))
+	sess.AddMessage(session.UserMessage("inspect the old item"))
 	sess.AddMessage(&session.Message{Message: chat.Message{
 		Role:            chat.MessageRoleAssistant,
-		ToolCalls:       []tools.ToolCall{{ID: "old-call", Function: tools.FunctionCall{Name: "view_background_job", Arguments: `{"job_id":"old-job"}`}}},
-		ToolDefinitions: []tools.Tool{{Name: "view_background_job", Category: "background_jobs"}},
+		ToolCalls:       []tools.ToolCall{{ID: "old-call", Function: tools.FunctionCall{Name: "old_inspector", Arguments: `{"id":"old-item"}`}}},
+		ToolDefinitions: []tools.Tool{{Name: "old_inspector", Category: "shell"}},
 	}})
 	sess.AddMessage(&session.Message{Message: chat.Message{Role: chat.MessageRoleTool, ToolCallID: "old-call", Content: strings.Repeat("x", 10*1024*1024) + "diagnostic tail"}})
 	sess.AddMessage(&session.Message{DisplayOnly: true, Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "display-only"}})

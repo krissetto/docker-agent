@@ -92,8 +92,19 @@ plus one terminal/gap slot. Each subscriber also has an **8 MiB serialized queue
 payload** budget, independent of replay retention. Oversized or backlogged
 sequenced delivery produces a gap and closes; compatibility delivery disconnects.
 Initial live seeds and replay are checked against the same payload budget before
-large snapshots are cloned. These bounds do not cap the authoritative transcript
-or the memory required for a session snapshot.
+large snapshots are cloned. The default snapshot remains full. Clients that
+negotiate `session_history_pages` may opt into `projection=tail` on snapshots
+and SSE baselines plus the older-history endpoint. Each tail SSE connection
+starts from a fresh, atomically subscribed bounded snapshot rather than replaying
+a `since` cursor; pending inputs/interactions and the epoch+cursor barrier seed
+the projector before live events. An opt-in tail connection rebaselines on
+reconnect/resnapshot; default SSE keeps cursor replay. The projection plus these preserve original typed
+items and absolute positions while bounding scans (100 positions), each item
+(256 KiB), and the complete serialized response (4 MiB). Cursors bind session,
+event epoch/cursor, absolute position and non-append history revision; append
+remains pageable, while edits/removal/compaction stale the cursor. The projection
+never constitutes branch/edit/restore proof. These bounds do not cap the
+authoritative transcript.
 
 The ordinary single-session client helper resets on epoch change, retries
 recoverable transport failures with bounded backoff, and resnapshots on gaps;
@@ -187,7 +198,16 @@ boundary or drain during teardown, rather than using an independent mailbox.
 `send_message` addresses only the sender's parent or direct children. Typed
 `DeliveryReceipt` fields distinguish acceptance, idempotent retry, durable
 admission, queued state, delivery disposition and rejection. Acceptance is an
-**inbox commit**, not proof of waking or model consumption. The persisted
+**inbox commit**, not proof of waking or model consumption. Session input events
+also distinguish admission from pending projection: `PendingUserMessageAccepted`
+with `immediate=true` is published only after the durable input has been promoted
+during an idle start, immediately before its promotion event. Missing/false remains
+pending for older senders and for any admission whose start is denied, blocked or
+otherwise deferred. The inbox commit and snapshots remain authoritative while an
+idle start is being resolved and may temporarily contain that accepted row as
+pending; consumers reconcile such a snapshot when the later immediate event
+arrives. Only the live accepted-event publication is deferred to preserve
+Accepted-before-Promoted ordering without a transient pending row. The persisted
 `input_mode` alone selects one of two delivery classes: `steer` is guidance for
 all origins; blank, `turn`, `followup`, `legacy_followup` and unknown modes are
 turn FIFO work. The `legacy_run` mode remains a control marker, not queued model
@@ -207,6 +227,42 @@ allow exact retries; changed payload/mode under the same identity conflicts.
 An unavailable live inbox rejects delivery, including internal lifecycle notes;
 there is no unknown-session buffer. Durable child completion reports use the
 coordination outbox and are restored through canonical sessions.
+
+A newly admitted, authorized `send_message` to a view-only-dormant runtime
+session is an explicit wake authorization for that recipient, not a tree-wide
+resume. The recipient's existing durable, accepted pending inputs and the new
+message execute in their canonical FIFO order; the new message does not skip
+older accepted work. Restore alone and read-only inspection do not wake any
+owner, and a matching retry of the same durable pending send may re-arm the
+recipient. A matching retry of an already completed send remains a successful
+idempotent receipt but does not wake or append; a changed payload/mode under
+that identity conflicts. A mismatch, unavailable receipt, stopped
+child, or legacy pending row without accepted admission evidence does not wake;
+legacy rows remain visible and require explicit session resume. Promoted inputs
+without terminal evidence remain interrupted and are never replayed. This wake
+preserves any independent pause. `SessionStatus.stopped` and the additive
+`session_dormancy_changed.stopped` event distinguish explicit stop from
+view-only dormancy; omitted fields from older peers decode as false. Stop state
+is projected from an explicit child stop/tombstone, root withdrawal intent, or
+a stopped-view capability; ordinary driver retirement, shutdown, or cancel is
+not itself explicit stop. Historical read-only views are neither dormant
+runtime owners nor stopped drivers.
+
+A descendant completion report has an additional **process-local causal wake**
+only when its child turn executed and its exact report ID was atomically committed
+with that turn's child revision in the current runtime. That authority is
+revalidated against the canonical child/root/parent link and turn/revision; it is
+not reconstructed by restore from an outbox row. A restored dormant parent may
+accept only that authorized report while remaining dormant until `AcceptReport`
+commits the exact inbox row. Causal-only maintenance filters the outbox to its
+authorized report IDs, preserving unrelated historical unaccepted reports and
+any already accepted parent FIFO order. A fresh report-ID permission is retried
+in-process if inbox persistence fails; cold restart loses that permission, leaving
+the outbox pending until a later explicit user/send authorization. Once report
+admission commits, ordinary parent execution follows its existing pause barrier;
+stop, withdrawal, deletion, stopped-view, or invalidated ancestry blocks the
+causal handoff. A subsequent explicit user or directed-send admission releases
+the causal-only filter; a completed exact receipt is idempotent but cannot do so.
 
 ## Hooks and extension correctness
 

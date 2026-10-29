@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,8 @@ func newHoverSidebar(t *testing.T) *model {
 	t.Helper()
 	ar := animation.NewRuntimeWithScheduler(&immediateScheduler{now: time.Unix(1, 0)})
 	m := New(ar, t.Context(), &service.SessionState{}).(*model)
+	// Keep this fixture's hover-clock assertions independent from scrollbar fades.
+	m.scrollview.SetAnimationRuntime(nil)
 	m.treeCollapsed = false // Hover fixtures need visible descendant rows.
 	m.todosCollapsed = false
 	m.SetSize(80, 30)
@@ -100,7 +103,12 @@ func TestHoverEntryExitElapsedAndNeutralIdentityParts(t *testing.T) {
 	require.InDelta(t, 1, m.hoverValues["node-name:child-full-id"].value, 0, "settled hover endpoint is clamped to exactly one")
 	assert.Zero(t, m.ar.ActiveCount())
 	hovered := strings.Split(m.View(), "\n")[row]
-	assert.Contains(t, hovered, styles.MutedStyle.Render(" (child-full-id)"), "IDs remain neutral")
+	// IDs keep the semantic muted base; pointer brightness is the row's shared HoverText, parsed per cell.
+	idCells := cellsOfSubstring(hovered, " (child-full-id)")
+	require.NotEmpty(t, idCells)
+	for _, cell := range idCells {
+		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(styles.MutedStyle.GetForeground(), .25)), color.NRGBAModel.Convert(cell.fg), "ID brightness follows the shared hover ramp")
+	}
 	assert.Contains(t, hovered, styles.MutedStyle.Render(timeAgo(time.Time{})), "status/time remains neutral")
 	assert.Contains(t, ansi.Strip(hovered), "worker")
 	settledGen := m.VisualGeneration()

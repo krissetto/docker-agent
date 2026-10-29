@@ -91,6 +91,9 @@ func TestKitCredentialPolicy(t *testing.T) {
 	}
 	assert.Equal(t, 1, networkPolicies)
 	assert.ElementsMatch(t, slices.Collect(maps.Keys(expected)), slices.Collect(maps.Keys(seen)))
-	assert.ElementsMatch(t, []string{"api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "api.github.com", "github.com"}, allowed)
-	assert.ElementsMatch(t, allowed, injected, "no extra egress or secret-injection scopes")
+	assert.ElementsMatch(t, []string{"models.dev", "api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "api.github.com", "github.com"}, allowed)
+	// models.dev is public catalog egress only; it must never receive credentials.
+	assert.ElementsMatch(t, []string{"api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "api.github.com", "github.com"}, injected, "exact injection hosts only")
+	assert.NotContains(t, injected, "models.dev")
+	assert.Subset(t, allowed, injected, "no secret injection outside the egress allowlist")
 }

@@ -21,7 +21,7 @@ func TestSuggestionStaysInsideTextareaAndTracksScrolledCursor(t *testing.T) {
 			e.hasSuggestion = true
 			e.suggestion = strings.Repeat(" suggestion 界 e\u0301\n", 40)
 			base := e.textarea.View()
-			view := e.applySuggestionOverlay(base)
+			view := e.applySuggestionOverlay(base, 0, 0)
 			require.Equal(t, lipgloss.Height(base), lipgloss.Height(view))
 			for line := range strings.SplitSeq(view, "\n") {
 				require.LessOrEqual(t, ansi.StringWidth(line), width)

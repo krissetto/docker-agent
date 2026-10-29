@@ -221,10 +221,8 @@ func TestSidebarWarmCacheThemeColorsAndLayout(t *testing.T) {
 			cells := sidebarCells(line)
 			cellX := lipgloss.Width(text[:offset])
 			require.Less(t, cellX, len(cells))
-			expected := styles.BaseStyle.GetForeground()
-			if needle == "provider" {
-				expected = styles.MutedStyle.GetForeground()
-			}
+			// Model and provider both rest muted; hover brightens them through the shared ramp.
+			expected := styles.MutedStyle.GetForeground()
 			if needle == "root" {
 				expected = styles.AgentIdentityStyle("root", false).GetForeground()
 			}

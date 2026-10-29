@@ -3,146 +3,425 @@ import AgentKit
 
 struct SessionListView: View {
     @Environment(AppModel.self) private var model
-    let filter: SidebarItem
+    @Binding var filter: SidebarItem
+    @Binding var serverID: UUID?
     @Binding var selection: SessionRef?
+    let onAddServer: () -> Void
+    let onManageServers: () -> Void
+    /// Opens the existing editor for a server whose pinned identity no longer matches; Test is the only way back.
+    var onEditServer: (UUID) -> Void = { _ in }
+    /// Explicit open from a row tap or menu; the container decides how to show the detail.
+    var onOpen: (SessionRef) -> Void = { _ in }
     @State private var query = ""
     @State private var starredOnly = false
-    @State private var creatingOn: NewSessionTarget?
+    @State private var showingOptions = false
+    @State private var creating = false
+    @State private var createError: String?
+    @State private var createOperationID = UUID()
+    @State private var optionsOperationID = UUID()
     @State private var multiSelection: Set<SessionRef> = []
     @State private var confirmingBatchDelete = false
     @State private var batchExport: SessionExportDocument?
     @State private var batchMessage: String?
     @State private var batchWorking = false
-    #if os(iOS)
-    @Environment(\.editMode) private var editMode
-    #endif
+    @State private var pendingDelete: SessionProjection?
+    @State private var starFeedback = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private struct Group: Identifiable {
-        let id: String
-        let title: String
+    private struct LogGroup: Identifiable {
+        let bucket: LogBucket
         let sessions: [SessionProjection]
+        var id: Int { bucket.id }
     }
+
+    private var activeServer: ServerProjection? { model.servers.first { $0.id == serverID } }
 
     private var title: String {
         switch filter {
-        case .needsYou: "Needs You"
-        case .running: "Running"
-        case .server(let id): model.servers.first { $0.id == id }?.name ?? "Server"
+        case .all: activeServer?.name ?? "Sessions"
+        case .needsYou: "Needs you"
+        case .running: "Working"
+        case .server(let id): model.servers.first { $0.id == id }?.name ?? "Sessions"
         }
     }
 
-    private var serverID: UUID? {
-        if case .server(let id) = filter { id } else { nil }
+    private var scopedServerID: UUID? {
+        if case .server(let id) = filter { return id }
+        return serverID
     }
 
-    private var scoped: [SessionProjection] {
-        let base: [SessionProjection]
-        switch filter {
-        case .needsYou:
-            let refs = Set(model.needsYou.map(\.id))
-            base = model.sessions.filter { refs.contains($0.ref) || $0.needsYouReason != nil }
-        case .running:
-            base = model.sessions.filter { $0.state.isActive }
-        case .server(let id):
-            base = model.sessions.filter { $0.ref.serverID == id && $0.parentID == nil }
-        }
-        return base.filter { session in
+    /// Root sessions on the active server; children are grouped under their parent for the board.
+    private var onServer: [SessionProjection] {
+        model.sessions.filter { $0.ref.serverID == scopedServerID && $0.parentID == nil }
+    }
+
+    private var childrenByParent: [String: [SessionProjection]] {
+        Dictionary(grouping: model.sessions.filter { $0.ref.serverID == scopedServerID && $0.parentID != nil }, by: { $0.parentID ?? "" })
+    }
+
+    /// A person is needed only when the server says so (interaction, pending input, error) or the run failed.
+    /// `.waiting` on its own is waiting on an agent, a tool or a pause and stays on the working side.
+    private func reason(for session: SessionProjection) -> String? {
+        if let reason = model.needsYou.first(where: { $0.id == session.ref })?.reason ?? session.needsYouReason { return reason }
+        return session.state == .failed ? "Failed" : nil
+    }
+
+    private var matchesSearch: (SessionProjection) -> Bool {
+        let query = query
+        let starredOnly = starredOnly
+        return { session in
             (!starredOnly || session.starred)
                 && (query.isEmpty || session.title.localizedCaseInsensitiveContains(query) || session.agentName.localizedCaseInsensitiveContains(query))
         }
     }
 
-    private var groups: [Group] {
-        let sorted = scoped.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
-        let waiting = sorted.filter { $0.needsYouReason != nil || $0.state == .waiting || $0.state == .failed }
-        let running = sorted.filter { $0.state == .running && $0.needsYouReason == nil }
-        let rest = sorted.filter { !$0.state.isActive && $0.state != .failed && $0.needsYouReason == nil }
-        return [
-            Group(id: "waiting", title: "Waiting", sessions: waiting),
-            Group(id: "running", title: "Running", sessions: running),
-            Group(id: "recent", title: "Recent", sessions: rest),
-        ].filter { !$0.sessions.isEmpty }
+    private var sortedRoots: [SessionProjection] {
+        onServer.filter(matchesSearch).sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
     }
 
+    /// Live work: sessions a person must answer, then sessions that are working. Disjoint from the log.
+    private var board: (needsYou: [BoardEntry], working: [BoardEntry]) {
+        let children = childrenByParent
+        var needsYou: [BoardEntry] = []
+        var working: [BoardEntry] = []
+        for session in sortedRoots {
+            let reason = reason(for: session)
+            guard reason != nil || session.state.isActive else { continue }
+            let entry = BoardEntry.make(session: session, reason: reason, open: model.openSessions[session.ref], catalogChildren: children[session.ref.sessionID] ?? [])
+            if reason != nil { needsYou.append(entry) } else { working.append(entry) }
+        }
+        return (needsYou, working)
+    }
+
+    /// Everything that isn't live, newest first, in recency buckets.
+    private var log: [LogGroup] {
+        guard filter == .all || isServerFilter else { return [] }
+        let rest = sortedRoots.filter { reason(for: $0) == nil && !$0.state.isActive }
+        let grouped = Dictionary(grouping: rest) { LogBucket.bucket(for: $0.updatedAt) }
+        return LogBucket.allCases.compactMap { bucket in grouped[bucket].map { LogGroup(bucket: bucket, sessions: $0) } }
+    }
+
+    private var isServerFilter: Bool {
+        if case .server = filter { return true }
+        return false
+    }
+
+    private var isEmpty: Bool {
+        let board = board
+        switch filter {
+        case .needsYou: return board.needsYou.isEmpty
+        case .running: return board.working.isEmpty
+        case .all, .server: return board.needsYou.isEmpty && board.working.isEmpty && log.isEmpty
+        }
+    }
+
+    private var needsYouCount: Int { onServer.count { reason(for: $0) != nil } }
+    private var workingCount: Int { onServer.count { $0.state.isActive && reason(for: $0) == nil } }
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #if os(iOS)
+    @State private var editMode: EditMode = .inactive
+    #endif
+
     var body: some View {
-        List(selection: $multiSelection) {
-            ForEach(groups) { group in
-                Section(group.title) {
+        list
+            .navigationTitle(title)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .environment(\.editMode, $editMode)
+            #endif
+            .searchable(text: $query, prompt: "Search loaded sessions")
+            .refreshable {
+                if let serverID { await model.refreshCatalog(serverID) } else { await model.refreshForeground() }
+            }
+            .toolbar { toolbar }
+            .overlay { if isEmpty { emptyState } }
+            .sheet(isPresented: $showingOptions) {
+                NewSessionSheet(initialServerID: serverID, operationID: optionsOperationID) { ref in
+                    guard ref.serverID == self.serverID else { return }
+                    selection = ref
+                    optionsOperationID = UUID()
+                }
+            }
+            .alert("Couldn't Start Session", isPresented: Binding(get: { createError != nil }, set: { if !$0 { createError = nil } })) {
+                Button("OK", role: .cancel) { createOperationID = UUID() }
+                if serverID != nil { Button("Options…") { createOperationID = UUID(); showingOptions = true } }
+            } message: {
+                Text(createError ?? "")
+            }
+            .onChange(of: serverID) { _, newServerID in
+                multiSelection = []
+                if selection?.serverID != newServerID { selection = nil }
+                createOperationID = UUID()
+                optionsOperationID = UUID()
+            }
+            .onChange(of: multiSelection) { _, refs in
+                if refs.count == 1, let ref = refs.first, ref != selection { selection = ref }
+            }
+            .onChange(of: selection, initial: true) { _, ref in
+                if let ref, ref.serverID != serverID { selection = nil; return }
+                if let ref, !multiSelection.contains(ref) || multiSelection.count == 1 { multiSelection = [ref] }
+                if ref == nil && multiSelection.count == 1 { multiSelection = [] }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if showsBatchBar { batchBar }
+            }
+            .confirmationDialog("Delete “\(pendingDelete?.title.nonEmpty ?? "this session")”?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible, presenting: pendingDelete) { session in
+                Button("Delete Session", role: .destructive) { Task { await delete(session) } }
+            } message: { _ in
+                Text("The session and its history are deleted from the server. This can't be undone.")
+            }
+            .sensoryFeedback(.success, trigger: starFeedback)
+            .sensoryFeedback(.selection, trigger: filter)
+            .animation(Motion.reveal(reduceMotion), value: filter)
+            .confirmationDialog(batchDeleteTitle, isPresented: $confirmingBatchDelete, titleVisibility: .visible) {
+                Button("Delete \(batchRefs.count) Sessions", role: .destructive) { Task { await deleteBatch() } }
+            } message: {
+                Text(batchTitles + "\nThe sessions and their history are deleted from the server. This can't be undone.")
+            }
+            .fileExporter(
+                isPresented: Binding(get: { batchExport != nil }, set: { if !$0 { batchExport = nil } }),
+                document: batchExport,
+                contentType: .json,
+                defaultFilename: "sessions-\(Date.now.formatted(.iso8601.year().month().day())).json"
+            ) { result in
+                if case .failure(let error) = result { batchMessage = error.localizedDescription }
+                batchExport = nil
+            }
+            .alert("Sessions", isPresented: Binding(get: { batchMessage != nil }, set: { if !$0 { batchMessage = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(batchMessage ?? "")
+            }
+    }
+
+    @ViewBuilder
+    private var list: some View {
+        let board = board
+        let log = log
+        // Said once when nothing is live: it rides in the first log group's header so the distance to
+        // "Today" is a deliberate 12pt rather than a List section's own padding.
+        let quietServer = board.needsYou.isEmpty && board.working.isEmpty && query.isEmpty ? activeServer : nil
+        let content = List(selection: $multiSelection) {
+            if filter != .running { boardSection(title: "Needs you", entries: board.needsYou) }
+            if filter != .needsYou { boardSection(title: "Working", entries: board.working) }
+            ForEach(log) { group in
+                Section {
                     ForEach(group.sessions) { session in
                         row(session)
                     }
+                } header: {
+                    if group.id == log.first?.id, let quietServer {
+                        VStack(alignment: .leading, spacing: Metrics.m) {
+                            quietLine(quietServer)
+                            sectionHeader(group.bucket.title, count: group.sessions.count)
+                        }
+                    } else {
+                        sectionHeader(group.bucket.title, count: group.sessions.count)
+                    }
                 }
             }
-            if let serverID, model.catalogHasMore.contains(serverID) {
-                Button("Load More") { Task { await model.loadMoreSessions(serverID: serverID) } }
+            if let serverID, model.catalogHasMore.contains(serverID), filter == .all || isServerFilter {
+                Button("Load older sessions") { Task { await model.loadMoreSessions(serverID: serverID) } }
                     .frame(maxWidth: .infinity)
                     .buttonStyle(.borderless)
+                    .font(.callout)
+                    .listRowSeparator(.hidden)
             }
         }
-        .navigationTitle(title)
-        .searchable(text: $query, prompt: "Search loaded sessions")
-        .refreshable {
-            if let serverID { await model.refreshCatalog(serverID) } else { await model.refreshForeground() }
+        if sizeClass == .compact {
+            content
+                .listStyle(.plain)
+                #if os(iOS)
+                // Plain-list sections sit ~35pt apart by default; the log reads as one column at 16pt.
+                .listSectionSpacing(Metrics.l)
+                #endif
+        } else {
+            content
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Toggle(isOn: $starredOnly) {
-                    Label("Starred Only", systemImage: starredOnly ? "star.fill" : "star")
+    }
+
+    @ViewBuilder
+    private func boardSection(title: String, entries: [BoardEntry]) -> some View {
+        if !entries.isEmpty {
+            Section {
+                ForEach(entries) { entry in
+                    BoardTag(entry: entry)
+                        .tag(entry.session.ref)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: Metrics.boardSpacing / 2, leading: Metrics.m, bottom: Metrics.boardSpacing / 2, trailing: Metrics.m))
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) { starAction(entry.session) }
+                        // Live work gets no trailing swipe: stopping or deleting it is a confirmed menu action.
+                        .contextMenu { rowMenu(entry.session, live: true) }
+                        .simultaneousGesture(openTap(entry.session.ref))
                 }
-                .help("Show starred sessions only")
-                Button {
-                    creatingOn = NewSessionTarget(serverID: serverID ?? model.servers.first?.id)
-                } label: {
-                    Label("New Session", systemImage: "square.and.pencil")
+            } header: {
+                sectionHeader(title, count: entries.count, attention: title == "Needs you")
+            }
+        }
+    }
+
+    /// Said once, in words, instead of a row of zero counts. Header text is semibold by default; this is a
+    /// sentence, so it takes regular weight and sentence case explicitly.
+    private func quietLine(_ server: ServerProjection) -> some View {
+        Text("Nothing is running on \(server.name).")
+            .font(.footnote)
+            .fontWeight(.regular)
+            .foregroundStyle(.secondary)
+            .textCase(nil)
+            .accessibilityAddTraits(.isStaticText)
+    }
+
+    private func sectionHeader(_ title: String, count: Int, attention: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.xs) {
+            Text(title)
+                .foregroundStyle(attention ? AnyShapeStyle(Palette.signalText) : AnyShapeStyle(.primary))
+            Text(count.formatted())
+                .font(.figure)
+                .foregroundStyle(.tertiary)
+        }
+        .font(.footnote.weight(.semibold))
+        .textCase(nil)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Runs alongside list selection so re-tapping an already selected row still opens it. Edit mode and
+    /// multi-selection keep their native tap meaning.
+    /// iOS only: on the Mac, list selection already shows the detail and ⌘-click multi-selection must not be
+    /// pre-empted by a tap.
+    private func openTap(_ ref: SessionRef) -> some Gesture {
+        TapGesture().onEnded {
+            #if os(iOS)
+            guard CompactRouting.rowTapOpens(isEditing: editMode.isEditing, selectedCount: multiSelection.count) else { return }
+            onOpen(ref)
+            #endif
+        }
+    }
+
+    /// Swipe → : mark. The same action sits in the context menu, so nothing is hidden behind the gesture.
+    private func starAction(_ session: SessionProjection) -> some View {
+        Button {
+            toggleStar(session)
+        } label: {
+            Label(session.starred ? "Unstar" : "Star", systemImage: session.starred ? "star.slash" : "star")
+        }
+        .tint(.yellow)
+    }
+
+    private func toggleStar(_ session: SessionProjection) {
+        Task {
+            do {
+                try await model.setSessionStarred(session.ref, starred: !session.starred)
+                starFeedback += 1
+            } catch {
+                batchMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rowMenu(_ session: SessionProjection, live: Bool = false) -> some View {
+        Button(session.starred ? "Unstar" : "Star", systemImage: session.starred ? "star.slash" : "star") { toggleStar(session) }
+        Button("Open", systemImage: "arrow.right.circle") { onOpen(session.ref) }
+        if !live {
+            Divider()
+            Button("Delete…", systemImage: "trash", role: .destructive) { pendingDelete = session }
+        }
+    }
+
+    private func delete(_ session: SessionProjection) async {
+        do {
+            let result = try await model.deleteSessions(serverID: session.ref.serverID, sessionIDs: [session.ref.sessionID], confirmedSessionIDs: [session.ref.sessionID])
+            if result.deletedIDs.contains(session.ref.sessionID) {
+                if selection == session.ref { selection = nil }
+                multiSelection.remove(session.ref)
+            } else {
+                batchMessage = "The server couldn't delete “\(session.title.nonEmpty ?? "this session")”."
+            }
+        } catch {
+            batchMessage = error.localizedDescription
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            Menu {
+                Section("Active Server") {
+                    ForEach(model.servers) { server in
+                        Button {
+                            serverID = server.id
+                            filter = .all
+                            selection = nil
+                        } label: {
+                            Label(serverMenuTitle(server), systemImage: server.id == serverID ? "checkmark.circle.fill" : "server.rack")
+                        }
+                    }
                 }
-                .keyboardShortcut("n", modifiers: .command)
-                .disabled(model.servers.isEmpty)
+                Section {
+                    Button("Add Server…", systemImage: "plus", action: onAddServer)
+                    Button("Manage Servers…", systemImage: "slider.horizontal.3", action: onManageServers)
+                    if let activeServer {
+                        if activeServer.connectionIssue == .identityChanged {
+                            Button("Edit Server…", systemImage: "exclamationmark.lock") { onEditServer(activeServer.id) }
+                        } else {
+                            Button("Reconnect", systemImage: "arrow.clockwise") { Task { do { try await model.reconnectServer(activeServer.id) } catch { createError = error.localizedDescription } } }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: Metrics.xs) {
+                    if let activeServer { HealthDot(state: activeServer.state) }
+                    Text(activeServer?.name ?? "Choose Server").font(.headline).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                }
             }
-        }
-        .overlay {
-            if groups.isEmpty {
-                emptyState
-            }
-        }
-        .sheet(item: $creatingOn) { target in
-            NewSessionSheet(initialServerID: target.serverID) { ref in
-                selection = ref
-            }
-        }
-        .onChange(of: multiSelection) { _, refs in
-            if refs.count == 1, let ref = refs.first, ref != selection { selection = ref }
-        }
-        .onChange(of: selection, initial: true) { _, ref in
-            if let ref, !multiSelection.contains(ref) || multiSelection.count == 1 { multiSelection = [ref] }
-            if ref == nil && multiSelection.count == 1 { multiSelection = [] }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if showsBatchBar { batchBar }
-        }
-        .confirmationDialog(batchDeleteTitle, isPresented: $confirmingBatchDelete, titleVisibility: .visible) {
-            Button("Delete \(batchRefs.count) Sessions", role: .destructive) { Task { await deleteBatch() } }
-        } message: {
-            Text(batchTitles + "\nThe sessions and their history are deleted from the server. This can't be undone.")
-        }
-        .fileExporter(
-            isPresented: Binding(get: { batchExport != nil }, set: { if !$0 { batchExport = nil } }),
-            document: batchExport,
-            contentType: .json,
-            defaultFilename: "sessions-\(Date.now.formatted(.iso8601.year().month().day())).json"
-        ) { result in
-            if case .failure(let error) = result { batchMessage = error.localizedDescription }
-            batchExport = nil
-        }
-        .alert("Sessions", isPresented: Binding(get: { batchMessage != nil }, set: { if !$0 { batchMessage = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(batchMessage ?? "")
+            .accessibilityLabel("Active server, \(activeServer?.name ?? "none")")
         }
         #if os(iOS)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) { EditButton() }
+        if editMode.isEditing {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Done") { withAnimation { editMode = .inactive } }
+                    .fontWeight(.semibold)
+            }
         }
         #endif
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                Task { await createDefault() }
+            } label: {
+                if creating { ProgressView() } else { Label("New Session", systemImage: "plus") }
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            .disabled(activeServer == nil || creating || activeServer?.state != .live)
+            Menu {
+                Button("New Session Options…", systemImage: "slider.horizontal.3") { optionsOperationID = UUID(); showingOptions = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(activeServer == nil)
+                Picker("Show", selection: $filter) {
+                    Label("Everything", systemImage: "list.bullet").tag(SidebarItem.all)
+                    Label("Needs you", systemImage: "hand.raised").tag(SidebarItem.needsYou)
+                    Label("Working", systemImage: "bolt.horizontal").tag(SidebarItem.running)
+                }
+                .pickerStyle(.inline)
+                Toggle("Starred only", systemImage: "star", isOn: $starredOnly)
+                #if os(iOS)
+                if !editMode.isEditing {
+                    Button("Select Sessions", systemImage: "checkmark.circle") { withAnimation { editMode = .active } }
+                        .disabled(isEmpty)
+                }
+                #endif
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+        }
+    }
+
+    private func serverMenuTitle(_ server: ServerProjection) -> String {
+        let needs = model.needsYou.filter { $0.id.serverID == server.id }.count
+        var parts = [server.name, server.state.label, "\(server.sessionCount) sessions"]
+        if needs > 0 { parts.append(needs == 1 ? "1 needs you" : "\(needs) need you") }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: Batch
@@ -153,7 +432,7 @@ struct SessionListView: View {
 
     private var showsBatchBar: Bool {
         #if os(iOS)
-        if editMode?.wrappedValue.isEditing == true { return true }
+        if editMode.isEditing { return true }
         #endif
         return multiSelection.count > 1
     }
@@ -224,31 +503,75 @@ struct SessionListView: View {
         }
     }
 
+    private func createDefault() async {
+        guard let serverID, !creating else { return }
+        creating = true
+        defer { creating = false }
+        do {
+            let ref = try await model.createDefaultSession(serverID: serverID, operationID: createOperationID)
+            guard self.serverID == serverID else { return }
+            selection = ref
+            createOperationID = UUID()
+        } catch {
+            createError = error.localizedDescription
+        }
+    }
+
     private func row(_ session: SessionProjection) -> some View {
-        let reason = model.needsYou.first { $0.id == session.ref }?.reason ?? session.needsYouReason
-        let serverName: String? = serverID == nil ? model.servers.first { $0.id == session.ref.serverID }?.name : nil
-        return SessionRow(session: session, reason: reason, serverName: serverName)
+        SessionRow(session: session, reason: reason(for: session))
             .tag(session.ref)
+            .listRowInsets(EdgeInsets(top: Metrics.xs, leading: Metrics.m, bottom: Metrics.xs, trailing: Metrics.l))
+            .swipeActions(edge: .leading, allowsFullSwipe: true) { starAction(session) }
+            // No full swipe: the trailing action only opens the confirmation the menu uses.
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button(role: .destructive) { pendingDelete = session } label: { Label("Delete…", systemImage: "trash") }
+            }
+            .contextMenu { rowMenu(session) }
+            .simultaneousGesture(openTap(session.ref))
     }
 
     @ViewBuilder
     private var emptyState: some View {
         if !query.isEmpty {
             ContentUnavailableView.search(text: query)
+        } else if let activeServer, activeServer.connectionIssue == .identityChanged {
+            // Fail-closed by design: Reconnect would be rejected, so the only honest action is Edit & Test.
+            ContentUnavailableView {
+                Label("Server Identity Changed", systemImage: "exclamationmark.lock")
+            } description: {
+                Text("\(activeServer.name) reports a different identity than the one saved on this device. Edit and test the server to trust it again. Your sessions remain on the server.")
+            } actions: {
+                Button("Edit Server…") { onEditServer(activeServer.id) }
+                    .buttonStyle(.borderedProminent)
+            }
+        } else if activeServer?.state == .offline || activeServer?.state == .unauthorized {
+            ContentUnavailableView {
+                Label(activeServer?.state == .unauthorized ? "Reconnect Required" : "Server Unavailable", systemImage: "wifi.exclamationmark")
+            } description: {
+                Text("\(activeServer?.name ?? "This server") is not currently available. Your sessions remain on the server.")
+            } actions: {
+                if let activeServer {
+                    Button("Reconnect") { Task { do { try await model.reconnectServer(activeServer.id) } catch { createError = error.localizedDescription } } }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
         } else {
             switch filter {
             case .needsYou:
-                ContentUnavailableView("Nothing Needs You", systemImage: "checkmark.circle", description: Text("Approvals, questions and failures from every server appear here."))
+                ContentUnavailableView("Nothing needs you", systemImage: "checkmark.circle", description: Text("Approvals, questions and failures from this server appear here."))
             case .running:
-                ContentUnavailableView("Nothing Running", systemImage: "moon.zzz", description: Text("Sessions that are working right now appear here."))
-            case .server:
+                ContentUnavailableView("Nothing is working", systemImage: "moon.zzz", description: Text("Sessions with an agent at work on this server appear here."))
+            case .all, .server:
                 ContentUnavailableView {
                     Label("No Sessions", systemImage: "bubble.left.and.bubble.right")
                 } description: {
-                    Text("Start a session with one of this server's agents.")
+                    Text(activeServer == nil ? "Connect a server to see its sessions." : "Start a session with this server's default agent team.")
                 } actions: {
-                    Button("New Session") { creatingOn = NewSessionTarget(serverID: serverID) }
-                        .buttonStyle(.borderedProminent)
+                    if activeServer != nil {
+                        Button("New Session") { Task { await createDefault() } }.buttonStyle(.borderedProminent)
+                    } else {
+                        Button("Add Server…", action: onAddServer).buttonStyle(.borderedProminent)
+                    }
                 }
             }
         }

@@ -66,6 +66,14 @@ public struct SSEParser: Sendable {
         return frames
     }
 
+    public mutating func append(_ byte: UInt8) throws -> [SSEFrame] {
+        try append(Data([byte]))
+    }
+
+    public mutating func append(_ bytes: [UInt8]) throws -> [SSEFrame] {
+        try append(Data(bytes))
+    }
+
     public mutating func finish() throws -> [SSEFrame] {
         guard !finished else { return [] }
         finished = true

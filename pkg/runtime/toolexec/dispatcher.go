@@ -601,7 +601,7 @@ func (c *call) autoApprovalAfterConfirmationWait() (PermissionDecision, bool) {
 // [permissions.Checker.CheckWithArgs] ordering (Deny > Allow > Ask), so a
 // session-level Deny or explicit Ask never yields an allow here.
 //
-// For the command tools (shell, run_background_job) a matching allow
+// For the shell tool a matching allow
 // pattern is necessary but not sufficient: the generic matcher's
 // trailing-* patterns are plain prefix matches, so the "T = always allow
 // mkdir*" grant would also cover "mkdir x && rm -rf ~". Silencing a

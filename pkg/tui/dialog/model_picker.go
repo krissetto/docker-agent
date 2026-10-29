@@ -422,9 +422,9 @@ func pickerRowStyles(selected bool) pickerRowPalette {
 	}
 	p.name = styles.PaletteSelectedActionStyle
 	p.desc = styles.PaletteSelectedDescStyle
-	p.alloy = p.alloy.Background(styles.MobyBlue)
-	p.defBadge = p.defBadge.Background(styles.MobyBlue)
-	p.current = p.current.Background(styles.MobyBlue)
+	p.alloy = p.alloy.Foreground(styles.White).Background(styles.MobyBlue)
+	p.defBadge = p.defBadge.Foreground(styles.White).Background(styles.MobyBlue)
+	p.current = p.current.Foreground(styles.White).Background(styles.MobyBlue)
 	// Reuse the description style so the cells share the selection band.
 	p.stats = p.desc
 	p.missing = p.desc.Italic(true)

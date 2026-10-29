@@ -14,11 +14,11 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/components/panel"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
-	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
@@ -54,7 +54,7 @@ func (m *appModel) applyPanelSettings(settings messages.PanelSettings) (tea.Mode
 	var focusCmd tea.Cmd
 	if m.focusedPanel == PanelStatus {
 		m.focusedPanel = PanelEditor
-		focusCmd = m.editor.Focus()
+		focusCmd = m.focusReviewComposer()
 	}
 	m.viewCacheValid = false
 	return m, tea.Batch(focusCmd, m.preparePanel())
@@ -230,7 +230,7 @@ func (m *appModel) preparePanel() tea.Cmd {
 	if m.focusedPanel == PanelStatus && !m.panelElementVisible(m.panelFocused) {
 		m.panelFocused = ""
 		m.focusedPanel = PanelEditor
-		m.editor.Focus()
+		m.focusReviewComposer()
 		m.viewCacheValid = false
 	}
 	enabled := len(messages.NormalizePanelSettings(m.panelSettings).Elements) > 0
@@ -345,7 +345,21 @@ func (m *appModel) panelFrame() panel.Frame {
 	if m.messageBar == nil {
 		return panel.Frame{}
 	}
-	return panel.Render(m.messageBarNotice(), messageBarWidth(m.width), m.panelElements(), m.panelFocused)
+	notice := m.messageBarNotice()
+	if !m.messageBarHasPriorityNotice() && (m.reviewCommentInput != nil || m.reviewFocused()) {
+		if hint := m.reviewCommentStatus(); hint != "" {
+			notice = hint
+		}
+	}
+	return panel.Render(notice, messageBarWidth(m.width), m.panelElements(), m.panelFocused)
+}
+
+func (m *appModel) messageBarHasPriorityNotice() bool {
+	if m.messageBar == nil {
+		return false
+	}
+	message := m.messageBar.CurrentMessage()
+	return message.Severity == messagebar.Warning || message.Severity == messagebar.Error || message.Category == messagebar.Cancellation
 }
 
 func (m *appModel) panelElementVisible(id messages.PanelElement) bool {
@@ -393,7 +407,7 @@ func (m *appModel) panelKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	case "tab", "esc":
 		m.panelFocused = ""
 		m.focusedPanel = PanelEditor
-		return true, m.editor.Focus()
+		return true, m.focusReviewComposer()
 	case "shift+tab":
 		m.panelFocused = ""
 		m.focusedPanel = PanelContent
@@ -426,10 +440,16 @@ func (m *appModel) panelKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 func (m *appModel) messageBarNotice() string {
 	view := m.messageBar.View()
 	if m.paneHeaderHeight() == 0 && strings.TrimSpace(ansi.Strip(view)) == "" {
-		if m.focusedSessionDormant() || m.sessionState.PauseState() != service.PauseNone {
-			view = paneClipped(m.paneActivity(m.paneFocus()), messageBarWidth(m.width), 1)
-		} else if m.leanMode && m.chatPage.IsWorking() {
-			view = paneClipped(styles.MutedStyle.Render("active"), messageBarWidth(m.width), 1)
+		id := m.paneFocus()
+		status, hasStatus := m.paneRenderStatus(id)
+		activity := m.paneActivityKindFor(id, status, hasStatus)
+		switch activity {
+		case paneActivityStopped, paneActivityReadOnly, paneActivityDormant, paneActivityPaused, paneActivityPausing:
+			view = paneClipped(m.paneActivityForStatus(id, status, hasStatus), messageBarWidth(m.width), 1)
+		default:
+			if m.leanMode && m.chatPage.IsWorking() {
+				view = paneClipped(styles.MutedStyle.Render("active"), messageBarWidth(m.width), 1)
+			}
 		}
 	}
 	return view

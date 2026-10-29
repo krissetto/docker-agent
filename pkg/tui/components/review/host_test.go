@@ -97,7 +97,7 @@ func TestKeyboardOnlyReviewWorkflow(t *testing.T) {
 		assert.Equal(t, "pkg/tui/panel.go", h.m.doc.Key.Path, "J moves to the next file without leaving the reader")
 		assert.Equal(t, areaReader, h.m.area)
 
-		h.press("/", "l", "a", "b", "e", "l", "enter", "n", "g", "v", "G", "c")
+		h.press("/", "l", "a", "b", "e", "l", "enter", "n", "g", "v", "G", "x")
 		copied := h.lastCopy()
 		assert.Equal(t, CopyText, copied.Kind)
 		assert.Equal(t, 7, strings.Count(copied.Text, "\n"), "full keyboard selection copies every line")
@@ -111,7 +111,7 @@ func TestKeyboardOnlyReviewWorkflow(t *testing.T) {
 		assert.Contains(t, plain(h.m), "go.mod")
 		h.press("j", "j", "j", "enter")
 		assert.Equal(t, "go.mod", h.m.doc.Key.Path)
-		h.press("c")
+		h.press("x")
 		assert.Equal(t, "module example\n", h.lastCopy().Text)
 
 		h.press("esc", "q")
@@ -175,7 +175,7 @@ func TestUntrustedTextIsSanitizedForDisplayButCopiedRaw(t *testing.T) {
 	assert.NotContains(t, view, "\x07")
 	assert.NotContains(t, view, "\u202e")
 
-	h.press("c", "y")
+	h.press("x", "y")
 	require.Len(t, h.copies, 2)
 	assert.Equal(t, "+x\x1b[2Jy\tz\n", h.copies[0].Text, "copies keep source bytes")
 	assert.Equal(t, evil, h.copies[1].Text)
@@ -189,7 +189,7 @@ func TestNarrowDockStaysSinglePane(t *testing.T) {
 	h.m.SetSize(56, 20)
 	assertFrame(t, h.m.View(), 56, 20)
 	assert.False(t, h.m.geometry().twoColumn)
-	assert.Contains(t, plain(h.m), "Unstaged hunk 1/2", "reader keeps focus when the dock narrows")
+	assert.Contains(t, plain(h.m), "Unstaged · hunk 1/2", "reader keeps focus when the dock narrows")
 	h.press("esc")
 	assert.Contains(t, plain(h.m), "Changes  Draft 0")
 }
@@ -206,4 +206,18 @@ func TestHelpFollowsContext(t *testing.T) {
 	h.press("/")
 	ctx, _ = h.m.Help()
 	assert.Equal(t, "Changes review — typing search", ctx)
+}
+
+func TestClearDirectoriesInvalidatesCacheWithoutSchedulingLoads(t *testing.T) {
+	m := New("ws")
+	m.SetSize(100, 20)
+	m.mode = ModeFiles
+	m.dirs[dirID{worktree: "w1", path: ""}] = Directory{WorktreeID: "w1", State: StateReady, Entries: []Entry{{Name: "old.go"}}}
+	m.loadPending[dirKey("w1", "")] = true
+	m.loadPending[worktreeKey("w1")] = true
+	m.ClearDirectories()
+	assert.Empty(t, m.dirs)
+	assert.NotContains(t, m.loadPending, dirKey("w1", ""))
+	assert.Contains(t, m.loadPending, worktreeKey("w1"), "directory cache reset should preserve unrelated request guards")
+	assert.Empty(t, m.dirs, "clearing cache is inert and cannot schedule replacement loads")
 }

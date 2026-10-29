@@ -161,15 +161,15 @@ type viewerLifecycleFixture struct {
 func newViewerLifecycleFixture(t *testing.T) *viewerLifecycleFixture {
 	t.Helper()
 	provider := &viewerLifecycleProvider{calls: make(chan viewerLifecycleCall, 16)}
+	dir := t.TempDir()
 	local, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
 		agent.New("root", "fixture root", agent.WithModel(&viewerLifecycleProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
 		agent.New("worker", "fixture worker", agent.WithModel(provider), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
-	)), runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	)), runtime.WithSessionStore(session.NewInMemorySessionStore()), runtime.WithWorkingDir(dir))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(local)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 	borrowed := owner.Runtime()
-	dir := t.TempDir()
 	rootSession := session.New(session.WithID(uuid.NewString()), session.WithAgentName("root"), session.WithWorkingDir(dir))
 	rootSession.AddMessage(session.UserMessage("original committed history"))
 	services := &viewerLifecycleLocalServices{local: local}
@@ -193,6 +193,8 @@ func newViewerLifecycleFixture(t *testing.T) *viewerLifecycleFixture {
 	m.viewers = &viewerHost{ctx: func() context.Context { return ctx }, events: make(chan any, 256), views: make(map[*app.App]*model)}
 	t.Cleanup(m.viewers.close)
 	m.subscribeViewer(ctx, root)
+	snapshot := local.SubagentTree().Snapshot()
+	m.handleEvent(ctx, &runtime.SubagentTreeEvent{Snapshot: snapshot})
 	root.Start(ctx)
 	f := &viewerLifecycleFixture{m: m, root: root, local: local, owner: owner, borrowed: borrowed, child: child, node: node, services: services, provider: provider}
 	f.event(t, root, func(msg app.SessionEventMsg) bool { _, ok := msg.Event.(*app.SessionResetEvent); return ok }, true)
@@ -337,6 +339,10 @@ func TestViewerLifecycleCanonicalAttachActiveAndCompleted(t *testing.T) {
 				return ok && e.SessionID == f.child.ID() && msg.TurnID == turnID
 			}, true)
 			require.NoError(t, f.child.AwaitTurn(t.Context(), turnID))
+			f.event(t, childApp, func(msg app.SessionEventMsg) bool {
+				e, ok := msg.Event.(*runtime.TurnSettledEvent)
+				return ok && e.TurnID == turnID
+			}, true)
 			assert.NotContains(t, viewerLifecycleText(f.m), "child follow-up answer")
 			assert.Equal(t, "original unsent draft", f.m.screen.Editor.Text())
 			assert.Equal(t, []messages.Attachment{originalAttachment}, f.m.draftAttachments)

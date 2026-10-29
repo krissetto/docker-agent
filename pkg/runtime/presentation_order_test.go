@@ -352,3 +352,20 @@ func TestAssistantPresentationUserBoundaryKeepsPlaceholder(t *testing.T) {
 	assert.Equal(t, "next task", got.Messages[1].Message.Message.Content)
 	assert.Equal(t, []chat.AssistantPart{{Type: chat.AssistantPartContent, Text: "new answer"}}, got.Messages[2].Message.Message.Presentation)
 }
+
+func TestMessageAddedCommittedToolCallIDsWireShape(t *testing.T) {
+	t.Parallel()
+	plain := MessageAddedAt("sess", session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "answer"}), "root", 2)
+	data, err := json.Marshal(plain)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "tool_call_ids", "an answer without tool calls keeps the wire shape unchanged")
+	var decoded MessageAddedEvent
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Empty(t, decoded.CommittedToolCallIDs())
+
+	withCalls := MessageAddedAt("sess", session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "call-1", Type: "function", Function: tools.FunctionCall{Name: "read", Arguments: "{}"}}}}), "root", 3)
+	data, err = json.Marshal(withCalls)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, []string{"call-1"}, decoded.CommittedToolCallIDs())
+}

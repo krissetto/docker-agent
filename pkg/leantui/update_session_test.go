@@ -173,12 +173,39 @@ func (r *leanSessions) ListSessions(context.Context) ([]runtime.SessionCatalogEn
 	return r.sessions, nil
 }
 
+// PrepareSessionView mirrors the canonical contract: the committed handle must
+// match the requested session identity, so loaded sessions get their own handle.
+func (r *leanSessions) PrepareSessionView(_ context.Context, sessionID string) (runtime.PreparedSessionView, error) {
+	source := r.handle.(*leanSession)
+	if source.snapshot == nil || source.snapshot.ID != sessionID {
+		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: sessionID, Operation: "prepare_view"}
+	}
+	handle := r.handle
+	if source.ID() != sessionID {
+		handle = &leanSession{id: sessionID, snapshot: source.snapshot, models: source.models, thinkingLevels: source.thinkingLevels, sessionEditing: source.sessionEditing}
+	}
+	sess := source.snapshot
+	binding := runtime.SessionBinding{AgentName: "agent"}
+	return &leanPreparedView{handle: handle, info: runtime.PreparedSessionViewInfo{ActiveAgentName: "agent", SessionID: sessionID, RootSessionID: sessionID, RootWorkingDir: sess.WorkingDir, RootBinding: binding, Session: sess, Binding: binding, WorkingDir: sess.WorkingDir}}, nil
+}
+
+type leanPreparedView struct {
+	handle runtime.SessionHandle
+	info   runtime.PreparedSessionViewInfo
+}
+
+func (p *leanPreparedView) Info() runtime.PreparedSessionViewInfo { return p.info }
+func (p *leanPreparedView) Commit(context.Context) (runtime.CommittedSessionView, error) {
+	return runtime.CommittedSessionView{SessionHandle: p.handle, Info: p.info, Metadata: p.handle.Metadata()}, nil
+}
+func (p *leanPreparedView) Abort() {}
+
 func sessionModel(t *testing.T) (*model, *leanSession) {
 	t.Helper()
 	sess := session.New(session.WithAgentName("agent"))
 	handle := &leanSession{id: sess.ID, snapshot: sess, models: []runtime.ModelChoice{{Name: "other", Ref: "other/model"}}, thinkingLevels: true, sessionEditing: true}
 	m := bareModel(24)
-	m.app = app.New(t.Context(), &leanSessions{handle: handle}, sess, runtime.SessionBinding{AgentName: "agent"})
+	m.app = app.New(t.Context(), &leanSessions{handle: handle}, sess, runtime.SessionBinding{AgentName: "agent"}, app.WithRuntimeServices(&viewerLifecycleServices{}))
 	m.app.Run(t.Context(), func() {}, "active", nil)
 	require.Eventually(t, func() bool { return len(handle.submitted) > 0 }, time.Second, time.Millisecond)
 	return m, handle

@@ -85,7 +85,7 @@ func TestDefaultLightThemeLoads(t *testing.T) {
 
 	theme, err := LoadTheme(DefaultLightThemeRef)
 	require.NoError(t, err)
-	assert.Equal(t, "Default Light", theme.Name)
+	assert.Equal(t, "Docker Next - Light", theme.Name)
 	assert.True(t, IsBuiltinTheme(DefaultLightThemeRef))
 
 	refs, err := ListThemeRefs()

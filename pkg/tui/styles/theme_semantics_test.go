@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,7 @@ var semanticColorFields = []string{
 	"TabActiveBg", "TabActiveFg", "TabInactiveFg", "TabHoverBg", "TabHoverFg", "TabDragBg", "TabDragFg", "TabBusy",
 	"ContextEmpty", "ContextFill", "ContextText",
 	"Resize", "ResizeHover", "ResizeActive", "Separator",
-	"Placeholder", "Hint", "Focus", "Disabled", "StatusAdjacent",
+	"Placeholder", "Hint", "Focus", "Disabled", "StatusAdjacent", "ScrollbarTrack",
 }
 
 func TestBuiltinThemesExplicitlyDefineSemanticColors(t *testing.T) {
@@ -116,6 +117,8 @@ func TestApplyThemeWiresSemanticColors(t *testing.T) { //nolint:paralleltest // 
 	assert.Equal(t, Resize, ResizeHandleStyle.GetForeground())
 	assert.Equal(t, ResizeHover, ResizeHandleHoverStyle.GetForeground())
 	assert.Equal(t, ResizeActive, ResizeHandleActiveStyle.GetForeground())
+	assert.Equal(t, Separator, BorderMuted, "muted separators use the authored semantic separator role")
+	assert.Equal(t, BorderMuted, DialogSeparatorStyle.GetForeground())
 }
 
 func TestBuiltinThemeSemanticANSIMatrix(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates style globals.
@@ -142,6 +145,13 @@ func TestBuiltinThemeSemanticANSIMatrix(t *testing.T) { //nolint:paralleltest //
 			lipgloss.NewStyle().Foreground(TabActiveFg).Background(TabActiveBg).Render("active"),
 			lipgloss.NewStyle().Foreground(TabInactiveFg).Background(ShellBg).Render("idle"),
 			lipgloss.NewStyle().Foreground(TabBusy).Background(ShellBg).Render("busy"),
+			TrackStyle.Render("track"),
+			ThumbStyle.Render("thumb"),
+			ThumbActiveStyle.Render("drag"),
+			ToolErrorIcon.Render("err"),
+			ToolPendingIcon.Render("wait"),
+			DiffAddEmphStyle.Render("add!"),
+			DiffRemoveEmphStyle.Render("del!"),
 		}
 		fmt.Fprintf(&snapshot, "%s %s %q\n", ref, light, strings.Join(cells, " "))
 	}
@@ -317,6 +327,270 @@ func TestBlackThemeMenuAndSpinnerContrast(t *testing.T) { //nolint:paralleltest 
 			hue, saturation, _ := rgbToHSL(r, g, b)
 			assert.InDelta(t, accentHue, hue, 5.0, "%s spinner keeps its accent hue", ref)
 			assert.Greater(t, saturation, 0.5, "%s spinner remains saturated", ref)
+		}
+	}
+}
+
+func TestAllBuiltinTextAndControlContrast(t *testing.T) {
+	t.Parallel()
+	refs, err := listBuiltinThemeRefs()
+	require.NoError(t, err)
+	for _, ref := range refs {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		c := theme.Colors
+		checks := []semanticContrast{
+			{"TextPrimary", "Background", 4.5, "body text"},
+			{"TextPrimary", "BackgroundAlt", 4.5, "card text"},
+			{"TextPrimary", "EditorBg", 4.5, "editor text"},
+			{"TextPrimary", "CardBg", 4.5, "card text"},
+			{"TextSecondary", "ShellBg", 4.5, "secondary text"},
+			{"TextSecondary", "CardBg", 4.5, "secondary card text"},
+			{"TextMuted", "ShellBg", 4.5, "muted text"},
+			{"TextMuted", "CardBg", 4.5, "muted card text"},
+			{"Placeholder", "EditorBg", 4.5, "placeholder text"},
+			{"Hint", "EditorBg", 4.5, "input hint"},
+			{"SuggestionGhost", "EditorBg", 4.5, "suggestion text"},
+			{"ContextText", "ShellBg", 4.5, "context text"},
+			{"StatusAdjacent", "ShellBg", 4.5, "adjacent status text"},
+			{"LineNumber", "BackgroundAlt", 4.5, "line number text"},
+			{"TabActiveFg", "TabActiveBg", 4.5, "active tab text"},
+			{"TabInactiveFg", "ShellBg", 4.5, "inactive tab text"},
+			{"TabHoverFg", "TabHoverBg", 4.5, "hover tab text"},
+			{"TabDragFg", "TabDragBg", 4.5, "drag tab text"},
+			{"TabPrimaryFg", "ShellBg", 4.5, "tab title text"},
+			{"Accent", "Background", 4.5, "accent text"},
+			{"Accent", "EditorBg", 3.0, "editor accent text"},
+			{"Accent", "CardBg", 3.0, "card accent text"},
+			{"Success", "Background", 4.5, "success text"},
+			{"Success", "EditorBg", 4.5, "editor success text"},
+			{"Success", "CardBg", 4.5, "card success text"},
+			{"Error", "Background", 4.5, "error text"},
+			{"Error", "EditorBg", 4.5, "editor error text"},
+			{"Error", "CardBg", 4.5, "card error text"},
+			{"Warning", "Background", 4.5, "warning text"},
+			{"Warning", "EditorBg", 4.5, "editor warning text"},
+			{"Warning", "CardBg", 4.5, "card warning text"},
+			{"Info", "Background", 4.5, "info text"},
+			{"Info", "EditorBg", 4.5, "editor info text"},
+			{"Info", "CardBg", 4.5, "card info text"},
+			{"Highlight", "Background", 4.5, "highlight text"},
+			{"Highlight", "EditorBg", 4.5, "editor highlight text"},
+			{"Highlight", "CardBg", 4.5, "card highlight text"},
+			{"TextPrimary", "Selected", 4.5, "selected text"},
+			{"Success", "DiffAddBg", 4.5, "addition text"},
+			{"Error", "DiffRemoveBg", 4.5, "removal text"},
+			{"BrandText", "Brand", 4.5, "selected command text"},
+		}
+		colors := reflect.ValueOf(c)
+		for _, check := range checks {
+			var fg string
+			switch check.fg {
+			case "BrandText":
+				fg = c.SelectedFg
+			case "TabPrimaryFg":
+				fg = c.TextMuted
+			default:
+				fg = colors.FieldByName(check.fg).String()
+			}
+			bg := colors.FieldByName(check.bg).String()
+			ratio, ok := contrastRatioHex(fg, bg)
+			require.True(t, ok, "%s %s has invalid colors %q/%q", ref, check.desc, fg, bg)
+			assert.GreaterOrEqualf(t, ratio, check.min, "%s %s: %s on %s = %.2f:1", ref, check.desc, fg, bg, ratio)
+		}
+
+		codeBg := theme.Markdown.CodeBg
+		for name, fg := range map[string]string{
+			"syntax comment": theme.Chroma.Comment, "syntax preprocessor": theme.Chroma.CommentPreproc,
+			"syntax keyword": theme.Chroma.Keyword, "syntax reserved": theme.Chroma.KeywordReserved,
+			"syntax namespace": theme.Chroma.KeywordNamespace, "syntax type": theme.Chroma.KeywordType,
+			"syntax operator": theme.Chroma.Operator, "syntax punctuation": theme.Chroma.Punctuation,
+			"syntax builtin": theme.Chroma.NameBuiltin, "syntax tag": theme.Chroma.NameTag,
+			"syntax attribute": theme.Chroma.NameAttribute, "syntax decorator": theme.Chroma.NameDecorator,
+			"syntax number": theme.Chroma.LiteralNumber, "syntax string": theme.Chroma.LiteralString,
+			"syntax escape": theme.Chroma.LiteralStringEscape, "syntax deleted": theme.Chroma.GenericDeleted,
+			"syntax subheading": theme.Chroma.GenericSubheading, "syntax success": theme.Chroma.Success,
+			"inline code": theme.Markdown.Code,
+		} {
+			ratio, ok := contrastRatioHex(fg, codeBg)
+			require.True(t, ok, "%s %s has invalid colors %q/%q", ref, name, fg, codeBg)
+			assert.GreaterOrEqualf(t, ratio, 4.5, "%s %s: %s on code background %s = %.2f:1", ref, name, fg, codeBg, ratio)
+		}
+		if theme.Chroma.ErrorFg != "" && theme.Chroma.ErrorBg != "" {
+			ratio, ok := contrastRatioHex(theme.Chroma.ErrorFg, theme.Chroma.ErrorBg)
+			require.True(t, ok)
+			assert.GreaterOrEqualf(t, ratio, 4.5, "%s syntax error fg on background = %.2f:1", ref, ratio)
+		}
+		for _, fg := range []string{theme.Markdown.Heading, theme.Markdown.Link, theme.Markdown.Strong, theme.Markdown.Blockquote, theme.Markdown.List} {
+			ratio, ok := contrastRatioHex(fg, c.Background)
+			require.True(t, ok)
+			assert.GreaterOrEqualf(t, ratio, 4.5, "%s markdown %s on document background = %.2f:1", ref, fg, ratio)
+		}
+	}
+}
+
+func TestAllBuiltinScrollbarAndDiffStylesRenderWithIntendedRoles(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates globals.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	refs, err := listBuiltinThemeRefs()
+	require.NoError(t, err)
+	for _, ref := range refs {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		ApplyTheme(theme)
+
+		assert.True(t, isNoColor(TrackStyle.GetBackground()), "%s track must not paint the gutter", ref)
+		assert.True(t, isNoColor(ThumbStyle.GetBackground()), "%s thumb must leave neighboring panel background intact", ref)
+		assert.True(t, isNoColor(ThumbActiveStyle.GetBackground()), "%s active thumb must leave neighboring panel background intact", ref)
+		track := TrackStyle.Render("│")
+		tr, tg, tb := extractFirstFgRGB(track)
+		assert.Equal(t, RGBToHex(ColorToRGB(ScrollbarTrack)), RGBToHex(float64(tr)/255, float64(tg)/255, float64(tb)/255), "%s exact track ANSI foreground", ref)
+		cursor := SuggestionCursorStyle.Render("λ")
+		assert.Equal(t, "λ", ansi.Strip(cursor), "%s cursor suggestion preserves glyph", ref)
+		cr, cg, cb := extractFirstFgRGB(cursor)
+		assert.GreaterOrEqual(t, contrastRatio(RGBToColor(float64(cr)/255, float64(cg)/255, float64(cb)/255), Accent), 4.5, "%s first ghost glyph on accent cursor background", ref)
+		for _, surface := range []color.Color{ShellBg, CardBg, EditorBg} {
+			assert.GreaterOrEqual(t, contrastRatio(ThumbStyle.GetForeground(), surface), 3.0, "%s thumb on actual surface", ref)
+			assert.GreaterOrEqual(t, contrastRatio(ThumbActiveStyle.GetForeground(), surface), 3.0, "%s active thumb on actual surface", ref)
+		}
+		assert.GreaterOrEqual(t, contrastRatio(White, MobyBlue), 4.5, "%s command/completion selection text", ref)
+		for _, check := range []struct {
+			name  string
+			style lipgloss.Style
+			bg    color.Color
+		}{
+			{"error icon", ToolErrorIcon, ErrorStrong}, {"pending icon", ToolPendingIcon, Warning},
+		} {
+			r, g, b := extractFirstFgRGB(check.style.Render("!"))
+			assert.GreaterOrEqual(t, contrastRatio(RGBToColor(float64(r)/255, float64(g)/255, float64(b)/255), check.bg), 3.0, "%s %s glyph", ref, check.name)
+		}
+
+		for _, check := range []struct {
+			name  string
+			style lipgloss.Style
+			row   color.Color
+		}{
+			{"addition", DiffAddEmphStyle, DiffAddBg}, {"removal", DiffRemoveEmphStyle, DiffRemoveBg},
+		} {
+			assert.NotEqual(t, check.row, check.style.GetBackground(), "%s %s emphasis remains distinct", ref, check.name)
+			assert.GreaterOrEqual(t, contrastRatio(check.style.GetForeground(), check.style.GetBackground()), 4.5, "%s %s emphasized text", ref, check.name)
+		}
+	}
+}
+
+func TestPartialThemeScrollbarTrackFallbackAndExplicitOverride(t *testing.T) {
+	t.Parallel()
+	base := DefaultTheme()
+	custom := mergeTheme(base, &Theme{Colors: ThemeColors{Background: "#ffffff"}})
+	assert.NotEqual(t, base.Colors.ScrollbarTrack, custom.Colors.ScrollbarTrack)
+	assert.Equal(t, custom.Colors.ScrollbarTrack, deriveScrollbarTrack(custom.Colors.ShellBg, custom.Colors.CardBg, custom.Colors.EditorBg))
+	indexed := mergeTheme(base, &Theme{Colors: ThemeColors{Background: "4"}})
+	assert.NotEqual(t, "4", indexed.Colors.ScrollbarTrack)
+	explicit := mergeTheme(base, &Theme{Colors: ThemeColors{ScrollbarTrack: "39"}})
+	assert.Equal(t, "39", explicit.Colors.ScrollbarTrack, "explicit ANSI scrollbar role is preserved")
+}
+
+func isNoColor(c color.Color) bool {
+	_, ok := c.(lipgloss.NoColor)
+	return ok
+}
+
+func TestDirectThemeScrollbarFallbackKeepsDefaultCopyIndependent(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates globals.
+	base := DefaultTheme()
+	want := base.Colors.ScrollbarTrack
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+
+	custom := *base
+	custom.Colors.ShellBg = "#ffffff"
+	custom.Colors.CardBg = "#f0f0f0"
+	custom.Colors.EditorBg = "#eeeeee"
+	custom.Colors.ScrollbarTrack = ""
+	ApplyTheme(&custom)
+	assert.Equal(t, deriveScrollbarTrack(custom.Colors.ShellBg, custom.Colors.CardBg, custom.Colors.EditorBg), RGBToHex(ColorToRGB(ScrollbarTrack)))
+	assert.Equal(t, want, DefaultTheme().Colors.ScrollbarTrack, "mutating a returned default theme copy never changes the cached default")
+}
+
+func TestCustomSuggestionCursorUsesContrastForegroundWithoutRecoloringGhost(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates globals.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	theme := DefaultTheme()
+	theme.Colors.Accent = "#1e66f5"
+	theme.Colors.SuggestionGhost = "#a0a0a0"
+	ApplyTheme(theme)
+	r, g, b := extractFirstFgRGB(SuggestionCursorStyle.Render("a"))
+	cursorForeground := RGBToColor(float64(r)/255, float64(g)/255, float64(b)/255)
+	assert.GreaterOrEqual(t, contrastRatio(cursorForeground, Accent), 4.5)
+	assert.Equal(t, theme.Colors.SuggestionGhost, RGBToHex(ColorToRGB(SuggestionGhostStyle.GetForeground())), "ordinary ghost text keeps the custom theme color")
+}
+
+func TestAllBuiltinChromaStyleCompositions(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates globals.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	refs, err := listBuiltinThemeRefs()
+	require.NoError(t, err)
+	for _, ref := range refs {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		ApplyTheme(theme)
+		style := ChromaStyle()
+		for name, token := range map[string]chroma.TokenType{
+			"NameClass": chroma.NameClass, "NameFunction": chroma.NameFunction, "GenericInserted": chroma.GenericInserted,
+		} {
+			entry := style.Get(token)
+			fg := entry.Colour.String()
+			bg := theme.Markdown.CodeBg
+			ratio, ok := contrastRatioHex(fg, bg)
+			require.True(t, ok, "%s %s token style resolves to foreground/background %q/%q", ref, name, fg, bg)
+			assert.GreaterOrEqualf(t, ratio, 4.5, "%s %s token style %s on %s = %.2f:1", ref, name, fg, bg, ratio)
+		}
+	}
+}
+
+func TestANSIStatusIconForegroundsKeepContrast(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates globals.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	theme := DefaultTheme()
+	theme.Colors.ErrorStrong = "0"
+	theme.Colors.Warning = "0"
+	ApplyTheme(theme)
+	for _, check := range []struct {
+		style lipgloss.Style
+		bg    color.Color
+	}{{ToolErrorIcon, ErrorStrong}, {ToolPendingIcon, Warning}} {
+		r, g, b := extractFirstFgRGB(check.style.Render("!"))
+		assert.GreaterOrEqual(t, contrastRatio(RGBToColor(float64(r)/255, float64(g)/255, float64(b)/255), check.bg), 3.0)
+	}
+}
+
+func TestBuiltinSpinnerRampStartsAtAccentAndOnlyBrightens(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates globals.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	refs := []string{"solarized-dark", "nord", "gruvbox-dark"}
+	for _, ref := range refs {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		ApplyTheme(theme)
+		steps := []struct {
+			style lipgloss.Style
+			want  string
+		}{
+			{SpinnerTextDimmestStyle, theme.Colors.Accent},
+			{SpinnerTextDimStyle, theme.Colors.SpinnerDim},
+			{SpinnerTextBrightStyle, theme.Colors.SpinnerBright},
+			{SpinnerTextBrightestStyle, theme.Colors.SpinnerBrightest},
+		}
+		previous := relativeLuminanceColor(Accent)
+		lastColor := ""
+		for index, step := range steps {
+			assert.Equal(t, strings.ToLower(step.want), RGBToHex(ColorToRGB(step.style.GetForeground())), "%s spinner foreground", ref)
+			colorHex := RGBToHex(ColorToRGB(step.style.GetForeground()))
+			if index > 1 {
+				assert.NotEqualf(t, lastColor, colorHex, "%s spinner ramp has visible steps", ref)
+			}
+			luminance := relativeLuminanceColor(step.style.GetForeground())
+			assert.GreaterOrEqualf(t, luminance, previous, "%s spinner ramp does not dim after accent", ref)
+			previous, lastColor = luminance, colorHex
 		}
 	}
 }

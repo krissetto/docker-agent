@@ -26,13 +26,14 @@ agents:
     instruction: You are a helpful assistant.
 ```
 
-No configuration is required to get this behavior — it's on by default. Three fields let you tune it:
+No configuration is required to get this behavior — it's on by default. Four fields let you tune it:
 
 | Field | Where | Description |
 | --- | --- | --- |
 | `session_compaction` | agent | Set to `false` to disable automatic compaction entirely for this agent (both the proactive threshold trigger and the post-overflow auto-recovery). The manual `/compact` command still works. Default: `true`. |
 | `compaction_threshold` | agent or model | Fraction of the context window (greater than `0`, at most `1`) at which proactive compaction fires. A value set on the model takes precedence over the agent-level value. Default: `0.9`. |
 | `compaction_model` | agent, model, or provider | Delegate the compaction (summary-generation) call to a different, usually cheaper and faster, model. The agent-level value wins, then the model-level value, then the provider-level default. |
+| `compaction_prompt` | agent, model, or provider | Replace the built-in compaction user prompt (the summary instruction). The system prompt is kept. The agent-level value wins, then the model-level value, then the provider-level default; when none is set, the built-in prompt is used. |
 
 Lower the threshold to compact earlier and keep individual requests smaller and cheaper; raise it to keep more verbatim history in context before the first summary happens:
 
@@ -64,6 +65,20 @@ models:
 > If `compaction_model` has a **smaller** context window than the primary model, Docker Agent triggers compaction against the smaller window so the summary call can always ingest the full conversation. Pair the primary model with a compaction model whose window is at least as large to keep the proactive trigger aligned with the primary model's window.
 >
 > The `/context` header and the sidebar's context gauge surface this cap when it applies: the `/context` header shows a second line reading "compaction cap: `<model>` • `<N>` tokens", and the sidebar shows a short "⚠ capped" marker. Live-sessions rows do not carry cap wording; the sidebar marker deliberately doesn't repeat the model name or figure — the `/context` header is the sole authority on why the reported limit is smaller than the primary model's own window.
+
+To change what the summary focuses on, set `compaction_prompt`. It replaces the built-in summary instruction and keeps the built-in system prompt. Text from `/compact <text>` and `pre_compact` hooks is still appended after it:
+
+```yaml
+models:
+  primary:
+    provider: anthropic
+    model: claude-sonnet-5
+    compaction_model: fast
+    compaction_prompt: Summarize the conversation for a code reviewer. Keep file paths and open TODOs.
+  fast:
+    provider: anthropic
+    model: claude-haiku-4-5
+```
 
 Disable compaction only when you specifically want a session to keep full, unabridged history and are willing to risk hitting the context limit:
 

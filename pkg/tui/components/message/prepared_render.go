@@ -20,6 +20,7 @@ type PreparedRender struct {
 	theme, agents     uint64
 	imageID           int
 	selected, hovered bool
+	hoverProgress     float64
 	output            string
 	blocks            []markdown.CodeBlock
 }
@@ -35,7 +36,7 @@ func (mv *messageModel) matchesPrepared(p *PreparedRender, width int) bool {
 		slices.Equal(p.media, mv.message.AssistantMedia) &&
 		p.width == width && p.content == mv.message.Content &&
 		p.theme == styles.ThemeGeneration() && p.agents == styles.AgentColorGeneration() &&
-		p.imageID == mv.markdownImageID && p.selected == mv.selected && p.hovered == mv.hovered
+		p.imageID == mv.markdownImageID && p.selected == mv.selected && p.hovered == mv.hovered && p.hoverProgress == mv.hoverProgress
 }
 
 // PrepareRender captures presentation inputs on the owner; only the returned
@@ -57,14 +58,14 @@ func PrepareRender(view Model) func() *PreparedRender {
 	// Media rendering can hold terminal image state; leave that small envelope
 	// on the owner, and hand only its immutable ANSI lines to the worker.
 	media := appendAssistantMediaLines("", msg.AssistantMedia, inner)
-	top := actionRow(inner, mv.hovered || mv.selected, types.MessageCopyLabel)
+	top := actionRowProgress(inner, mv.actionProgress(), types.MessageCopyLabel)
 	renderer := markdown.NewFastRenderer(inner).FreezeStyles()
 	result := PreparedRender{
 		revision: mv.renderRevision, sender: msg.Sender, msgType: msg.Type,
 		sameAgent: mv.sameAgentAsPrevious(msg), media: slices.Clone(msg.AssistantMedia),
 		content: msg.Content, width: width,
 		theme: styles.ThemeGeneration(), agents: styles.AgentColorGeneration(),
-		imageID: mv.markdownImageID, selected: mv.selected, hovered: mv.hovered,
+		imageID: mv.markdownImageID, selected: mv.selected, hovered: mv.hovered, hoverProgress: mv.hoverProgress,
 	}
 	return func() *PreparedRender {
 		rendered, blocks, err := renderer.RenderWithCodeBlocks(content)

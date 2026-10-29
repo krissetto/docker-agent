@@ -37,3 +37,30 @@ func EffectiveCompactionModelRef(cfg *latest.Config, a *latest.AgentConfig) stri
 	}
 	return ""
 }
+
+// EffectiveCompactionPrompt resolves the compaction user prompt for an agent:
+// the agent-level value wins, then the first configured model value, then the
+// provider-level default. It returns an empty string when no override is set,
+// which leaves the built-in prompt in effect. Per-call guidance (manual
+// /compact text and pre_compact hook context) is appended separately by the
+// compactor.
+func EffectiveCompactionPrompt(cfg *latest.Config, a *latest.AgentConfig) string {
+	if a.CompactionPrompt != "" {
+		return a.CompactionPrompt
+	}
+	for name := range strings.SplitSeq(a.Model, ",") {
+		if modelCfg, ok := cfg.Models[name]; ok && modelCfg.CompactionPrompt != "" {
+			return modelCfg.CompactionPrompt
+		}
+	}
+	for name := range strings.SplitSeq(a.Model, ",") {
+		modelCfg, ok := cfg.Models[name]
+		if !ok {
+			continue
+		}
+		if providerCfg, ok := cfg.Providers[modelCfg.Provider]; ok && providerCfg.CompactionPrompt != "" {
+			return providerCfg.CompactionPrompt
+		}
+	}
+	return ""
+}

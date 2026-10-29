@@ -108,9 +108,32 @@ def main() -> int:
         for path in sorted(set(target_counts) - actual):
             errors.append(f"{target_name} compiles missing/non-app source: {path}")
 
+    widget_root = apple_root / "Sources" / "DockerAgentWidget"
+    actual_widget = {
+        path.relative_to(apple_root).as_posix()
+        for path in widget_root.rglob("*.swift") if path.is_file()
+    } if widget_root.is_dir() else set()
+    widget_source = "Sources/DockerAgentWidget/TeamSummary.swift"
+    if actual_widget != {widget_source}:
+        errors.append(f"widget source inventory differs from expected single target source: {sorted(actual_widget)}")
+    widget_refs = [object_id for object_id, body in objects.items()
+                   if "isa = PBXFileReference;" in body and f'path = "{widget_source}";' in body]
+    if len(widget_refs) != 1:
+        errors.append(f"{widget_source} has {len(widget_refs)} PBXFileReference entries (expected exactly one)")
+    widget_builds = [build_id for build_id, ref in build_file_refs.items() if ref in widget_refs]
+    widget_target = targets.get("DockerAgentWidget")
+    if widget_target is None:
+        errors.append("native widget target not found: DockerAgentWidget")
+    elif len(widget_builds) != 1:
+        errors.append(f"{widget_source} has {len(widget_builds)} PBXBuildFile entries (expected exactly one)")
+    else:
+        _, phase_ids = widget_target
+        compiled = [build_id for phase_id in phase_ids for build_id in phases.get(phase_id, [])]
+        if compiled.count(widget_builds[0]) != 1:
+            errors.append("DockerAgentWidget must compile TeamSummary.swift exactly once")
     if errors:
         return fail(errors)
-    print(f"Xcode source membership valid: {len(actual)} app Swift files are compiled exactly once by both native app targets.")
+    print(f"Xcode source membership valid: {len(actual)} app Swift files compile exactly once by both native app targets, and the widget target compiles TeamSummary.swift exactly once.")
     return 0
 
 

@@ -74,12 +74,13 @@ func (s *appProjectionSink) Reset(snapshot runtime.SessionSnapshot) {
 		return
 	}
 	// Empty compatibility observations carry no authoritative state.
-	if snapshot.Session == nil && snapshot.Status.SessionID == "" && snapshot.Cursor == 0 && len(snapshot.PendingInputs) == 0 && len(snapshot.Interactions) == 0 {
+	if snapshot.Session == nil && snapshot.Status.SessionID == "" && snapshot.Cursor == 0 && len(snapshot.PendingInputs) == 0 && len(snapshot.Interactions) == 0 && len(snapshot.BackgroundProcesses) == 0 {
 		return
 	}
 	if snapshot.Status.SessionID == "" {
 		snapshot.Status.SessionID = s.sessionID
 	}
+	snapshot.BackgroundProcesses = slices.Clone(snapshot.BackgroundProcesses)
 	s.position = snapshot.TranscriptPosition
 	s.setConnection(ConnectionConnected, nil)
 	s.app.sendBridgedEventFrom(s.ctx, "", &SessionResetEvent{Snapshot: snapshot}, true, s.sessionID, s.epoch)
@@ -183,6 +184,9 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		return head
 	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *runtime.TurnSettledEvent, *runtime.PendingUserMessageAcceptedEvent, *runtime.PendingUserMessagePromotedEvent, *runtime.SessionCompactionEvent:
 		next.Lifecycle, _ = next.Lifecycle.Apply(event)
+		if accepted, ok := event.(*runtime.PendingUserMessageAcceptedEvent); ok && accepted.Immediate {
+			next.Lifecycle.Pending = slices.DeleteFunc(slices.Clone(next.Lifecycle.Pending), func(id string) bool { return id == accepted.TurnID })
+		}
 		next.Status.State = next.Lifecycle.Status
 		if _, settled := event.(*runtime.TurnSettledEvent); settled {
 			next.Status.TurnID = next.Lifecycle.TurnID
@@ -203,6 +207,7 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		next.Lifecycle.Pending = slices.DeleteFunc(slices.Clone(next.Lifecycle.Pending), func(id string) bool { return id == e.TurnID })
 	case *runtime.DormancyChangedEvent:
 		next.Status.Dormant = e.Dormant
+		next.Status.Stopped = e.Stopped
 	case *runtime.PauseChangedEvent:
 		next.Status.PauseArmed = e.Paused
 		if !e.Paused {
@@ -223,6 +228,10 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 			next.PendingInputs[index].MultiContent = e.MultiContent
 		}
 	case *runtime.PendingUserMessageAcceptedEvent:
+		if e.Immediate {
+			next.PendingInputs = slices.DeleteFunc(slices.Clone(next.PendingInputs), func(p runtime.PendingInput) bool { return p.TurnID == e.TurnID })
+			break
+		}
 		if !slices.ContainsFunc(next.PendingInputs, func(p runtime.PendingInput) bool { return p.TurnID == e.TurnID }) {
 			next.PendingInputs = append(slices.Clone(next.PendingInputs), runtime.PendingInput{TurnID: e.TurnID, Content: e.Message, MultiContent: e.MultiContent, SessionPosition: e.SessionPosition, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, ReportOutcome: e.ReportOutcome, InputMode: e.InputMode})
 		}
@@ -281,11 +290,13 @@ func (a *App) projectTranscript(event runtime.Event) {
 	case *runtime.PendingUserMessageAcceptedEvent:
 		if e.SessionPosition >= sess.ItemCount() {
 			msg := session.UserMessage(e.Message, e.MultiContent...)
-			msg.TurnID, msg.Pending, msg.Accepted = e.TurnID, true, true
+			msg.TurnID, msg.Pending, msg.Accepted = e.TurnID, !e.Immediate, true
 			msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode = e.InputOrigin, e.SenderID, e.SenderName, e.InputMode
 			msg.ReportOutcome = e.ReportOutcome
 			msg.Implicit = e.InputOrigin == session.InputOriginRuntime
 			sess.AddMessage(msg)
+		} else if e.Immediate {
+			sess.PromotePendingUserMessageByTurnID(e.TurnID)
 		}
 	case *runtime.PendingUserMessagePromotedEvent:
 		sess.PromotePendingUserMessageByTurnID(e.TurnID)

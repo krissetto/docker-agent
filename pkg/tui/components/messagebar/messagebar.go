@@ -102,6 +102,13 @@ func (m *Model) SetSize(width, height int) tea.Cmd {
 
 func (m *Model) Height() int { return m.height }
 
+// CurrentMessage returns a detached snapshot of the visible notice.
+func (m *Model) CurrentMessage() Message {
+	message := m.message
+	message.Actions = append([]Action(nil), m.message.Actions...)
+	return message
+}
+
 func (m *Model) SetMessage(message Message) tea.Cmd {
 	_, cmd, _ := m.SetNotice(message, time.Time{})
 	return cmd

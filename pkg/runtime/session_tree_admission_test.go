@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 type admissionFailChildStore struct {
@@ -37,6 +39,7 @@ func testTreeAdmissionRollback(t *testing.T, always bool) {
 	base := session.NewInMemorySessionStore()
 	store := &admissionFailChildStore{Store: base, CoordinationStore: base.(session.CoordinationStore), remaining: 1, always: always}
 	m := newTestSubagentManager(t)
+	m.r.team = team.New(team.WithAgents(agent.New("root", "fake"), agent.New("worker", "fake")))
 	m.r.sessionStore = store
 	parent := session.New(session.WithID("parent"), session.WithAgentName("root"))
 	m.ensureRoot(parent, "root")

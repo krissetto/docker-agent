@@ -55,43 +55,41 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 						m.scrollview.SetScrollOffset(start)
 						frame := m.View()
 						plain := ansi.Strip(frame)
-						require.Contains(t, plain, "Worker 界 (a1b2c)", "session provenance must resolve to sidebar identity")
+						assert.Contains(t, plain, "From Worker 界", "incoming attribution identifies the sender")
+						assert.Contains(t, plain, "a1b2c", "session provenance resolves to the canonical sidebar identity")
 						assert.NotContains(t, plain, "99999")
 						assert.NotContains(t, plain, "Message from")
 						lines := strings.Split(frame, "\n")
-						labelLine, col := -1, -1
+						nameLine, nameCol := -1, -1
 						for y, line := range lines {
-							before, _, found := strings.Cut(ansi.Strip(line), "Worker 界 (a1b2c)")
+							before, _, found := strings.Cut(ansi.Strip(line), "Worker 界")
 							if found {
-								labelLine, col = y, ansi.StringWidth(before)
+								nameLine, nameCol = y, ansi.StringWidth(before)
 								break
 							}
 						}
-						require.GreaterOrEqual(t, labelLine, 0)
+						require.GreaterOrEqual(t, nameLine, 0)
 
-						for x := col; x < col+ansi.StringWidth("Worker 界 (a1b2c)"); x++ {
-							id, ok := m.SubagentNodeAt(7+x, 3+labelLine)
-							onName := x < col+ansi.StringWidth("Worker 界")
-							require.Equal(t, onName, ok, "only visible name cell navigates x=%d y=%d width=%d", x, labelLine, width)
-							if onName {
-								assert.Equal(t, subagent.NodeID(nodeID), id)
-							}
+						for x := nameCol; x < nameCol+ansi.StringWidth("Worker 界"); x++ {
+							id, ok := m.SubagentNodeAt(7+x, 3+nameLine)
+							require.True(t, ok, "every visible sender-name cell navigates x=%d y=%d width=%d", x, nameLine, width)
+							assert.Equal(t, subagent.NodeID(nodeID), id)
 						}
-						_, outside := m.SubagentNodeAt(7+col-1, 3+labelLine)
+						_, outside := m.SubagentNodeAt(7+nameCol-1, 3+nameLine)
 						assert.False(t, outside, "border/icon is not a target")
-						_, outside = m.SubagentNodeAt(6, 3+labelLine)
+						_, outside = m.SubagentNodeAt(6, 3+nameLine)
 						assert.False(t, outside, "off-viewport coordinates cannot clamp into a target")
 						beforeHover := m.View()
-						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + col, Y: 3 + labelLine})
+						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + nameCol, Y: 3 + nameLine})
 						afterHover := m.View()
 						assert.Equal(t, ansi.Strip(beforeHover), ansi.Strip(afterHover), "hover never moves hit coordinates")
 						assert.True(t, m.referenceHoverAnimation.IsActive(), "identity starts the shared finite transition")
 
-						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + width - 2, Y: 3 + labelLine})
+						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + width - 2, Y: 3 + nameLine})
 						if origin == session.InputOriginAgent && mode != "steer" {
 							for y, line := range lines {
 								if strings.Contains(ansi.Strip(line), "body") {
-									_, linked := m.SubagentNodeAt(7+col, 3+y)
+									_, linked := m.SubagentNodeAt(7+nameCol, 3+y)
 									assert.False(t, linked, "body identity text is not navigation")
 								}
 							}

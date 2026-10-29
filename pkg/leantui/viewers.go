@@ -291,7 +291,6 @@ func (m *model) newViewer(application *app.App, placeholder string) *model {
 		playSound:        m.playSound,
 		soundEnabled:     m.soundEnabled,
 		soundThreshold:   m.soundThreshold,
-		queueSendMode:    m.queueSendMode,
 		interruptMode:    m.interruptMode,
 		appName:          m.appName,
 		banner:           m.banner,
@@ -301,9 +300,9 @@ func (m *model) newViewer(application *app.App, placeholder string) *model {
 		term:             m.term, r: m.r, width: m.width, height: m.height,
 		screen:          ui.NewScreen(application.Session().WorkingDir, "", placeholder, m.historyStore),
 		sessionState:    service.NewSessionState(application.Session()),
-		usage:           ui.NewUsageTracker(),
+		usage:           newUsageTrackerFor(application),
 		inputReferences: subagentindex.New(),
-		status:          ui.StatusModel{WorkingDir: application.Session().WorkingDir, Agent: application.Binding().AgentName},
+		status:          ui.StatusModel{WorkingDir: application.Session().WorkingDir, Agent: application.Binding().AgentName, ReadOnly: application.IsReadOnly()},
 	}
 }
 
@@ -390,6 +389,7 @@ func (m *model) restoreViewerMetadata(ctx context.Context, cfg Config) {
 				}
 				m.app = application
 				m.status.WorkingDir = application.Session().WorkingDir
+				m.status.ReadOnly = application.IsReadOnly()
 				m.sessionState = service.NewSessionState(application.Session())
 				if cleanup != nil {
 					m.restoredCleanup = append(m.restoredCleanup, cleanup)

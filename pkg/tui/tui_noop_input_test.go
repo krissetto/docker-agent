@@ -21,6 +21,11 @@ import (
 func populateScrollableRoot(t *testing.T) *appModel {
 	t.Helper()
 	root, _, _ := wallClockRoot(t, 100, 35)
+	// Compact Work collapses these messages onto one screen, leaving nothing to scroll.
+	// This fixture tests scrolling, so it opts out like the reference-hover fixture.
+	if owner, ok := root.chatPage.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
+		owner.SetCompactWorkLog(false)
+	}
 	for i := range 30 {
 		msg := session.NewAgentMessage("root", &chat.Message{
 			Role:    chat.MessageRoleAssistant,
@@ -32,6 +37,8 @@ func populateScrollableRoot(t *testing.T) *appModel {
 	root.handleWindowResize(100, 35)
 	root.chatPage.ScrollToBottom()
 	root.viewCacheValid = false
+	// Precondition: the transcript must overflow the viewport, or scrolling is a no-op.
+	require.NotContains(t, ansi.Strip(root.View().Content), "message 00", "scroll fixture must overflow its viewport")
 	return root
 }
 

@@ -50,7 +50,8 @@ func EffortFillStyle(level effort.Level) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(c)
 }
 
-// effortEmptyStyle is the faint style used for unfilled gauge cells.
+// Empty gauge cells are decoration rather than readable prose; their extra
+// faint treatment keeps them subordinate to the filled effort level.
 func effortEmptyStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(styles.TextMuted).Faint(true)
 }
@@ -115,17 +116,13 @@ func ThinkingMarker(label string) string {
 // summary used by the sidebar focus card and the agent-details dialog: the
 // effort gauge (or compact marker) followed by the human-readable description
 // from ThinkingDescription. Returns "" when the label carries no thinking
-// configuration. The "off" description is rendered faint to read as disabled.
+// configuration. The "off" description uses the semantic muted text color.
 func ThinkingGaugeValue(label string) string {
 	desc := ThinkingDescription(label)
 	if desc == "" {
 		return ""
 	}
-	wordStyle := styles.MutedStyle
-	if label == "off" {
-		wordStyle = wordStyle.Faint(true)
-	}
-	word := wordStyle.Render(desc)
+	word := styles.MutedStyle.Render(desc)
 
 	marker := ThinkingMarker(label)
 	if marker == "" {

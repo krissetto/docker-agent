@@ -32,7 +32,6 @@ import (
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	bgagent "github.com/docker/docker-agent/pkg/tools/builtin/agent"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
@@ -95,26 +94,32 @@ func initialUserPrompt(sess *session.Session) (QueuedMessage, int, bool) {
 // user_prompt_submit hook. Steered/detached messages are handled separately by
 // drainAndEmitSteered so their hook path remains user_steering_messages_submit.
 func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) (contextMsgs []chat.Message, stop bool) {
-	prompt, ok := r.initialTurnInput(sess)
+	prompt, promotedPosition, ok := r.initialTurnInputFor(ctx, sess)
 	if !ok || prompt.Retry {
 		return nil, false
 	}
 	position := -1
 	accepted := false
-	for i, item := range sess.ItemsSnapshot() {
-		if item.Message != nil && item.Message.TurnID == prompt.RequestID {
-			position = i
-			accepted = item.Message.Accepted
-			break
+	if promotedPosition >= 0 {
+		// Run-start promotion already appended and published this row, so it
+		// is accepted here: hooks run once and the row is not appended again.
+		position, accepted = promotedPosition, true
+	} else {
+		for i, item := range sess.ItemsSnapshot() {
+			if item.Message != nil && item.Message.TurnID == prompt.RequestID {
+				position = i
+				accepted = item.Message.Accepted
+				break
+			}
 		}
+		if position < 0 {
+			_, position, ok = initialUserPrompt(sess)
+		}
+		if !ok || position < 0 {
+			return nil, false
+		}
+		accepted = accepted || prompt.AcceptedPosition == position
 	}
-	if position < 0 {
-		_, position, ok = initialUserPrompt(sess)
-	}
-	if !ok || position < 0 {
-		return nil, false
-	}
-	accepted = accepted || prompt.AcceptedPosition == position
 	if !accepted {
 		events.Emit(inputEventMetadata(UserMessage(prompt.Content, sess.ID, prompt.MultiContent, position), prompt))
 	}
@@ -502,7 +507,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		sessionStartSources:    sessionStart.sources,
 	}
 
-	if input, ok := r.initialTurnInput(sess); ok {
+	if input, _, ok := r.initialTurnInputFor(ctx, sess); ok {
 		ls.consumeTurnInput(r.quietCoordinationInput(sess, input))
 	}
 
@@ -527,7 +532,8 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 	agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
-	agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools))))
+	agentTools = enrichSpawnToolDescription(a, agentTools, r.allowedFromAgentForTeam(r.teamForContext(ctx, sess), a))
+	agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addConfiguredSubagentTools(sess, a, r.teamForContext(ctx, sess), addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools)))))
 
 	// Record the catalogue size on the session span — answers "how
 	// many tools could this turn actually use?" without having to
@@ -559,10 +565,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 
 	// Initialize consecutive duplicate tool call detector.
-	// Polling tools (view_background_agent, list_background_agents,
-	// view_background_job) are expected to be called repeatedly with
-	// identical arguments while a background task is in progress. Exempt
-	// them so they never trigger the loop-termination path.
+	// Background-agent status tools are intentionally exempt because
+	// repeated status checks are a normal coordination pattern. Shell process
+	// diagnostics are not exempt; completed output arrives automatically.
 	loopThreshold := sess.MaxConsecutiveToolCalls
 	if loopThreshold == 0 {
 		loopThreshold = 5 // default: always active
@@ -570,7 +575,6 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	ls.loopDetector = toolexec.NewLoopDetector(loopThreshold,
 		bgagent.ToolNameViewBackgroundAgent,
 		bgagent.ToolNameListBackgroundAgents,
-		backgroundjobs.ToolNameViewBackgroundJob,
 	)
 
 	for {
@@ -624,7 +628,8 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		}
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
-		agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools))))
+		agentTools = enrichSpawnToolDescription(a, agentTools, r.allowedFromAgentForTeam(r.teamForContext(ctx, sess), a))
+		agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addConfiguredSubagentTools(sess, a, r.teamForContext(ctx, sess), addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools)))))
 
 		// Emit updated tool count. After a ToolListChanged MCP notification
 		// the cache is invalidated, so getTools above re-fetches from the
@@ -1980,6 +1985,35 @@ func addAsyncChildTools(sess *session.Session, agentTools []tools.Tool) []tools.
 				agentTools = append(agentTools, tool)
 			}
 			break
+		}
+	}
+	return agentTools
+}
+
+func addConfiguredSubagentTools(sess *session.Session, a *agent.Agent, tm *team.Team, agentTools []tools.Tool) []tools.Tool {
+	if a == nil || tm == nil {
+		return agentTools
+	}
+	cfg, ok := tm.AgentConfig(a.Name())
+	if !ok || cfg.SubagentAccess == nil {
+		return agentTools
+	}
+	for _, grant := range []struct {
+		name  string
+		scope latest.SubagentAccessScope
+	}{
+		{name: subagent.ToolListAgents, scope: cfg.SubagentAccess.ListAgents},
+		{name: subagent.ToolSendMessage, scope: cfg.SubagentAccess.SendMessage},
+	} {
+		name, scope := grant.name, grant.scope
+		if scope == "" || slices.ContainsFunc(agentTools, func(existing tools.Tool) bool { return existing.Name == name }) {
+			continue
+		}
+		for _, definition := range subagent.Definitions() {
+			if definition.Name == name {
+				agentTools = append(agentTools, definition)
+				break
+			}
 		}
 	}
 	return agentTools

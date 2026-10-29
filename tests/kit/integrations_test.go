@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,7 +28,11 @@ import (
 func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	teamYAML, err := os.ReadFile(kitPath(t, "hackerspace.yaml"))
 	require.NoError(t, err)
-	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
+	realCfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
+	require.NoError(t, err)
+	// hackerspace.yaml carries no add_prompt_files wiring; exercise the prompt-file contract synthetically.
+	cfg, err := config.Load(t.Context(), config.NewBytesSource("kit-prompt-files.yaml", []byte(
+		"agents:\n  root:\n    model: openai/example\n    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]\n")))
 	require.NoError(t, err)
 	profile := []byte("Host-contributed kit guidance.")
 	home := t.TempDir()
@@ -83,7 +88,8 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 		})))
 	require.NoError(t, err)
 	defer team.StopToolSets(t.Context())
-	for _, name := range []string{"root", "dev-team", "greppy", "planner", "engineer", "designer", "review-team", "technical-reviewer", "security-reviewer", "edge-case-reviewer"} {
+	for _, authored := range realCfg.Agents {
+		name := authored.Name
 		a, err := team.Agent(name)
 		require.NoError(t, err)
 		actual, err := a.Tools(t.Context())
@@ -92,15 +98,44 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 		for _, tool := range actual {
 			names = append(names, tool.Name)
 		}
-		if name == "root" || name == "engineer" || name == "designer" {
+		// Expectations derive from the authored real config, never a hard-coded agent list.
+		if authored.Skills.Enabled() {
 			assert.Contains(t, names, "read_skill")
 		} else {
 			assert.NotContains(t, names, "read_skill")
 			assert.NotContains(t, names, "read_skill_file")
 			assert.NotContains(t, names, "run_skill")
 		}
+		assert.Equal(t, hasToolset(authored, "filesystem"), slices.Contains(names, "read_file"))
+	}
+	// Synthetic root/dev-team team keeps the exact per-agent expectations.
+	synthYAML := "agents:\n  root:\n    model: openai/example\n    skills: true\n    subagents:\n      - agent: dev-team\n"
+	synthYAML += "  dev-team:\n    model: openai/example\n    toolsets:\n      - type: filesystem\n        tools: [read_file]\n    subagents:\n      - agent: worker\n"
+	synthYAML += "  worker:\n    model: openai/example\n"
+	synthetic, err := teamloader.Load(t.Context(), config.NewBytesSource("kit-team.yaml", []byte(synthYAML)), &config.RuntimeConfig{
+		Config:                 config.Config{WorkingDir: workspace},
+		EnvProviderForTests:    environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fixture", "ANTHROPIC_API_KEY": "fixture"}),
+		ModelsDevStoreOverride: store,
+	}, teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{"openai": inert, "anthropic": inert})),
+		teamloader.WithToolsetRegistry(teamloader.NewToolsetRegistry(map[string]teamloader.ToolsetCreator{
+			"filesystem": filesystem.Creator, "shell": shell.Creator, "todo": teamloader.CreatorFromToolset(todo.CreateToolSet),
+		})))
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, synthetic.StopToolSets(t.Context())) }()
+	for _, name := range []string{"root", "dev-team"} {
+		a, err := synthetic.Agent(name)
+		require.NoError(t, err)
+		actual, err := a.Tools(t.Context())
+		require.NoError(t, err)
+		var names []string
+		for _, tool := range actual {
+			names = append(names, tool.Name)
+		}
+		if name == "root" {
+			assert.Contains(t, names, "read_skill")
+		}
 		if name == "dev-team" {
-			assert.ElementsMatch(t, []string{"read_file", "spawn_subagent", "send_message", "read_subagent", "stop_subagent"}, names)
+			assert.ElementsMatch(t, []string{"read_file", "spawn_subagent", "send_message", "read_subagent", "stop_subagent", "list_agents"}, names)
 		}
 	}
 	// A custom team replaces, rather than inherits, the bundled loaders.
@@ -123,4 +158,8 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out.HookSpecificOutput.InstructionContext, 1)
 	assert.Empty(t, skills.Load(t.Context(), []string{"local"}))
+}
+
+func hasToolset(agent latest.AgentConfig, toolsetType string) bool {
+	return slices.ContainsFunc(agent.Toolsets, func(ts latest.Toolset) bool { return ts.Type == toolsetType })
 }

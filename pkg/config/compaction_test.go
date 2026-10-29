@@ -45,6 +45,41 @@ func TestEffectiveCompactionModelRef(t *testing.T) {
 	}
 }
 
+func TestEffectiveCompactionPrompt(t *testing.T) {
+	t.Parallel()
+
+	cfg := &latest.Config{
+		Providers: map[string]latest.ProviderConfig{
+			"corp": {Provider: "anthropic", CompactionPrompt: "provider prompt"},
+		},
+		Models: map[string]latest.ModelConfig{
+			"plain":     {Provider: "anthropic", Model: "claude-sonnet-4-5"},
+			"with":      {Provider: "anthropic", Model: "claude-sonnet-4-5", CompactionPrompt: "model prompt"},
+			"corporate": {Provider: "corp", Model: "claude-sonnet-4-5"},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		agent latest.AgentConfig
+		want  string
+	}{
+		{name: "agent-level wins", agent: latest.AgentConfig{Model: "with", CompactionPrompt: "agent prompt"}, want: "agent prompt"},
+		{name: "model-level wins over provider-level", agent: latest.AgentConfig{Model: "corporate,with"}, want: "model prompt"},
+		{name: "provider-level default", agent: latest.AgentConfig{Model: "corporate"}, want: "provider prompt"},
+		{name: "first model with a value wins", agent: latest.AgentConfig{Model: "plain,with"}, want: "model prompt"},
+		{name: "none set", agent: latest.AgentConfig{Model: "plain"}, want: ""},
+		{name: "unknown model", agent: latest.AgentConfig{Model: "missing"}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, EffectiveCompactionPrompt(cfg, &tt.agent))
+		})
+	}
+}
+
 // A first_available selector referenced only through a provider-level
 // compaction_model default must still be resolved at load time.
 func TestResolveFirstAvailableModels_ProviderCompactionModel(t *testing.T) {

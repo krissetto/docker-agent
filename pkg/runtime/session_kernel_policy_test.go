@@ -219,6 +219,7 @@ func TestSharedRuntimeBindsDifferentConfiguredAgents(t *testing.T) {
 		agent.New("worker", "worker", agent.WithModel(workerProvider)),
 	)))
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
 	rootSession := session.New(session.WithID("root-tab"))
 	workerSession := session.New(session.WithID("worker-tab"))
 	rootHandle, err := rt.CreateSession(t.Context(), rootSession, SessionBinding{AgentName: "root"})

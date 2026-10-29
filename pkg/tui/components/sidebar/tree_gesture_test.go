@@ -91,8 +91,16 @@ func TestSubagentNameHoverOnlyWithinRenderedName(t *testing.T) {
 			motion(m.layoutCfg.PaddingLeft)
 			row, ok := m.placementRowAt(m.layoutCfg.PaddingLeft, y)
 			require.True(t, ok)
-			require.Greater(t, row.identity.nameEnd, row.identity.nameStart)
 			nameKey := "node-name:branch-full-identity"
+			if row.identity.nameEnd == row.identity.nameStart {
+				require.Contains(t, ansi.Strip(row.text), "bra", "when a narrow row cannot show both name and ID, its identity budget is spent on the hovered ID")
+				require.InDelta(t, 1.0, m.branchSpans["branch-full-identity"].idValue, 1e-9)
+				require.Zero(t, m.hoverValues[nameKey].value, "the clipped name has no hover target")
+				settleSidebarHover(t, m, m.ClearSubagentHover())
+				require.Empty(t, m.hoverValues)
+				return
+			}
+			require.Greater(t, row.identity.nameEnd, row.identity.nameStart)
 			require.Zero(t, m.hoverValues[nameKey].value, "indent leaves the name unhighlighted")
 			require.Equal(t, 1.0, m.branchSpans["branch-full-identity"].idValue, "indent still reveals the ID")
 			motion(m.layoutCfg.PaddingLeft + row.identity.nameStart)
@@ -101,7 +109,7 @@ func TestSubagentNameHoverOnlyWithinRenderedName(t *testing.T) {
 				motion(m.layoutCfg.PaddingLeft + col)
 				require.Zero(t, m.hoverValues[nameKey].value, "non-name column %d", col)
 				require.Equal(t, "node:branch-full-identity", m.hoverTarget)
-				require.Equal(t, 1.0, m.branchSpans["branch-full-identity"].idValue)
+				require.InDelta(t, 1.0, m.branchSpans["branch-full-identity"].idValue, 1e-9)
 			}
 			row, ok = m.placementRowAt(m.layoutCfg.PaddingLeft, y)
 			require.True(t, ok)

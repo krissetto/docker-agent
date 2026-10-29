@@ -105,7 +105,8 @@ func TestEmptyCoordinationSendMessageAndReport(t *testing.T) {
 							reports++
 							assert.Equal(t, "report:"+childReportID(child.ID(), accepted.TurnID), msg.TurnID)
 						}
-						if msg.Message.Role == chat.MessageRoleAssistant {
+						// Display-only reasoning is presentation, not an answer.
+						if msg.Message.Role == chat.MessageRoleAssistant && !msg.DisplayOnly {
 							assistant++
 						}
 					}

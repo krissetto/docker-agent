@@ -17,6 +17,7 @@ import (
 type Disclosure struct {
 	motion        animation.Transition
 	expanded      bool
+	userSet       bool // an explicit user toggle outranks any default
 	from, visible float64
 }
 
@@ -35,9 +36,21 @@ func (d *Disclosure) Chevron() string {
 }
 
 func (d *Disclosure) Toggle() {
+	d.userSet = true
 	d.from = d.visible
 	d.expanded = !d.expanded
 	d.motion.Start(140*time.Millisecond, animation.EaseOutCubic)
+}
+
+// SetDefault opens or closes the disclosure without animation until the user
+// toggles it. It reports whether the visible state changed.
+func (d *Disclosure) SetDefault(expanded bool) bool {
+	if d.userSet || d.expanded == expanded {
+		return false
+	}
+	d.expanded = expanded
+	d.Settle()
+	return true
 }
 
 func (d *Disclosure) Tick(tick animation.TickMsg) {

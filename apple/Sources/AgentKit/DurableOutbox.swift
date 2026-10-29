@@ -83,6 +83,7 @@ public struct DurableSendRecord: Codable, Equatable, Sendable, Identifiable {
     public let attemptCount: Int
     public let lastAttemptAt: Date?
     public let multiContent: [SessionMessagePart]?
+    public let generateTitle: Bool
     public let acceptedAt: Date?
     public let state: DurableSendState
 
@@ -99,6 +100,7 @@ public struct DurableSendRecord: Codable, Equatable, Sendable, Identifiable {
         attemptCount = storage.attemptCount
         lastAttemptAt = storage.lastAttemptAt
         multiContent = storage.multiContent
+        generateTitle = storage.generateTitle ?? false
         acceptedAt = storage.acceptedAt
         state = storage.state
     }
@@ -113,6 +115,7 @@ private struct StoredDurableSend: Codable, Equatable, Sendable {
     var attemptCount: Int
     var lastAttemptAt: Date?
     var multiContent: [SessionMessagePart]?
+    var generateTitle: Bool?
     var acceptedAt: Date?
     var state: DurableSendState
 }
@@ -163,26 +166,27 @@ public final class DurableSendOutbox: @unchecked Sendable {
     /// Creates a new explicit send. A matching ID returns its original immutable request.
     @discardableResult
     public func prepare(identity: DurableSendIdentity, payload: String, mode: String = "submit",
-                        requestID: String = UUID().uuidString) throws -> DurableSendRecord {
+                        requestID: String = UUID().uuidString, generateTitle: Bool = false) throws -> DurableSendRecord {
         let sendPayload: SessionSendPayload
         do { sendPayload = try SessionSendPayload.text(payload) }
         catch { throw DurableSendOutboxError.invalidPayload }
-        return try prepare(identity: identity, sendPayload: sendPayload, mode: mode, requestID: requestID)
+        return try prepare(identity: identity, sendPayload: sendPayload, mode: mode, requestID: requestID, generateTitle: generateTitle)
     }
 
     /// Persists the complete immutable multi-content body before the caller attempts transport.
     @discardableResult
     public func prepare(identity: DurableSendIdentity, sendPayload: SessionSendPayload, mode: String = "submit",
-                        requestID: String = UUID().uuidString) throws -> DurableSendRecord {
+                        requestID: String = UUID().uuidString, generateTitle: Bool = false) throws -> DurableSendRecord {
         lock.lock(); defer { lock.unlock() }
         guard !requestID.isEmpty, requestID.utf8.count <= Self.maximumRequestIDBytes,
               sendPayload.content.utf8.count <= Self.maximumPayloadBytes,
               ["", "submit", "steer"].contains(mode) else { throw DurableSendOutboxError.invalidPayload }
-        guard (try? sendPayload.encodedRequest(requestID: requestID, mode: mode)) != nil else {
+        guard (try? sendPayload.encodedRequest(requestID: requestID, mode: mode, generateTitle: generateTitle)) != nil else {
             throw DurableSendOutboxError.invalidPayload
         }
         if let existing = records.first(where: { $0.requestID == requestID }) {
-            guard existing.identity == identity, existing.payload == sendPayload.content, existing.multiContent == (sendPayload.multiContent.isEmpty ? nil : sendPayload.multiContent), existing.mode == mode else {
+            guard existing.identity == identity, existing.payload == sendPayload.content, existing.multiContent == (sendPayload.multiContent.isEmpty ? nil : sendPayload.multiContent), existing.mode == mode,
+                  (existing.generateTitle ?? false) == generateTitle else {
                 throw DurableSendOutboxError.conflictingRequestID
             }
             return DurableSendRecord(storage: existing)
@@ -195,7 +199,7 @@ public final class DurableSendOutbox: @unchecked Sendable {
         next.append(StoredDurableSend(identity: identity, requestID: requestID, payload: sendPayload.content, mode: mode,
                                       createdAt: .now, attemptCount: 0, lastAttemptAt: nil,
                                       multiContent: sendPayload.multiContent.isEmpty ? nil : sendPayload.multiContent,
-                                      acceptedAt: nil, state: .prepared))
+                                      generateTitle: generateTitle ? true : nil, acceptedAt: nil, state: .prepared))
         try commit(next)
         return DurableSendRecord(storage: next[next.count - 1])
     }
@@ -328,7 +332,7 @@ public final class DurableSendOutbox: @unchecked Sendable {
             && record.identity.session.serverID == record.identity.serverID
             && !record.identity.serverInstanceID.isEmpty && !record.identity.origin.isEmpty
             && record.payload.utf8.count <= maximumPayloadBytes
-            && (try? SessionSendPayload(content: record.payload, multiContent: record.multiContent ?? []).encodedRequest(requestID: record.requestID, mode: record.mode)) != nil
+            && (try? SessionSendPayload(content: record.payload, multiContent: record.multiContent ?? []).encodedRequest(requestID: record.requestID, mode: record.mode, generateTitle: record.generateTitle ?? false)) != nil
             && (!record.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(record.multiContent?.isEmpty ?? true))
             && ["", "submit", "steer"].contains(record.mode)
             && record.attemptCount >= 0

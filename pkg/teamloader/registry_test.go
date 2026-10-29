@@ -13,7 +13,6 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/lsp"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
@@ -24,9 +23,6 @@ func testToolsetRegistry() ToolsetRegistry {
 	return NewToolsetRegistry(map[string]ToolsetCreator{
 		"shell": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 			return shell.CreateToolSet(ctx, toolset, runConfig)
-		},
-		"background_jobs": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
-			return backgroundjobs.CreateToolSet(ctx, toolset, runConfig)
 		},
 		"mcp": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 			return mcptool.CreateToolSet(ctx, toolset, runConfig)
@@ -44,24 +40,6 @@ func TestCreateShellTool(t *testing.T) {
 	t.Parallel()
 	toolset := latest.Toolset{
 		Type: "shell",
-	}
-
-	registry := testToolsetRegistry()
-
-	runConfig := &config.RuntimeConfig{
-		Config:              config.Config{WorkingDir: t.TempDir()},
-		EnvProviderForTests: environment.NewOsEnvProvider(),
-	}
-
-	tool, err := registry.CreateTool(t.Context(), toolset, ".", runConfig, "test-agent")
-	require.NoError(t, err)
-	require.NotNil(t, tool)
-}
-
-func TestCreateBackgroundJobsTool(t *testing.T) {
-	t.Parallel()
-	toolset := latest.Toolset{
-		Type: "background_jobs",
 	}
 
 	registry := testToolsetRegistry()

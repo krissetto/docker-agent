@@ -5,13 +5,18 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 const (
-	SessionAPIVersion          = 2
-	SessionAPIPath             = "/api/v2/sessions"
-	SessionCatalogDefaultLimit = 50
-	SessionCatalogMaxLimit     = 200
+	SessionFeaturesHeader             = "X-Docker-Agent-Features"
+	SessionFeatureBackgroundProcesses = "background-processes"
+	SessionAPIVersion                 = 2
+	SessionAPIPath                    = "/api/v2/sessions"
+	SessionCatalogDefaultLimit        = 50
+	SessionCatalogMaxLimit            = 200
+	SessionViewMetadataProjection     = "metadata"
+	SessionHistoryProjection          = "tail"
 )
 
 type SessionCatalog[State ~string] struct {
@@ -160,6 +165,7 @@ type SessionStatus[State ~string] struct {
 	TurnID           string `json:"turn_id,omitempty"`
 	LastError        string `json:"last_error,omitempty"`
 	Dormant          bool   `json:"dormant,omitempty"`
+	Stopped          bool   `json:"stopped,omitempty"`
 	PauseArmed       bool   `json:"pause_armed,omitempty"`
 	Paused           bool   `json:"paused,omitempty"`
 	PauseGeneration  uint64 `json:"pause_generation,omitempty"`
@@ -186,11 +192,15 @@ type SessionInteraction[Kind ~string, Event any] struct {
 }
 
 type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
-	ParentSessionID string                            `json:"parent_session_id,omitempty"`
-	Session         *session.Session                  `json:"session"`
-	Status          SessionStatus[State]              `json:"status"`
-	Interactions    []SessionInteraction[Kind, Event] `json:"interactions"`
-	PendingInputs   []SessionPendingInput             `json:"pending_inputs"`
+	BackgroundProcesses []tools.BackgroundProcess         `json:"background_processes,omitempty"`
+	ParentSessionID     string                            `json:"parent_session_id,omitempty"`
+	Projection          string                            `json:"projection,omitempty"`
+	Items               []SessionHistoryItem              `json:"items,omitempty"`
+	History             *SessionHistory                   `json:"history,omitempty"`
+	Session             *session.Session                  `json:"session"`
+	Status              SessionStatus[State]              `json:"status"`
+	Interactions        []SessionInteraction[Kind, Event] `json:"interactions"`
+	PendingInputs       []SessionPendingInput             `json:"pending_inputs"`
 	// LiveSeeds supplements a dynamically admitted tree snapshot before its live tail.
 	LiveSeeds          []SessionEnvelope[Event] `json:"live_seeds,omitempty"`
 	Epoch              string                   `json:"epoch,omitempty"`
@@ -219,6 +229,38 @@ type SessionEnvelope[Event any] struct {
 	Event              Event  `json:"event,omitempty"`
 	Gap                bool   `json:"gap,omitempty"`
 	FirstAvailable     uint64 `json:"first_available,omitempty"`
+}
+
+// SessionHistoryItem preserves an original typed item and its absolute
+// transcript position. Partial history is never a complete Session proof.
+type SessionHistoryItem struct {
+	Position int          `json:"position"`
+	Item     session.Item `json:"item"`
+}
+
+type SessionHistoryOmittedRange struct {
+	StartPosition int    `json:"start_position"`
+	EndPosition   int    `json:"end_position"`
+	Reason        string `json:"reason"`
+}
+
+type SessionHistory struct {
+	StartPosition int                          `json:"start_position"`
+	EndPosition   int                          `json:"end_position"`
+	TotalItems    int                          `json:"total_items"`
+	OmittedRanges []SessionHistoryOmittedRange `json:"omitted_ranges,omitempty"`
+	NextCursor    string                       `json:"next_cursor,omitempty"`
+	Truncated     bool                         `json:"truncated"`
+}
+
+type SessionHistoryPage struct {
+	Projection         string               `json:"projection"`
+	SessionID          string               `json:"session_id"`
+	Epoch              string               `json:"epoch"`
+	Cursor             uint64               `json:"cursor"`
+	TranscriptPosition int                  `json:"transcript_position"`
+	Items              []SessionHistoryItem `json:"items"`
+	History            SessionHistory       `json:"history"`
 }
 
 type SessionStreamMessage[State ~string, Kind ~string, Event any] struct {

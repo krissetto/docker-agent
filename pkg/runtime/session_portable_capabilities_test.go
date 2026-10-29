@@ -10,7 +10,9 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	latest "github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -84,7 +86,11 @@ func TestPortableCapabilitiesUseBoundAgent(t *testing.T) {
 }
 
 func TestPortableBranchExactCutsAndPrecondition(t *testing.T) {
-	r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("bound", "", agent.WithModel(&mockProvider{id: "test/bound"})))), WithSessionStore(session.NewInMemorySessionStore()))
+	r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("bound", "", agent.WithModel(&mockProvider{id: "test/bound"})))), WithSessionStore(session.NewInMemorySessionStore()), WithModelSwitcherConfig(&ModelSwitcherConfig{
+		Models:           map[string]latest.ModelConfig{"test/override": {Provider: "openai", Model: "gpt-4o"}},
+		ProviderRegistry: testProviderRegistry(),
+		EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
+	}))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close() })
 	sess := session.New(session.WithWorkingDir(t.TempDir()), session.WithSafetyPolicy(session.SafetyPolicyAutonomous))

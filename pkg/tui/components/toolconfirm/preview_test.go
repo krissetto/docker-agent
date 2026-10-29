@@ -66,7 +66,6 @@ func TestPreviewPreservesOtherToolInputs(t *testing.T) {
 		want []string
 	}{
 		{"shell", `{"cmd":"printf '%s' hello\nprintf goodbye","cwd":"/tmp"}`, []string{"printf '%s' hello", "printf goodbye", "/tmp"}},
-		{"run_background_job", `{"cmd":" ","command":"npm run dev","cwd":"/workspace","recall":true}`, []string{"cmd:", "command:", "npm run dev", "/workspace", "recall:", "true"}},
 		{"write_file", `{"path":"/tmp/input.md","content":"# Literal heading\n**literal syntax**"}`, []string{"/tmp/input.md", "# Literal heading", "**literal syntax**"}},
 		{"search", `{"query":"Find **approval** checks","options":{"limit":9007199254740993},"paths":["/a","/b"],"optional":null}`, []string{"approval", "9007199254740993", `"/a"`, `"/b"`, "null"}},
 		{"custom", `{"task":"partial`, []string{`{"task":"partial`}},

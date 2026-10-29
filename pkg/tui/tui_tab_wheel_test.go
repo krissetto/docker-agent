@@ -37,7 +37,9 @@ func TestActualProgramTabWheelRoutingClampAndBoundaryOrder(t *testing.T) {
 		tabs[i] = messages.TabInfo{SessionID: fmt.Sprintf("wheel-tab-%02d", i), Title: fmt.Sprintf("Wheel tab %02d long", i), IsActive: i == 0}
 	}
 	program.Send(messages.TabsUpdatedMsg{Tabs: tabs, ActiveIdx: 0})
-	require.Eventually(t, func() bool { s := snapshot(); return s.active == 0 && strings.Contains(s.tabView, "Wheel tab 00") }, time.Second, time.Millisecond)
+	// The fixture's scrollbar reveal holds for 2*MediumDuration (1000ms) and then fades,
+	// so the settled-strip wait covers that finite lease.
+	require.Eventually(t, func() bool { s := snapshot(); return s.active == 0 && strings.Contains(s.tabView, "Wheel tab 00") }, 3*time.Second, time.Millisecond)
 	initial := snapshot()
 	wheel := func(button tea.MouseButton, y, count int) {
 		for range count {

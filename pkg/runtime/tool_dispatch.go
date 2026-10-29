@@ -66,11 +66,11 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 			_, err = origin.postSteer(ctx, QueuedMessage{Content: message, RequestID: id, InputOrigin: session.InputOriginRuntime, InputMode: "steer"})
 			return err
 		},
-		BeginBackgroundWork: func(ctx context.Context, sess *session.Session, _ *agent.Agent, _ tools.ToolCall) (tools.BackgroundWork, error) {
+		BeginBackgroundWork: func(ctx context.Context, sess *session.Session, _ *agent.Agent, tc tools.ToolCall) (tools.BackgroundWork, error) {
 			if !hasOrigin || origin == nil {
 				return nil, ErrSessionClosed
 			}
-			return r.beginSessionBackgroundWork(ctx, sess, origin)
+			return r.beginSessionBackgroundWork(ctx, sess, origin, tc)
 		},
 	}
 	return d.Process(ctx, sess, calls, agentTools, &sinkEmitter{runtime: r, events: events, sessionID: sess.ID})

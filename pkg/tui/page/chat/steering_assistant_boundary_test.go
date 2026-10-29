@@ -26,7 +26,7 @@ func TestSteeringAcceptedReceiptDoesNotSplitLiveAssistantCommit(t *testing.T) {
 				}
 				a, _ := newSessionTestApp(t, sess, nil, nil)
 				ar := animation.NewRuntime()
-				p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+				p := New(ar, t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 				t.Cleanup(func() { Cleanup(p); ar.Stop() })
 				p.messages.SetSize(100, 200)
 				if restored {

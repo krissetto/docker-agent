@@ -1,6 +1,8 @@
 package messages
 
 import (
+	"slices"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -90,6 +92,8 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 	}
 	if !r.renderOnly {
 		m.loadedMessageCount, m.committedMessageCount = len(m.messages), len(m.messages)
+		m.workProjectionDirty = true
+		m.syncWorkProjection()
 	}
 	if !render {
 		m.replay = nil
@@ -109,32 +113,80 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 		r.width = m.contentWidth()
 	}
 	for ops := 0; r.renderPosition < len(m.views) && ops < 32; ops++ {
+		m.syncWorkProjection()
 		i := r.renderPosition
-		if view, ok := m.views[i].(message.Model); ok {
-			// Capture the same presentation state renderItem will use.
-			view.SetSelected(m.focused && i == m.selectedMessageIndex)
-			view.SetHovered(i == m.hoveredMessageIndex)
-			if r.prepared != nil && r.preparedIndex == i {
-				message.ApplyPreparedRender(view, r.prepared)
-				r.prepared = nil
-			}
-			if prepare := message.PrepareRender(view); prepare != nil {
-				r.waiting = true
-				return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, prepared: prepare()} })...)
+		if _, hidden := m.workSourceToHeader[i]; hidden && m.workSourceToHeader[i] != i {
+			r.offsets[i] = len(r.lines)
+			r.renderPosition++
+			continue
+		}
+		composite := m.workHeaderBySource[i]
+		if composite != nil && composite.Expanded() {
+			for _, source := range m.workItemsForAnchor(i) {
+				if view, ok := source.View.(message.Model); ok {
+					view.SetSelected(m.focused && source.SourceIndex == m.selectedMessageIndex)
+					view.SetHovered(source.SourceIndex == m.hoveredMessageIndex)
+					if r.prepared != nil && r.preparedIndex == source.SourceIndex {
+						message.ApplyPreparedRender(view, r.prepared)
+						r.prepared = nil
+					}
+					if prepare := message.PrepareRender(view); prepare != nil {
+						r.waiting = true
+						return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: source.SourceIndex, prepared: prepare()} })...)
+					}
+				}
+				if block, ok := source.View.(*reasoningblock.Model); ok {
+					if r.preparedReasoning != nil && r.preparedIndex == source.SourceIndex {
+						block.ApplyPreparedReasoning(r.preparedReasoning)
+						r.preparedReasoning = nil
+					}
+					if prepare := block.PrepareReasoning(); prepare != nil {
+						r.waiting = true
+						return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: source.SourceIndex, reasoning: prepare()} })...)
+					}
+				}
 			}
 		}
-		if block, ok := m.views[i].(*reasoningblock.Model); ok {
-			if r.preparedReasoning != nil && r.preparedIndex == i {
-				block.ApplyPreparedReasoning(r.preparedReasoning)
-				r.preparedReasoning = nil
+		if composite == nil {
+			if view, ok := m.views[i].(message.Model); ok {
+				view.SetSelected(m.focused && i == m.selectedMessageIndex)
+				view.SetHovered(i == m.hoveredMessageIndex)
+				if r.prepared != nil && r.preparedIndex == i {
+					message.ApplyPreparedRender(view, r.prepared)
+					r.prepared = nil
+				}
+				if prepare := message.PrepareRender(view); prepare != nil {
+					r.waiting = true
+					return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, prepared: prepare()} })...)
+				}
 			}
-			if prepare := block.PrepareReasoning(); prepare != nil {
-				r.waiting = true
-				return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, reasoning: prepare()} })...)
+			if block, ok := m.views[i].(*reasoningblock.Model); ok {
+				if r.preparedReasoning != nil && r.preparedIndex == i {
+					block.ApplyPreparedReasoning(r.preparedReasoning)
+					r.preparedReasoning = nil
+				}
+				if prepare := block.PrepareReasoning(); prepare != nil {
+					r.waiting = true
+					return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, reasoning: prepare()} })...)
+				}
 			}
 		}
-		item := m.renderItem(i, m.views[i])
-		if view, ok := m.views[i].(message.Model); ok {
+
+		var item renderedItem
+		if composite != nil {
+			text := composite.View()
+			lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+			item = renderedItem{lines: lines, height: composite.Height()}
+		} else {
+			item = m.renderItem(i, m.views[i])
+		}
+		if composite != nil {
+			for _, source := range m.workItemsForAnchor(i) {
+				if view, ok := source.View.(message.Model); ok {
+					message.ReleasePreparedRender(view)
+				}
+			}
+		} else if view, ok := m.views[i].(message.Model); ok {
 			// The transcript now owns these lines. Do not retain a second full
 			// ANSI document on every historical (or last replayed) message view.
 			message.ReleasePreparedRender(view)
@@ -151,7 +203,7 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 		if m.shouldCacheMessage(i) {
 			r.ranges[i] = renderedItemRange{start: start, height: item.height}
 		}
-		if m.needsSeparator(i) {
+		if m.displayNeedsSeparator(i) {
 			r.lines = append(r.lines, "")
 		}
 		r.renderPosition++
@@ -163,6 +215,7 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 		return false, tea.Batch(cmds...)
 	}
 	m.renderedLines = r.lines
+	m.dropRenderedBacking()
 	m.renderedItems = r.ranges
 	m.lineOffsets = r.offsets
 	m.totalHeight = len(r.lines)
@@ -217,6 +270,8 @@ func (m *model) HistoryPending() bool { return m.historyReplay != nil }
 
 // ContinueHistory warms older rows separately from authoritative replay so live
 // events and the recent viewport never wait for historical markdown rendering.
+type historyProgressedMsg struct{}
+
 func ContinueHistory(list Model) tea.Cmd {
 	m := list.(*model)
 	r := m.historyReplay
@@ -224,6 +279,33 @@ func ContinueHistory(list Model) tea.Cmd {
 		return nil
 	}
 	m.ensureAllItemsRendered()
+	if m.workEnabled {
+		oldHeight := m.totalHeight
+		advanced := 0
+		for advanced < 8 && m.historyStart > 0 {
+			m.historyStart--
+			advanced++
+		}
+		if advanced == 0 {
+			m.historyReplay = nil
+			return nil
+		}
+		if m.historyStart == 0 {
+			m.historyReplay = nil
+			m.releaseRenderedHeadroom()
+		}
+		m.invalidateHistoryStep()
+		m.ensureAllItemsRendered()
+		delta := m.totalHeight - oldHeight
+		if m.userHasScrolled {
+			m.scrollOffset = max(0, min(m.totalHeight-m.height, m.scrollOffset+delta))
+			m.scrollview.SetScrollOffset(m.scrollOffset)
+		}
+		if m.historyStart == 0 {
+			return nil
+		}
+		return func() tea.Msg { return historyProgressedMsg{} }
+	}
 	var prefix []historyItem
 	defer func() { m.prependHistory(prefix) }()
 	deadline := time.Now().Add(2 * time.Millisecond)
@@ -271,6 +353,61 @@ func ContinueHistory(list Model) tea.Cmd {
 	return nil
 }
 
+// invalidateHistoryStep keeps the item cache: renderItem reuses renderedItems
+// ranges. The last item is dropped; it may be the streaming suffix, which is
+// not in renderedLines.
+func (m *model) invalidateHistoryStep() {
+	m.workProjectionDirty = true
+	m.invalidateFrameContent()
+	if last := len(m.views) - 1; last >= 0 {
+		m.renderedItems.Delete(last)
+	}
+	m.activeSegments = nil
+	m.lineOffsets = nil
+	m.urlSpans.clear()
+	m.renderDirty = true
+	m.invalidateView()
+}
+
+// prependRenderedLines writes a batch in front of renderedLines using front
+// headroom, so each batch copies only its own rows.
+func (m *model) prependRenderedLines(prefix []historyItem, delta int) {
+	current := len(m.renderedLines)
+	if !m.renderedLinesOwnBacking() || m.renderedHead < delta {
+		room := max(delta, current)
+		backing := make([]string, room+current)
+		copy(backing[room:], m.renderedLines)
+		m.renderedBacking, m.renderedHead = backing, room
+	}
+	head := m.renderedHead - delta
+	pos := head
+	for _, item := range slices.Backward(prefix) {
+		pos += copy(m.renderedBacking[pos:], item.lines)
+	}
+	m.renderedHead = head
+	m.renderedLines = m.renderedBacking[head:]
+}
+
+// renderedLinesOwnBacking reports whether renderedLines is still the window of renderedBacking.
+func (m *model) renderedLinesOwnBacking() bool {
+	n := len(m.renderedLines)
+	if m.renderedHead < 0 || m.renderedHead > len(m.renderedBacking) || len(m.renderedBacking)-m.renderedHead != n {
+		return false
+	}
+	return n == 0 || &m.renderedBacking[m.renderedHead] == &m.renderedLines[0]
+}
+
+// releaseRenderedHeadroom compacts the window to an exact-size transcript.
+func (m *model) releaseRenderedHeadroom() {
+	if m.renderedLinesOwnBacking() && m.renderedHead > 0 {
+		m.renderedLines = slices.Clone(m.renderedLines)
+	}
+	m.dropRenderedBacking()
+}
+
+// dropRenderedBacking must run wherever renderedLines is replaced or cleared.
+func (m *model) dropRenderedBacking() { m.renderedBacking, m.renderedHead = nil, 0 }
+
 type historyItem struct {
 	index, height int
 	lines         []string
@@ -284,12 +421,7 @@ func (m *model) prependHistory(prefix []historyItem) {
 	for _, item := range prefix {
 		delta += len(item.lines)
 	}
-	lines := make([]string, 0, delta+len(m.renderedLines))
-	for i := len(prefix) - 1; i >= 0; i-- {
-		lines = append(lines, prefix[i].lines...)
-	}
-	lines = append(lines, m.renderedLines...)
-	m.renderedLines = lines
+	m.prependRenderedLines(prefix, delta)
 	for i := m.historyStart; i < len(m.lineOffsets); i++ {
 		m.lineOffsets[i] += delta
 	}
@@ -309,6 +441,7 @@ func (m *model) prependHistory(prefix []historyItem) {
 	m.historyStart = prefix[len(prefix)-1].index
 	if m.historyStart == 0 {
 		m.historyReplay = nil
+		m.releaseRenderedHeadroom()
 	}
 	if m.activeSegments != nil {
 		m.activeSegments.start += delta

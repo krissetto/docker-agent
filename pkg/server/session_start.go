@@ -72,7 +72,7 @@ func (s *Server) startCanonicalSession(c echo.Context) error {
 	if err != nil {
 		return sessionHTTPError(err)
 	}
-	submission, err := handle.Submit(ctx, runtime.TurnInput{Content: req.Input.Content, MultiContent: req.Input.MultiContent, RequestID: req.Input.RequestID})
+	submission, err := handle.Submit(ctx, runtime.TurnInput{GenerateTitle: req.Input.GenerateTitle, Content: req.Input.Content, MultiContent: req.Input.MultiContent, RequestID: req.Input.RequestID})
 	if err != nil {
 		return sessionHTTPError(err)
 	}

@@ -136,14 +136,17 @@ func (g *sessionDriverRegistry) schedule() {
 }
 
 func (g *sessionDriverRegistry) maintainDriver(d *sessionDriver) bool {
-	var dormant bool
+	var dormant, causalOnly bool
 	if err := d.ownerCall(context.WithoutCancel(g.r.lifetime()), func() error {
-		dormant = d.viewDormant
+		dormant, causalOnly = d.viewDormant, d.causalReportOnly
 		return nil
-	}); err != nil || dormant {
+	}); err != nil || dormant && !causalOnly {
 		return false
 	}
 	pending := g.deliverReports(d)
+	if g.r.subagents != nil && g.r.subagents.commitDeferredCompletionReport(d) {
+		pending = true
+	}
 	var completion, wake bool
 	var generation uint64
 	var runErr string

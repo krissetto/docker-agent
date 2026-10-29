@@ -78,12 +78,12 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.NotContains(t, ansi.Strip(border), node.SessionID)
 	rows := strings.Split(border, "\n")
 	prefix := ansi.Strip(styles.ToolCompletedIcon.Render("✓")) + " "
-	header := styles.UserMessageStyle.GetBorderStyle().TopLeft + strings.TrimPrefix(prefix, " ") + ref.Label() + " sent a message v "
+	header := styles.UserMessageStyle.GetBorderStyle().TopLeft + strings.TrimPrefix(prefix, " ") + "From " + ref.Label() + " sent a message v "
 	assert.Equal(t, header+strings.Repeat("━", 80-ansi.StringWidth(header)), ansi.Strip(rows[0]), "canonical identity is embedded in the top surface without shifting columns")
 	assert.Equal(t, "┃ literal **body**", strings.TrimRight(ansi.Strip(rows[2]), " "), "literal USER body stays below the identity border")
 	borderLinks := identityLinkCells(rows[0])
 	require.Len(t, borderLinks, 80)
-	start := ansi.StringWidth(prefix)
+	start := ansi.StringWidth(styles.UserMessageStyle.GetBorderStyle().TopLeft + strings.TrimPrefix(prefix, " ") + "From ")
 	for x, url := range borderLinks {
 		if x >= start && x < start+ansi.StringWidth(ref.Name) {
 			assert.Equal(t, agentidentity.Link, url, "canonical name remains linked at border cell %d", x)

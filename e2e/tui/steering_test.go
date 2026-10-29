@@ -11,7 +11,6 @@ package tui_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -20,14 +19,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/fake"
 	agentruntime "github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
-	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // steeringProxyOptions slows the SSE replay enough that submitting a
@@ -86,11 +83,6 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 	}
 	d := newStreamingTUI(t, options)
 	t.Cleanup(func() { close(release) })
-	openBehaviorSettings(d).
-		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("‹ Steer ›"))
-	saveSettingsAndWait(d)
-
 	// Draft the follow-up as a single paste so it costs one Update instead of
 	// one per keystroke (keystrokes are expensive under -race and would eat
 	// into the streaming window). Submission waits until chunks are visibly
@@ -107,9 +99,9 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 		t.Fatal("first response did not reach the replay gate")
 	}
 
-	// Plain Enter with explicit Steer mode injects into the ongoing stream.
-	d.Enter().
-		WaitFor(tuitest.Contains("Message sent to the working agent")).
+	// Alt+Enter steers into the ongoing stream; plain Enter queues.
+	d.Press(tea.KeyEnter, tea.ModAlt).
+		WaitFor(tuitest.Contains("Message steered into the working agent")).
 		Assert(tuitest.Absent("Message queued"))
 	// The first answer remains in the session history sent to the second model
 	// call, even if the renderer coalesces adjacent assistant blocks.
@@ -119,11 +111,10 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 		Assert(tuitest.Absent("2 + 2 equals 4."))
 }
 
-// TestChat_QueueSendModeWhileStreaming switches the send mode to Queue via
-// the /settings dialog, then submits a second message while the agent is
-// still streaming. The session must accept it immediately, project it in the
-// sidebar, and promote it only once the first stream stops, producing a second
-// turn with its own answer. The switch must also be persisted to user config.
+// TestChat_QueueSendModeWhileStreaming submits a second message while the
+// agent is still streaming; plain Enter queues by default. The session must
+// accept it immediately, project it in the sidebar, and promote it only once
+// the first stream stops, producing a second turn with its own answer.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	accepted, promoted := make(chan queuedIdentity, 1), make(chan queuedIdentity, 1)
 	d := newTUIWithProxyOptionsWrapped(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions(), func(model tea.Model) tea.Model {
@@ -132,23 +123,6 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		tuitest.WithTimeout(30 * time.Second)(d)
 	}
-
-	// Start with an explicit steering preference, then restore the default.
-	openBehaviorSettings(d).
-		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("‹ Steer ›"))
-	saveSettingsAndWait(d)
-
-	// Restore Queue through the real draft and focused Save action.
-	openBehaviorSettings(d).
-		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("‹ Queue ›"))
-	saveSettingsAndWait(d)
-
-	// The choice is persisted for future sessions.
-	cfg, err := os.ReadFile(userconfig.Path())
-	require.NoError(t, err)
-	assert.NotContains(t, string(cfg), "busy_send_mode:", "queue is the omitted default")
 
 	d.Type("What's 2+2?").
 		Enter().
@@ -245,13 +219,13 @@ func openBehaviorSettings(d *tuitest.Driver) *tuitest.Driver {
 		WaitFor(tuitest.Contains("Appearance")).
 		Send(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}).
 		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("While agent is working")).
+		WaitFor(tuitest.Contains("Enter queues; Alt+Enter steers")).
 		Enter()
 }
 
 func saveSettingsAndWait(d *tuitest.Driver) {
 	d.Press(tea.KeyTab).Enter().
 		WaitFor(tuitest.Contains("Settings saved")).
-		WaitFor(tuitest.Absent("While agent is working")).
+		WaitFor(tuitest.Absent("Enter queues; Alt+Enter steers")).
 		WaitForStable(200 * time.Millisecond)
 }

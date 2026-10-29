@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // Descendant approvals and questions aggregate into the shared tree topology
@@ -188,4 +189,36 @@ func TestTreeWatchCanonicalStoppedStateWinsOverRunAndInteractionOverlay(t *testi
 	assert.Equal(t, subagent.NodeStopped, got.State, "owner snapshot wins over stale baseline and stream state")
 	assert.False(t, got.NeedsAttention)
 	assert.Empty(t, got.WaitingOn)
+}
+
+func TestTreeWatchOverlaysOnlyCurrentSessionBackgroundProcessCounts(t *testing.T) {
+	const rootID = "background-tree-root"
+	root := subagent.SessionRootID(rootID)
+	base := &subagent.Snapshot{Version: subagent.SnapshotVersion, Root: root, Nodes: []subagent.NodeSnapshot{{
+		Node:     subagent.Node{ID: root, SessionID: rootID, State: subagent.NodeIdle},
+		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", SessionID: "child-session", Parent: root, State: subagent.NodeIdle}}},
+	}}}
+	watch := newTreeWatch(rootID)
+	watch.reset([]runtime.SessionSnapshot{
+		{Session: session.New(session.WithID(rootID)), Status: runtime.SessionStatus{SessionID: rootID}, BackgroundProcesses: []tools.BackgroundProcess{{ID: "root-proc", SessionID: rootID, State: tools.BackgroundProcessRunning}}},
+		{Session: session.New(session.WithID("child-session")), Status: runtime.SessionStatus{SessionID: "child-session"}, BackgroundProcesses: []tools.BackgroundProcess{
+			{ID: "child-a", SessionID: "child-session", State: tools.BackgroundProcessRunning},
+			{ID: "child-b", SessionID: "child-session", State: tools.BackgroundProcessRunning},
+			{ID: "foreign", SessionID: "foreign-session", State: tools.BackgroundProcessRunning},
+		}},
+	})
+	merged := watch.merged(base)
+	require.Equal(t, 1, merged.Nodes[0].Node.BackgroundProcesses)
+	require.Equal(t, 2, merged.Nodes[0].Children[0].Node.BackgroundProcesses)
+	require.Equal(t, subagent.NodeIdle, merged.Nodes[0].Children[0].Node.State, "background shell work does not mark a subagent's agent loop busy")
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: "child-session", Event: &runtime.BackgroundProcessesEvent{SessionID: "child-session", Processes: []tools.BackgroundProcess{{ID: "done", SessionID: "child-session", State: tools.BackgroundProcessCompleted}}}}))
+	merged = watch.merged(base)
+	require.Zero(t, merged.Nodes[0].Children[0].Node.BackgroundProcesses, "an authoritative terminal-only replacement clears the running badge")
+	watch.add(runtime.SessionSnapshot{Session: session.New(session.WithID("child-session")), Status: runtime.SessionStatus{SessionID: "child-session"}, BackgroundProcesses: []tools.BackgroundProcess{{ID: "stale", SessionID: "child-session", State: tools.BackgroundProcessRunning}}})
+	merged = watch.merged(base)
+	require.Zero(t, merged.Nodes[0].Children[0].Node.BackgroundProcesses, "an older session-added snapshot cannot overwrite a newer process replacement")
+	watch.reset([]runtime.SessionSnapshot{{Session: session.New(session.WithID("child-session")), Status: runtime.SessionStatus{SessionID: "child-session"}}})
+	merged = watch.merged(base)
+	require.Zero(t, merged.Nodes[0].Children[0].Node.BackgroundProcesses, "empty reconnect baselines clear stale counts")
+	require.False(t, watch.apply(runtime.SessionEvent{SessionID: "child-session", Event: &runtime.BackgroundProcessesEvent{SessionID: "root-owner", Processes: []tools.BackgroundProcess{{ID: "foreign", SessionID: "root-owner", State: tools.BackgroundProcessRunning}}}}), "event owner and envelope must match")
 }

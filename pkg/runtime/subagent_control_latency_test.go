@@ -2,12 +2,14 @@ package runtime
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,7 +127,15 @@ func TestStopCancelsBusyTargetBeforeOwnerAdmission(t *testing.T) {
 	defer cancel()
 	stopped := make(chan error, 1)
 	go func() { _, err := m.stopChildContext(ctx, "target-root", "target-node"); stopped <- err }()
-	controlWait(t, runCtx.Done())
+	select {
+	case <-runCtx.Done():
+	case <-time.After(time.Second):
+		cancel()
+		close(release)
+		controlWait(t, ownerDone)
+		child.wg.Done()
+		t.Fatal("stop did not cancel execution while the target owner was busy")
+	}
 	records, err := m.coord.LoadChildren(t.Context(), "target-root")
 	require.NoError(t, err)
 	require.Equal(t, subagent.NodeStopped, records[0].Node.State)
@@ -141,6 +151,7 @@ func TestStopCancelsBusyTargetBeforeOwnerAdmission(t *testing.T) {
 	close(release)
 	controlWait(t, ownerDone)
 	require.NoError(t, child.awaitStop(t.Context()))
+	require.True(t, child.Status().Stopped, "explicit-stop intent must survive until the owner applies the request")
 	child.wg.Done()
 }
 
@@ -190,6 +201,7 @@ func (s *controlCheckpointStore) SaveTree(ctx context.Context, id string, tree s
 
 func TestChildAdmissionBypassesUnrelatedCheckpointAndOwner(t *testing.T) {
 	m, _, _ := controlManager(t)
+	m.r.team = team.New(team.WithAgents(agent.New("root", "fake"), agent.New("worker", "fake")))
 	store := &controlCheckpointStore{Store: subagent.NewInMemoryStore(), entered: make(chan struct{}, 1), release: make(chan struct{})}
 	m.r.subagentStore = store
 	unrelated := session.New(session.WithID("checkpoint-unrelated"))
@@ -197,6 +209,9 @@ func TestChildAdmissionBypassesUnrelatedCheckpointAndOwner(t *testing.T) {
 	t.Cleanup(ud.closeOwner)
 	m.ensureRoot(unrelated, "root")
 	entered, release, ownerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	// LIFO: registered after closeOwner, so it runs first and frees the owner on every exit path.
+	unblock := sync.OnceFunc(func() { close(release); close(store.release) })
+	t.Cleanup(unblock)
 	go func() {
 		_ = ud.ownerCall(t.Context(), func() error { close(entered); <-release; return nil })
 		close(ownerDone)
@@ -216,15 +231,13 @@ func TestChildAdmissionBypassesUnrelatedCheckpointAndOwner(t *testing.T) {
 	case err := <-admitted:
 		require.NoError(t, err)
 	case <-time.After(time.Second):
-		close(release)
-		close(store.release)
+		unblock()
 		t.Fatal("child admission waited for unrelated checkpoint or owner")
 	}
 	records, err := m.coord.LoadChildren(t.Context(), parent.ID)
 	require.NoError(t, err)
 	require.Len(t, records, 2, "admission remains authoritative before returning")
-	close(release)
-	close(store.release)
+	unblock()
 	controlWait(t, ownerDone)
 	if d, ok := m.r.sessionDrivers.Lookup(child.ID); ok {
 		t.Cleanup(d.closeOwner)

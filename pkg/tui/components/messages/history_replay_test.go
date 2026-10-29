@@ -9,9 +9,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func historyReplayFixture(count int) *session.Session {
@@ -67,6 +69,42 @@ func TestReplayPresentsRecentHistoryBeforeRenderingPrefix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHistoryPrefixPagingKeepsAdjacentThinkingGrouped(t *testing.T) {
+	sess := session.New(session.WithID("history-page-group"))
+	for i := 0; i < 33; i++ {
+		switch i {
+		case 19:
+			sess.AddMessage(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "older first thought", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "older first thought"}}}})
+		case 20:
+			sess.AddMessage(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "older second thought", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "older second thought"}}}})
+		default:
+			sess.AddMessage(session.NewAgentMessage("worker", &chat.Message{Role: chat.MessageRoleAssistant, Content: fmt.Sprintf("page marker %02d", i)}))
+		}
+	}
+	m := NewScrollableView(animation.NewRuntime(), 80, 12, &service.SessionState{}).(*model)
+	t.Cleanup(m.StopAnimations)
+	BeginReplay(m, PrepareReplay(sess), nil)
+	finishPreparedReplay(t, m)
+	require.True(t, HistoryPending(m))
+	require.Equal(t, 20, m.historyStart, "the two canonical thoughts straddle the recent-history boundary")
+	require.NotContains(t, ansi.Strip(m.View()), "older first thought")
+	require.NotContains(t, ansi.Strip(m.View()), "older second thought")
+
+	finishHistoryReplay(t, m)
+	frame := ansi.Strip(strings.Join(m.renderedLines, "\n"))
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+	require.Contains(t, frame, "older first thought")
+	require.Contains(t, frame, "older second thought")
+	require.Contains(t, frame, "page marker 18")
+	require.Contains(t, frame, "page marker 21")
+	require.Equal(t, 1, strings.Count(frame, "older first thought"))
+	require.Equal(t, 1, strings.Count(frame, "older second thought"))
+	first, second := strings.Index(frame, "older first thought"), strings.Index(frame, "older second thought")
+	require.Greater(t, second, first, "prefix paging preserves order within the merged block")
+	require.True(t, m.needsSeparator(18), "standalone assistant before the merged reasoning keeps its separator")
+	require.True(t, m.needsSeparator(19), "standalone assistant after the merged reasoning keeps its separator")
 }
 
 func TestHistoryReplayPrependsWithoutMovingReaderOrSelection(t *testing.T) {

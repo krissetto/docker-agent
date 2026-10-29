@@ -20,6 +20,11 @@ func (m *model) SetImagePreviewSessionID(id string) {
 	}
 }
 func (m *model) cancelImageClick() {
+	if m.attachmentClick != nil {
+		m.attachmentClick = nil
+		m.selection.clear()
+		m.releaseRetainedReplies()
+	}
 	if m.imageClick != nil {
 		m.imageClick.preview.Close()
 		m.imageClick = nil
@@ -56,6 +61,7 @@ func (m *model) releaseImageClick(msg tea.MouseReleaseMsg) (tea.Cmd, bool) {
 		return nil, false
 	}
 	m.selection.clear()
+	m.releaseRetainedReplies()
 	return core.CmdHandler(msgtypes.OpenImagePreviewMsg{SessionID: m.imageSessionID, Preview: candidate.preview}), true
 }
 

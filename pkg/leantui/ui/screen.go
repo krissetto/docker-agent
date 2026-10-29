@@ -40,7 +40,7 @@ func (s *Screen) Frame(width, height, spinnerFrame int, busy bool, sessionState 
 	footer := RenderStatus(status, width)
 	footer = footer[:min(len(footer), max(0, height-1))]
 	if status.Dormant {
-		explanation := WrapANSI(StMuted().Render("Any queued work or reports will wait until you resume this session."), width)
+		explanation := WrapANSI(StMuted().Render("New messages wake this session; queued work and reports wait for /resume."), width)
 		if len(footer)+len(explanation) < height {
 			footer = append(footer, explanation...)
 		}

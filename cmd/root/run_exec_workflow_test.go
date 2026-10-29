@@ -25,8 +25,8 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shellprocess"
 )
 
 type execWorkflowProvider struct {
@@ -221,7 +221,7 @@ func TestExecWorkflowWaitsForAutomaticShellJobAndCompletionFollowup(t *testing.T
 		default:
 			seen := false
 			for _, message := range messages {
-				if strings.Contains(message.Content, "same-process-complete") && strings.Contains(message.Content, "Background shell command") {
+				if strings.Contains(message.Content, "same-process-complete") && strings.Contains(message.Content, "Shell command ") {
 					seen = true
 				}
 			}
@@ -230,12 +230,12 @@ func TestExecWorkflowWaitsForAutomaticShellJobAndCompletionFollowup(t *testing.T
 		}
 	}}
 	workingDir := t.TempDir()
-	manager := backgroundjobs.New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: workingDir}})
+	manager := shellprocess.New()
 	shellRaw, err := builtinshell.CreateToolSet(t.Context(), latest.Toolset{Type: "shell", BackgroundAfter: new(1)}, &config.RuntimeConfig{Config: config.Config{WorkingDir: workingDir}})
 	require.NoError(t, err)
 	shellTool, ok := tools.As[*builtinshell.ToolSet](shellRaw)
 	require.True(t, ok)
-	shellTool.AttachBackgroundJobs(manager, true)
+	shellTool.AttachProcessManager(manager, true)
 	// Keep the runtime-owned raw job manager alive through team teardown.
 	root := agent.New("root", "run shell and report its completion", agent.WithModel(model), agent.WithTitleModel(titleTestProvider{calls: &atomic.Int32{}}), agent.WithToolSets(shellTool))
 	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(root), team.WithOwnedResources(manager)), runtime.WithSessionStore(session.NewInMemorySessionStore()), runtime.WithModelStore(execWorkflowModelStore{}), runtime.WithSessionCompaction(false))
@@ -285,7 +285,7 @@ func TestExecWorkflowWaitsForChildAutomaticShellJobAndFollowups(t *testing.T) {
 		default:
 			found := false
 			for _, message := range messages {
-				if strings.Contains(message.Content, "child-job-finished") && strings.Contains(message.Content, "Background shell command") {
+				if strings.Contains(message.Content, "child-job-finished") && strings.Contains(message.Content, "Shell command ") {
 					found = true
 				}
 			}
@@ -303,12 +303,12 @@ func TestExecWorkflowWaitsForChildAutomaticShellJobAndFollowups(t *testing.T) {
 		}
 	}}
 	workingDir := t.TempDir()
-	manager := backgroundjobs.New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: workingDir}})
+	manager := shellprocess.New()
 	shellRaw, err := builtinshell.CreateToolSet(t.Context(), latest.Toolset{Type: "shell", BackgroundAfter: new(1)}, &config.RuntimeConfig{Config: config.Config{WorkingDir: workingDir}})
 	require.NoError(t, err)
 	shellTool, ok := tools.As[*builtinshell.ToolSet](shellRaw)
 	require.True(t, ok)
-	shellTool.AttachBackgroundJobs(manager, true)
+	shellTool.AttachProcessManager(manager, true)
 	root := agent.New("root", "spawn child and wait", agent.WithModel(rootModel), agent.WithTitleModel(titleTestProvider{calls: &atomic.Int32{}}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"}), agent.WithToolSets(subagent.NewToolSet()))
 	worker := agent.New("worker", "run shell", agent.WithModel(workerModel), agent.WithTitleModel(titleTestProvider{calls: &atomic.Int32{}}), agent.WithToolSets(shellTool))
 	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, worker), team.WithOwnedResources(manager)), runtime.WithSessionStore(session.NewInMemorySessionStore()), runtime.WithModelStore(execWorkflowModelStore{}), runtime.WithSessionCompaction(false))

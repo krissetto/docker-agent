@@ -540,6 +540,6 @@ func (d *toolConfirmationDialog) Position() (row, col int) {
 func (d *toolConfirmationDialog) DialogClosable() bool { return true }
 
 // StopAnimations has no work: proposed-call previews never own execution animations.
-func (d *toolConfirmationDialog) StopAnimations() {}
+func (d *toolConfirmationDialog) StopAnimations() { d.BaseDialog.StopAnimations() }
 
 func (d *toolConfirmationDialog) Cleanup() {}

@@ -204,6 +204,19 @@ type HistoricalViewReader interface {
 	HistoricalSessionView(ctx context.Context, sessionID string) (SessionHandle, PreparedSessionViewInfo, error)
 }
 
+// SessionHistoryLimits bounds an opt-in tail/history response.
+type SessionHistoryLimits struct {
+	MaxItems     int
+	MaxBytes     int
+	MaxItemBytes int
+}
+
+// SessionHistoryReader pages older complete items against a frozen runtime anchor.
+type SessionHistoryReader interface {
+	ReadHistoryPage(context.Context, string, string, SessionHistoryLimits) (SessionSnapshot, error)
+	ReadHistoryPageBounded(context.Context, string, string, SessionHistoryLimits, func(SessionSnapshot) bool) error
+}
+
 // PreparedSessionView owns only unpublished preparation resources. Commit runs
 // asynchronously; Abort never revokes canonical owners after publication.
 type PreparedSessionView interface {
@@ -608,6 +621,7 @@ type SessionStatus struct {
 	TurnID           string       `json:"turn_id,omitempty"`
 	LastError        string       `json:"last_error,omitempty"`
 	Dormant          bool         `json:"dormant,omitempty"`
+	Stopped          bool         `json:"stopped,omitempty"`
 	PauseArmed       bool         `json:"pause_armed,omitempty"`
 	Paused           bool         `json:"paused,omitempty"`
 	PauseGeneration  uint64       `json:"pause_generation,omitempty"`
@@ -663,10 +677,11 @@ type InteractionResponse struct {
 // ObserveOptions selects replay after Since. A nil cursor means snapshot plus
 // tail from the observation boundary. Buffer <= 0 uses the runtime default.
 type ObserveOptions struct {
-	SinceEpoch string
-	Since      *uint64
-	Buffer     int
-	Tree       bool
+	HistoryTail *SessionHistoryLimits
+	SinceEpoch  string
+	Since       *uint64
+	Buffer      int
+	Tree        bool
 	// OrderedTree selects atomic descendant baselines and an ordered tree tail.
 	OrderedTree bool
 }
@@ -698,15 +713,20 @@ type PendingInput struct {
 // is a clone and therefore safe for consumers to retain. Interactions reseed
 // outstanding prompts after reconnect or a bounded-journal gap.
 type SessionSnapshot struct {
-	Epoch              string
-	Session            *session.Session
-	Status             SessionStatus
-	Interactions       []InteractionSnapshot
-	PendingInputs      []PendingInput
-	Cursor             uint64
-	TranscriptPosition int
-	Presentation       []Event
-	TitleStatus        string
+	BackgroundProcesses []tools.BackgroundProcess
+	Projection          string
+	Items               []session.BoundedItem
+	History             *session.BoundedItemPage
+	HistoryCursor       string
+	Epoch               string
+	Session             *session.Session
+	Status              SessionStatus
+	Interactions        []InteractionSnapshot
+	PendingInputs       []PendingInput
+	Cursor              uint64
+	TranscriptPosition  int
+	Presentation        []Event
+	TitleStatus         string
 }
 
 // SessionEvent is the canonical session event stream. Sequence is
@@ -726,7 +746,7 @@ type SessionEvent struct {
 	FirstAvailable     uint64
 }
 
-// IsLiveSeed identifies an authoritative nil-cursor snapshot supplement, not a journal event.
+// IsLiveSeed identifies an authoritative snapshot supplement, not a journal event.
 func (envelope SessionEvent) IsLiveSeed() bool {
 	if envelope.Version == 0 || envelope.SessionID == "" || envelope.Sequence != 0 || envelope.Gap || envelope.FirstAvailable != 0 || envelope.TurnID != "" || envelope.InteractionID != "" || envelope.TranscriptPosition != -1 {
 		return false
@@ -746,6 +766,21 @@ func (envelope SessionEvent) IsLiveSeed() bool {
 		return event.ToolCallID != "" && event.Output != ""
 	case *ToolCallResponseEvent:
 		return event.ToolCallID != ""
+	case *BackgroundProcessesEvent:
+		if event.SessionID != envelope.SessionID {
+			return false
+		}
+		seen := make(map[string]struct{}, len(event.Processes))
+		for _, process := range event.Processes {
+			if process.SessionID != envelope.SessionID || !validBackgroundProcess(process) {
+				return false
+			}
+			if _, duplicate := seen[process.ID]; duplicate {
+				return false
+			}
+			seen[process.ID] = struct{}{}
+		}
+		return true
 	default:
 		return false
 	}

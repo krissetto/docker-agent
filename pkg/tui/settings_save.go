@@ -21,6 +21,15 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		if original.GitDiffLayout != draft.GitDiffLayout {
 			latest.GitDiffLayout = draft.GitDiffLayout
 		}
+		if original.CompactWorkLog != draft.CompactWorkLog {
+			latest.CompactWorkLog = draft.CompactWorkLog
+		}
+		if original.ShowAgentContext != draft.ShowAgentContext {
+			latest.ShowAgentContext = draft.ShowAgentContext
+		}
+		if original.VisibleReplies != draft.VisibleReplies {
+			latest.VisibleReplies = messages.ParseVisibleReplies(string(draft.VisibleReplies))
+		}
 		if original.ExpandThinking != draft.ExpandThinking {
 			latest.ExpandThinking = draft.ExpandThinking
 		}
@@ -98,6 +107,9 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		}
 		if original.Layout.HideTodos != draft.Layout.HideTodos {
 			latest.Layout.HideTodos = draft.Layout.HideTodos
+		}
+		if original.Layout.AlignInputWithMessages != draft.Layout.AlignInputWithMessages {
+			latest.Layout.AlignInputWithMessages = draft.Layout.AlignInputWithMessages
 		}
 		if !original.Panel.Equal(draft.Panel) {
 			latest.Panel = messages.NormalizePanelSettings(draft.Panel)

@@ -82,7 +82,12 @@ func TestSubagentReplyLiveReplayControlsAndRetention(t *testing.T) {
 					if width == 100 {
 						out := ansi.Strip(strings.Join(m.renderedLines, "\n"))
 						assert.Contains(t, out, "Delivered preview")
-						assert.Contains(t, out, "end of original payload</system_info>")
+						assert.Contains(t, out, "end of original payload")
+						if origin == session.InputOriginRuntime {
+							assert.NotContains(t, out, "system_info")
+						} else {
+							assert.Contains(t, out, "end of original payload</system_info>")
+						}
 						for y, line := range m.renderedLines {
 							if before, _, found := strings.Cut(ansi.Strip(line), "body identity"); found {
 								_, linked := m.InputReferenceAt(7+ansi.StringWidth(before), 3+y)

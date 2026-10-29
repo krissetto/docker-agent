@@ -659,6 +659,8 @@ type remoteSessionMetadata api.SessionMetadata
 func (m remoteSessionMetadata) runtime() SessionMetadata {
 	capabilities := m.Capabilities
 	return SessionMetadata{SessionID: m.SessionID, AgentName: m.AgentName, Historical: m.Historical, ExecutionAvailable: m.ExecutionAvailable, HistoryReason: m.HistoryReason, Model: m.Model, ThinkingLevels: slices.Clone(m.ThinkingLevels), ThinkingLevel: m.ThinkingLevel, Capabilities: SessionCapabilities{
+		Historical:            capabilities.Historical,
+		ExecutionAvailable:    capabilities.ExecutionAvailable,
 		PendingMessageRemoval: capabilities.PendingMessageRemoval,
 		Snapshots:             capabilities.Snapshots,
 		ToolInspection:        capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
@@ -709,6 +711,7 @@ func (c *Client) sessionJSONWithClient(ctx context.Context, client *http.Client,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcesses)
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
@@ -801,6 +804,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		req.Header.Set("Last-Event-ID", strconv.FormatUint(*options.Since, 10))
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcesses)
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
@@ -965,7 +969,8 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			return Observation{}, protocolError(decodeErr)
 		}
 		previous, known := replaySequences[envelope.SessionID]
-		zeroSeed := baseline && known && envelope.IsLiveSeed()
+		_, processReplacement := envelope.Event.(*BackgroundProcessesEvent)
+		zeroSeed := known && envelope.IsLiveSeed() && (baseline || processReplacement)
 		if !known || envelope.Epoch != replayEpochs[envelope.SessionID] || (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && !envelope.Gap && envelope.Sequence != previous+1) {
 			resp.Body.Close()
 			cancel()
@@ -1232,7 +1237,17 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 		return SessionSnapshot{}, errors.New("invalid session snapshot identity")
 	}
 	in.Session.ParentID = in.ParentSessionID
-	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition, TitleStatus: in.TitleStatus}
+	out := SessionSnapshot{BackgroundProcesses: in.BackgroundProcesses, Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition, TitleStatus: in.TitleStatus}
+	seenProcesses := make(map[string]struct{}, len(out.BackgroundProcesses))
+	for _, process := range out.BackgroundProcesses {
+		if process.SessionID != in.Session.ID || !validBackgroundProcess(process) {
+			return SessionSnapshot{}, errors.New("invalid background process snapshot identity")
+		}
+		if _, duplicate := seenProcesses[process.ID]; duplicate {
+			return SessionSnapshot{}, errors.New("duplicate background process snapshot identity")
+		}
+		seenProcesses[process.ID] = struct{}{}
+	}
 	for _, raw := range in.Presentation {
 		event, err := c.decodeSessionEvent(raw)
 		if err != nil {
@@ -1296,6 +1311,20 @@ func (c *Client) decodeSessionEnvelope(in remoteSessionEnvelope) (SessionEvent, 
 	return out, nil
 }
 
+func validBackgroundProcess(process tools.BackgroundProcess) bool {
+	if process.ID == "" || process.StartedAt.IsZero() {
+		return false
+	}
+	switch process.State {
+	case tools.BackgroundProcessRunning:
+		return process.FinishedAt.IsZero()
+	case tools.BackgroundProcessCompleted, tools.BackgroundProcessStopped, tools.BackgroundProcessFailed:
+		return !process.FinishedAt.IsZero()
+	default:
+		return false
+	}
+}
+
 func (c *Client) decodeSessionEvent(raw json.RawMessage) (Event, error) {
 	var head struct {
 		Type string `json:"type"`
@@ -1310,6 +1339,21 @@ func (c *Client) decodeSessionEvent(raw json.RawMessage) (Event, error) {
 	event := factory()
 	if err := json.Unmarshal(raw, event); err != nil {
 		return nil, err
+	}
+	if processes, ok := event.(*BackgroundProcessesEvent); ok {
+		if processes.SessionID == "" {
+			return nil, errors.New("invalid background process event identity")
+		}
+		seen := make(map[string]struct{}, len(processes.Processes))
+		for _, process := range processes.Processes {
+			if process.SessionID != processes.SessionID || !validBackgroundProcess(process) {
+				return nil, errors.New("invalid background process event identity")
+			}
+			if _, duplicate := seen[process.ID]; duplicate {
+				return nil, errors.New("duplicate background process event identity")
+			}
+			seen[process.ID] = struct{}{}
+		}
 	}
 	return event, nil
 }

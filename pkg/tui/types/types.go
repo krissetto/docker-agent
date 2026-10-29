@@ -92,7 +92,10 @@ type Message struct {
 	ReportOutcome  session.ReportOutcome
 	InputReference lifecycle.InputReference
 	// ReceivedBody retains the delivered payload, not a fetched subagent transcript.
-	ReceivedBody   string
+	ReceivedBody string
+	// DisplayContent is presentation-only user text. Content remains canonical for copy/edit/branch.
+	DisplayContent string
+	Attachments    []UserAttachment
 	Type           MessageType
 	Content        string
 	Sender         string                // Agent name for assistant messages
@@ -159,6 +162,8 @@ func Input(input *session.Message) *Message {
 	msg := &Message{Type: MessageTypeUser, TurnID: input.TurnID, Pending: input.Pending}
 	if input.InputOrigin != session.InputOriginRuntime {
 		msg.Content = strings.ReplaceAll(input.Message.Content, "\t", "    ")
+		msg.DisplayContent, msg.Attachments = ProjectUserAttachments(input.Message.Content, input.Message.MultiContent)
+		msg.DisplayContent = strings.ReplaceAll(msg.DisplayContent, "\t", "    ")
 	}
 	msg.InputOrigin, msg.InputMode = input.InputOrigin, input.InputMode
 	msg.SenderID, msg.SenderName = input.SenderID, input.SenderName

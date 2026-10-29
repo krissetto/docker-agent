@@ -92,6 +92,27 @@ func ParseSidebarInfoMode(raw string) SidebarInfoMode {
 	return InfoModeCompact
 }
 
+// VisibleReplies controls how many regular assistant replies remain visible.
+type VisibleReplies string
+
+const (
+	VisibleRepliesLatest VisibleReplies = "latest"
+	VisibleRepliesThree  VisibleReplies = "3"
+	VisibleRepliesFive   VisibleReplies = "5"
+	VisibleRepliesAll    VisibleReplies = "all"
+)
+
+// ParseVisibleReplies normalizes configured values, defaulting to the latest
+// three replies.
+func ParseVisibleReplies(raw string) VisibleReplies {
+	switch VisibleReplies(raw) {
+	case VisibleRepliesLatest, VisibleRepliesThree, VisibleRepliesFive, VisibleRepliesAll:
+		return VisibleReplies(raw)
+	default:
+		return VisibleRepliesThree
+	}
+}
+
 // GitDiffLayout selects the default layout for Git review diffs.
 type GitDiffLayout string
 
@@ -119,23 +140,23 @@ type LayoutSettings struct {
 	// ActiveAgentsOnly filters the sidebar's Agents roster to agents active
 	// in the current session. Presentation-only: agent cycling and switching
 	// still address the full team.
-	ActiveAgentsOnly bool
-	HideSessionPath  bool
-	HideUsage        bool
-	HideAgents       bool
-	HideTools        bool
-	HideTodos        bool
+	ActiveAgentsOnly       bool
+	HideSessionPath        bool
+	HideUsage              bool
+	HideAgents             bool
+	HideTools              bool
+	HideTodos              bool
+	AlignInputWithMessages bool
 }
 
-// SendMode identifies what happens to a plain send while the agent is
-// working: queued for a later turn or steered into the ongoing stream.
+// SendMode is the legacy persisted preference retained for compatibility.
+// TUI composer key routing is explicit and does not depend on this value.
 type SendMode string
 
 const (
-	// SendModeSteer injects busy sends into the ongoing stream so the agent
-	// picks them up mid-turn.
+	// SendModeSteer is the legacy mode value for compatibility.
 	SendModeSteer SendMode = "steer"
-	// SendModeQueue holds busy sends until the current turn ends. This is the default.
+	// SendModeQueue is the legacy default mode value for compatibility.
 	SendModeQueue SendMode = "queue"
 )
 
@@ -254,6 +275,9 @@ type Preferences struct {
 	SplitDiffView         bool
 	GitDiffLayout         GitDiffLayout
 	ExpandThinking        bool
+	CompactWorkLog        bool
+	ShowAgentContext      bool
+	VisibleReplies        VisibleReplies
 	HideToolResults       bool
 	RenderImages          bool
 	ShowBanner            bool

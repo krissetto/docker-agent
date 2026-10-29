@@ -12,7 +12,6 @@ var BuiltinToolsets = []BuiltinToolsetInfo{
 	builtinToolset("a2a", "a2a", "Connect to remote agents via the Agent-to-Agent (A2A) protocol"),
 	builtinToolset("api", "api", "Create custom tools that call HTTP APIs"),
 	builtinToolset("background_agents", "background-agents", "Dispatch work to sub-agents concurrently and collect results"),
-	builtinToolset("background_jobs", "background-jobs", "Run and manage long-running shell commands"),
 	builtinToolset("environment", "environment", "Report the OS and resolved shell (read-only, no arguments)"),
 	builtinToolset("fetch", "fetch", "Read content from HTTP/HTTPS URLs"),
 	builtinToolset("file", "file", "Read, write, and edit individual files"),

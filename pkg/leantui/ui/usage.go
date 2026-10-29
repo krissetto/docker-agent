@@ -32,13 +32,21 @@ func (u *UsageTracker) Reset() {
 	u.stack = nil
 }
 
+// BindRoot fixes the footer's root to the attached session so that a child's
+// usage or stream arriving first cannot become the root.
+func (u *UsageTracker) BindRoot(sessionID string) {
+	if sessionID != "" {
+		u.rootSessionID = sessionID
+	}
+}
+
 // StreamStarted pushes a newly-started session onto the active stack, adopting
-// the first one as the root session.
+// the first one as the root session unless a root is already bound.
 func (u *UsageTracker) StreamStarted(sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	if len(u.stack) == 0 {
+	if len(u.stack) == 0 && u.rootSessionID == "" {
 		u.rootSessionID = sessionID
 	}
 	u.stack = append(u.stack, sessionID)

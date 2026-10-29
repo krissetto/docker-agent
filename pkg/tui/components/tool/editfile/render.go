@@ -2,6 +2,7 @@ package editfile
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -309,6 +310,9 @@ func chromaToLipgloss(tokenType chroma.TokenType, style *chroma.Style) lipgloss.
 
 	if entry.Colour.IsSet() {
 		lipStyle = lipStyle.Foreground(lipgloss.Color(entry.Colour.String()))
+	}
+	if tokenType == chroma.Error && entry.Background.IsSet() {
+		lipStyle = lipStyle.Background(lipgloss.Color(entry.Background.String()))
 	}
 	if entry.Bold == chroma.Yes {
 		lipStyle = lipStyle.Bold(true)
@@ -670,19 +674,38 @@ func renderTokensWithStyle(tokens []chromaToken, lineStyle lipgloss.Style, kind 
 
 	emph := emphasisStyleFor(kind)
 	for _, token := range tokens {
+		hasTokenBackground := !isNoColor(token.Style.GetBackground())
 		if token.Emphasized && (kind == udiff.Delete || kind == udiff.Insert) {
-			// Keep the chroma foreground so syntax colors carry through into
-			// the emphasized block, but override the background with the
-			// stronger emphasis tint and add bold for extra weight.
+			// Diff emphasis outranks token backgrounds; error tokens also use
+			// the diff foreground so their semantic background stays readable.
 			style := token.Style.Background(emph.GetBackground()).Bold(true)
+			if hasTokenBackground {
+				style = style.Foreground(lineStyle.GetForeground())
+			}
 			output.WriteString(style.Render(token.Text))
 			continue
 		}
-		style := token.Style.Background(lineStyle.GetBackground())
+		style := token.Style
+		if kind == udiff.Delete || kind == udiff.Insert {
+			style = style.Background(lineStyle.GetBackground())
+			if hasTokenBackground {
+				style = style.Foreground(lineStyle.GetForeground())
+			}
+		} else if !hasTokenBackground {
+			style = style.Background(lineStyle.GetBackground())
+		}
 		output.WriteString(style.Render(token.Text))
 	}
 
 	return output.String()
+}
+
+func isNoColor(c color.Color) bool {
+	if c == nil {
+		return true
+	}
+	_, ok := c.(lipgloss.NoColor)
+	return ok
 }
 
 func padToWidth(content string, width int, style lipgloss.Style) string {

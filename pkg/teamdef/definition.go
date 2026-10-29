@@ -18,25 +18,26 @@ import (
 const DefinitionFormatVersion = 1
 
 type AgentDefinition struct {
-	FormatVersion  int                  `json:"format_version"`
-	TeamID         string               `json:"team_id"`
-	AgentID        string               `json:"agent_id"`
-	AgentKey       string               `json:"agent_key"`
-	Name           string               `json:"name"`
-	Description    string               `json:"description,omitempty"`
-	WelcomeMessage string               `json:"welcome_message,omitempty"`
-	Instruction    string               `json:"instruction,omitempty"`
-	Model          string               `json:"model,omitempty"`
-	Safety         string               `json:"safety,omitempty"`
-	ReadOnly       bool                 `json:"readonly,omitempty"`
-	MaxIterations  int                  `json:"max_iterations,omitempty"`
-	Harness        string               `json:"harness,omitempty"`
-	Toolsets       []ToolsetDefinition  `json:"toolsets,omitempty"`
-	SubAgents      []string             `json:"sub_agents,omitempty"`
-	Subagents      []latest.SubagentRef `json:"subagents,omitempty"`
-	Handoffs       []string             `json:"handoffs,omitempty"`
-	ForceHandoff   string               `json:"force_handoff,omitempty"`
-	Unavailable    []string             `json:"unavailable,omitempty"`
+	FormatVersion  int                          `json:"format_version"`
+	TeamID         string                       `json:"team_id"`
+	AgentID        string                       `json:"agent_id"`
+	AgentKey       string                       `json:"agent_key"`
+	Name           string                       `json:"name"`
+	Description    string                       `json:"description,omitempty"`
+	WelcomeMessage string                       `json:"welcome_message,omitempty"`
+	Instruction    string                       `json:"instruction,omitempty"`
+	Model          string                       `json:"model,omitempty"`
+	Safety         string                       `json:"safety,omitempty"`
+	ReadOnly       bool                         `json:"readonly,omitempty"`
+	MaxIterations  int                          `json:"max_iterations,omitempty"`
+	Harness        string                       `json:"harness,omitempty"`
+	Toolsets       []ToolsetDefinition          `json:"toolsets,omitempty"`
+	SubAgents      []string                     `json:"sub_agents,omitempty"`
+	Subagents      []latest.SubagentRef         `json:"subagents,omitempty"`
+	SubagentAccess *latest.SubagentAccessConfig `json:"subagent_access,omitempty"`
+	Handoffs       []string                     `json:"handoffs,omitempty"`
+	ForceHandoff   string                       `json:"force_handoff,omitempty"`
+	Unavailable    []string                     `json:"unavailable,omitempty"`
 }
 
 // ToolsetDefinition contains only useful non-credential authored fields.

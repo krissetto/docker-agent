@@ -196,7 +196,7 @@ func TestValidActions(t *testing.T) {
 	assert.Len(t, actions, 14)
 }
 
-func TestBuildKeysHelpFallbackAndReservedFollowup(t *testing.T) {
+func TestBuildKeysHelpFallbackAndReservedSteeringKey(t *testing.T) {
 	t.Parallel()
 	keys := buildKeys(&userconfig.Settings{Keybindings: []userconfig.Keybinding{
 		{Action: "help", Keys: []string{"f7"}},

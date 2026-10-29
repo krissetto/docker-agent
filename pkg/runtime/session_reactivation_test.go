@@ -106,6 +106,7 @@ func TestStoppedSessionViewManualReactivation(t *testing.T) {
 				assert.Len(t, observation.Initial[0].Session.OwnMessages(), 2)
 				observation.Cancel()
 				assert.True(t, handle.(*sessionHandle).driver.isStopped())
+				assert.True(t, handle.(*sessionHandle).driver.Status().Stopped)
 				assert.False(t, handle.(*sessionHandle).driver.WakePending())
 			}
 			target := openStoppedView(t, owner, "target")
@@ -151,6 +152,7 @@ func TestStoppedSessionViewManualReactivation(t *testing.T) {
 			restored := openStoppedView(t, owner2, "target")
 			assert.False(t, restored.(*sessionHandle).driver.isStopped())
 			assert.True(t, restored.(*sessionHandle).driver.Status().Dormant)
+			assert.False(t, restored.(*sessionHandle).driver.Status().Stopped)
 			records, err = store.LoadChildren(t.Context(), "root")
 			require.NoError(t, err)
 			require.Len(t, records, 3)

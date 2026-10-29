@@ -10,7 +10,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -47,14 +49,30 @@ func TestSingleVisiblePaneHasNoHeaderAndFirstRowRoutesToTranscript(t *testing.T)
 	}
 }
 
-func TestSinglePaneDormancyAndPauseUseExistingNoticeSeam(t *testing.T) {
+func TestSinglePanePassiveStatesUseExistingNoticeSeam(t *testing.T) {
 	root := splitTestRoot(t)
-	root.composingPaneStatuses = map[string]runtime.SessionStatus{"profile": {Dormant: true}}
-	require.Contains(t, ansi.Strip(root.renderMessageBar()), "Restored · paused · /resume")
-	require.NotContains(t, ansi.Strip(root.composePanes()), "Restored")
+	for _, test := range []struct {
+		name   string
+		status runtime.SessionStatus
+		want   string
+	}{
+		{name: "dormant", status: runtime.SessionStatus{Dormant: true}, want: "Restored · dormant · message or /resume"},
+		{name: "stopped", status: runtime.SessionStatus{Stopped: true}, want: "· stopped"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root.composingPaneStatuses = map[string]runtime.SessionStatus{"profile": test.status}
+			require.Contains(t, ansi.Strip(root.renderMessageBar()), test.want)
+			require.NotContains(t, ansi.Strip(root.composePanes()), test.want)
+		})
+	}
 	root.composingPaneStatuses = nil
+	root.supervisor.GetRunner("second").App = app.New(t.Context(), nil, session.New(session.WithID("second")), runtime.SessionBinding{}, app.WithReadOnly())
+	root.handleSwitchTab("second")
+	require.Contains(t, ansi.Strip(root.renderMessageBar()), "· read-only")
+	require.NotContains(t, ansi.Strip(root.renderMessageBar()), "/resume")
+	root.handleSwitchTab("profile")
 	root.sessionState.SetPauseState(service.PausePaused)
-	require.Contains(t, ansi.Strip(root.renderMessageBar()), "paused")
+	require.Contains(t, ansi.Strip(root.renderMessageBar()), "⏸ paused")
 	require.Zero(t, root.ar.ActiveCount(), "passive truth acquires no lease")
 }
 

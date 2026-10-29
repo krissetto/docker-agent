@@ -80,10 +80,12 @@ private struct AttachmentChip: View {
 }
 
 /// Paperclip menu: Photos and Files (paste/drop are handled by the composer).
+/// The composer's one leading menu: everything that adds to a message lives here, so the field keeps its width.
 struct AttachmentMenu: View {
     let allowedTypes: [UTType]
     let addFiles: ([URL]) -> Void
     let addPhoto: (Data, _ name: String, _ mimeType: String) -> Void
+    var openPrompts: (() -> Void)? = nil
 
     @State private var importing = false
     @State private var photoItems: [PhotosPickerItem] = []
@@ -93,14 +95,22 @@ struct AttachmentMenu: View {
         Menu {
             Button("Photos…", systemImage: "photo.on.rectangle") { pickingPhotos = true }
             Button("Files…", systemImage: "doc") { importing = true }
+            if let openPrompts {
+                Divider()
+                Button("Prompts & Skills…", systemImage: "sparkles", action: openPrompts)
+            }
         } label: {
-            Image(systemName: "paperclip").font(.title3)
+            Image(systemName: "plus.circle.fill")
+                .font(.title2)
+                .symbolRenderingMode(.hierarchical)
+                .frame(width: Metrics.target, height: Metrics.target)
+                .contentShape(.rect)
         }
         .menuStyle(.button)
         .buttonStyle(.borderless)
         .menuIndicator(.hidden)
         .fixedSize()
-        .accessibilityLabel("Attach")
+        .accessibilityLabel(openPrompts == nil ? "Attach" : "Attach or insert a prompt")
         .fileImporter(isPresented: $importing, allowedContentTypes: allowedTypes, allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { addFiles(urls) }
         }

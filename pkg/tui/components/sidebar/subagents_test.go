@@ -26,6 +26,7 @@ func newSubagentTestModel(t *testing.T) *model {
 	m := New(animation.NewRuntime(), t.Context(), &service.SessionState{}).(*model)
 	m.treeCollapsed = false // These tests exercise expanded descendant rows.
 	m.subagentSpinner = &fakeSpinner{m.subagentSpinner}
+	m.SetAgentContextReadings(true) // readings are off by default; these fixtures assert them
 	return m
 }
 
@@ -459,6 +460,7 @@ func TestSubagentsInfoRendersBranchGuides(t *testing.T) {
 			}},
 		}},
 	})
+	testOpenAllSubagentBranches(m)
 
 	out := ansi.Strip(m.subagentsInfo(60))
 	lines := strings.Split(out, "\n")
@@ -506,9 +508,9 @@ func TestSubagentsInfoTruncatesDeepRowsWithoutWrapping(t *testing.T) {
 
 	assert.LessOrEqual(t, lipgloss.Width(line), 24)
 	assert.NotContains(t, line, "\n")
-	assert.Contains(t, line, "planner-with-a-ver", "idle rows use the freed glyph space for the name")
+	assert.True(t, strings.HasPrefix(line, "│││││││└"), "the row preserves every hierarchy connector before truncating the name: %q", line)
+	assert.Contains(t, line, "plan", "the display name uses only the cells remaining after its hierarchy prefix")
 	assert.NotContains(t, line, "○", "idle rows do not render a state glyph")
-	assert.NotContains(t, line, "│", "indentation recedes before the name truncates")
 	assert.Contains(t, line, "idle", "status stays on the right when possible")
 }
 

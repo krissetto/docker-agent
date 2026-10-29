@@ -8,7 +8,7 @@ extension SessionState {
         case .queued: "Queued"
         case .cancelling: "Stopping"
         case .running: "Running"
-        case .waiting: "Waiting for you"
+        case .waiting: "Waiting"
         case .settled: "Done"
         case .failed: "Failed"
         case .unknown: "Unknown"
@@ -21,7 +21,7 @@ extension SessionState {
         case .queued: "tray.and.arrow.down"
         case .cancelling: "stop.circle"
         case .running: "circle.dotted.circle"
-        case .waiting: "hand.raised.fill"
+        case .waiting: "hourglass"
         case .failed: "exclamationmark.triangle.fill"
         case .unknown: "questionmark.circle"
         }
@@ -30,7 +30,6 @@ extension SessionState {
     var tint: Color {
         switch self {
         case .running: .accentColor
-        case .waiting: .orange
         case .failed: .red
         default: .secondary
         }
@@ -72,6 +71,15 @@ struct StateIcon: View {
     }
 }
 
+/// A person is needed: only drawn when the server reported a reason (interaction, pending input, error).
+struct NeedsYouIcon: View {
+    var body: some View {
+        Image(systemName: "hand.raised.fill")
+            .foregroundStyle(Palette.signal)
+            .accessibilityLabel("Needs you")
+    }
+}
+
 struct HealthDot: View {
     let state: ConnectionState
 
@@ -91,8 +99,9 @@ struct ConnectionStatusView: View {
         HStack(spacing: Metrics.xs) {
             HealthDot(state: state)
             Text(state.label)
-            if state != .live, let when = Format.relative(refreshedAt) {
-                Text("· \(when)").foregroundStyle(.secondary)
+            if state != .live, let age = Format.age(refreshedAt) {
+                Text(age).font(.figureSmall).foregroundStyle(.secondary)
+                    .accessibilityLabel("last seen \(Format.relative(refreshedAt) ?? age)")
             }
         }
         .font(.caption)

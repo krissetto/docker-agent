@@ -8,6 +8,13 @@ LDFLAGS="-X \"github.com/docker/docker-agent/pkg/version.Version=${GIT_TAG}\" -X
 
 BINARY_NAME="docker-agent"
 case "$OSTYPE" in
+  darwin*)
+    if [ -z "${SDKROOT:-}" ]; then
+      # Keep CGO's SDK aligned with the selected Apple toolchain.
+      SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+      export SDKROOT
+    fi
+    ;;
   msys*|cygwin*) BINARY_NAME="${BINARY_NAME}.exe" ;;
 esac
 

@@ -82,3 +82,33 @@ func TestExtractAttachmentsFromSession(t *testing.T) {
 	assert.Empty(t, attachments[2].Data)
 	assert.Empty(t, attachments[2].MimeType)
 }
+
+func TestExtractAttachmentsPreservesStoredPayloadWithoutRestoringPaths(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	p := newTestChatPage(t)
+	p.app = app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(queueTestRuntime{}))
+	bigData := make([]byte, 21<<20)
+	bigData[0], bigData[len(bigData)-1] = 1, 2
+	msg := session.Message{InputOrigin: session.InputOriginUser, Message: chat.Message{
+		Role: chat.MessageRoleUser, Content: "Inspect @/deleted/large.bin",
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "large.bin", MimeType: "application/octet-stream", Source: chat.DocumentSource{InlineData: bigData}}},
+			{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "small.txt", MimeType: "text/plain", Source: chat.DocumentSource{InlineText: "saved text"}}},
+			{Type: chat.MessagePartTypeFile, File: &chat.MessageFile{Path: "/remote/or/deleted/old.pdf", MimeType: "application/pdf"}},
+			{Type: chat.MessagePartTypeText, Text: "Contents of legacy.txt: legacy stored"},
+		},
+	}}
+	sess.Messages = append(sess.Messages, session.Item{Message: &msg})
+	attachments := p.extractAttachmentsFromSession(0)
+	require.Len(t, attachments, 3)
+	assert.Equal(t, bigData, attachments[0].Data, "editing retains canonical binary bytes even above preview limits")
+	assert.Empty(t, attachments[0].FilePath)
+	assert.Equal(t, "saved text", attachments[1].Content)
+	assert.Empty(t, attachments[1].FilePath, "inline content is authoritative; never re-read its source path")
+	assert.Equal(t, "legacy stored", attachments[2].Content)
+	for _, attachment := range attachments {
+		assert.Empty(t, attachment.FilePath, "editing history never authorizes a source-path read")
+	}
+}

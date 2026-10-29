@@ -54,6 +54,7 @@ type Agent struct {
 	fallbackCooldown        time.Duration                       // Duration to stick with fallback after non-retryable error
 	titleModel              provider.Provider                   // Optional dedicated model for session-title generation
 	compactionModel         provider.Provider                   // Optional dedicated model for session compaction (summary generation)
+	compactionPrompt        string                              // Optional replacement user prompt for session compaction
 	compactionThreshold     float64                             // Custom proactive-compaction trigger fraction; 0 means "use the default"
 	sessionCompactionOff    bool                                // True when the agent opted out of automatic session compaction
 	modelOverrides          atomic.Pointer[[]provider.Provider] // Optional model override(s) set at runtime (supports alloy)
@@ -434,6 +435,12 @@ func (a *Agent) TitleModels(ctx context.Context) []provider.Provider {
 // configured compaction model after the conversation model has been changed.
 func (a *Agent) CompactionModel() provider.Provider {
 	return a.compactionModel
+}
+
+// CompactionPrompt returns the replacement user prompt for session compaction,
+// or an empty string when the built-in prompt should be used.
+func (a *Agent) CompactionPrompt() string {
+	return a.compactionPrompt
 }
 
 // CompactionThreshold returns the configured fraction of the context window

@@ -18,7 +18,7 @@ func TestBoundToolMessagesPreservesHistoryAndPairing(t *testing.T) {
 	media := &chat.MessageImageURL{URL: "data:image/png;base64,aGVsbG8="}
 	msgs := []chat.Message{
 		{Role: chat.MessageRoleUser, Content: payload},
-		{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "logs"}}}, ToolDefinitions: []tools.Tool{{Name: "logs", Category: "background_jobs"}}},
+		{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "logs"}}}, ToolDefinitions: []tools.Tool{{Name: "logs", Category: "shell"}}},
 		{Role: chat.MessageRoleTool, ToolCallID: "call", IsError: true, Content: payload, MultiContent: []chat.MessagePart{{Type: chat.MessagePartTypeText, Text: payload}, {Type: chat.MessagePartTypeImageURL, ImageURL: media}}},
 		{Role: chat.MessageRoleTool, ToolCallID: "unknown", Content: payload},
 	}

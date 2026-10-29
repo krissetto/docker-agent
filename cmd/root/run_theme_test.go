@@ -1,6 +1,8 @@
 package root
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -90,5 +92,45 @@ func TestApplyThemePrecedence(t *testing.T) {
 		applyTheme("nord")
 		assert.Equal(t, "nord", styles.CurrentTheme().Ref)
 		assert.False(t, styles.AutoThemeEnabled())
+	})
+}
+
+// Not parallel: mutates the process-global applied theme and user config dir.
+func TestDockerNextThemeSelectionAndOldSchoolCompatibility(t *testing.T) {
+	dir := t.TempDir()
+	paths.SetConfigDir(dir)
+	original := styles.CurrentTheme()
+	prevDark := styles.TerminalIsDark()
+	prevEnabled := styles.AutoThemeEnabled()
+	t.Cleanup(func() {
+		paths.SetConfigDir("")
+		styles.ApplyTheme(original)
+		styles.SetTerminalDark(prevDark)
+		styles.SetAutoThemeEnabled(prevEnabled)
+	})
+
+	for _, ref := range []string{styles.DefaultThemeRef, styles.DockerNextLightThemeRef, styles.LegacyDefaultThemeRef} {
+		require.NoError(t, validateTheme(ref), ref)
+	}
+
+	t.Run("unset config applies Docker Next Dark", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("settings:\n  show_banner: false\n"), 0o600))
+		applyTheme("")
+		assert.Equal(t, "docker-next-dark", styles.CurrentTheme().Ref)
+		assert.Equal(t, "Docker Next - Dark", styles.CurrentTheme().Name)
+	})
+
+	t.Run("saved default stays Old School", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("settings:\n  theme: default\n"), 0o600))
+		applyTheme("")
+		assert.Equal(t, "default", styles.CurrentTheme().Ref)
+		assert.Equal(t, "Old School", styles.CurrentTheme().Name)
+	})
+
+	t.Run("--theme overrides a saved Old School choice", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("settings:\n  theme: default\n"), 0o600))
+		applyTheme(styles.DockerNextLightThemeRef)
+		assert.Equal(t, "docker-next-light", styles.CurrentTheme().Ref)
+		assert.Equal(t, "Docker Next - Light", styles.CurrentTheme().Name)
 	})
 }

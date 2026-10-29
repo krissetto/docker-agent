@@ -189,6 +189,7 @@ func (d *todosDialog) pruneHover() {
 }
 
 func (d *todosDialog) StopAnimations() {
+	d.BaseDialog.StopAnimations()
 	d.hoverAnimation.Stop()
 	d.hover, d.hovered, d.pointerKnown = nil, "", false
 	d.MarkVisualDirty()

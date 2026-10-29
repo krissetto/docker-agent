@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,11 +93,12 @@ func (s *boundaryStream) Recv() (chat.MessageStreamResponse, error) {
 func (*boundaryStream) Close() {}
 
 type boundaryFrameProbe struct {
-	root    *appModel
-	mu      sync.Mutex
-	frame   string
-	stops   int
-	updated chan struct{}
+	root        *appModel
+	mu          sync.Mutex
+	frame       string
+	stops       int
+	partialSeen bool
+	updated     chan struct{}
 }
 
 func (p *boundaryFrameProbe) Init() tea.Cmd { return p.root.Init() }
@@ -105,6 +107,11 @@ func (p *boundaryFrameProbe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	p.root = next.(*appModel)
 	if routed, ok := msg.(messages.RoutedMsg); ok {
 		if event, ok := routed.Inner.(messages.SessionRuntimeEventMsg); ok {
+			if _, ok := event.Event.(*runtime.PartialToolCallEvent); ok {
+				p.mu.Lock()
+				p.partialSeen = true
+				p.mu.Unlock()
+			}
 			if _, ok := event.Event.(*runtime.StreamStoppedEvent); ok {
 				p.mu.Lock()
 				p.stops++
@@ -150,12 +157,15 @@ func TestActualFullTUICommittedAssistantBoundaries(t *testing.T) {
 	for _, variant := range []struct {
 		name                                 string
 		reasoning, steering, partial, replay bool
+		mode                                 string
 	}{
 		{name: "content"},
 		{name: "reasoning-content", reasoning: true},
 		{name: "steer-content", steering: true},
-		{name: "steer-partial", steering: true, partial: true},
-		{name: "steer-reasoning-partial", steering: true, partial: true, reasoning: true},
+		{name: "steer-partial", steering: true, partial: true, mode: "noncompact"},
+		{name: "steer-partial-compact", steering: true, partial: true, mode: "compact"},
+		{name: "steer-reasoning-partial", steering: true, partial: true, reasoning: true, mode: "noncompact"},
+		{name: "steer-reasoning-partial-compact", steering: true, partial: true, reasoning: true, mode: "compact"},
 		{name: "replay-content", replay: true},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
@@ -174,13 +184,29 @@ func TestActualFullTUICommittedAssistantBoundaries(t *testing.T) {
 				require.NoError(t, owner.Shutdown(ctx))
 			}()
 			sess := session.New(session.WithID("boundary"), session.WithAgentName("root"), session.WithTitle("boundary"), session.WithNonInteractive(true), session.WithToolsApproved(true))
-			require.NoError(t, store.AddSession(t.Context(), sess))
+			handle, err := owner.Runtime().CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
+			require.NoError(t, err)
+			sess, err = store.GetSession(t.Context(), sess.ID)
+			require.NoError(t, err)
+			require.False(t, handle.Metadata().Historical, "fixture must be a live session")
+			require.True(t, handle.Metadata().ExecutionAvailable, "fixture must execute turns")
 			sessions := owner.Runtime()
 			if variant.replay {
 				sessions = &boundaryReplayRuntime{SessionRuntime: sessions}
 			}
 			a := app.New(t.Context(), sessions, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt))
 			root := New(t.Context(), nil, a, t.TempDir(), nil).(*appModel)
+			if variant.mode != "" {
+				setter, ok := root.chatPage.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd })
+				require.True(t, ok, "chat page exposes the compact Work mode")
+				setter.SetCompactWorkLog(variant.mode == "compact")
+				// Replacement pages (createSessionComponents) read the root field, not the chat page.
+				root.compactWorkLog = variant.mode == "compact"
+			}
+			if variant.replay {
+				_, wrapped := a.SessionHandle().(*boundaryReplayHandle)
+				require.True(t, wrapped, "app must bind the replay wrapper handle")
+			}
 			probe := &boundaryFrameProbe{root: root, updated: make(chan struct{}, 1)}
 			program := tea.NewProgram(probe, tea.WithContext(t.Context()), tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithWindowSize(120, 40))
 			root.SetProgram(program)
@@ -198,10 +224,15 @@ func TestActualFullTUICommittedAssistantBoundaries(t *testing.T) {
 				root.ar.Stop()
 			}()
 			program.Send(messages.SendMsg{Content: "capture a background callback"})
+			if variant.replay {
+				require.Eventually(t, func() bool { return sessions.(*boundaryReplayRuntime).observed.Load() > 0 }, 6*time.Second, 10*time.Millisecond, "app must observe through the replay wrapper")
+			}
 			stops := 2
 			if variant.steering {
 				probe.await(t, 0, "staff meeting.")
-				if variant.partial {
+				if variant.partial && variant.mode == "compact" {
+					awaitCompactPartialHidden(t, probe)
+				} else if variant.partial {
 					probe.await(t, 0, "orphan_partial")
 				}
 				_, err = a.SessionHandle().Steer(t.Context(), runtime.TurnInput{Content: "continue separately"})
@@ -212,6 +243,11 @@ func TestActualFullTUICommittedAssistantBoundaries(t *testing.T) {
 			}
 			require.NoError(t, err)
 			frame := probe.await(t, stops, "elly.")
+			if variant.replay {
+				replay := sessions.(*boundaryReplayRuntime)
+				require.Equal(t, int32(1), replay.disconnects.Load(), "exactly one root AgentChoice must disconnect the primary observation")
+				require.Positive(t, replay.resumes.Load(), "app must resume with Since and the primary epoch")
+			}
 			assert.NotContains(t, frame, "orphan_partial", "aborted partial tool must retire")
 			snapshot, err := a.SessionHandle().Snapshot(t.Context())
 			require.NoError(t, err)
@@ -231,14 +267,30 @@ func TestActualFullTUICommittedAssistantBoundaries(t *testing.T) {
 
 // Disconnect one genuine runtime observation after a chunk; the ordinary App
 // adapter must reconnect from its cursor and consume the owner's retained replay.
-type boundaryReplayRuntime struct{ runtime.SessionRuntime }
+type boundaryReplayRuntime struct {
+	runtime.SessionRuntime
+
+	observed    atomic.Int32
+	disconnects atomic.Int32
+	resumes     atomic.Int32
+
+	mu           sync.Mutex
+	primaryEpoch string
+}
+
+func (r *boundaryReplayRuntime) wrap(h runtime.SessionHandle) runtime.SessionHandle {
+	if h == nil {
+		return nil
+	}
+	return &boundaryReplayHandle{SessionHandle: h, owner: r}
+}
 
 func (r *boundaryReplayRuntime) SessionByID(id string) (runtime.SessionHandle, error) {
 	h, err := r.SessionRuntime.SessionByID(id)
 	if err != nil {
 		return nil, err
 	}
-	return &boundaryReplayHandle{SessionHandle: h}, nil
+	return r.wrap(h), nil
 }
 
 func (r *boundaryReplayRuntime) CreateSession(ctx context.Context, s *session.Session, b runtime.SessionBinding) (runtime.SessionHandle, error) {
@@ -246,28 +298,45 @@ func (r *boundaryReplayRuntime) CreateSession(ctx context.Context, s *session.Se
 	if err != nil {
 		return nil, err
 	}
-	return &boundaryReplayHandle{SessionHandle: h}, nil
+	return r.wrap(h), nil
 }
 
 type boundaryReplayHandle struct {
 	runtime.SessionHandle
+	owner *boundaryReplayRuntime
 
 	mu           sync.Mutex
 	disconnected bool
 }
 
 func (h *boundaryReplayHandle) Observe(ctx context.Context, opts runtime.ObserveOptions) (runtime.Observation, error) {
+	h.owner.observed.Add(1)
 	if opts.Tree {
-		return runtime.Observation{}, runtime.ErrUnsupported
+		// Tree topology is outside the replay contract: pass it through so the
+		// app's tree bridge sees the same capability as the ordinary variants.
+		return h.SessionHandle.Observe(ctx, opts)
 	}
 	observation, err := h.SessionHandle.Observe(ctx, opts)
 	if err != nil {
 		return observation, err
 	}
+	if opts.Since != nil && opts.SinceEpoch != "" {
+		h.owner.mu.Lock()
+		primary := h.owner.primaryEpoch
+		h.owner.mu.Unlock()
+		if opts.SinceEpoch == primary {
+			h.owner.resumes.Add(1)
+		}
+	}
 	h.mu.Lock()
 	disconnect := !h.disconnected
 	h.disconnected = true
 	h.mu.Unlock()
+	if disconnect {
+		h.owner.mu.Lock()
+		h.owner.primaryEpoch = observation.Primary().Epoch
+		h.owner.mu.Unlock()
+	}
 	if !disconnect {
 		return observation, nil
 	}
@@ -288,7 +357,8 @@ func (h *boundaryReplayHandle) Observe(ctx context.Context, opts runtime.Observe
 				case <-ctx.Done():
 					return
 				}
-				if _, ok := event.Event.(*runtime.AgentChoiceEvent); ok {
+				if _, ok := event.Event.(*runtime.AgentChoiceEvent); ok && event.SessionID == h.ID() {
+					h.owner.disconnects.Add(1)
 					observation.Cancel()
 					return
 				}
@@ -297,4 +367,57 @@ func (h *boundaryReplayHandle) Observe(ctx context.Context, opts runtime.Observe
 	}()
 	observation.Events = out
 	return observation, nil
+}
+
+// awaitCompactPartialHidden is the compact-Work counterpart of the partial visibility wait:
+// the pending tool call is processed by the UI and stays inside the active collapsed Work
+// header until steering retires it. Noncompact variants keep the original visible wait.
+func awaitCompactPartialHidden(t *testing.T, probe *boundaryFrameProbe) {
+	t.Helper()
+	deadline := time.NewTimer(6 * time.Second)
+	defer deadline.Stop()
+	for {
+		probe.mu.Lock()
+		frame, seen := probe.frame, probe.partialSeen
+		probe.mu.Unlock()
+		if seen && strings.Contains(frame, "Working [+]") {
+			require.NotContains(t, frame, "orphan_partial", "pending partial tool must stay inside the collapsed Work group")
+			return
+		}
+		select {
+		case <-probe.updated:
+		case <-deadline.C:
+			t.Fatalf("compact partial never reached the collapsed Work header; frame:\n%s", frame)
+		}
+	}
+}
+
+// PrepareSessionView keeps the optional preparer capability that the ordinary
+// App open path requires, and wraps the committed handle so Observe reaches the
+// replay disconnect. Omitting it makes persisted sessions fail as unsupported.
+func (r *boundaryReplayRuntime) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	preparer, ok := r.SessionRuntime.(runtime.SessionViewPreparer)
+	if !ok {
+		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	prepared, err := preparer.PrepareSessionView(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return boundaryReplayPrepared{PreparedSessionView: prepared, owner: r}, nil
+}
+
+type boundaryReplayPrepared struct {
+	runtime.PreparedSessionView
+
+	owner *boundaryReplayRuntime
+}
+
+func (p boundaryReplayPrepared) Commit(ctx context.Context) (runtime.CommittedSessionView, error) {
+	committed, err := p.PreparedSessionView.Commit(ctx)
+	if err != nil {
+		return committed, err
+	}
+	committed.SessionHandle = p.owner.wrap(committed.SessionHandle)
+	return committed, nil
 }

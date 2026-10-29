@@ -83,26 +83,18 @@ func (l Label) Metadata() map[string]string {
 	return meta
 }
 
-// Canonical names of the builtin tools that execute the shell command
-// carried in their cmd argument. Duplicated here as string literals so
-// pkg/safety does not depend on pkg/tools/builtin; the names are part
-// of the user-facing wire protocol and a rename is caught by tests in
-// both packages.
-const (
-	ShellToolName         = "shell"
-	BackgroundJobToolName = "run_background_job"
-)
+// ShellToolName is the builtin tool that executes a shell command.
+const ShellToolName = "shell"
 
 // IsCommandTool reports whether toolName runs the shell command in its
 // cmd argument, and so must be classified by command text rather than
 // by annotation hints.
 func IsCommandTool(toolName string) bool {
-	return toolName == ShellToolName || toolName == BackgroundJobToolName
+	return toolName == ShellToolName
 }
 
-// LabelToolCall labels a tool call for the safety-mode table. Command
-// tools (see [IsCommandTool]) are classified by command text; every
-// other tool is labelled from its MCP annotation hints.
+// LabelToolCall labels a tool call for the safety-mode table. The shell
+// command is classified by command text; other tools use MCP annotation hints.
 func LabelToolCall(toolName string, args map[string]any, readOnlyHint, destructiveHint bool) Label {
 	if IsCommandTool(toolName) {
 		cmd, _ := CommandArg(args)
@@ -124,11 +116,10 @@ func LabelForHints(readOnlyHint, destructiveHint bool) Label {
 	}
 }
 
-// CommandArg extracts the shell command string from tool-call
-// arguments with the same precedence as the shell and background-job
-// handlers: a non-blank canonical "cmd" wins, otherwise the "command"
-// alias some models emit. Classifying anything else would label a
-// command the handler does not run.
+// CommandArg extracts the shell command string from tool-call arguments
+// with the same precedence as the shell handler: a non-blank canonical
+// "cmd" wins, otherwise the "command" alias some models emit. Classifying
+// anything else would label a command the handler does not run.
 func CommandArg(input map[string]any) (string, bool) {
 	cmd, hasCmd := input["cmd"].(string)
 	if hasCmd && strings.TrimSpace(cmd) != "" {

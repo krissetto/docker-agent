@@ -164,6 +164,7 @@ extension AppModel {
 
     private func removeLocalSessionState(_ ref: SessionRef) {
         streamTasks[ref]?.cancel(); streamTasks[ref] = nil; sessionLeases[ref] = nil
+        cancelOpeningSession(ref)
         openSessions[ref] = nil; sessionControls[ref] = nil; sessionControlMetadata[ref] = nil
         safetyBySession[ref] = nil; toolsBySession[ref] = nil; teamRosterBySession[ref] = nil; agentDetailsBySession[ref] = nil
         promptsBySession[ref] = nil; forkSkillsBySession[ref] = nil; contextBySession[ref] = nil; workspaceSnapshotsBySession[ref] = nil

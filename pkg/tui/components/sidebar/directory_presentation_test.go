@@ -64,7 +64,7 @@ func TestDirectoryPaletteAndAnimatedRevealAcrossThemes(t *testing.T) {
 
 			_, cmd = m.Update(tea.MouseMotionMsg{X: x, Y: y})
 			settlePlacement(t, m, cmd)
-			sameColor(styles.Brighten(styles.TextPrimary, .25), iconColor(width-5))
+			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-5))
 			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-2))
 			line := ansi.Strip(m.directoryRow(width))
 			assert.True(t, strings.HasSuffix(line, directoryCopyIcon+"  "+directoryIcon+" "))
@@ -82,7 +82,7 @@ func TestDirectoryPaletteAndAnimatedRevealAcrossThemes(t *testing.T) {
 			_, cmd = m.Update(tea.MouseMotionMsg{X: x + width - 2, Y: y})
 			settlePlacement(t, m, cmd)
 			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-5))
-			sameColor(styles.Brighten(styles.TextPrimary, .25), iconColor(width-2))
+			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-2))
 			settled := m.View()
 			cmd = advancePlacement(t, m, m.ClearSubagentHover())
 			assert.NotEqual(t, settled, m.View(), "exit follows the shared highlight before removing the glyphs")

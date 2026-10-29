@@ -91,11 +91,12 @@ func TestHandleCompactSession_UnsupportedRuntimeNotifies(t *testing.T) {
 
 	m, page := newCompactTestModel(t, session.New())
 
+	gen := m.metadataGeneration
 	_, cmd := m.Update(messages.CompactSessionMsg{SessionID: "child-1"})
 
 	assert.Empty(t, page.compactCalls)
 	require.NotNil(t, cmd)
-	msgs := collectMsgs(cmd)
+	msgs := filterMetadataRefresh(t, m, gen, collectMsgs(cmd))
 	require.Len(t, msgs, 1)
 	note, ok := msgs[0].(notification.ShowMsg)
 	require.True(t, ok, "expected a notification, got %T", msgs[0])

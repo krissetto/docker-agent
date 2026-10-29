@@ -21,7 +21,7 @@ func TestRootAcceptedResizeWorkIsViewportBounded(t *testing.T) {
 	var allocations []uint64
 	for _, history := range []int{200, 600} {
 		t.Run(strconv.Itoa(history), func(t *testing.T) {
-			root, _, _ := wallClockRoot(t, 120, 40)
+			root := deterministicRootFixture(t, 120, 40)
 			sess, _, _ := mixedHistorySession(history)
 			root.application.Session().Messages = sess.Messages
 			_ = root.chatPage.Init()
@@ -29,19 +29,35 @@ func TestRootAcceptedResizeWorkIsViewportBounded(t *testing.T) {
 			root.chatPage.ScrollToBottom()
 			root.viewCacheValid = false
 			_ = root.View()
+			// The fixture's ScrollToBottom reveal is a finite scrollbar lease; settle it
+			// through the real tick chain before any measurement.
+			settleRootAnimations(t, root)
 			stats, ok := root.chatPage.(resizeCacheReporter)
 			require.True(t, ok, "real chat must expose actual transcript render work")
-			_, _ = root.Update(tea.MouseClickMsg{X: 40, Y: root.contentHeight, Button: tea.MouseLeft})
+			// Press the exact composer separator row so the resize gesture is real drag capture.
+			separator := root.composerLayout().separatorTop
+			require.True(t, root.composerResizeHit(40, separator), "the press lands on the composer resize handle")
+			_, pressCmd := root.Update(tea.MouseClickMsg{X: 40, Y: separator, Button: tea.MouseLeft})
+			require.True(t, root.isDragging, "the press enters drag capture before the measured motions")
+			// Settle the press-started grip reveal, consuming the command the press returned.
+			settleRootAnimations(t, root, pressCmd)
+			// Commands returned during the measured window are collected, not executed, so
+			// the measurement is unchanged; they are driven after it so no tick is lost.
+			var deferred []tea.Cmd
 			resize := func(lines int) {
 				y := root.height - (lines - 1) - 1 - root.tabBar.Height() - root.editor.BannerHeight() - styles.EditorStyle.GetVerticalFrameSize() - 1 - root.messageBarHeight()
 				motion := tea.MouseMotionMsg{X: 40, Y: y, Button: tea.MouseLeft}
-				_, _ = root.Update(messages.PointerUpdateMsg{X: 40, Y: y, Motion: &motion})
+				_, cmd := root.Update(messages.PointerUpdateMsg{X: 40, Y: y, Motion: &motion})
+				deferred = append(deferred, cmd)
 			}
-			// Warm both viewport extents before measuring repeated height-only work.
+			// Warm both viewport extents, then settle the warmup's own commands (a warmup
+			// motion may start a grip lease) before the baseline stats and measurement.
 			resize(4)
 			_ = root.View()
 			resize(10)
 			_ = root.View()
+			settleRootAnimations(t, root, deferred...)
+			deferred = nil
 			rebuilds, misses, renders := stats.ResizeCacheStats()
 			var before, after goruntime.MemStats
 			goruntime.ReadMemStats(&before)
@@ -65,12 +81,18 @@ func TestRootAcceptedResizeWorkIsViewportBounded(t *testing.T) {
 			}
 			elapsed := time.Since(started)
 			goruntime.ReadMemStats(&after)
+			// The strict check reads the measured window itself: no release, no drained commands.
 			nextRebuilds, nextMisses, nextRenders := stats.ResizeCacheStats()
+			require.Zero(t, root.ar.ActiveCount(), "manual resizing owns no timer")
+			// Only now end the gesture and drive the deferred commands and release reveal.
+			_, releaseCmd := root.Update(tea.MouseReleaseMsg{X: 40, Y: -1, Button: tea.MouseLeft})
+			require.False(t, root.isDragging, "release ends drag capture")
+			settleRootAnimations(t, root, append(deferred, releaseCmd)...)
+			require.Zero(t, root.ar.ActiveCount(), "quiescent after release and drain")
 			require.Equal(t, rebuilds, nextRebuilds, "height-only resize must not flatten the whole transcript")
 			require.Equal(t, misses, nextMisses, "cached messages must not miss on height-only resize")
 			require.Equal(t, renders, nextRenders, "height-only resize must not re-render message bodies")
 			require.Equal(t, 20, compositions, "exactly one root composition per changed allocation")
-			require.Zero(t, root.ar.ActiveCount(), "manual resizing owns no timer")
 			allocations = append(allocations, after.TotalAlloc-before.TotalAlloc)
 			t.Logf("history=%d accepted=40 changes=20 root_compositions=%d transcript_rebuilds=%d item_misses=%d message_renders=%d allocations=%d bytes=%d elapsed=%s bytes_per_change=%d elapsed_per_change=%s", history, compositions, nextRebuilds-rebuilds, nextMisses-misses, nextRenders-renders, after.Mallocs-before.Mallocs, after.TotalAlloc-before.TotalAlloc, elapsed, (after.TotalAlloc-before.TotalAlloc)/20, elapsed/20)
 		})

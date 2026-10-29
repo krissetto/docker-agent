@@ -62,8 +62,8 @@ func TestScreenAutocompleteAndDormancyUseBoundedExistingSeams(t *testing.T) {
 	s.Status.Agent, s.Status.Dormant, s.Status.Pending = "reviewer", true, 2
 	lines, _, _ := s.Frame(120, 24, 0, false, nil, nil)
 	plain := ansi.Strip(strings.Join(lines, "\n"))
-	require.Contains(t, plain, "Restored · paused · /resume")
-	require.Contains(t, plain, "2 accepted inputs queued")
-	require.Contains(t, plain, "Any queued work or reports will wait until you resume this session.")
+	require.Contains(t, plain, "Restored · dormant · message or /resume")
+	require.Contains(t, plain, "2 inputs queued")
+	require.Contains(t, plain, "New messages wake this session; queued work and reports wait for /resume.")
 	require.Equal(t, 1, strings.Count(plain, "reviewer"), "identity belongs to footer, not a replacement pane header")
 }

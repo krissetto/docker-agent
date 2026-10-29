@@ -29,6 +29,9 @@ type sessionContractFixture struct {
 	afterRelease func() SessionHandle
 	unavailable  []string
 	close        func()
+	// replayAuthority: the local driver appends one trailing sequence-zero
+	// background-process replacement after replay; the remote journal does not.
+	replayAuthority bool
 }
 
 type sessionContractFactory struct {
@@ -127,7 +130,7 @@ func TestSessionHandleConformance(t *testing.T) {
 				replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 				require.NoError(t, err)
 				require.NotEmpty(t, replayed.Replay)
-				assert.Equal(t, first.TurnID, replayed.Replay[len(replayed.Replay)-1].TurnID)
+				assertReplayTurnBoundary(t, replayed.Replay, first.TurnID, replayed.Primary().Epoch, fixture.replayAuthority)
 				replayed.Cancel()
 
 				fixture.injectGap()
@@ -166,6 +169,29 @@ func assertSessionContractError(t *testing.T, err error, kind SessionErrorKind, 
 	assert.Equal(t, operation, sessionErr.Operation)
 }
 
+// assertReplayTurnBoundary checks the last sequenced replay envelope belongs to
+// the turn. A trailing sequence-zero background replacement carries no turn.
+func assertReplayTurnBoundary(t *testing.T, replay []SessionEvent, turnID, epoch string, replayAuthority bool) {
+	t.Helper()
+	last := -1
+	for i, event := range replay {
+		if event.Sequence != 0 {
+			last = i
+		}
+	}
+	require.GreaterOrEqual(t, last, 0, "replay must contain a sequenced event")
+	assert.Equal(t, turnID, replay[last].TurnID)
+	if !replayAuthority {
+		return
+	}
+	trailing := replay[last+1:]
+	require.Len(t, trailing, 1, "exactly one trailing background-process replacement")
+	assert.Zero(t, trailing[0].Sequence)
+	assert.Equal(t, epoch, trailing[0].Epoch)
+	_, ok := trailing[0].Event.(*BackgroundProcessesEvent)
+	assert.True(t, ok, "trailing replay envelope must be the background-process replacement")
+}
+
 func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []string) {
 	t.Helper()
 	if !handle.Metadata().Capabilities.ForkSkills {
@@ -181,6 +207,8 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 		call      func() error
 	}
 	calls := map[string][]capabilityCall{
+		// Historical is a view-state fact, not an operation; checked against metadata below.
+		"Historical":        nil,
 		"Compaction":        {{SessionOperationCompact, func() error { return handle.Compact(t.Context(), "", nil) }}},
 		"TargetCompaction":  {{SessionOperationCompactTarget, func() error { return handle.CompactTarget(t.Context(), handle.ID(), "", nil) }}},
 		"ModelSwitching":    {{SessionOperationSetModel, func() error { return handle.SetModel(t.Context(), "unavailable") }}},
@@ -275,6 +303,11 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 			continue
 		}
 		name := capabilityType.Field(index).Name
+		if name == "Historical" {
+			assert.Equal(t, field.Bool(), handle.Metadata().Historical, "Historical capability must mirror metadata")
+			require.False(t, handle.Metadata().Historical, "live conformance fixtures are not historical views")
+			continue
+		}
 		applicable, ok := calls[name]
 		require.True(t, ok, "false capability %s needs a conformance caller", name)
 		for _, item := range applicable {
@@ -323,7 +356,8 @@ func newLocalSessionContractFixture(t *testing.T) sessionContractFixture {
 			require.NoError(t, reopenErr)
 			return reopened
 		},
-		unavailable: []string{"model_switching", "thinking_levels", "model_catalog_refresh"},
+		unavailable:     []string{"model_switching", "thinking_levels", "model_catalog_refresh"},
+		replayAuthority: true,
 		close: func() {
 			releaseOnce.Do(func() { close(releaseRun) })
 			_ = runtime.Close()
@@ -379,7 +413,7 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 	defer s.mu.Unlock()
 	switch operation {
 	case "status":
-		fmt.Fprint(w, `{"metadata":{"session_id":"contract-session","agent_name":"contract","capabilities":{"available_models":[]}},"status":{"session_id":"contract-session","agent_name":"contract","state":"settled","pending":0}}`)
+		fmt.Fprint(w, `{"metadata":{"session_id":"contract-session","agent_name":"contract","execution_available":true,"capabilities":{"available_models":[],"execution_available":true,"pending_message_removal":true,"delegation_policy":true,"stop_subtree":true,"tool_inspection":true,"toolset_restart":true,"permissions_inspection":true,"mcp_prompts":true,"todo_editing":true,"branching":true,"compaction":true,"target_compaction":true,"context_inspection":true,"live_sessions":true,"session_editing":true,"pause":true,"todos":true}},"status":{"session_id":"contract-session","agent_name":"contract","state":"settled","pending":0}}`)
 	case "messages", "retry":
 		mode := "retry"
 		if operation == "messages" {

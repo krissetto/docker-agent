@@ -514,6 +514,7 @@ func (s *InMemorySessionStore) UpdateMessage(_ context.Context, sessionID string
 			continue
 		}
 		session.Messages[i].Message = updated
+		session.historyRevision++
 		return nil
 	}
 	return ErrNotFound

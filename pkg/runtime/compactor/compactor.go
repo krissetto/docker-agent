@@ -205,7 +205,7 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 		options.WithMaxTokens(summaryTokenBudget(args.ContextLimit)),
 		options.WithCompacting(),
 	)
-	compactionAgent := agent.New("root", "", agent.WithModel(summaryModel))
+	compactionAgent := agent.New("root", "", agent.WithModel(summaryModel), agent.WithCompactionPrompt(args.Agent.CompactionPrompt()))
 
 	messages, firstKeptEntry := extractMessages(args.Session, compactionAgent, args.ContextLimit, args.AdditionalPrompt)
 
@@ -307,7 +307,7 @@ func ComputeFirstKeptEntry(sess *session.Session, contextLimit int64) int {
 // If the conversation tail itself doesn't fit in
 // (contextLimit − summary budget − prompt-overhead), older messages
 // are dropped from the front of the to-compact list to make room.
-func extractMessages(sess *session.Session, _ *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
+func extractMessages(sess *session.Session, a *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
 	messages, sessIndices, itemCount := sess.CompactionInput()
 	messages = builtins.BoundToolMessages(messages)
 
@@ -321,6 +321,11 @@ func extractMessages(sess *session.Session, _ *agent.Agent, contextLimit int64, 
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
 	userPrompt := compaction.UserPrompt
+	if a != nil {
+		if prompt := a.CompactionPrompt(); prompt != "" {
+			userPrompt = prompt
+		}
+	}
 	if additionalPrompt != "" {
 		userPrompt += "\n\n" + additionalPrompt
 	}

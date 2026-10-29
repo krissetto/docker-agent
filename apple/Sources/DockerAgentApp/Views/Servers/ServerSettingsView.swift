@@ -7,8 +7,9 @@ public struct ServerSettingsView: View {
     @State private var selection: UUID?
     @State private var editor: ServerEditorTarget?
     @State private var error: String?
+    var onServerAdded: ((UUID) -> Void)?
 
-    public init() {}
+    public init(onServerAdded: ((UUID) -> Void)? = nil) { self.onServerAdded = onServerAdded }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: Metrics.m) {
@@ -55,6 +56,11 @@ public struct ServerSettingsView: View {
         }
         .padding(Metrics.xl)
         .frame(width: 460)
-        .sheet(item: $editor) { ServerEditorSheet(target: $0) }
+        .sheet(item: $editor) { target in
+            ServerEditorSheet(target: target) { id in
+                selection = id
+                onServerAdded?(id)
+            }
+        }
     }
 }

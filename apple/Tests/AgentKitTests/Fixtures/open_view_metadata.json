@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "view": "open-view",
+  "projection": "metadata",
+  "info": {
+    "active_agent_name": "root",
+    "session_id": "session-demo-001",
+    "root_session_id": "session-demo-001",
+    "root_working_dir": "/workspace/demo",
+    "root_binding": {"AgentName":"root","Model":"demo/model","Durability":"durable","ParentSessionID":""},
+    "session": {"id":"session-demo-001","working_dir":"/workspace/demo","attributes":{"docker-agent.actor.source":"demo-team"}},
+    "binding": {"AgentName":"root","Model":"demo/model","Durability":"durable","ParentSessionID":""},
+    "working_dir":"/workspace/demo"
+  },
+  "metadata":{"session_id":"session-demo-001","agent_name":"root","capabilities":{"historical":false,"branching":true}},
+  "status":{"session_id":"session-demo-001","agent_name":"root","state":"settled"}
+}

@@ -170,7 +170,11 @@ func TestOrderedAssistantResponseAndUserBoundaries(t *testing.T) {
 					second.Message.Presentation = []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "second"}}
 					live.AppendReasoning("worker", "second")
 					attached.AppendReasoning("worker", "second")
-					want += " R(second;next)"
+					if userBoundary {
+						want += " R(second;next)"
+					} else {
+						want = "R(first\n\nsecond;call,next)"
+					}
 				} else {
 					want += " T(next)"
 				}
@@ -188,12 +192,203 @@ func TestOrderedAssistantResponseAndUserBoundaries(t *testing.T) {
 				for _, m := range []*model{live, attached, replay} {
 					require.Equal(t, want, orderedTopology(m))
 					require.True(t, m.views[0].(*reasoningblock.Model).HasToolCall("call"))
-					require.False(t, m.views[0].(*reasoningblock.Model).HasToolCall("next"))
+					require.Equal(t, !toolOnly && !userBoundary, m.views[0].(*reasoningblock.Model).HasToolCall("next"))
 					require.Contains(t, ansi.Strip(m.views[0].View()), "late first")
 				}
 			})
 		}
 	}
+}
+
+func TestAdjacentCommittedThinkingGroupsAndAbortedNewToolIsRemoved(t *testing.T) {
+	call := tools.ToolCall{ID: "committed", Function: tools.FunctionCall{Name: "check"}}
+	def := tools.Tool{Name: "check"}
+	first := &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "first", ToolCalls: []tools.ToolCall{call}, ToolDefinitions: []tools.Tool{def}, Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "first"}, {Type: chat.AssistantPartToolCall, ToolCallID: call.ID}}}}
+	live := orderedTestModel(t)
+	live.AppendReasoning("worker", "first")
+	live.AddOrUpdateToolCall("worker", call, def, types.ToolStatusRunning)
+	live.CompleteAssistant(runtime.MessageAddedAt("s", first, "worker", 0).(*runtime.MessageAddedEvent))
+
+	live.AppendReasoning("worker", "second")
+	aborted := tools.ToolCall{ID: "aborted", Function: tools.FunctionCall{Name: "write_file"}}
+	live.AddOrUpdateToolCall("worker", aborted, tools.Tool{Name: "write_file"}, types.ToolStatusPending)
+	second := &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "second", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "second"}}}}
+	live.CompleteAssistant(runtime.MessageAddedAt("s", second, "worker", 2).(*runtime.MessageAddedEvent))
+
+	require.Equal(t, 1, live.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+	block := live.views[0].(*reasoningblock.Model)
+	require.Equal(t, "first\n\nsecond", block.Reasoning())
+	require.True(t, block.HasToolCall(call.ID), "a tool committed by the earlier assistant record survives")
+	require.False(t, block.HasToolCall(aborted.ID), "only the newly added uncommitted tool is rolled back")
+}
+
+func TestAdjacentCommittedToolThinkingOrderAcrossLiveAttachAndHistory(t *testing.T) {
+	firstCall := tools.ToolCall{ID: "first-call", Function: tools.FunctionCall{Name: "first_operation", Arguments: `{"step":1}`}}
+	secondCall := tools.ToolCall{ID: "second-call", Function: tools.FunctionCall{Name: "second_operation", Arguments: `{"step":2}`}}
+	firstDef := tools.Tool{Name: "first_operation"}
+	secondDef := tools.Tool{Name: "second_operation"}
+	firstResult, secondResult := "FIRST_RESULT_MARKER", "SECOND_RESULT_MARKER"
+	first := &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "FIRST_REASONING_MARKER", ToolCalls: []tools.ToolCall{firstCall}, ToolDefinitions: []tools.Tool{firstDef}, Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "FIRST_REASONING_MARKER"}, {Type: chat.AssistantPartToolCall, ToolCallID: firstCall.ID}}}}
+	second := &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "SECOND_REASONING_MARKER", ToolCalls: []tools.ToolCall{secondCall}, ToolDefinitions: []tools.Tool{secondDef}, Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "SECOND_REASONING_MARKER"}, {Type: chat.AssistantPartToolCall, ToolCallID: secondCall.ID}}}}
+	toolResult := func(id, output string) *session.Message {
+		return &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleTool, ToolCallID: id, Content: output}}
+	}
+	appendRound := func(m *model, msg *session.Message, call tools.ToolCall, def tools.Tool, result string, position int) {
+		m.AppendReasoning("worker", msg.Message.ReasoningContent)
+		m.AddOrUpdateToolCall("worker", call, def, types.ToolStatusRunning)
+		m.CompleteAssistant(runtime.MessageAddedAt("s", msg, "worker", position).(*runtime.MessageAddedEvent))
+		m.AddToolResult(runtime.ToolCallResponse(call.ID, def, &tools.ToolCallResult{Output: result}, result, "worker").(*runtime.ToolCallResponseEvent), types.ToolStatusCompleted)
+	}
+
+	canonical := session.New(session.WithID("s"))
+	canonical.AddMessage(first)
+	canonical.AddMessage(toolResult(firstCall.ID, firstResult))
+	canonical.AddMessage(second)
+	canonical.AddMessage(toolResult(secondCall.ID, secondResult))
+	before, err := json.Marshal(canonical)
+	require.NoError(t, err)
+
+	live := orderedTestModel(t)
+	appendRound(live, first, firstCall, firstDef, firstResult, 0)
+	appendRound(live, second, secondCall, secondDef, secondResult, 2)
+
+	// The second turn arrives after the first record is already part of the
+	// attached snapshot; it must extend that block rather than replace it.
+	attached := orderedTestModel(t)
+	snapshot := session.New(session.WithID("s"))
+	snapshot.AddMessage(first)
+	snapshot.AddMessage(toolResult(firstCall.ID, firstResult))
+	attached.LoadFromSession(snapshot, nil)
+	appendRound(attached, second, secondCall, secondDef, secondResult, 2)
+
+	history := orderedTestModel(t)
+	history.LoadFromSession(canonical, nil)
+	for _, path := range []struct {
+		name string
+		m    *model
+	}{{"live", live}, {"attached", attached}, {"history", history}} {
+		require.Equal(t, 1, path.m.MessageTypeCount(types.MessageTypeAssistantReasoningBlock), path.name)
+		block := path.m.views[0].(*reasoningblock.Model)
+		block.SetExpanded(true)
+		frame := ansi.Strip(block.View())
+		markers := []string{"FIRST_REASONING_MARKER", "first_operation", "FIRST_RESULT_MARKER", "SECOND_REASONING_MARKER", "second_operation", "SECOND_RESULT_MARKER"}
+		previous := -1
+		for _, marker := range markers {
+			position := strings.Index(frame, marker)
+			require.Greater(t, position, previous, "%s expanded order of %q", path.name, marker)
+			previous = position
+		}
+	}
+	after, err := json.Marshal(canonical)
+	require.NoError(t, err)
+	require.JSONEq(t, string(before), string(after), "presentation grouping must not merge or reorder canonical records")
+	require.Len(t, canonical.Messages, 4)
+}
+
+func TestLegacyAggregateReconciliationAfterToolKeepsReasoningSequence(t *testing.T) {
+	t.Run("pending tool between streamed segments", func(t *testing.T) {
+		m := orderedTestModel(t)
+		m.AppendReasoning("worker", "A")
+		call := tools.ToolCall{ID: "partial", Function: tools.FunctionCall{Name: "check"}}
+		m.AddOrUpdateToolCall("worker", call, tools.Tool{Name: "check"}, types.ToolStatusPending)
+		m.AppendReasoning("worker", "B")
+		aggregate := &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "AB"}}
+		m.CompleteAssistant(runtime.MessageAddedAt("s", aggregate, "worker", 0).(*runtime.MessageAddedEvent))
+		require.Equal(t, "R(A\n\nB;)", orderedTopology(m), "aggregate AB must not replace streamed segment B with the whole record")
+		require.Equal(t, "A\n\nB", m.messages[0].Content)
+	})
+
+	t.Run("loaded shared block and partial tool", func(t *testing.T) {
+		call := tools.ToolCall{ID: "committed", Function: tools.FunctionCall{Name: "check"}}
+		def := tools.Tool{Name: "check"}
+		seed := session.New(session.WithID("s"))
+		seed.AddMessage(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "X", ToolCalls: []tools.ToolCall{call}, ToolDefinitions: []tools.Tool{def}, Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "X"}, {Type: chat.AssistantPartToolCall, ToolCallID: call.ID}}}})
+		m := orderedTestModel(t)
+		m.LoadFromSession(seed, nil)
+		m.AppendReasoning("worker", "A")
+		partial := tools.ToolCall{ID: "partial", Function: tools.FunctionCall{Name: "write_file"}}
+		m.AddOrUpdateToolCall("worker", partial, tools.Tool{Name: "write_file"}, types.ToolStatusPending)
+		aggregate := &session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "C", ReasoningContent: "A"}}
+		m.CompleteAssistant(runtime.MessageAddedAt("s", aggregate, "worker", 2).(*runtime.MessageAddedEvent))
+		require.Equal(t, "R(X\n\nA;) C(C)", orderedTopology(m), "loaded block below the commit boundary is reconciled in place")
+		require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+		require.True(t, m.views[0].(*reasoningblock.Model).HasToolCall(call.ID))
+		require.False(t, m.views[0].(*reasoningblock.Model).HasToolCall(partial.ID))
+	})
+}
+
+func TestPresentationCommitCorrectsOnlyFinalSegmentAfterTool(t *testing.T) {
+	m := orderedTestModel(t)
+	firstCall := tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "check"}}
+	def := tools.Tool{Name: "check"}
+	m.AppendReasoning("worker", "A")
+	m.AddOrUpdateToolCall("worker", firstCall, def, types.ToolStatusRunning)
+	m.AppendReasoning("worker", "Bpartial")
+	committed := &session.Message{AgentName: "worker", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, ReasoningContent: "ABfinal",
+		ToolCalls: []tools.ToolCall{firstCall}, ToolDefinitions: []tools.Tool{def},
+		Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "A"}, {Type: chat.AssistantPartToolCall, ToolCallID: firstCall.ID}, {Type: chat.AssistantPartReasoning, Text: "Bfinal"}},
+	}}
+	m.CompleteAssistant(runtime.MessageAddedAt("s", committed, "worker", 0).(*runtime.MessageAddedEvent))
+
+	require.Equal(t, "R(A\n\nBfinal;call)", orderedTopology(m))
+	block := m.views[0].(*reasoningblock.Model)
+	block.SetExpanded(true)
+	view := ansi.Strip(block.View())
+	markers := []string{"A", "check", "Bfinal"}
+	previous := -1
+	for _, marker := range markers {
+		position := strings.Index(view, marker)
+		require.Greater(t, position, previous, "commit correction preserves segment/tool order")
+		previous = position
+	}
+	require.NotContains(t, view, "Bpartial")
+	require.Equal(t, "A\n\nBfinal", m.messages[0].Content)
+}
+
+func TestPresentationCommitCorrectsExactStreamedBlockAfterSeparator(t *testing.T) {
+	m := orderedTestModel(t)
+	m.AppendReasoning("worker", "prior reasoning")
+	m.AppendToLastMessage("worker", "separator")
+	m.AppendReasoning("worker", "partial current")
+	committed := &session.Message{AgentName: "worker", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, ReasoningContent: "current final",
+		Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "current final"}},
+	}}
+	m.CompleteAssistant(runtime.MessageAddedAt("s", committed, "worker", 0).(*runtime.MessageAddedEvent))
+
+	require.Equal(t, "R(prior reasoning;) C(separator) R(current final;)", orderedTopology(m))
+	require.Equal(t, 3, len(m.messages))
+	require.Equal(t, "prior reasoning", m.messages[0].Content, "earlier same-agent block is untouched")
+	require.Equal(t, "separator", m.messages[1].Content)
+	require.Equal(t, "current final", m.messages[2].Content)
+}
+
+func TestLegacyReplayGroupsReasoningWithCopySeparators(t *testing.T) {
+	sess := session.New(session.WithID("legacy-group"))
+	sess.AddMessage(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "first"}})
+	sess.AddMessage(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "second"}})
+	m := orderedTestModel(t)
+	m.LoadFromSession(sess, nil)
+	require.Equal(t, "R(first\n\nsecond;)", orderedTopology(m))
+	require.Equal(t, "first\n\nsecond", m.messages[0].Content, "copy text keeps the visible segment separator")
+}
+
+func TestReplayGroupsOnlyAdjacentSameAgentThinking(t *testing.T) {
+	sess := session.New(session.WithID("s"))
+	for _, item := range []*session.Message{
+		{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "first", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "first"}}}},
+		{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "separator", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartContent, Text: "separator"}}}},
+		{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "second", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "second"}}}},
+		{AgentName: "researcher", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "other agent", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "other agent"}}}},
+		{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "third", Presentation: []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "third"}}}},
+	} {
+		sess.AddMessage(item)
+	}
+	m := orderedTestModel(t)
+	m.LoadFromSession(sess, nil)
+	require.Equal(t, "R(first;) C(separator) R(second;) R(other agent;) R(third;)", orderedTopology(m))
+	require.Equal(t, 4, m.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
 }
 
 func TestOrderedAssistantLegacyAggregateFallback(t *testing.T) {

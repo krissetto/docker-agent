@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -40,6 +41,60 @@ func newRestoreFixture(t *testing.T) (*LocalRuntime, session.Store, *session.Ses
 	sess := session.New(session.WithID(t.Name()+"/parent-sess"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	return rt, store, sess
+}
+
+type restoreGateWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (ctx *restoreGateWaitContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.waiting) })
+	return ctx.Context.Done()
+}
+
+func TestEnsureChildDriverCanceledWhileRestoreGateHeld(t *testing.T) {
+	rt, _, _ := newRestoreFixture(t)
+	const childID subagent.NodeID = "blocked-restore"
+	restore := rt.subagents.transition("restore:" + string(childID))
+	restore.Lock()
+
+	baseCtx, cancel := context.WithCancel(t.Context())
+	ctx := &restoreGateWaitContext{Context: baseCtx, waiting: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- rt.subagents.ensureChildDriver(ctx, childID) }()
+	gateHeld, workerFinished := true, false
+	defer func() {
+		cancel()
+		if gateHeld {
+			restore.Unlock()
+		}
+		if !workerFinished {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("restore worker did not exit after cancellation and gate release")
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.waiting: // LockContext has entered its cancellable wait with the gate held.
+	case <-time.After(time.Second):
+		t.Fatal("restore worker did not reach its lifecycle gate")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		workerFinished = true
+		gateHeld = false // ensureChildDriver returned without taking the token.
+		restore.Unlock()
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("canceled child restore remained blocked on its lifecycle gate")
+	}
 }
 
 func TestNormalCreateRejectsReservedRestoreChildWithoutSideEffects(t *testing.T) {

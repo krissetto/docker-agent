@@ -137,13 +137,14 @@ type dragState struct {
 
 // manager implements Manager
 type manager struct {
-	runtime       *animation.Runtime
-	width, height int
-	stack         []dialogEntry
-	drag          dragState
-	projections   map[string]*lifecycle.Projection
-	closeHovered  bool //nolint:unused // Retained as lifecycle hover state for concrete dialogs.
-	visualDirty   bool
+	runtime         *animation.Runtime
+	width, height   int
+	stack           []dialogEntry
+	drag            dragState
+	projections     map[string]*lifecycle.Projection
+	closeHovered    bool //nolint:unused // Retained as lifecycle hover state for concrete dialogs.
+	visualDirty     bool
+	scrollbarActive bool
 }
 
 // New creates a new dialog component manager
@@ -151,7 +152,7 @@ func New(runtime *animation.Runtime) Manager {
 	if runtime == nil {
 		panic("dialog: nil animation runtime")
 	}
-	return &manager{runtime: runtime}
+	return &manager{runtime: runtime, scrollbarActive: true}
 }
 
 // Init initializes the dialog component
@@ -194,6 +195,9 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			key := entry.interactionKey
 			if key.SessionID == msg.SessionID && key.InteractionID != "" && !msg.Projection.HasInteraction(key) {
 				entry.cancel()
+				if active, ok := entry.dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+					active.SetScrollbarActive(false)
+				}
 				CleanupDialog(entry.dialog)
 				return true
 			}
@@ -380,6 +384,13 @@ func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 	}
 	tick, ticking := msg.(animation.TickMsg)
 	wasTickDirty := ticking && tick.Dirty()
+	if ticking {
+		if updater, ok := d.stack[top].dialog.(interface{ UpdateScrollbarAnimation(msg tea.Msg) bool }); ok && updater.UpdateScrollbarAnimation(msg) {
+			d.stack[top].invalidateView()
+			d.visualDirty = true
+			tick.MarkDirty()
+		}
+	}
 	if retarget {
 		d.stack[top].capture()
 	}
@@ -608,6 +619,9 @@ func (d *manager) clearTopPointerState() {
 	if stopper, ok := entry.dialog.(interface{ StopAnimations() }); ok {
 		stopper.StopAnimations()
 	}
+	if active, ok := entry.dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+		active.SetScrollbarActive(false)
+	}
 	changed := entry.closeHovered
 	entry.closeHovered = false
 	if chrome, ok := entry.dialog.(interface{ SetCloseHover(hovered bool) }); ok {
@@ -662,6 +676,14 @@ func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 	}); ok {
 		bindable.BindAnimationRuntime(d.runtime)
 	}
+	if bindable, ok := msg.Model.(interface {
+		SetAnimationRuntime(runtime *animation.Runtime)
+	}); ok {
+		bindable.SetAnimationRuntime(d.runtime)
+	}
+	if active, ok := msg.Model.(interface{ SetScrollbarActive(active bool) bool }); ok {
+		active.SetScrollbarActive(d.scrollbarActive)
+	}
 	initCmd := msg.Model.Init()
 
 	// Size the concrete dialog before the shared wrapper measures its rendered
@@ -702,6 +724,9 @@ func (d *manager) beginClose(hiding bool) (layout.Model, tea.Cmd) {
 	if stopper, ok := d.stack[top].dialog.(interface{ StopAnimations() }); ok {
 		stopper.StopAnimations()
 	}
+	if active, ok := d.stack[top].dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+		active.SetScrollbarActive(false)
+	}
 	resetDialogCloseHover(d.stack[top].dialog)
 	cmd := d.stack[top].startClose(hiding)
 	if !d.stack[top].anim.Running() {
@@ -726,6 +751,9 @@ func (d *manager) handleClosePlanDetail(msg ClosePlanDetailMsg) (layout.Model, t
 	if viewer, ok := d.stack[len(d.stack)-1].dialog.(PlanDetailViewer); ok && viewer.PlanRef() == msg.Ref {
 		top := len(d.stack) - 1
 		d.stack[top].cancel()
+		if active, ok := d.stack[top].dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+			active.SetScrollbarActive(false)
+		}
 		CleanupDialog(d.stack[top].dialog)
 		d.stack = d.stack[:top]
 		d.drag.active = false
@@ -738,6 +766,9 @@ func (d *manager) handleClosePlanDetail(msg ClosePlanDetailMsg) (layout.Model, t
 func (d *manager) handleCloseAll() (layout.Model, tea.Cmd) {
 	for i := range d.stack {
 		d.stack[i].cancel()
+		if active, ok := d.stack[i].dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+			active.SetScrollbarActive(false)
+		}
 		CleanupDialog(d.stack[i].dialog)
 	}
 	d.stack = nil
@@ -782,6 +813,12 @@ func (d *manager) handleTick(msg animation.TickMsg) (layout.Model, tea.Cmd) {
 	d.stack = remaining
 	if d.Closing() || len(d.stack) == 0 {
 		return d, tea.Batch(cmds...)
+	}
+	if active, ok := d.stack[len(d.stack)-1].dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+		if active.SetScrollbarActive(d.scrollbarActive) {
+			d.stack[len(d.stack)-1].invalidateView()
+			d.visualDirty = true
+		}
 	}
 	cmds = append(cmds, d.forwardToTopWithoutRetarget(msg))
 	return d, tea.Batch(cmds...)
@@ -880,6 +917,46 @@ func (d *manager) TakeVisualDirty() bool {
 	return dirty
 }
 
+// SetScrollbarPointer forwards absolute pointer proximity to the top visible
+// dialog without routing or mutating its active gesture.
+func (d *manager) SetScrollbarPointer(x, y int) bool {
+	if len(d.stack) == 0 || d.Closing() || !d.scrollbarActive {
+		return false
+	}
+	e := &d.stack[len(d.stack)-1]
+	if setter, ok := e.dialog.(interface{ SetScrollbarPointer(x, y int) bool }); ok {
+		msg := d.adjustMouseMsg(tea.MouseMotionMsg{X: x, Y: y})
+		point := msg.(tea.MouseMotionMsg)
+		if setter.SetScrollbarPointer(point.X, point.Y) {
+			e.invalidateView()
+			d.visualDirty = true
+			return true
+		}
+	}
+	return false
+}
+
+// SetScrollbarActive suspends scrollbar animation when dialogs are occluded.
+func (d *manager) SetScrollbarActive(active bool) bool {
+	if d.scrollbarActive == active {
+		return false
+	}
+	d.scrollbarActive = active
+	changed := false
+	for i := range d.stack {
+		e := &d.stack[i]
+		visible := active && i == len(d.stack)-1 && !e.closing
+		if setter, ok := e.dialog.(interface{ SetScrollbarActive(active bool) bool }); ok && setter.SetScrollbarActive(visible) {
+			e.invalidateView()
+			changed = true
+		}
+	}
+	if changed {
+		d.visualDirty = true
+	}
+	return changed
+}
+
 func (d *manager) SetSize(width, height int) tea.Cmd {
 	d.width = width
 	d.height = height
@@ -954,6 +1031,9 @@ func (d *manager) closeByModel(model Dialog) (layout.Model, tea.Cmd) {
 			return d.beginClose(false)
 		}
 		d.stack[i].cancel()
+		if active, ok := d.stack[i].dialog.(interface{ SetScrollbarActive(active bool) bool }); ok {
+			active.SetScrollbarActive(false)
+		}
 		CleanupDialog(d.stack[i].dialog)
 		d.stack = slices.Delete(d.stack, i, i+1)
 		d.visualDirty = true

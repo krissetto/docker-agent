@@ -19,7 +19,7 @@ func (m *model) todoSummary(width int) string {
 	if width <= 1 {
 		return styles.MutedStyle.Render(glyph)
 	}
-	text := styles.TabPrimaryStyle.Render(fmt.Sprintf("%d/%d todos", completed, total))
+	text := styles.MutedStyle.Render(fmt.Sprintf("%d/%d todos", completed, total))
 
 	text = ansi.Truncate(text, width-2, "…")
 	return m.hoverText(text+strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-1))+styles.MutedStyle.Render(glyph), "todo-summary")
@@ -68,12 +68,12 @@ func (m *model) actionRowText(text, base string, first, todo bool) string {
 		}
 		col := indent + part.col
 		out.WriteString(ansi.Cut(text, end, col))
-		paint := ansi.Cut(text, col, col+1)
+		// One ramp per control: its own hover or the row's, whichever is further along.
+		own := max(m.hoverValues[base+part.name].value, progress)
 		if part.name == "remove" {
-			out.WriteString(removeAction(m.hoverValues[base+part.name].value, progress))
+			out.WriteString(removeAction(own))
 		} else {
-			paint = styles.HoverText(paint, m.hoverValues[base+part.name].value, styles.TextPrimary)
-			out.WriteString(hoverAction(paint, progress))
+			out.WriteString(hoverAction(ansi.Cut(text, col, col+1), own))
 		}
 		end = col + 1
 	}
@@ -91,18 +91,16 @@ func (m *model) todoRowText(text, base string, first bool) string {
 	}
 	// Only paint is occluded: wrapping, canonical text and continuation rows stay intact.
 	text = padRight(ansi.Truncate(text, width-4, "…"), width-4)
-	edit := styles.HoverText(styles.MutedStyle.Render("✎"), m.hoverValues[base+"edit"].value, styles.TextPrimary)
-	remove := removeAction(m.hoverValues[base+"remove"].value, progress)
-	return text + " " + hoverAction(edit, progress) + " " + remove
+	edit := hoverAction(styles.MutedStyle.Render("✎"), max(m.hoverValues[base+"edit"].value, progress))
+	remove := removeAction(max(m.hoverValues[base+"remove"].value, progress))
+	return text + " " + edit + " " + remove
 }
 
-func removeAction(emphasis, reveal float64) string {
+// removeAction paints the destructive control in the stable semantic error
+// color on the shared hover ramp. Hidden-at-rest cells stay blank.
+func removeAction(reveal float64) string {
 	if reveal <= 0 {
 		return " "
 	}
-	// Blend after row highlighting so the destructive endpoint stays the theme's error color.
-	r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))
-	er, eg, eb := styles.ColorToRGB(styles.Error)
-	foreground := styles.RGBToColor(r+(er-r)*emphasis, g+(eg-g)*emphasis, b+(eb-b)*emphasis)
-	return styles.BaseStyle.Foreground(foreground).Render("×")
+	return styles.HoverText(styles.BaseStyle.Foreground(styles.Error).Render("×"), reveal, styles.TextPrimary)
 }

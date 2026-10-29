@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -18,10 +20,73 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	view "github.com/docker/docker-agent/pkg/tui/components/review"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
+	tuiinput "github.com/docker/docker-agent/pkg/tui/input"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
+
+type failingGitMetadataProvider struct{ *fakeReviewProvider }
+
+func (p failingGitMetadataProvider) LoadWorktree(ctx context.Context, id string) (gitreview.Worktree, error) {
+	_, err := p.fakeReviewProvider.LoadWorktree(ctx, id)
+	if err != nil {
+		return gitreview.Worktree{}, err
+	}
+	return gitreview.Worktree{}, errors.New("metadata unavailable")
+}
+
+type unscannedSidebarReviewProvider struct{ *fakeReviewProvider }
+
+func (p unscannedSidebarReviewProvider) Snapshot(ctx context.Context) (gitreview.Snapshot, error) {
+	snapshot, err := p.fakeReviewProvider.Snapshot(ctx)
+	if err != nil {
+		return snapshot, err
+	}
+	for ri := range snapshot.Repositories {
+		for wi := range snapshot.Repositories[ri].Worktrees {
+			snapshot.Repositories[ri].Worktrees[wi].State = "unscanned"
+			snapshot.Repositories[ri].Worktrees[wi].Files = nil
+		}
+	}
+	return snapshot, nil
+}
+
+func (p unscannedSidebarReviewProvider) LoadWorktree(ctx context.Context, id string) (gitreview.Worktree, error) {
+	_, err := p.fakeReviewProvider.LoadWorktree(ctx, id)
+	if err != nil {
+		return gitreview.Worktree{}, err
+	}
+	switch id {
+	case "w1":
+		return gitreview.Worktree{ID: id, Path: "/work", Branch: "main", Current: true, State: "changed", CountsState: gitreview.StateReady, Files: []gitreview.FileChange{
+			{Path: "Dockerfile.dev", Group: gitreview.GroupUnstaged, Status: "M", Added: 1, Removed: 1},
+			{Path: "a.go", Group: gitreview.GroupUnstaged, Status: "M", Added: 1},
+		}}, nil
+	case "w2":
+		return gitreview.Worktree{ID: id, Path: "/work/wt", Branch: "feature", Linked: true, State: "changed", CountsState: gitreview.StateReady, Files: []gitreview.FileChange{{Path: "b.go", Group: gitreview.GroupStaged, Status: "A", Added: 2}}}, nil
+	default:
+		return gitreview.Worktree{ID: id, Path: "/work/det", State: "clean", CountsState: gitreview.StateReady}, nil
+	}
+}
+
+func useUnscannedSidebarProvider(h *reviewHarness) {
+	h.m.gitReviewFactory = func(*app.App, string, string) (gitreview.Provider, *view.Snapshot, error) {
+		return unscannedSidebarReviewProvider{h.provider}, nil, nil
+	}
+}
+
+type interruptedSidebarReviewProvider struct {
+	*fakeReviewProvider
+	lateResult bool
+}
+
+func (p *interruptedSidebarReviewProvider) LoadWorktree(ctx context.Context, id string) (gitreview.Worktree, error) {
+	if p.lateResult && id == "w1" {
+		return gitreview.Worktree{ID: id, Path: "/late", Branch: "late", State: "changed", CountsState: gitreview.StateReady}, nil
+	}
+	return p.fakeReviewProvider.LoadWorktree(ctx, id)
+}
 
 // withRealPage swaps the mock for a real chat page with the normal sidebar.
 func withRealPage(t *testing.T, h *reviewHarness) chat.Page {
@@ -80,28 +145,295 @@ func (h *reviewHarness) clickText(label string) {
 	h.t.Fatalf("%q not rendered:\n%s", label, frame)
 }
 
-func TestReviewRootClickSidebarFileShowsDiffBesideNormalSidebar(t *testing.T) {
-	h, f := newDraftHarnessWithoutOpen(t)
+func TestCollapsedGitSidebarPrewarmsBoundedMetadataWithoutHydratingDocuments(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	useUnscannedSidebarProvider(h)
+	h.pump(h.m.syncGitReview())
+	require.True(t, h.page.git.Available)
+	require.Nil(t, h.page.overlay, "metadata prewarm does not open an inspector")
+	require.NotNil(t, h.page.git.Snapshot)
+	assert.Equal(t, 1, h.provider.snapshots, "collapsed sidebar performs discovery once")
+	assert.Equal(t, []string{"w1", "w2", "w3"}, h.provider.worktrees, "all discovered statuses are loaded")
+	assert.Empty(t, h.provider.documents, "prewarm never asks for patches")
+	assert.Empty(t, h.provider.dirs, "prewarm never asks for file history/listings")
+	require.NotNil(t, h.m.activeReview(), "review data is live for sidebar without a visible review surface")
+	assert.False(t, h.m.activeReview().inspecting)
+	assert.Nil(t, h.page.overlay, "the transcript is not covered")
+}
+
+func TestCollapsedGitSidebarDefersPrewarmUntilVisibleAndNoCompetingSurface(t *testing.T) {
+	t.Run("hidden sidebar", func(t *testing.T) {
+		h := newReviewHarness(t, 140)
+		useUnscannedSidebarProvider(h)
+		h.m.hideSidebar = true
+		h.pump(h.m.syncGitReview())
+		assert.Zero(t, h.provider.snapshots)
+		h.m.hideSidebar = false
+		h.pump(h.m.syncGitReview())
+		assert.Equal(t, 1, h.provider.snapshots)
+		assert.Len(t, h.provider.worktrees, 3)
+	})
+	t.Run("files surface", func(t *testing.T) {
+		h := newReviewHarness(t, 140)
+		useUnscannedSidebarProvider(h)
+		h.open(true)
+		require.Equal(t, view.ModeFiles, h.m.activeReview().mode)
+		assert.Empty(t, h.provider.worktrees, "visible Files review is not displaced by sidebar prewarm")
+		_, cmd := h.m.Update(view.CloseRequestMsg{Owner: "s1"})
+		h.pump(cmd)
+		h.pump(h.m.syncGitReview())
+		assert.Zero(t, h.provider.snapshots, "the Files intent keeps the sidebar from scanning Git")
+		h.pump(browseRequest(h, "s1", sidebar.GitShowChanges))
+		assert.Equal(t, 1, h.provider.snapshots, "selecting Changes starts the deferred scan")
+		assert.NotEmpty(t, h.provider.worktrees)
+	})
+	t.Run("inspector", func(t *testing.T) {
+		h := newReviewHarness(t, 140)
+		useUnscannedSidebarProvider(h)
+		_, cmd := h.m.Update(messages.RevealGitChangesMsg{})
+		h.pump(cmd)
+		loadedBeforeInspector := len(h.provider.worktrees)
+		h.openDockerfile()
+		require.True(t, h.m.activeReview().inspecting)
+		assert.Len(t, h.provider.worktrees, loadedBeforeInspector, "opening the inspector does not scan additional worktrees")
+		_, closeCmd := h.m.Update(view.CloseRequestMsg{Owner: "s1"})
+		h.pump(closeCmd)
+		h.pump(h.m.syncGitReview())
+		assert.NotEmpty(t, h.provider.worktrees)
+	})
+}
+
+func countPrefix(values map[string]gitReviewRequest, prefix string) int {
+	n := 0
+	for key := range values {
+		if strings.HasPrefix(key, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func batchCmd(cmds ...tea.Cmd) tea.Cmd {
+	return func() tea.Msg { return tea.BatchMsg(cmds) }
+}
+
+func TestCollapsedGitSidebarUnavailableProviderDoesNotRetryUntilRequested(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	factoryCalls := 0
+	h.m.gitReviewFactory = func(*app.App, string, string) (gitreview.Provider, *view.Snapshot, error) {
+		factoryCalls++
+		return nil, nil, errors.New("provider unavailable")
+	}
+	h.pump(h.m.syncGitReview())
+	require.Equal(t, 1, factoryCalls)
+	for range 5 {
+		h.pump(h.m.syncGitReview())
+	}
+	assert.Equal(t, 1, factoryCalls, "a completed unavailable result is cached rather than auto-retried every update")
+	_, cmd := h.m.Update(sidebar.GitRequestMsg{Owner: "s1", Action: sidebar.GitLoad})
+	h.pump(cmd)
+	assert.Equal(t, 2, factoryCalls, "an explicit Git request may retry provider creation")
+}
+
+func TestCollapsedGitSidebarMetadataPrewarmBatchesAllWorktrees(t *testing.T) {
+	for _, total := range []int{20, 40} {
+		t.Run(fmt.Sprintf("%d worktrees", total), func(t *testing.T) {
+			h := newReviewHarness(t, 140)
+			owner := h.m.paneFocus()
+			route, _ := h.m.supervisor.RouteGeneration(owner)
+			ws := newGitReviewWorkspace(owner)
+			ws.open = true
+			ws.mode = view.ModeChanges
+			ws.provider = h.provider
+			ws.sessionID, ws.workingDir, ws.route = h.sess.ID, h.sess.WorkingDir, route
+			ws.snapshot = &view.Snapshot{Generation: 1, Repositories: []view.Repository{{ID: "r", Worktrees: make([]view.Worktree, total)}}}
+			ids := make([]string, total)
+			for i := range ws.snapshot.Repositories[0].Worktrees {
+				id := fmt.Sprintf("w%d", i)
+				ids[i] = id
+				ws.snapshot.Repositories[0].Worktrees[i] = view.Worktree{ID: id, State: view.StateUnscanned}
+			}
+			h.m.gitReviews = map[string]*gitReviewWorkspace{owner: ws}
+			h.m.gitReviewOwner = owner
+			h.m.gitReviewGeneration++
+			h.m.gitSidebarMarked = map[string]bool{owner: true}
+			cmd := h.m.prewarmGitSidebarMetadata(ws)
+			require.NotNil(t, cmd)
+			initial := cmd().(tea.BatchMsg)
+			require.Equal(t, maxSidebarMetadataConcurrent, countPrefix(h.m.gitReviewPending, "worktree:"), "the first batch fills, but never exceeds, the concurrency budget")
+			assert.Nil(t, h.m.prewarmGitSidebarMetadata(ws), "a repeated sync does not duplicate or exceed the batch")
+			h.pump(batchCmd(initial...))
+			require.Len(t, h.provider.worktrees, total, "completion refills slots until all discovered worktrees are handled")
+			assert.ElementsMatch(t, ids, h.provider.worktrees)
+			assert.Empty(t, h.provider.documents)
+			assert.Empty(t, h.provider.dirs)
+			assert.True(t, ws.prewarm.complete)
+		})
+	}
+}
+
+func TestCollapsedGitSidebarPrewarmStopsWhenHiddenAndResumes(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	owner := h.m.paneFocus()
+	route, _ := h.m.supervisor.RouteGeneration(owner)
+	ws := newGitReviewWorkspace(owner)
+	ws.open, ws.mode, ws.provider = true, view.ModeChanges, h.provider
+	ws.sessionID, ws.workingDir, ws.route = h.sess.ID, h.sess.WorkingDir, route
+	ws.snapshot = &view.Snapshot{Generation: 1, Repositories: []view.Repository{{ID: "r", Worktrees: make([]view.Worktree, 20)}}}
+	for i := range ws.snapshot.Repositories[0].Worktrees {
+		ws.snapshot.Repositories[0].Worktrees[i] = view.Worktree{ID: fmt.Sprintf("w%d", i), State: view.StateUnscanned}
+	}
+	h.m.gitReviews = map[string]*gitReviewWorkspace{owner: ws}
+	h.m.gitReviewOwner = owner
+	h.m.gitReviewGeneration++
+	h.m.gitSidebarMarked = map[string]bool{owner: true}
+	cmd := h.m.prewarmGitSidebarMetadata(ws)
+	initial := cmd().(tea.BatchMsg)
+	require.Equal(t, maxSidebarMetadataConcurrent, countPrefix(h.m.gitReviewPending, "worktree:"))
+	h.m.hideSidebar = true
+	h.pump(batchCmd(initial...))
+	require.Len(t, h.provider.worktrees, maxSidebarMetadataConcurrent, "hidden sidebar stops scheduling remaining work")
+	h.m.hideSidebar = false
+	h.pump(h.m.prewarmGitSidebarMetadata(ws))
+	require.Len(t, h.provider.worktrees, 20)
+	assert.True(t, ws.prewarm.complete)
+}
+
+func TestCollapsedGitSidebarPrewarmStopsSchedulingAfterPaneSwitch(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	owner := h.m.paneFocus()
+	route, _ := h.m.supervisor.RouteGeneration(owner)
+	ws := newGitReviewWorkspace(owner)
+	ws.open, ws.mode, ws.provider = true, view.ModeChanges, h.provider
+	ws.sessionID, ws.workingDir, ws.route = h.sess.ID, h.sess.WorkingDir, route
+	ws.snapshot = &view.Snapshot{Generation: 1, Repositories: []view.Repository{{ID: "r", Worktrees: make([]view.Worktree, 20)}}}
+	for i := range ws.snapshot.Repositories[0].Worktrees {
+		ws.snapshot.Repositories[0].Worktrees[i] = view.Worktree{ID: fmt.Sprintf("w%d", i), State: view.StateUnscanned}
+	}
+	h.m.gitReviews = map[string]*gitReviewWorkspace{owner: ws}
+	h.m.gitReviewOwner = owner
+	h.m.gitReviewGeneration++
+	h.m.gitSidebarMarked = map[string]bool{owner: true}
+	cmd := h.m.prewarmGitSidebarMetadata(ws)
+	require.NotNil(t, cmd)
+	assert.Equal(t, maxSidebarMetadataConcurrent, countPrefix(h.m.gitReviewPending, "worktree:"))
+	child := &session.Session{ID: "s2", Title: "child", WorkingDir: "/child"}
+	_, err := h.m.supervisor.AddSession(t.Context(), app.New(t.Context(), nil, child, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), child, "/child", nil)
+	require.NoError(t, err)
+	h.m.supervisor.SwitchTo("s2")
+	assert.Nil(t, h.m.prewarmGitSidebarMetadata(ws), "a background pane never queues more metadata for the old owner")
+	assert.Equal(t, maxSidebarMetadataConcurrent, countPrefix(h.m.gitReviewPending, "worktree:"))
+}
+
+func TestCollapsedGitSidebarPrewarmErrorDoesNotTightLoop(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	owner := h.m.paneFocus()
+	route, _ := h.m.supervisor.RouteGeneration(owner)
+	ws := newGitReviewWorkspace(owner)
+	ws.open, ws.mode, ws.provider = true, view.ModeChanges, failingGitMetadataProvider{h.provider}
+	ws.sessionID, ws.workingDir, ws.route = h.sess.ID, h.sess.WorkingDir, route
+	ws.snapshot = &view.Snapshot{Generation: 1, Repositories: []view.Repository{{ID: "r", Worktrees: make([]view.Worktree, 8)}}}
+	for i := range ws.snapshot.Repositories[0].Worktrees {
+		ws.snapshot.Repositories[0].Worktrees[i] = view.Worktree{ID: fmt.Sprintf("w%d", i), State: view.StateUnscanned}
+	}
+	h.m.gitReviews = map[string]*gitReviewWorkspace{owner: ws}
+	h.m.gitReviewOwner = owner
+	h.m.gitReviewGeneration++
+	h.m.gitSidebarMarked = map[string]bool{owner: true}
+	h.pump(h.m.prewarmGitSidebarMetadata(ws))
+	require.Eventually(t, func() bool { return ws.prewarm.complete }, time.Second, time.Millisecond, "failed worktrees are marked unavailable and batch proceeds")
+	require.Len(t, h.provider.worktrees, 8)
+	for range 5 {
+		h.pump(h.m.syncGitReview())
+	}
+	assert.Len(t, h.provider.worktrees, 8, "failed worktrees become error and are not retried on every sync")
+	assert.True(t, ws.prewarm.complete)
+}
+
+func TestReviewSidebarRemoteIncompleteDiscoveryStaysCompact(t *testing.T) {
+	h := newReviewHarness(t, 220)
+	useUnscannedSidebarProvider(h)
 	withRealPage(t, h)
 	h.pump(h.m.syncGitReview())
-	h.settle()
-	assert.Zero(t, h.provider.snapshots, "nothing is scanned before the section is opened")
-
-	h.clickText("Git changes")
-	assert.Equal(t, 1, h.provider.snapshots, "opening the section runs discovery once")
-	assert.Empty(t, h.provider.worktrees)
-	h.settle()
+	ws := h.m.activeReview()
+	require.NotNil(t, ws)
+	require.NotNil(t, ws.snapshot)
+	ws.snapshot.Scope.Remote = true
+	ws.snapshot.Scope.LimitReason = "entries"
+	ws.snapshot.Scope.LimitValue = 4096
+	ws.snapshot.Scope.Note = "Partial scan: discovery entry limit reached (4096 entries). This remote view cannot continue discovery; some repositories may be missing."
+	h.pump(h.m.pushGitSidebar(ws))
+	h.clickText("Git")
 	h.settle()
 	h.m.viewCacheValid = false
 	frame := ansi.Strip(h.m.composeView().Content)
-	assert.Contains(t, frame, "└ work")
-	assert.NotContains(t, frame, "● main", "repositories start collapsed")
+	assert.Contains(t, frame, "Files - Git")
+	assert.Contains(t, frame, "work")
+	assert.NotContains(t, frame, "Partial scan:")
+	assert.NotContains(t, frame, "discovery entry limit")
+	assert.NotContains(t, frame, "cannot continue discovery")
+	assert.NotContains(t, frame, "repositories may be missing")
+	assert.NotContains(t, frame, "Changes(")
+	assert.NotContains(t, frame, "Browse")
+	assert.Regexp(t, `(?i)(incomplete|partial|limited)`, frame, "incomplete results remain visible as a concise status")
+	assert.Equal(t, "entries", ws.snapshot.Scope.LimitReason, "presentation does not erase discovery state")
+}
 
-	h.clickText("└ work")
-	assert.Empty(t, h.provider.worktrees, "expanding a repository lists worktrees without scanning them")
-	h.clickText("● main")
-	assert.NotContains(t, h.provider.worktrees, "w2", "other worktrees are never scanned")
-	assert.NotContains(t, h.provider.worktrees, "w3")
+func TestReviewSidebarSingleHeaderSwitchesExpandedModes(t *testing.T) {
+	h := newReviewHarness(t, 220)
+	useUnscannedSidebarProvider(h)
+	withRealPage(t, h)
+	h.pump(h.m.syncGitReview())
+	page, ok := h.m.gitPage("s1")
+	require.True(t, ok)
+
+	for _, label := range []string{"Git", "Files", "Git"} {
+		h.clickText(label)
+		h.settle()
+		mode := view.ModeChanges
+		if label == "Files" {
+			mode = view.ModeFiles
+		}
+		assert.Equal(t, mode, page.GitWatchState().Mode)
+		assert.True(t, page.GitWatchState().Open, "mode choices keep the tree open")
+		h.m.viewCacheValid = false
+		frame := ansi.Strip(h.m.composeView().Content)
+		assert.Equal(t, 1, strings.Count(frame, "Files - Git"))
+		assert.NotContains(t, frame, "Changes(")
+		assert.NotContains(t, frame, "Browse")
+		lines := strings.Split(frame, "\n")
+		for y, line := range lines {
+			if strings.Contains(line, "Files - Git") {
+				require.Less(t, y+1, len(lines))
+				firstEntry := "work"
+				if mode == view.ModeFiles {
+					firstEntry = "README.md"
+				}
+				assert.Contains(t, lines[y+1], firstEntry, "the tree starts immediately below the header")
+				break
+			}
+		}
+	}
+}
+
+func TestReviewRootClickSidebarFileShowsDiffBesideNormalSidebar(t *testing.T) {
+	h, f := newDraftHarnessWithoutOpen(t)
+	useUnscannedSidebarProvider(h)
+	withRealPage(t, h)
+	h.pump(h.m.syncGitReview())
+	h.settle()
+	assert.Equal(t, 1, h.provider.snapshots, "visible collapsed sidebar starts bounded discovery")
+	assert.NotEmpty(t, h.provider.worktrees, "status metadata is prewarmed")
+	assert.Empty(t, h.provider.documents, "metadata prewarm does not hydrate diffs")
+
+	h.clickText("Git")
+	h.settle()
+	h.m.viewCacheValid = false
+	frame := ansi.Strip(h.m.composeView().Content)
+	assert.Contains(t, frame, "work")
+	assert.Nil(t, h.page.overlay, "opening the sidebar tree does not open the inspector")
+	h.clickText("work")
+	h.clickText("● /work")
 	h.clickText("Unstaged")
 	h.clickText("Dockerfile.dev")
 	h.settle()
@@ -112,7 +444,7 @@ func TestReviewRootClickSidebarFileShowsDiffBesideNormalSidebar(t *testing.T) {
 	assert.Contains(t, frame, "- FROM golang:1.22", "the inspector shows the diff")
 	assert.Contains(t, frame, "+ FROM golang:1.27")
 	assert.Contains(t, frame, "Dockerfile.dev")
-	assert.Contains(t, frame, "● main", "the normal sidebar stays beside it")
+	assert.Contains(t, frame, "● /work  ⎇ main", "checkout path is primary and branch is secondary")
 	assert.Contains(t, frame, "Unstaged")
 	assert.Contains(t, frame, "New session", "with its usual session section")
 	assert.NotContains(t, frame, "Loading…")
@@ -127,19 +459,24 @@ func TestReviewRootClickSidebarFileShowsDiffBesideNormalSidebar(t *testing.T) {
 	page := h.m.chatPage.(interface{ ContentOverlayBounds() (int, int, int, int) })
 	ox, oy, _, _ := page.ContentOverlayBounds()
 	beforeWheel := ansi.Strip(model.View())
+	topBeforeWheel := model.Save().Top
 	var wheelCmd tea.Cmd
-	for range 12 {
-		_, wheelCmd = h.m.Update(messages.WheelCoalescedMsg{X: ox + 10, Y: oy + 4, Delta: 12})
-		h.pump(wheelCmd)
-	}
+	_, wheelCmd = h.m.Update(messages.WheelCoalescedMsg{X: ox + 10, Y: oy + 4, Delta: 3})
+	h.pump(wheelCmd)
 	afterWheel := ansi.Strip(model.View())
+	assert.Equal(t, topBeforeWheel+6, model.Save().Top, "the root preserves all three coalesced wheel ticks at two visual rows each")
 	assert.NotEqual(t, beforeWheel, afterWheel, "the root coalesced wheel scrolls the sidebar-opened diff")
+	beforeRaw := ansi.Strip(model.View())
+	_, rawCmd := h.m.Update(tea.MouseWheelMsg{X: ox + 10, Y: oy + 4, Button: tea.MouseWheelUp})
+	h.pump(rawCmd)
+	assert.NotEqual(t, beforeRaw, ansi.Strip(model.View()), "a direct terminal wheel event also scrolls the diff")
+	afterWheel = ansi.Strip(model.View())
 	frame = ansi.Strip(h.m.composeView().Content)
 	var sidebarY, sidebarX = -1, -1
 	for y, line := range strings.Split(frame, "\n") {
-		if strings.Contains(line, "3 changes") {
+		if index := strings.Index(line, "Files - Git"); index >= 0 {
 			sidebarY = y
-			sidebarX = ansi.StringWidth(line[:strings.Index(line, "3 changes")]) + 1
+			sidebarX = ansi.StringWidth(line[:index]) + 1
 			break
 		}
 	}
@@ -157,6 +494,44 @@ func TestReviewRootClickSidebarFileShowsDiffBesideNormalSidebar(t *testing.T) {
 	h.key("enter")
 	require.Len(t, f.calls, 1, "sent to the current agent after confirmation")
 	assert.Empty(t, h.draft().Comments)
+}
+
+func TestReviewInspectorWheelUsesProductionCoalescer(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unified", true: "split"}[split], func(t *testing.T) {
+			h := newReviewHarness(t, 220)
+			h.m.gitDiffSplit = split
+			useUnscannedSidebarProvider(h)
+			withRealPage(t, h)
+			h.pump(h.m.syncGitReview())
+			h.settle()
+			h.clickText("Git")
+			h.clickText("work")
+			h.clickText("● /work")
+			h.clickText("Unstaged")
+			h.clickText("Dockerfile.dev")
+			h.settle()
+			model := h.m.reviewModel()
+			require.NotNil(t, model)
+			before := ansi.Strip(model.View())
+			frameBefore := ansi.Strip(h.m.composeView().Content)
+			page := h.m.chatPage.(interface{ ContentOverlayBounds() (int, int, int, int) })
+			ox, oy, _, _ := page.ContentOverlayBounds()
+
+			coalescer := tuiinput.NewMouseCoalescer()
+			t.Cleanup(coalescer.Stop)
+			assert.Nil(t, coalescer.Filter(tea.MouseWheelMsg{X: ox + 8, Y: oy + 4, Button: tea.MouseWheelDown}))
+			pointer, ok := coalescer.Filter(tea.MouseWheelMsg{X: ox + 9, Y: oy + 4, Button: tea.MouseWheelDown}).(messages.PointerUpdateMsg)
+			require.True(t, ok, "the production coalescer flushes PointerUpdateMsg when wheel position changes")
+			_, cmd := h.m.Update(pointer)
+			h.pump(cmd)
+			afterFrame := ansi.Strip(h.m.composeView().Content)
+			assert.NotEqual(t, before, ansi.Strip(model.View()), "PointerUpdateMsg reaches the chat content overlay and scrolls the diff model")
+			assert.NotEqual(t, frameBefore, afterFrame, "the root rendered frame reflects the wheel scroll")
+			assert.True(t, model.Focused(), "wheel scrolling preserves review keyboard focus")
+			assert.Contains(t, afterFrame, "● /work", "the adjacent Git sidebar remains visible")
+		})
+	}
 }
 
 func TestReviewGitScopeFollowsFocusedPaneSession(t *testing.T) {
@@ -207,16 +582,30 @@ func TestReviewInterruptedScanNeverLeavesSidebarLoading(t *testing.T) {
 	require.NoError(t, err)
 	h.m.chatPages["s2"] = &reviewChatPage{overlayWidth: h.m.width}
 
-	h.pump(h.m.syncGitReview())
-	_, load := h.m.Update(sidebar.GitRequestMsg{Owner: "s1", Action: sidebar.GitLoad})
-	assert.True(t, h.page.git.Loading, "the section shows a scan in flight")
+	provider := &interruptedSidebarReviewProvider{fakeReviewProvider: h.provider}
+	h.m.gitReviewFactory = func(*app.App, string, string) (gitreview.Provider, *view.Snapshot, error) {
+		return provider, nil, nil
+	}
+	h.pump(h.m.syncGitReview()) // collapsed-sidebar discovery and bounded prewarm finish
+	require.NotNil(t, h.page.git.Snapshot, "prewarm has already discovered the sidebar snapshot")
+	ws := h.m.activeReview()
+	require.NotNil(t, ws)
+	provider.lateResult = true
+	load := h.m.submitGitReviewRequest(view.LoadWorktreeRequestMsg{Owner: "s1", WorktreeID: "w1"})
+	require.NotNil(t, load, "an explicit worktree scan starts")
+	h.pump(h.m.pushGitSidebar(ws))
+	assert.True(t, h.page.git.Scanning["w1"], "the section shows a worktree scan in flight")
 
 	// Switch panes before the scan answers; the late answer is dropped.
 	h.m.supervisor.SwitchTo("s2")
 	h.pump(h.m.syncGitReview())
-	assert.False(t, h.page.git.Loading, "an interrupted scan stops showing as loading")
+	assert.False(t, h.page.git.Scanning["w1"], "an interrupted scan stops showing as loading")
+	assert.NotContains(t, h.m.gitReviewPending, "worktree:w1", "switching panes cancels the outstanding request")
+	beforeLateResult := h.page.git.Snapshot
+	require.NotNil(t, beforeLateResult, "switching panes preserves the prewarmed sidebar snapshot")
 	h.pump(load)
-	assert.Nil(t, h.page.git.Snapshot, "the late result is not applied after the switch")
+	assert.Equal(t, beforeLateResult, h.page.git.Snapshot, "the late result is rejected without mutating the sidebar snapshot")
+	assert.Equal(t, "main", h.page.git.Snapshot.Repositories[0].Worktrees[0].Branch)
 
 	h.m.supervisor.SwitchTo("s1")
 	h.pump(h.m.syncGitReview())
@@ -387,4 +776,68 @@ func TestTargetedRefreshWaitsUntilExplicitSnapshotCompletes(t *testing.T) {
 	assert.Nil(t, h.m.handleGitWatch(page.GitWatchState()), "automatic work does not race explicit discovery")
 	assert.False(t, h.m.gitRefreshScheduled)
 	assert.Empty(t, h.provider.refreshed)
+}
+
+type toggledDirectoryReviewProvider struct {
+	*fakeReviewProvider
+	fail bool
+}
+
+func (p *toggledDirectoryReviewProvider) Directory(ctx context.Context, worktreeID, path string) (gitreview.Directory, error) {
+	if p.fail {
+		return gitreview.Directory{}, errors.New("directory unavailable")
+	}
+	return p.fakeReviewProvider.Directory(ctx, worktreeID, path)
+}
+
+func TestGitReviewDirectoryErrorUpdatesSidebarCacheAndCanRetry(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	provider := &toggledDirectoryReviewProvider{fakeReviewProvider: h.provider, fail: true}
+	h.m.gitReviewFactory = func(*app.App, string, string) (gitreview.Provider, *view.Snapshot, error) { return provider, nil, nil }
+	h.open(true)
+	key := view.LoadDirectoryRequestMsg{Owner: "s1", WorktreeID: "w1", Path: "src"}
+	h.pump(h.m.submitGitReviewRequest(key))
+	ws := h.m.gitReviews["s1"]
+	require.Equal(t, view.StateError, ws.directories["w1\x00src"].State)
+	var sidebarDirectory *view.Directory
+	for i := range h.page.git.Directories {
+		if h.page.git.Directories[i].Path == "src" {
+			sidebarDirectory = &h.page.git.Directories[i]
+			break
+		}
+	}
+	require.NotNil(t, sidebarDirectory, "sidebar receives the terminal directory state and clears pending")
+	require.Equal(t, view.StateError, sidebarDirectory.State)
+	provider.fail = false
+	h.pump(h.m.submitGitReviewRequest(key))
+	require.Equal(t, view.StateReady, ws.directories["w1\x00src"].State)
+}
+
+func TestCancelledDirectoryRequestGenerationAllowsSidebarRetry(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.open(true)
+	ws := h.m.activeReview()
+	require.NotNil(t, ws)
+	key := view.LoadDirectoryRequestMsg{Owner: "s1", WorktreeID: "w1", Path: "src"}
+	load := h.m.submitGitReviewRequest(key)
+	require.NotNil(t, load)
+	initialGeneration := ws.directoryGeneration
+	_, pending := h.m.gitReviewPending["dir:w1\x00src"]
+	require.True(t, pending)
+
+	h.pump(h.m.pushGitSidebar(ws))
+	h.m.invalidateGitDirectories(ws)
+	h.pump(h.m.pushGitSidebar(ws))
+	assert.Greater(t, ws.directoryGeneration, initialGeneration)
+	assert.Equal(t, ws.directoryGeneration, h.page.git.DirectoryGeneration)
+	assert.Empty(t, ws.directories)
+	_, pending = h.m.gitReviewPending["dir:w1\x00src"]
+	assert.False(t, pending, "cancelled request is removed so the next explicit browse can retry")
+
+	// The root accepts a new explicit request after cancellation; no stale
+	// canceled result is needed to release its request guard.
+	retry := h.m.submitGitReviewRequest(key)
+	require.NotNil(t, retry)
+	_, pending = h.m.gitReviewPending["dir:w1\x00src"]
+	assert.True(t, pending)
 }

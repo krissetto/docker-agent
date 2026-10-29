@@ -50,6 +50,7 @@ func runtimeWithRecordedUserInput(t *testing.T, extraAgents ...*agent.Agent) (*L
 	r, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
+	t.Cleanup(func() { _ = r.Close() })
 	require.NoError(t, r.hooksRegistry.RegisterBuiltin("test_record_on_user_input", rb.hook))
 	r.buildHooksExecutors()
 

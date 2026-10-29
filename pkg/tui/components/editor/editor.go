@@ -2,6 +2,7 @@ package editor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -118,6 +119,14 @@ type fileLoadResultMsg struct {
 }
 
 // historySearchState holds the state for incremental history search.
+type commentInputState struct {
+	value       string
+	line        int
+	column      int
+	placeholder string
+}
+
+// historySearchState holds state for history-search input.
 type historySearchState struct {
 	active                   bool
 	query                    string
@@ -140,6 +149,7 @@ type editor struct {
 	viewportWidth, viewportHeight int
 	viewportLimited               bool
 	working                       bool
+	commentInput                  *commentInputState
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -304,17 +314,17 @@ func (e *editor) computeWrappedLines(value string, startOffset int) []string {
 	return result
 }
 
-// applySuggestionOverlay draws the inline suggestion on top of the textarea
-// view using the configured ghost style. The first character appears with
-// cursor styling (reverse video) so it's visible inside the cursor block.
-// Multi-line suggestions are rendered across multiple visual lines.
-func (e *editor) applySuggestionOverlay(view string) string {
+// applySuggestionOverlay draws the inline suggestion over the textarea rows of
+// view, whose textarea origin is (originX, originY). The first grapheme gets
+// cursor styling; the rest uses ghost styling. Multi-line suggestions span rows.
+func (e *editor) applySuggestionOverlay(view string, originX, originY int) string {
 	lines := strings.Split(view, "\n")
+	textareaRows := min(len(lines)-originY, e.textarea.Height())
 	promptWidth := runewidth.StringWidth(stripANSI(e.textarea.Prompt()))
 	geometry := e.textarea.Layout()
 	textWidth := geometry.Cursor.Column
 	targetLine := geometry.Cursor.Row - geometry.ScrollY
-	if targetLine < 0 || targetLine >= len(lines) {
+	if targetLine < 0 || targetLine >= textareaRows {
 		return view
 	}
 
@@ -335,7 +345,7 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		}
 
 		currentY := targetLine + i
-		if currentY >= len(lines) {
+		if currentY >= textareaRows {
 			break
 		}
 
@@ -379,15 +389,15 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	// the editor does not depend on canvas/compositor APIs that differ
 	// across lipgloss v2 pre-releases (it keeps the editor embeddable by
 	// consumers pinned to other lipgloss snapshots, e.g. Docker Sandboxes).
-	outLines := strings.Split(view, "\n")
 	for _, ov := range overlays {
 		if ov.x >= e.textarea.Width() {
 			continue
 		}
 		content := ansi.Truncate(ov.content, e.textarea.Width()-ov.x, "")
-		outLines[ov.y] = spliceLine(outLines[ov.y], content, ov.x)
+		row := originY + ov.y
+		lines[row] = spliceLine(lines[row], content, originX+ov.x)
 	}
-	return strings.Join(outLines, "\n")
+	return strings.Join(lines, "\n")
 }
 
 // spliceLine overwrites line content at column x with overlay, preserving
@@ -531,7 +541,7 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 	return e.resetAndSendMode(content, false)
 }
 
-func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
+func (e *editor) resetAndSendMode(content string, steer bool) tea.Cmd {
 	e.tryAddFileRef(e.pendingFileRef)
 	e.pendingFileRef = ""
 	attachments := e.collectAttachments(content)
@@ -560,7 +570,7 @@ func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
 	e.textarea.Reset()
 	e.userTyped = false
 	e.clearSuggestion()
-	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments, FollowUp: followUp})
+	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments, Queue: !steer, Steer: steer})
 }
 
 // configureNewlineKeybinding sets up the newline keybinding from the
@@ -573,9 +583,43 @@ func (e *editor) configureNewlineKeybinding() {
 	e.textarea.SetNewlineEnabled(true)
 }
 
+func (e *editor) updateCommentInput(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.PasteMsg:
+		e.textarea.InsertString(normalizePasteNewlines(msg.Content))
+	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+		_, cmd := e.textarea.Update(msg)
+		return cmd
+	case tea.KeyPressMsg:
+		if msg.String() == "alt+enter" || key.Matches(msg, e.textarea.PasteBinding()) {
+			return nil
+		}
+		if key.Matches(msg, e.textarea.NewlineBinding()) {
+			e.textarea.InsertString("\n")
+			return nil
+		}
+		_, cmd := e.textarea.Update(msg)
+		return cmd
+	}
+	return nil
+}
+
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	defer e.updateAttachmentBanner()
+	if e.commentInput != nil {
+		switch msg.(type) {
+		case tea.PasteMsg, tea.KeyPressMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+			return e, e.updateCommentInput(msg)
+		case commands.CategoriesUpdatedMsg, tea.KeyboardEnhancementsMsg, messages.ThemeChangedMsg, tea.WindowSizeMsg, completion.ClosedMsg, completion.SelectionChangedMsg:
+		default:
+			return e, nil
+		}
+	}
+	defer func() {
+		if e.commentInput == nil {
+			e.updateAttachmentBanner()
+		}
+	}()
 
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
@@ -755,9 +799,9 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return e.handleGraphemeBackspace()
 		}
 
-		// Alt+Enter submits an end-of-turn follow-up. It is handled before the
-		// configurable newline binding so the two delivery modes are always
-		// available independently.
+		// Alt+Enter explicitly steers into the active turn. It is handled
+		// before the configurable newline binding so it remains a distinct
+		// delivery key; while idle it still sends as a normal first message.
 		if msg.String() == "alt+enter" {
 			if !e.textarea.Focused() {
 				return e, nil
@@ -1373,11 +1417,21 @@ func (e *editor) SetWorking(working bool) tea.Cmd {
 
 // Value returns the current editor content
 func (e *editor) Value() string {
+	if e.commentInput != nil {
+		return e.commentInput.value
+	}
 	return e.textarea.Value()
 }
 
 // SetValue updates the editor content and moves cursor to end
 func (e *editor) SetValue(content string) {
+	if e.commentInput != nil {
+		e.commentInput.value = content
+		lines := strings.Split(content, "\n")
+		e.commentInput.line = len(lines) - 1
+		e.commentInput.column = len([]rune(lines[len(lines)-1]))
+		return
+	}
 	e.textarea.SetValue(content)
 	e.fixViewportScroll()
 	e.textarea.MoveToEnd()
@@ -1385,8 +1439,84 @@ func (e *editor) SetValue(content string) {
 	e.refreshSuggestion()
 }
 
+// BeginCommentInput borrows the normal composer for a review comment while
+// retaining its unsent message and cursor for exact restoration.
+func (e *editor) BeginCommentInput() bool {
+	if e.commentInput != nil || e.recording || e.historySearch.active {
+		return false
+	}
+	e.commentInput = &commentInputState{
+		value: e.textarea.Value(), line: e.textarea.Line(), column: e.textarea.Column(),
+		placeholder: e.textarea.Placeholder(),
+	}
+	e.clearSuggestion()
+	e.currentCompletion = nil
+	e.completionWord = ""
+	e.argumentPrefix = ""
+	e.pendingFileRef = ""
+	e.textarea.SetValue("")
+	e.textarea.SetPlaceholder("Write a review comment…")
+	e.fixViewportScroll()
+	e.updateAttachmentBanner()
+	return true
+}
+
+func (e *editor) CommentInputActive() bool { return e.commentInput != nil }
+func (e *editor) CommentInputValue() string {
+	if e.commentInput == nil {
+		return ""
+	}
+	return e.textarea.Value()
+}
+
+func (e *editor) SetCommentInputValue(value string) {
+	if e.commentInput == nil {
+		return
+	}
+	e.textarea.SetValue(value)
+	e.fixViewportScroll()
+}
+
+func (e *editor) FinishCommentInput() (string, bool) {
+	if e.commentInput == nil {
+		return "", false
+	}
+	body := strings.TrimSpace(e.textarea.Value())
+	state := *e.commentInput
+	e.commentInput = nil
+	e.textarea.SetValue(state.value)
+	rows := e.textarea.Layout().Rows
+	for row, line := range rows {
+		if line.Line != state.line || state.column < line.StartColumn || state.column > line.EndColumn {
+			continue
+		}
+		cell := 0
+		for _, run := range line.Runs {
+			if state.column <= run.StartColumn {
+				break
+			}
+			cell = run.Cell + run.Width
+			if state.column <= run.EndColumn {
+				break
+			}
+		}
+		e.textarea.PlaceCursor(cell, row)
+		break
+	}
+	e.textarea.SetPlaceholder(state.placeholder)
+	e.userTyped = state.value != ""
+	e.pendingFileRef = ""
+	e.clearSuggestion()
+	e.fixViewportScroll()
+	e.updateAttachmentBanner()
+	return body, true
+}
+
 // InsertText inserts text at the current cursor position
 func (e *editor) InsertText(text string) {
+	if e.commentInput != nil {
+		return
+	}
 	e.textarea.InsertString(text)
 	e.userTyped = true
 	e.refreshSuggestion()
@@ -1394,6 +1524,9 @@ func (e *editor) InsertText(text string) {
 
 // AttachFile adds a file as an attachment and inserts @filepath into the editor
 func (e *editor) AttachFile(filePath string) error {
+	if e.commentInput != nil {
+		return errors.New("attachments are unavailable while writing a review comment")
+	}
 	placeholder := "@" + filePath
 	before := len(e.attachments)
 	if err := e.addFileAttachment(placeholder); err != nil {
@@ -1564,6 +1697,9 @@ func (e *editor) Cleanup() {
 // SetRecording sets the recording mode which shows animated dots as the cursor.
 // When recording is enabled, the placeholder changes to animated dots.
 func (e *editor) SetRecording(recording bool) tea.Cmd {
+	if e.commentInput != nil {
+		return nil
+	}
 	e.recording = recording
 	if recording {
 		e.recordingDotPhase = 0
@@ -1596,6 +1732,9 @@ func (e *editor) IsHistorySearchActive() bool {
 
 // SendContent triggers sending the current editor content
 func (e *editor) SendContent() tea.Cmd {
+	if e.commentInput != nil {
+		return nil
+	}
 	value := e.textarea.Value()
 	if value == "" {
 		return nil

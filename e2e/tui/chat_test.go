@@ -110,10 +110,9 @@ func TestCommandPalette_Opens(t *testing.T) {
 // output only; the real model and its three-second notice expiry keep running.
 func TestGolden_Chat_BasicMath(t *testing.T) {
 	captured := make(chan tea.View, 1)
-	expired := make(chan struct{}, 1)
 	d := newTUIWithProxyOptionsWrapped(t, "testdata/basic.yaml", 120, 40, nil,
 		func(model tea.Model) tea.Model {
-			return &settledGoldenModel{inner: model, captured: captured, expired: expired}
+			return &settledGoldenModel{inner: model, captured: captured}
 		}, tui.WithHideSidebar(), tui.WithVersion("test"))
 
 	d.Type("What's 2+2?").Enter()
@@ -128,15 +127,12 @@ func TestGolden_Chat_BasicMath(t *testing.T) {
 	d.Send(settledGoldenBarrier{})
 	require.Len(t, strings.Split(snapshot.Content, "\n"), 40)
 	require.Equal(t, goldenCompletedTitle+" - docker agent", snapshot.WindowTitle, "canonical full title remains available without a pane header")
-	d.Assert(tuitest.ContainsAll("2 + 2 equals 4.", goldenCompletedTabLabel, "root · 1 turn completed"))
+	d.Assert(tuitest.ContainsAll("2 + 2 equals 4.", goldenCompletedTabLabel))
+	// The completed-turn notice was deliberately removed (32f29b136); it must stay absent.
+	d.Assert(tuitest.Absent("turn completed"))
 	d.Assert(tuitest.Absent("Send to"))
 	d.AssertGolden("chat_basic_math")
-	// Pinning output must not suppress the underlying canonical expiry path.
-	select {
-	case <-expired:
-	case <-time.After(10 * time.Second):
-		t.Fatal("underlying summary expiry did not continue after golden capture")
-	}
+	// Notice expiry is covered by messagebar's TestAgentNoticeExpiryDedupAndCancellationPriority.
 }
 
 const (
@@ -147,11 +143,9 @@ const (
 type settledGoldenBarrier struct{}
 
 type settledGoldenModel struct {
-	inner          tea.Model
-	captured       chan<- tea.View
-	expired        chan<- struct{}
-	pinned         *tea.View
-	expiryObserved bool
+	inner    tea.Model
+	captured chan<- tea.View
+	pinned   *tea.View
 }
 
 func (m *settledGoldenModel) SetProgram(program *tea.Program) {
@@ -176,14 +170,11 @@ func (m *settledGoldenModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	state := core.Resolve[*service.SessionState](inner)
 	canonicalTitle := application.Session() != nil && application.Session().TitleSnapshot() == goldenCompletedTitle && state.SessionTitle() == goldenCompletedTitle
 	if m.pinned == nil && settled && strings.Contains(plain, "2 + 2 equals 4.") &&
-		!strings.Contains(plain, "Send to") && strings.Contains(plain, "root · 1 turn completed") &&
+		!strings.Contains(plain, "Send to") && !strings.Contains(plain, "turn completed") &&
 		canonicalTitle && view.WindowTitle == goldenCompletedTitle+" - docker agent" && strings.Contains(plain, goldenCompletedTabLabel) {
 		snapshot := view
 		m.pinned = &snapshot
 		m.captured <- snapshot
-	} else if m.pinned != nil && settled && !m.expiryObserved && !strings.Contains(plain, "root · 1 turn completed") {
-		m.expiryObserved = true
-		m.expired <- struct{}{}
 	}
 	return m, cmd
 }

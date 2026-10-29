@@ -13,6 +13,8 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	latest "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
@@ -256,6 +258,12 @@ func TestColdDuplicateCreateLoadsCanonicalRoot(t *testing.T) {
 			}
 			t.Cleanup(func() { require.NoError(t, store.Close()) })
 			r := serviceRuntime(t, NewSessionService(), store)
+			// Hermetic switcher: the stored override must resolve without a live provider.
+			r.modelSwitcherCfg = &ModelSwitcherConfig{
+				Models:           map[string]latest.ModelConfig{"test/saved-model": {Provider: "openai", Model: "gpt-4o"}},
+				ProviderRegistry: testProviderRegistry(),
+				EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
+			}
 			// Inspect hydration without starting the restored pending execution.
 			r.agents = nil
 			r.team = team.New(team.WithAgents(agent.New("root", "prompt", agent.WithMaxIterations(9), agent.WithModel(coordinationReply("unused")))))

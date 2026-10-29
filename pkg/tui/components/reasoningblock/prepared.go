@@ -11,16 +11,16 @@ import (
 )
 
 type PreparedReasoning struct {
-	width, version     int
-	theme              uint64
-	selected, expanded bool
-	chunks             map[string]string
-	cache              *renderCache
+	width, version, toolCount int
+	theme                     uint64
+	selected, expanded        bool
+	chunks                    map[string]string
+	cache                     *renderCache
 }
 
 func (m *Model) preparedValid() bool {
 	p := m.prepared
-	return p != nil && p.width == m.contentWidth() && p.version == m.reasoningVersion && p.theme == styles.ThemeGeneration() && p.selected == m.selected && p.expanded == m.expanded
+	return p != nil && p.width == m.contentWidth() && p.version == m.reasoningVersion && p.toolCount == len(m.toolEntries) && p.theme == styles.ThemeGeneration() && p.selected == m.selected && p.expanded == m.expanded
 }
 
 // PrepareReasoning captures immutable inputs; the returned worker never reads
@@ -40,8 +40,12 @@ func (m *Model) PrepareReasoning() func() *PreparedReasoning {
 	width := m.contentWidth()
 	renderer := markdown.NewFastRenderer(width).HideCopyIcon().FreezeStyles()
 	muted, envelope := styles.MutedStyle.Italic(true), m.messageStyle()
-	prepared := PreparedReasoning{width: width, version: m.reasoningVersion, theme: styles.ThemeGeneration(), selected: m.selected, expanded: m.expanded, chunks: make(map[string]string)}
-	toolCount := len(m.toolEntries)
+	prepared := PreparedReasoning{width: width, version: m.reasoningVersion, toolCount: len(m.toolEntries), theme: styles.ThemeGeneration(), selected: m.selected, expanded: m.expanded}
+	if prepared.expanded {
+		// Chunks are only read by the expanded view; collapsed blocks keep no map.
+		prepared.chunks = make(map[string]string)
+	}
+	toolCount := prepared.toolCount
 	return func() *PreparedReasoning {
 		var reasoning []string
 		for _, item := range items {
@@ -74,8 +78,8 @@ func (m *Model) ApplyPreparedReasoning(prepared *PreparedReasoning) bool {
 	return true
 }
 
-func reasoningPreviewCache(lines []string, width, version int, theme uint64, tools int) *renderCache {
-	hasExtra := tools > 0 || len(lines) > previewLines
+func reasoningPreviewCache(lines []string, width, version int, theme uint64, toolCount int) *renderCache {
+	hasExtra := toolCount > 0 || len(lines) > previewLines
 	preview := make([]string, 0, previewLines)
 	nonblank := 0
 	for _, line := range lines {
@@ -92,5 +96,5 @@ func reasoningPreviewCache(lines []string, width, version int, theme uint64, too
 	for i := range preview {
 		preview[i] = strings.Clone(preview[i])
 	}
-	return &renderCache{themeGeneration: theme, width: width, reasoningVersion: version, lines: preview, hasExtra: hasExtra, truncated: nonblank > previewLines, hasLines: len(lines) > 0}
+	return &renderCache{themeGeneration: theme, width: width, reasoningVersion: version, toolCount: toolCount, lines: preview, hasExtra: hasExtra, truncated: nonblank > previewLines, hasLines: len(lines) > 0}
 }

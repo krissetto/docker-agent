@@ -116,7 +116,7 @@ func TestDirectoryArrowRevealsAtStableSingleCell(t *testing.T) {
 		} else {
 			assert.Equal(t, directoryIcon, arrow.glyph)
 		}
-		expected := sidebarCells(directoryActionIcon(directoryIcon, progress, progress))
+		expected := sidebarCells(directoryActionIcon(directoryIcon, progress))
 		require.Len(t, expected, 1)
 		assert.Equal(t, expected[0].fg, arrow.fg)
 		assert.Nil(t, arrow.bg, "arrow has no box/background fill")
@@ -150,15 +150,10 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 		require.InDelta(t, 1, m.hoverValues["directory"].target, 0)
 		settleSidebarHover(t, m, cmd)
 		cells := sidebarCells(m.directoryRow(width))
-		copyBase := styles.MutedStyle.GetForeground()
-		arrowBase := copyBase
-		if x == arrowX {
-			arrowBase = styles.TextPrimary
-		} else {
-			copyBase = styles.TextPrimary
-		}
-		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(copyBase, .25)), color.NRGBAModel.Convert(cells[width-5].fg))
-		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(arrowBase, .25)), color.NRGBAModel.Convert(cells[width-2].fg))
+		// Both icons rest muted and brighten on the single shared hover ramp at full progress.
+		muted := styles.Brighten(styles.MutedStyle.GetForeground(), .25)
+		assert.Equal(t, color.NRGBAModel.Convert(muted), color.NRGBAModel.Convert(cells[width-5].fg))
+		assert.Equal(t, color.NRGBAModel.Convert(muted), color.NRGBAModel.Convert(cells[width-2].fg))
 		result, payload := m.HandleClickType(x, y)
 		if x == arrowX {
 			assert.Equal(t, ClickOpenWorkingDir, result)
@@ -263,10 +258,10 @@ func TestQueueItemHoverKeepsTextHighlightedAcrossControls(t *testing.T) {
 					} else {
 						require.Zero(t, progress)
 					}
-					paint := styles.HoverText(styles.MutedStyle.Render(action.glyph), progress, styles.TextPrimary)
-					paint = hoverAction(paint, 1)
+					// Row hover is full, so each control's single effective progress is 1.
+					paint := hoverAction(styles.MutedStyle.Render(action.glyph), max(progress, 1))
 					if action.name == "remove" {
-						paint = removeAction(progress, 1)
+						paint = removeAction(max(progress, 1))
 					}
 					require.Equal(t, sidebarCells(paint)[0], sidebarCells(m.placementText(first, width))[indent+action.col])
 				}

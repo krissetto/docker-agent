@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/components/grip"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
@@ -304,4 +305,27 @@ func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
 	require.IsType(t, msgtypes.OpenPendingRemovalMsg{}, cmd())
 	_, cmd = p.handleMouseClick(remove)
 	require.IsType(t, msgtypes.OpenPendingRemovalMsg{}, cmd(), "repeated clicks still only request a dialog")
+}
+
+func TestSinglePageTopInsetAndExtendedSidebarHandleGeometry(t *testing.T) {
+	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	p.SetSize(160, 40)
+	p.SetMainContentInset(1)
+	sl := p.computeSidebarLayout()
+	sidebarX := styles.AppPadding + sl.sidebarStartX
+	handleX := styles.AppPadding + sl.handleX
+
+	require.Equal(t, wheelTargetNone, p.wheelTarget(sidebarX, 0), "blank root inset cannot scroll the sidebar")
+	require.Equal(t, TargetNone, NewHitTest(p).At(sidebarX, 0), "blank root inset has no sidebar target")
+
+	p.SetSidebarPresentationExtent(sl.chatHeight + 4)
+	handleHeight := max(sl.chatHeight, p.sidebarPresentationExtent)
+	continuedY := p.mainContentInset + sl.chatHeight + 1
+	require.Equal(t, TargetSidebarResizeHandle, NewHitTest(p).At(handleX, continuedY), "resize handle hit bounds include the composer continuation")
+	p.handleMouseClick(tea.MouseClickMsg{X: handleX, Y: continuedY, Button: tea.MouseLeft})
+	require.True(t, p.isDraggingSidebar, "composer continuation clicks start a sidebar resize")
+	p.handleMouseRelease(tea.MouseReleaseMsg{X: handleX, Y: continuedY, Button: tea.MouseLeft})
+	top, length := grip.Rows(handleHeight)
+	gripY := p.mainContentInset + top + length/2
+	require.True(t, p.sidebarGripHandleAt(handleX, gripY), "the revealed sidebar grip follows the extended hit bounds")
 }

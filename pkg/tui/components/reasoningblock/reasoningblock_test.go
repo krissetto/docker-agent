@@ -141,6 +141,60 @@ func TestReasoningBlockExpanded(t *testing.T) {
 	assert.Contains(t, stripped, "Line 6")
 }
 
+func TestReasoningBlockAddedToolInvalidatesCollapsedDisclosureCache(t *testing.T) {
+	t.Parallel()
+
+	block := New(animation.NewRuntime(), "test-tool-disclosure-cache", "root", &service.SessionState{})
+	t.Cleanup(block.StopAnimation)
+	block.SetSize(80, 24)
+	block.SetReasoning("Short reasoning.")
+
+	assert.NotContains(t, ansi.Strip(block.View()), "Thinking [+]")
+	assert.False(t, block.IsToggleLine(0))
+	oldCache := block.cache
+	require.NotNil(t, oldCache)
+	require.Equal(t, 0, oldCache.toolCount)
+
+	toolMsg := types.ToolCallMessage("root", tools.ToolCall{
+		ID:       "call-1",
+		Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"/tmp/test.txt"}`},
+	}, tools.Tool{Name: "read_file", Description: "Read a file"}, types.ToolStatusRunning)
+	block.AddToolCall(toolMsg)
+
+	assert.Contains(t, ansi.Strip(block.View()), "Thinking [+] (1 tool)")
+	assert.NotSame(t, oldCache, block.cache)
+	assert.Equal(t, 1, block.cache.toolCount)
+	assert.True(t, block.IsToggleLine(0))
+	assert.True(t, block.IsToggleAt(0, 0))
+
+	// Updating the existing tool must preserve the disclosure without adding a duplicate.
+	block.AddToolCall(toolMsg)
+	assert.Equal(t, 1, block.ToolCount())
+	assert.Contains(t, ansi.Strip(block.View()), "Thinking [+] (1 tool)")
+	block.ToggleAt(0, 0)
+	assert.True(t, block.IsExpanded())
+	assert.Contains(t, ansi.Strip(block.View()), "read_file")
+}
+
+func TestCompletedToolCountExcludesInFlightCalls(t *testing.T) {
+	block := New(animation.NewRuntime(), "completed-tools", "root", &service.SessionState{})
+	t.Cleanup(block.StopAnimation)
+	for i, status := range []types.ToolStatus{
+		types.ToolStatusPending, types.ToolStatusConfirmation, types.ToolStatusRunning,
+		types.ToolStatusCompleted, types.ToolStatusError,
+	} {
+		block.AddToolCall(types.ToolCallMessage("root", tools.ToolCall{
+			ID: strconv.Itoa(i), Function: tools.FunctionCall{Name: "read_file"},
+		}, tools.Tool{Name: "read_file"}, status))
+	}
+	require.Equal(t, 5, block.ToolCount())
+	require.Equal(t, 2, block.CompletedToolCount())
+	block.UpdateToolCall("2", types.ToolStatusCompleted, "")
+	require.Equal(t, 3, block.CompletedToolCount())
+	block.UpdateToolCall("2", types.ToolStatusCompleted, "")
+	require.Equal(t, 3, block.CompletedToolCount())
+}
+
 func TestReasoningBlockWithToolCall(t *testing.T) {
 	t.Parallel()
 
@@ -333,36 +387,18 @@ func TestReasoningBlockHeaderFooterLineDetection(t *testing.T) {
 	assert.False(t, block.IsToggleLine(1)) // Body line
 }
 
-func TestReasoningBlockAgentBadge(t *testing.T) {
+func TestReasoningBlockNeverRepeatsAgentNameBadge(t *testing.T) {
 	t.Parallel()
-
-	sessionState := &service.SessionState{}
-	block := New(animation.NewRuntime(), "test-badge", "developer", sessionState)
+	block := New(animation.NewRuntime(), "test-badge", "developer", &service.SessionState{})
 	block.SetSize(80, 24)
 	block.SetReasoning("Working through the problem.")
-	// Expand so the header is toggleable regardless of extra content;
-	// otherwise IsToggleLine would be false everywhere and prove nothing.
 	block.SetExpanded(true)
-
-	// Badge is off by default: the header sits on line 0 and toggles there.
-	assert.NotContains(t, ansi.Strip(block.View()), "developer")
+	view := ansi.Strip(block.View())
+	assert.NotContains(t, view, "developer")
+	assert.Contains(t, view, "Thinking")
 	assert.True(t, block.IsHeaderLine(0))
 	assert.True(t, block.IsToggleLine(0))
-
-	block.SetShowAgentBadge(true)
-	stripped := ansi.Strip(block.View())
-	badgeIdx := strings.Index(stripped, "developer")
-	thinkingIdx := strings.Index(stripped, "Thinking")
-	require.GreaterOrEqual(t, badgeIdx, 0, "badge should be rendered")
-	require.GreaterOrEqual(t, thinkingIdx, 0)
-	assert.Less(t, badgeIdx, thinkingIdx, "badge should render before the Thinking header")
-
-	// The badge and its blank separator shift the header down by two lines,
-	// for hit-testing as well as rendering.
-	assert.False(t, block.IsHeaderLine(0))
-	assert.False(t, block.IsToggleLine(0))
-	assert.True(t, block.IsHeaderLine(2))
-	assert.True(t, block.IsToggleLine(2))
+	assert.False(t, block.IsToggleLine(2), "badge removal keeps child/header geometry canonical")
 }
 
 func TestReasoningBlockMultipleToolCalls(t *testing.T) {
@@ -451,6 +487,29 @@ func TestReasoningBlockUpdateToolCall(t *testing.T) {
 
 	// Verify update
 	assert.True(t, block.HasToolCall("call-1"))
+}
+
+func TestReplaceLastReasoningSuffixPreservesPriorReasoningAndToolSequence(t *testing.T) {
+	t.Parallel()
+
+	block := New(animation.NewRuntime(), "replace-reasoning-suffix", "root", &service.SessionState{})
+	t.Cleanup(block.StopAnimation)
+	block.SetSize(80, 24)
+	block.SetExpanded(true)
+	block.SetReasoning("first segment")
+	toolMsg := types.ToolCallMessage("root", tools.ToolCall{ID: "between", Function: tools.FunctionCall{Name: "check", Arguments: `{"x":1}`}}, tools.Tool{Name: "check"}, types.ToolStatusCompleted)
+	block.AddToolCall(toolMsg)
+	block.UpdateToolResult("between", "tool result", types.ToolStatusCompleted, &tools.ToolCallResult{Output: "tool result"})
+	block.AppendReasoningSegment("partial final")
+
+	require.True(t, block.ReplaceLastReasoningSuffix("partial final", "corrected final"))
+	require.Equal(t, "first segment\n\ncorrected final", block.Reasoning())
+	view := ansi.Strip(block.View())
+	require.Less(t, strings.Index(view, "first segment"), strings.Index(view, "check"))
+	require.Less(t, strings.Index(view, "check"), strings.Index(view, "tool result"))
+	require.Less(t, strings.Index(view, "tool result"), strings.Index(view, "corrected final"))
+	require.NotContains(t, view, "partial final")
+	require.True(t, block.HasToolCall("between"))
 }
 
 func TestReasoningBlockUpdateToolResult(t *testing.T) {

@@ -52,7 +52,7 @@ func TestSQLiteRecentChatBoundsExtractionAndUsesSessionPositionIndex(t *testing.
 	require.Len(t, page.Messages, 1)
 	assert.Len(t, page.Messages[0].Text, 32)
 	assert.True(t, page.Messages[0].Truncated)
-	assert.False(t, page.Messages[1].Truncated)
+	assert.False(t, page.HasMore, "the only stored message is the whole page")
 	rows, err := store.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN SELECT id, position FROM session_items WHERE session_id = ? ORDER BY position DESC LIMIT ?`, root.ID, 8)
 	require.NoError(t, err)
 	defer rows.Close()

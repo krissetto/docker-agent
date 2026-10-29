@@ -60,8 +60,12 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				} else {
 					assert.Contains(t, out, "sent a message v")
 				}
-				for _, line := range strings.Split(strings.TrimSuffix(body, "\n"), "\n") {
-					assert.Contains(t, out, strings.ReplaceAll(line, "\t", "    "))
+				for line := range strings.SplitSeq(strings.TrimSuffix(body, "\n"), "\n") {
+					want := strings.ReplaceAll(line, "\t", "    ")
+					if origin == session.InputOriginRuntime {
+						want = strings.TrimSuffix(strings.TrimPrefix(want, "<system_info>"), "</system_info>")
+					}
+					assert.Contains(t, out, want)
 				}
 				assert.False(t, view.InputReferenceOnLine(1), "expanded body is not navigation")
 				assert.False(t, view.IsToggleAt(1, 0))
@@ -110,4 +114,61 @@ func TestSubagentReplyGateExcludesInstructionsAndGenericNotices(t *testing.T) {
 	generic := session.UserMessage("model-only envelope")
 	generic.InputOrigin, generic.InputMode = session.InputOriginRuntime, "steer"
 	assert.Empty(t, types.Input(generic).ReceivedBody)
+}
+
+func TestRuntimeNoticeDetailsExpandWithoutSystemInfoEnvelope(t *testing.T) {
+	input := session.UserMessage(`<system_info>Subagent "worker" (child-session) finished its turn. Full response: "updated the project safely"</system_info>`)
+	input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = session.InputOriginRuntime, "steer", "child-session", "worker"
+	input.ReportOutcome = session.ReportOutcomeFinished
+	msg := types.Input(input)
+	view := New(animation.NewRuntime(), msg, nil)
+
+	collapsed := ansi.Strip(view.View())
+	assert.Contains(t, collapsed, "From worker (child) · turn finished >")
+	assert.NotContains(t, collapsed, "updated the project")
+	assert.NotContains(t, collapsed, "system_info")
+	assert.True(t, view.IsToggleAt(0, 0), "runtime detail summary uses the shared disclosure hit area")
+
+	view.SetExpanded(true)
+	expanded := ansi.Strip(view.View())
+	assert.Contains(t, expanded, "From worker (child) · turn finished v")
+	assert.Contains(t, expanded, "Full response: updated the project safely")
+	assert.NotContains(t, expanded, "system_info")
+	assert.False(t, view.InputReferenceOnLine(1), "expanded detail is not sender navigation")
+	assert.False(t, view.IsToggleAt(1, 0))
+
+	view.SetSize(24, 20)
+	view.InvalidateRenderCache()
+	narrow := strings.Split(ansi.Strip(view.View()), "\n")
+	headerLines := strings.Count(ansi.Strip(view.replyHeader(24)), "\n") + 1
+	for i, line := range narrow[:headerLines] {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 24)
+		if i > 0 && ansi.StringWidth(line) <= 22 {
+			assert.True(t, strings.HasPrefix(line, "  "), "wrapped header row %d aligns at the tool gutter", i)
+		}
+	}
+	for line := range headerLines {
+		for col := range 24 {
+			assert.Equal(t, view.IsToggleAt(0, 0), view.IsToggleAt(line, col), "header hit target line=%d col=%d", line, col)
+		}
+	}
+
+	malformed := *msg
+	malformed.ReceivedBody = `<system_info>secret without a closing envelope`
+	unsafe := New(animation.NewRuntime(), &malformed, nil)
+	unsafe.SetExpanded(true)
+	assert.NotContains(t, ansi.Strip(unsafe.View()), "secret")
+	assert.NotContains(t, ansi.Strip(unsafe.View()), "system_info")
+}
+
+func TestRuntimeNoticeWithoutDetailsHasNoDisclosure(t *testing.T) {
+	input := session.UserMessage(`Subagent "worker" (child-session) finished its turn.`)
+	input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = session.InputOriginRuntime, "steer", "child-session", "worker"
+	input.ReportOutcome = session.ReportOutcomeFinished
+	view := New(animation.NewRuntime(), types.Input(input), nil)
+	out := ansi.Strip(view.View())
+	assert.Contains(t, out, "worker (child) · turn finished")
+	assert.NotContains(t, out, ">", "a status-only completion does not advertise expansion")
+	assert.False(t, view.IsExpanded())
+	assert.False(t, view.IsToggleAt(0, 0))
 }

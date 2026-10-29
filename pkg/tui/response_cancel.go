@@ -63,20 +63,23 @@ func (m *appModel) tickResponsePrompt() tea.Cmd {
 }
 
 func (m *appModel) handleResponseEscape() tea.Cmd {
-	if m.application == nil || m.application.Session() == nil {
+	if (m.responseCancelPendingApp == m.application && m.responseCancelPendingTurn == m.responseTurnID()) || m.application == nil || m.application.Session() == nil {
 		return nil
 	}
 	valid := m.responsePrompt.armed && time.Now().Before(m.responsePrompt.expiresAt) && m.responsePrompt.application == m.application && m.responsePrompt.sessionID == m.application.Session().ID && m.responsePrompt.handle == m.application.SessionHandle() && m.responsePrompt.generation == m.responseRunGeneration && m.responsePrompt.turnID == m.responseTurnID()
 	if valid {
 		cancel := m.responsePrompt.cancel
+		application, sessionID, turnID := m.application, m.responsePrompt.sessionID, m.responsePrompt.turnID
+		handle := m.responsePrompt.handle
+		owner := app.SessionEventMsg{Epoch: m.application.CurrentSessionEventIdentity().Epoch, OriginSessionID: sessionID}
+		routeGeneration, _ := m.supervisor.RouteGeneration(sessionID)
 		clearCmd := m.clearResponsePrompt()
-		cmd, accepted := chat.CancelResponseIntent(m.chatPage, cancel)
-		if !accepted {
-			return tea.Batch(clearCmd, cmd)
+		m.responseCancelPendingApp, m.responseCancelPendingTurn = application, turnID
+		m.responsePrompt = responseCancelPrompt{application: application, sessionID: sessionID, turnID: turnID, handle: handle}
+		cmd := func() tea.Msg {
+			return responseCancelCompletedMsg{application: application, sessionID: sessionID, turnID: turnID, handle: handle, owner: owner, routeGeneration: routeGeneration, outcome: cancel()}
 		}
-		m.ensureMessageBar()
-		m.responsePrompt = responseCancelPrompt{application: m.application}
-		return tea.Batch(clearCmd, cmd, m.setResponseNotice("Response cancelled.", messagebar.Success, messagebar.Cancellation))
+		return tea.Batch(clearCmd, cmd)
 	}
 	clearCmd := m.clearResponsePrompt()
 	m.ensureMessageBar()
@@ -84,6 +87,53 @@ func (m *appModel) handleResponseEscape() tea.Cmd {
 	noticeCmd := m.setResponseNotice("Double Esc within 3s cancels the response.", messagebar.Warning, messagebar.Cancellation)
 	token := m.responsePrompt.noticeToken
 	return tea.Batch(clearCmd, noticeCmd, tea.Tick(responsePromptLifetime, func(time.Time) tea.Msg { return responseArmExpiredMsg{token: token} }))
+}
+
+type responseCancelCompletedMsg struct {
+	application     *app.App
+	sessionID       string
+	turnID          string
+	handle          runtime.SessionHandle
+	owner           app.SessionEventMsg
+	routeGeneration uint64
+	outcome         runtime.CancelOutcome
+}
+
+func (m *appModel) clearStaleResponseCancelPending() {
+	if m.responseCancelPendingApp == nil {
+		return
+	}
+	if m.application != m.responseCancelPendingApp || m.responseTurnID() != m.responseCancelPendingTurn {
+		m.responseCancelPendingApp, m.responseCancelPendingTurn = nil, ""
+	}
+}
+
+func (m *appModel) finishResponseCancel(msg responseCancelCompletedMsg) tea.Cmd {
+	if m.responseCancelPendingApp == msg.application && m.responseCancelPendingTurn == msg.turnID {
+		m.responseCancelPendingApp, m.responseCancelPendingTurn = nil, ""
+	}
+	if msg.outcome == runtime.CancelNotActive || m.supervisor == nil || !msg.application.IsCurrentSessionEvent(msg.owner) {
+		return nil
+	}
+	generation, exists := m.supervisor.RouteGeneration(msg.sessionID)
+	runner := m.supervisor.GetRunner(msg.sessionID)
+	if !exists || generation != msg.routeGeneration || runner == nil || runner.App != msg.application || runner.App.SessionHandle() != msg.handle {
+		return nil
+	}
+	projection := msg.application.Presentation()
+	if projection == nil || (projection.Status.TurnID != "" && projection.Status.TurnID != msg.turnID) {
+		return nil
+	}
+	page := m.chatPages[msg.sessionID]
+	cmd, finished := chat.FinishCancelResponse(page, msg.outcome)
+	if !finished {
+		return nil
+	}
+	if page == m.chatPage {
+		m.responsePrompt = responseCancelPrompt{application: msg.application}
+		return tea.Batch(m.routePaneCmd(msg.sessionID, cmd), m.setResponseNotice("Response cancelled.", messagebar.Success, messagebar.Cancellation))
+	}
+	return m.routePaneCmd(msg.sessionID, cmd)
 }
 
 type interactionHintReadyMsg struct {

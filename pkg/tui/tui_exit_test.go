@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/docker/docker-agent/pkg/tui/widgets/help"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -65,7 +65,6 @@ func (m *mockChatPage) SetSidebarSettings(chat.SidebarSettings)  {}
 func (m *mockChatPage) SetLayoutSettings(messages.LayoutSettings) tea.Cmd {
 	return nil
 }
-func (m *mockChatPage) SetSendMode(messages.SendMode) {}
 func (m *mockChatPage) SetInterruptMode(mode messages.InterruptMode) {
 	m.interruptMode = mode
 }

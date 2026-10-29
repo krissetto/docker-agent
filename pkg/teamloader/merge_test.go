@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +14,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shellprocess"
 )
 
 type mergeableSet struct {
@@ -94,55 +93,7 @@ func allToolNames(t *testing.T, sets []tools.ToolSet) []string {
 	return names
 }
 
-func TestShellGetsSharedBackgroundOwnerAndOnlyOneInspectionSet(t *testing.T) {
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}}
-	pool, err := NewToolsetLeasePool("shell-source-runtime")
-	require.NoError(t, err)
-	loadOpts := &loadOptions{toolsetRegistry: testToolsetRegistry(), toolsetPool: pool, toolsetPoolScope: "shell-source-runtime", ownedResources: new([]io.Closer)}
-	agentConfig := &latest.AgentConfig{Toolsets: []latest.Toolset{{Type: "shell"}, {Type: "shell"}, {Type: "background_jobs"}}}
-	sets, _, err := getToolsForAgent(t.Context(), agentConfig, ".", &runConfig, "team.yaml", loadOpts, newEnvExpander(runConfig.EnvProvider()))
-	require.NoError(t, err)
-	var shellSets []*builtinshell.ToolSet
-	for _, set := range sets {
-		if raw, ok := tools.As[*builtinshell.ToolSet](set); ok {
-			shellSets = append(shellSets, raw)
-		}
-	}
-	require.Len(t, shellSets, 2)
-	first, err := shellSets[0].Tools(t.Context())
-	require.NoError(t, err)
-	second, err := shellSets[1].Tools(t.Context())
-	require.NoError(t, err)
-	count := func(list []tools.Tool, name string) int {
-		n := 0
-		for _, tool := range list {
-			if tool.Name == name {
-				n++
-			}
-		}
-		return n
-	}
-	require.Equal(t, 0, count(first, backgroundjobs.ToolNameRunBackgroundJob))
-	require.Equal(t, 0, count(first, backgroundjobs.ToolNameViewBackgroundJob))
-	require.Equal(t, 0, count(second, backgroundjobs.ToolNameViewBackgroundJob))
-	var declaredJobs tools.ToolSet
-	for _, set := range sets {
-		if _, ok := tools.As[*backgroundjobs.ToolSet](set); ok {
-			declaredJobs = set
-		}
-	}
-	require.NotNil(t, declaredJobs)
-	declaredTools, err := declaredJobs.Tools(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, 1, count(declaredTools, backgroundjobs.ToolNameRunBackgroundJob))
-	require.Equal(t, 1, count(declaredTools, backgroundjobs.ToolNameViewBackgroundJob))
-	for _, resource := range *loadOpts.ownedResources {
-		require.NoError(t, resource.Close())
-	}
-	require.NoError(t, pool.Close(t.Context()))
-}
-
-func TestShellOnlyGetsPooledSyntheticInspectionOwner(t *testing.T) {
+func TestShellOnlyGetsPooledProcessManagerAndDiagnostics(t *testing.T) {
 	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}}
 	pool, err := NewToolsetLeasePool("shell-only-scope")
 	require.NoError(t, err)
@@ -162,11 +113,11 @@ func TestShellOnlyGetsPooledSyntheticInspectionOwner(t *testing.T) {
 	require.NoError(t, err)
 	two, err := second.Tools(t.Context())
 	require.NoError(t, err)
-	for _, name := range []string{backgroundjobs.ToolNameListBackgroundJobs, backgroundjobs.ToolNameViewBackgroundJob, backgroundjobs.ToolNameWaitBackgroundJob, backgroundjobs.ToolNameStopBackgroundJob} {
-		require.Equal(t, 1, countToolName(one, name))
-		require.Equal(t, 1, countToolName(two, name))
+	for _, definitions := range [][]tools.Tool{one, two} {
+		for _, name := range []string{shellprocess.ToolNameListRunningProcesses, shellprocess.ToolNameInspectRunningProcess, shellprocess.ToolNameKillRunningProcess} {
+			require.Equal(t, 1, countToolName(definitions, name))
+		}
 	}
-	require.Equal(t, 0, countToolName(one, backgroundjobs.ToolNameRunBackgroundJob))
 	for _, closer := range firstClosers {
 		require.NoError(t, closer.Close())
 	}
@@ -174,16 +125,6 @@ func TestShellOnlyGetsPooledSyntheticInspectionOwner(t *testing.T) {
 		require.NoError(t, closer.Close())
 	}
 	require.NoError(t, pool.Close(t.Context()))
-}
-
-func countToolName(list []tools.Tool, name string) int {
-	n := 0
-	for _, tool := range list {
-		if tool.Name == name {
-			n++
-		}
-	}
-	return n
 }
 
 func TestShellSyntheticManagerSurvivesLeaseRevisionAndEnvironmentEdit(t *testing.T) {
@@ -222,21 +163,8 @@ func TestShellSyntheticManagerSurvivesLeaseRevisionAndEnvironmentEdit(t *testing
 	require.NotNil(t, shellTool)
 	result, err := shellTool.Handler(tools.WithResourceOwner(t.Context(), owner), tools.ToolCall{Function: tools.FunctionCall{Name: shellTool.Name, Arguments: `{"cmd":"echo old-start; sleep 2.5; echo old-finish","timeout":5}`}}, workRuntime)
 	require.NoError(t, err)
-	require.Contains(t, result.Output, "Background job started")
-	newTool, newLease := build("new")
-	definitions, err := newTool.Tools(t.Context())
-	require.NoError(t, err)
-	var view tools.Tool
-	for _, candidate := range definitions {
-		if candidate.Name == backgroundjobs.ToolNameViewBackgroundJob {
-			view = candidate
-		}
-	}
-	require.NotNil(t, view)
-	id := strings.Fields(strings.Split(result.Output, "ID: ")[1])[0]
-	viewResult, err := view.Handler(tools.WithResourceOwner(t.Context(), owner), tools.ToolCall{Function: tools.FunctionCall{Name: view.Name, Arguments: `{"job_id":"` + id + `"}`}}, tools.NopRuntime{})
-	require.NoError(t, err)
-	require.Contains(t, viewResult.Output, "old-start")
+	require.Contains(t, result.Output, "Completion output will be delivered automatically.")
+	_, newLease := build("new")
 	require.NoError(t, oldLease.Close())
 	select {
 	case completion := <-registered.complete:
@@ -269,3 +197,13 @@ type shellJobWork struct {
 func (w *shellJobWork) Complete(s string) error { w.complete <- s; return nil }
 func (*shellJobWork) Cancel()                   {}
 func (w *shellJobWork) Close() error            { w.once.Do(func() { close(w.closed) }); return nil }
+
+func countToolName(list []tools.Tool, name string) int {
+	n := 0
+	for _, tool := range list {
+		if tool.Name == name {
+			n++
+		}
+	}
+	return n
+}

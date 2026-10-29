@@ -33,6 +33,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/contextbar"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
+	"github.com/docker/docker-agent/pkg/tui/components/grip"
 	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	reviewcomponent "github.com/docker/docker-agent/pkg/tui/components/review"
@@ -81,7 +82,6 @@ const (
 	PanelSidebarGit FocusedPanel = "sidebar-git"
 
 	// appPaddingHorizontal is total horizontal padding from AppStyle (left + right)
-	resizeHandleWidth    = 8
 	appPaddingHorizontal = 2 * styles.AppPadding
 )
 
@@ -100,17 +100,19 @@ type appModel struct {
 	modelPickerGeneration    uint64
 	modelPickerApp           *app.App
 
-	responsePrompt        responseCancelPrompt
-	responseRunGeneration uint64
-	contextClosed         bool
-	contextBar            *contextbar.Model
-	contextUsage          map[string]map[string]runtime.Usage
-	contextUsageReady     map[string]map[string]bool
-	contextSessionID      string
-	contextAgentName      string
-	ar                    *animation.Runtime
-	shutdownDone          <-chan struct{}
-	cleanupOnce           sync.Once
+	responsePrompt            responseCancelPrompt
+	responseCancelPendingApp  *app.App
+	responseCancelPendingTurn string
+	responseRunGeneration     uint64
+	contextClosed             bool
+	contextBar                *contextbar.Model
+	contextUsage              map[string]map[string]runtime.Usage
+	contextUsageReady         map[string]map[string]bool
+	contextSessionID          string
+	contextAgentName          string
+	ar                        *animation.Runtime
+	shutdownDone              <-chan struct{}
+	cleanupOnce               sync.Once
 	// runCleanup releases the resources the whole run owns — the shared local
 	// runtime and its toolsets, which every borrowed tab depends on. It runs
 	// once when the TUI shuts down, never when an individual tab closes.
@@ -255,16 +257,18 @@ type appModel struct {
 	separatorHeight, tabsHeight, contextHeight int
 
 	// Editor resize state
-	editorLines         int
-	manualEditorHeight  int
-	editorHeight        int
-	editorHeightFrom    int
-	editorHeightTarget  int
-	editorHeightMotion  animation.Transition
-	editorShrinkDelayed bool
-	editorHistoryValue  string
-	isDragging          bool
-	isHoveringHandle    bool
+	editorLines                       int
+	manualEditorHeight                int
+	editorHeight                      int
+	editorHeightFrom                  int
+	editorHeightTarget                int
+	editorHeightMotion                animation.Transition
+	editorShrinkDelayed               bool
+	editorHeightReviewFocusTransition bool
+	editorHistoryValue                string
+	isDragging                        bool
+	isHoveringHandle                  bool
+	composerGrip                      grip.Reveal
 
 	// Focus state
 	focusedPanel FocusedPanel
@@ -274,6 +278,9 @@ type appModel struct {
 
 	// keyboardEnhancementsSupported tracks whether the terminal supports keyboard enhancements
 	keyboardEnhancementsSupported bool
+	keyReleaseSupported           bool
+	reviewHoldC                   bool
+	reviewCommentInput            *reviewCommentInput
 
 	// program holds a reference to the tea.Program so that we can
 	// perform a full terminal release/restore cycle on focus events.
@@ -306,6 +313,8 @@ type appModel struct {
 	// keep flowing at startup even before any focus event arrives — some
 	// terminals never send FocusMsg.
 	tickPaused bool
+
+	scrollbarPointer scrollbarPointerState
 
 	// lightDarkModeSet is true while DEC mode 2031 (terminal color-scheme
 	// reports) is enabled. Set when the auto theme turns the mode on, so the
@@ -384,6 +393,8 @@ type appModel struct {
 	panelSelectionGeneration uint64
 
 	gitReviews           map[string]*gitReviewWorkspace
+	gitReviewScopes      gitReviewRegistry
+	reviewAnimations     map[*reviewcomponent.Model]struct{}
 	gitReviewOwner       string
 	gitReviewGeneration  uint64
 	gitReviewToken       uint64
@@ -418,11 +429,6 @@ type appModel struct {
 	majorEventWater           map[string]majorEventFence
 	paneOutcomes              map[string]runtime.TurnOutcome
 
-	// sendMode is what happens to messages sent while the agent is working:
-	// queue until the turn ends (default) or steer into the ongoing stream.
-	// Shared by every tab and managed via /settings.
-	sendMode messages.SendMode
-
 	// interruptMode is how Esc interrupts a running stream (confirmation
 	// dialog, double-tap, or immediate). Shared by every tab and managed
 	// via /settings.
@@ -431,7 +437,11 @@ type appModel struct {
 
 	// showBanner displays the ASCII-art startup banner on an empty
 	// conversation. Shared by every tab and managed via /settings.
-	showBanner bool
+	showBanner     bool
+	compactWorkLog bool
+	// agentContextReadings shows each sidebar agent's context fill. Managed via /settings.
+	agentContextReadings bool
+	visibleReplies       messages.VisibleReplies
 
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
@@ -676,6 +686,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	m := &appModel{
 		ar:           ar,
+		composerGrip: grip.NewReveal(ar),
 		shutdownDone: ctx.Done(),
 		buildCommandCategories: func(ctx context.Context, model tea.Model) []commands.Category {
 			return commands.BuildCommandCategories(ctx, model.(*appModel).application)
@@ -705,11 +716,13 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		panelWorkingDir:               panelWorkingDir,
 		dimInactivePanes:              userSettings.GetDimInactivePanes(),
 		transparentBackground:         userSettings.GetTransparentBackground(),
-		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
 		closeTabChoice:                messages.ParseCloseTabChoice(userSettings.CloseTabChoice),
 		gitDiffSplit:                  messages.ParseGitDiffLayout(userSettings.GetGitDiffLayout()) == messages.GitDiffSplit,
 		showBanner:                    userSettings.GetShowBanner(),
+		compactWorkLog:                userSettings.GetCompactWorkLog(),
+		agentContextReadings:          userSettings.GetShowAgentContext(),
+		visibleReplies:                messages.ParseVisibleReplies(userSettings.GetVisibleReplies()),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "docker agent",
@@ -860,9 +873,11 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 	opts := []chat.PageOption{
 		chat.WithCommandParser(commands.NewParser(m.commandCategories()...)),
 		chat.WithLayoutSettings(m.layoutSettings),
-		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
 		chat.WithShowBanner(m.showBanner),
+		chat.WithCompactWorkLog(m.compactWorkLog),
+		chat.WithAgentContextReadings(m.agentContextReadings),
+		chat.WithVisibleReplies(m.visibleReplies),
 	}
 
 	if m.leanMode {
@@ -1055,7 +1070,7 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return model, tea.Batch(pendingCmd, eventCmd)
 	case messages.PointerUpdateMsg:
 		if pointer.HasWheel {
-			if pointer.WheelHorizontal && (m.leanMode || m.hitTestRegion(pointer.Y) != regionTabBar || pointer.X < tabFrameOrigin() || pointer.X >= tabFrameOrigin()+tabFrameWidth(m.width)) {
+			if pointer.WheelHorizontal && (m.leanMode || m.hitTestRegion(pointer.Y) != regionTabBar || pointer.X < m.tabOrigin() || pointer.X >= m.tabOrigin()+m.tabWidth()) {
 				return m, nil
 			}
 			return m.updateWithLifecycle(messages.WheelCoalescedMsg{Delta: pointer.WheelDelta, X: pointer.X, Y: pointer.Y})
@@ -1081,7 +1096,24 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 		promptCmd = tea.Batch(m.cancelInteractionHint(), m.clearResponsePrompt())
 	}
 	previousEditor := m.editor
+	wasReviewFocused := m.reviewFocused()
 	model, cmd := m.update(msg)
+	if wasReviewFocused != m.reviewFocused() {
+		m.viewCacheValid = false
+		target := min(m.composerMaxTextHeight(), max(1, m.editor.ContentLineCount()))
+		if m.manualEditorHeight > 0 {
+			target = min(m.composerMaxTextHeight(), m.manualEditorHeight)
+		}
+		if m.reviewFocused() {
+			target = 1
+		}
+		needsReviewCollapse := m.reviewFocused() && (m.editorHeight > 1 || m.editorHeightTarget > 1)
+		needsComposerRestore := !m.reviewFocused() && target > 1 && (m.editorHeight == 1 || m.editorHeightTarget == 1)
+		if needsReviewCollapse || needsComposerRestore {
+			m.editorHeightReviewFocusTransition = true
+			cmd = tea.Batch(cmd, m.resizeAll())
+		}
+	}
 	cmd = tea.Batch(cmd, m.syncGitReview())
 	if previousEditor != m.editor || m.dialogMgr.Open() || m.tickPaused {
 		if hover, ok := previousEditor.(editor.BannerHover); ok {
@@ -1115,6 +1147,10 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd = tea.Batch(cmd, m.resizeAll())
 	}
 	m.validateMessagesScrollbar()
+	if !tick {
+		m.syncReviewAnimations()
+		m.syncScrollbarPointer(msg)
+	}
 	if obs := m.tour.Observe(msg); obs != nil {
 		cmd = tea.Batch(cmd, obs)
 	}
@@ -1133,14 +1169,13 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	beforePanesValid := m.visiblePaneCacheValid()
 	beforeSidebarVisual := sidebarVisualGeneration(m.chatPage)
 	beforeTabVisual := tabVisualGeneration(m.tabBar)
-	beforeResizeHover := m.isHoveringHandle
 	beforeEditorHeight := m.editorHeight
 	canRestore := m.canRestorePointerCache(msg)
 	defer func() {
 		if canRestore && ((!m.visiblePaneCacheValid() && beforePanesValid) || m.chatPage.VisualGeneration() != beforeVisual ||
 			sidebarVisualGeneration(m.chatPage) != beforeSidebarVisual ||
 			tabVisualGeneration(m.tabBar) != beforeTabVisual ||
-			m.isHoveringHandle != beforeResizeHover || m.editorHeight != beforeEditorHeight) {
+			m.editorHeight != beforeEditorHeight) {
 			m.viewCacheValid = false
 		}
 	}()
@@ -1222,7 +1257,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.messageBar.Update(msg)
 		if m.focusedPanel == PanelMessageBar && !m.messageBar.Focused() {
 			m.focusedPanel = PanelEditor
-			cmd = tea.Batch(cmd, m.editor.Focus())
+			cmd = tea.Batch(cmd, m.focusReviewComposer())
 		}
 		return m, cmd
 	// --- Routing & Animation ---
@@ -1243,6 +1278,10 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update epilogue re-arms on focus, or keeps a still-outstanding lease.
 		if m.tickPaused {
 			return m, nil
+		}
+		m.tickReviewAnimation(msg)
+		if m.composerGrip.Tick(msg) {
+			msg.MarkDirty()
 		}
 		updatedNotification, notificationCmd := m.notification.Update(msg)
 		m.notification = updatedNotification
@@ -1334,8 +1373,16 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleGitAutoRefresh(msg)
 	case gitReviewTaskResult:
 		return m, m.applyGitReviewTask(msg)
+	case gitReviewIdentityMsg:
+		cmd := m.applyGitReviewIdentity(msg)
+		return m, cmd
+	case gitReviewPeerContent:
+		cmd := m.applyGitReviewPeerContent(msg)
+		return m, cmd
+	case reviewExternalEditorDone:
+		return m, m.finishReviewExternalEditor(msg)
 	case reviewcomponent.RefreshRequestMsg, reviewcomponent.LoadWorktreeRequestMsg, reviewcomponent.LoadDirectoryRequestMsg, reviewcomponent.OpenDocumentRequestMsg, reviewcomponent.CloseRequestMsg, reviewcomponent.DockToggleRequestMsg, reviewcomponent.FocusRequestMsg, reviewcomponent.CopyRequestMsg, reviewcomponent.SelectionChangedMsg,
-		reviewcomponent.HighlightedMsg, reviewcomponent.AddCommentMsg, reviewcomponent.EditCommentMsg, reviewcomponent.DeleteCommentMsg, reviewcomponent.PreviewDraftMsg, reviewcomponent.SendDraftMsg, reviewcomponent.CancelPreviewMsg, gitReviewSendResult,
+		reviewcomponent.HighlightedMsg, reviewcomponent.CommentResultMsg, reviewcomponent.GeneralCommentRequestMsg, reviewcomponent.OpenExternalEditorRequestMsg, reviewcomponent.CounterpartRequestMsg, reviewcomponent.AddCommentMsg, reviewcomponent.EditCommentMsg, reviewcomponent.DeleteCommentMsg, reviewcomponent.PreviewDraftMsg, reviewcomponent.SendDraftMsg, reviewcomponent.CancelPreviewMsg, gitReviewSendResult,
 		dialog.ReviewTargetResultMsg, dialog.ReviewTargetMoreMsg, gitReviewCatalogResult, gitReviewResolved, gitReviewAgents:
 		return m, m.handleReviewComponentMessage(msg)
 	case messages.OpenPanesMsg:
@@ -1451,7 +1498,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focusedPanel != PanelEditor {
 				m.focusedPanel = PanelEditor
 				m.chatPage.BlurMessages()
-				return m, m.editor.Focus()
+				return m, m.focusReviewComposer()
 			}
 		}
 		return m, nil
@@ -1483,10 +1530,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
 
 	case tea.BlurMsg:
+		m.reviewHoldC = false
 		m.cancelPaneGesture()
 		m.focused = false
 		m.tickPaused = true
 		m.isDragging, m.isHoveringHandle = false, false
+		m.resetComposerGrip()
 		var barCmd tea.Cmd
 		if m.messageBar != nil {
 			barCmd = m.messageBar.Update(msg)
@@ -1536,12 +1585,19 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyboardEnhancementsMsg:
 		m.keyboardEnhancements = &msg
 		m.keyboardEnhancementsSupported = msg.Flags != 0 || termfeatures.SupportsModifiedEnter(os.Getenv)
+		m.keyReleaseSupported = msg.SupportsEventTypes()
+		if !m.keyReleaseSupported {
+			m.reviewHoldC = false
+		}
 		return m, tea.Batch(m.updateChatCmd(msg), m.updateEditorCmd(msg))
 
 	// --- Keyboard input ---
 
 	case tea.KeyPressMsg:
 		return m.handleKeyPress(msg)
+
+	case tea.KeyReleaseMsg:
+		return m.handleKeyRelease(msg)
 
 	case tea.PasteMsg:
 		if m.reviewCapturing() {
@@ -1555,9 +1611,25 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.forwardChat(msg)
 		}
 		// Forward paste to editor
-		return m.forwardEditor(msg)
+		cmd := m.updateEditorCmd(msg)
+		if m.reviewCommentInput != nil && m.reviewCommentInput.general {
+			if saveCmd := m.captureReviewGeneral(m.reviewCommentInput.owner); saveCmd != nil {
+				cmd = tea.Batch(cmd, saveCmd)
+			}
+		}
+		return m, cmd
 
 	// --- Mouse ---
+
+	case tea.MouseWheelMsg:
+		if msg.Button == tea.MouseWheelUp || msg.Button == tea.MouseWheelDown {
+			delta := 1
+			if msg.Button == tea.MouseWheelUp {
+				delta = -1
+			}
+			return m.handleWheelCoalesced(messages.WheelCoalescedMsg{X: msg.X, Y: msg.Y, Delta: delta})
+		}
+		return m, nil
 
 	case tea.MouseClickMsg:
 		return m.handleMouseClick(msg)
@@ -1717,7 +1789,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.RestorePendingMessagesMsg:
 		m.editor.SetValue(msg.Content)
-		return m, m.editor.Focus()
+		return m, m.focusReviewComposer()
 
 	case messages.SendMsg:
 		// Forward send messages to the active content view.
@@ -1741,7 +1813,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSwitchAgent(msg.AgentName)
 
 	case messages.ShowAgentDetailsMsg:
-		return m.handleShowAgentDetails(msg.AgentName)
+		return m.handleShowAgentDetails(msg)
 
 	// --- Session browser ---
 
@@ -1959,6 +2031,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Settings (/settings) ---
 
+	case messages.OpenUserAttachmentPreviewMsg:
+		return m.openUserAttachmentPreview(msg)
+
 	case messages.OpenImagePreviewMsg:
 		if msg.Preview == nil {
 			return m, nil
@@ -2049,6 +2124,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.OpenURLMsg:
 		return m.handleOpenURL(msg.URL)
 
+	case responseCancelCompletedMsg:
+		return m, m.finishResponseCancel(msg)
 	case responseArmExpiredMsg:
 		if m.responsePrompt.noticeToken == msg.token && !time.Now().Before(m.responsePrompt.expiresAt) {
 			m.responsePrompt.armed = false
@@ -2096,8 +2173,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 	m.ingestPanelEvent(m.paneFocus(), event)
 	switch event.(type) {
-	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *app.SessionResetEvent:
+	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *runtime.TurnSettledEvent, *app.SessionResetEvent:
 		m.responseRunGeneration++
+		m.clearStaleResponseCancelPending()
 	}
 	if m.application != nil {
 		m.trackContextUsage(event, m.application.Session())
@@ -2155,6 +2233,12 @@ func (m *appModel) deliverRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd)
 			return m, notification.ErrorCmd("Message was not sent: originating session closed or replaced. Unsent draft: " + send.Content)
 		}
 		return m, nil
+	}
+	if preview, ok := msg.Inner.(messages.OpenUserAttachmentPreviewMsg); ok {
+		if preview.SessionID != msg.SessionID {
+			return m, nil
+		}
+		return m.openUserAttachmentPreview(preview)
 	}
 	if image, ok := msg.Inner.(messages.OpenImagePreviewMsg); ok {
 		if image.SessionID != msg.SessionID {
@@ -2364,6 +2448,9 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 // handleClearSession resets the current tab by creating a fresh session
 // in the same working directory.
 func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
+	if cmd, ok := m.prepareReviewInputTransition(); !ok {
+		return m, cmd
+	}
 	activeID := m.supervisor.ActiveID()
 
 	// Cleanup old editor for the active session.
@@ -2555,6 +2642,9 @@ func (m *appModel) handleOpenSubagent(msg messages.OpenSubagentMsg) (tea.Model, 
 // Existing chat pages and editors are preserved (not recreated) so that in-flight streaming
 // content and draft text are retained when switching back to a tab.
 func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
+	if cmd, ok := m.prepareReviewInputTransition(); !ok {
+		return m, cmd
+	}
 	if m.opening != nil {
 		if sessionID == m.opening.target {
 			return m, nil
@@ -2969,6 +3059,9 @@ func (m *appModel) requestExitConfirmation() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
+	if cmd, ok := m.prepareReviewInputTransition(); !ok {
+		return m, cmd
+	}
 	if m.opening != nil {
 		pending := !m.opening.installed && sessionID == m.opening.target
 		m.cancelSessionOpening()
@@ -3314,7 +3407,6 @@ func (m *appModel) resizeAll() tea.Cmd {
 	width, height := m.width, m.height
 	if !m.leanMode {
 		m.ensureContextBar()
-		m.contextBar.SetWidth(max(0, width-2*styles.EditorHMargin))
 		cmds = append(cmds, m.syncContextBar())
 	}
 	// Reserve the editable cell first. On genuinely short screens, retire
@@ -3326,16 +3418,22 @@ func (m *appModel) resizeAll() tea.Cmd {
 		remaining -= m.separatorHeight
 		m.tabsHeight = min(m.tabBar.Height(), remaining)
 		remaining -= m.tabsHeight
-		if m.activeContextUsageReady() {
-			m.contextHeight = min(contextbar.Height, remaining)
-		}
+		m.contextHeight = min(contextbar.Height, remaining)
 	}
 	chromeHeight := m.separatorHeight + m.tabsHeight + m.contextHeight + m.messageBarHeight()
+	column := m.composerColumn()
+	// The dock (tabs, editor, context usage) shares one column; the footer does not.
+	if m.tabBar != nil {
+		cmds = append(cmds, m.tabBar.SetWidth(m.tabWidth()))
+	}
+	if !m.leanMode && m.contextBar != nil {
+		m.contextBar.SetWidth(max(0, column.W-2*styles.EditorHMargin))
+	}
 	if viewport, ok := m.editor.(editor.ViewportLayout); ok {
-		viewport.SetViewportSize(width, max(1, height-chromeHeight))
+		viewport.SetViewportSize(max(1, column.W), max(1, height-chromeHeight))
 	}
 	frame := m.editorFrame()
-	innerWidth := max(1, width-frame.GetHorizontalFrameSize())
+	innerWidth := max(1, column.W-frame.GetHorizontalFrameSize())
 	maxTextHeight := m.composerMaxTextHeight()
 
 	// Measure wrapping at the new width without first snapping the displayed height.
@@ -3347,6 +3445,9 @@ func (m *appModel) resizeAll() tea.Cmd {
 		// Keep the choice intact when the terminal temporarily clamps it.
 		targetEditorHeight = min(maxTextHeight, m.manualEditorHeight)
 	}
+	if m.reviewFocused() {
+		targetEditorHeight = 1
+	}
 	// A smaller terminal must clamp immediately, but that is not permission
 	// to collapse all the way to shorter content without the usual hold.
 	if m.editorHeight > maxTextHeight {
@@ -3357,31 +3458,35 @@ func (m *appModel) resizeAll() tea.Cmd {
 	if m.editorHistoryValue != m.editor.Value() {
 		m.editorHistoryValue = ""
 	}
-	if targetEditorHeight == m.editorHeight || m.editorHeight == 0 || (targetEditorHeight > m.editorHeight && m.editorHistoryValue == "") || m.manualEditorHeight > 0 {
+	if targetEditorHeight == m.editorHeight || m.editorHeight == 0 ||
+		(targetEditorHeight > m.editorHeight && m.editorHistoryValue == "" && !m.editorHeightReviewFocusTransition) ||
+		(m.manualEditorHeight > 0 && !m.editorHeightReviewFocusTransition) {
 		m.editorHeightMotion.Cancel()
 		m.editorShrinkDelayed = false
 		m.editorHistoryValue = ""
 		m.editorHeight = targetEditorHeight
 		m.editorHeightTarget = targetEditorHeight
-	} else if targetEditorHeight != m.editorHeightTarget {
+	} else if targetEditorHeight != m.editorHeightTarget ||
+		(m.editorHeightReviewFocusTransition && targetEditorHeight != m.editorHeight && m.editorShrinkDelayed) {
 		m.editorHeightFrom, m.editorHeightTarget = m.editorHeight, targetEditorHeight
 		if !m.editorHeightMotion.Running() {
 			m.editorHeightMotion.SetRuntime(m.ar)
 		}
 		// History growth shares the shrink easing without delaying recalled text.
 		duration, easing := editorShrinkDuration, animation.EaseOutCubic
-		m.editorShrinkDelayed = targetEditorHeight < m.editorHeight
+		m.editorShrinkDelayed = targetEditorHeight < m.editorHeight && !m.reviewFocused()
 		if m.editorShrinkDelayed {
 			duration, easing = editorShrinkDelay+editorShrinkDuration, delayedEditorShrink
 		}
 		cmds = append(cmds, m.editorHeightMotion.Start(duration, easing))
 	}
+	m.editorHeightReviewFocusTransition = false
 	if m.editorHeight != allocatedEditorHeight {
 		cmds = append(cmds, m.editor.SetSize(innerWidth, m.editorHeight))
 	}
 	_, editorHeight := m.editor.GetSize()
 	if banner, ok := m.editor.(editor.BannerLayout); ok {
-		banner.SetBannerWidth(width)
+		banner.SetBannerWidth(max(1, column.W))
 	}
 	if banner, ok := m.editor.(editor.BannerHeightLimit); ok {
 		banner.SetBannerMaxHeight(max(0, height-chromeHeight-editorHeight-paneMinHeight))
@@ -3400,7 +3505,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 
 	// The popup ends before the banner/editor, including all allocated chrome.
 	m.completions.SetEditorBottom(max(0, height-m.composerLayout().bannerTop))
-	cmds = append(cmds, m.updateCompletionsCmd(tea.WindowSizeMsg{Width: width, Height: height}))
+	cmds = append(cmds, m.updateCompletionsCmd(tea.WindowSizeMsg{Width: max(1, m.composerColumn().W), Height: height}))
 
 	m.notification.SetSize(width, height)
 
@@ -3419,6 +3524,11 @@ func (m *appModel) Bindings() []key.Binding {
 
 // handleKeyPress handles all keyboard input with proper priority routing.
 func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea.Cmd) {
+	if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
+		if handled, inputCmd := m.updateReviewCommentKey(msg); handled {
+			return m, inputCmd
+		}
+	}
 	if gestureCmd, handled := m.handlePaneGestureKey(msg); handled {
 		return m, gestureCmd
 	}
@@ -3429,7 +3539,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		return m.forwardDialog(msg)
 	}
 	// Check if we should stop transcription on Enter or Escape
-	if m.transcriber.IsRunning() {
+	if m.transcriber.IsRunning() && m.reviewCommentInput == nil && m.reviewModel() == nil {
 		switch msg.String() {
 		case "enter":
 			model, cmd := m.handleStopSpeak()
@@ -3488,6 +3598,9 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	if handled, cmd := m.handleReviewKey(msg); handled {
 		return m, cmd
 	}
+	if msg.String() == "enter" && m.focusedPanel == PanelEditor && m.reviewModel() != nil && !m.editor.IsContextBarFocused() && m.reviewCommentInput == nil {
+		return m, m.sendReviewFromComposer()
+	}
 	if handled, cmd := m.handleGitSidebarKey(msg); handled {
 		return m, cmd
 	}
@@ -3503,7 +3616,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 				return m, nil
 			}
 			m.focusedPanel = PanelEditor
-			return m, m.editor.Focus()
+			return m, m.focusReviewComposer()
 		case "shift+tab":
 			m.messageBar.SetFocused(false)
 			m.focusedPanel = PanelContent
@@ -3574,6 +3687,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 			return m, m.focusContent()
 		default:
 			m.editor.SetContextBarFocused(false)
+			if ws := m.activeReview(); ws != nil && m.reviewModel() != nil {
+				focus := m.startReviewGeneralInput(ws.anchor)
+				return m, tea.Batch(focus, m.updateEditorCmd(msg))
+			}
 			return m, tea.Batch(m.editor.Focus(), m.updateEditorCmd(msg))
 		}
 	}
@@ -3718,6 +3835,9 @@ func (m *appModel) switchFocus() (tea.Model, tea.Cmd) {
 		}
 		m.focusedPanel = PanelEditor
 		m.chatPage.BlurMessages()
+		if ws := m.activeReview(); ws != nil && m.reviewModel() != nil {
+			return m, m.startReviewGeneralInput(ws.anchor)
+		}
 		return m, m.editor.Focus()
 	}
 	return m, nil
@@ -3789,14 +3909,34 @@ func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
 // composerResizeHit addresses the restored separator row, never editor text,
 // tabs, sidebar content or a modal overlay.
 func (m *appModel) composerResizeHit(x, y int) bool {
+	column := m.composerColumn()
 	return !m.leanMode && m.separatorHeight > 0 && !m.dialogMgr.Open() && m.err == nil && m.ready && y == m.composerLayout().separatorTop &&
-		x >= 0 && x < m.width && y >= 0 && y < m.height
+		x >= column.X && x < column.X+column.W && y >= 0 && y < m.height
 }
 
-func (m *appModel) composerView() string { return m.editor.View() }
+func (m *appModel) composerView() string {
+	view := m.editor.View()
+	if !m.reviewFocused() {
+		return view
+	}
+	fade := styles.NewFadeContext()
+	lines := strings.Split(view, "\n")
+	for i := range lines {
+		lines[i] = styles.FadeLineCtx(lines[i], 0.6, &fade)
+	}
+	return strings.Join(lines, "\n")
+}
 
 // handleMouseClick routes mouse clicks to the appropriate component based on Y coordinate.
 func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
+		if m.hitTestRegion(msg.Y) == regionEditor {
+			return m, tea.Batch(m.clearVisiblePointerHover(), m.updateEditorCmd(m.reviewCommentMouse(msg)))
+		}
+		if cmd := m.finishReviewComment(false); func() bool { input, ok := m.editor.(reviewCommentEditor); return ok && input.CommentInputActive() }() {
+			return m, cmd
+		}
+	}
 	if msg.Button == tea.MouseLeft {
 		m.cancelMessagesScrollbar()
 		m.messagesScrollbar = nil
@@ -3812,11 +3952,12 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 	// Dialogs use full-window coordinates (they're positioned over the entire screen)
 	if m.dialogMgr.Open() {
+		m.clearVisiblePointerHover()
 		// Background dialogs (e.g. pending elicitations) let tab-bar clicks
 		// pass through so the user can keep navigating between tabs.
 		if !m.dialogMgr.Closing() && m.dialogMgr.TopIsBackground() && !m.leanMode && m.hitTestRegion(msg.Y) == regionTabBar {
 			adjustedMsg := msg
-			adjustedMsg.X = msg.X - tabFrameOrigin()
+			adjustedMsg.X = msg.X - m.tabOrigin()
 			adjustedMsg.Y = msg.Y - m.composerLayout().tabsTop
 			if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
 				return m, cmd
@@ -3826,19 +3967,29 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		return m.forwardDialog(msg)
 	}
 	if m.reviewOwnsPointer(msg.X, msg.Y) {
+		m.clearVisiblePointerHover()
 		cmd := m.reviewHandleMouse(msg)
 		return m, cmd
 	}
 	m.blurReviewForChat(msg)
 
 	if msg.Button == tea.MouseLeft && !m.chatPage.IsSelecting() && m.composerResizeHit(msg.X, msg.Y) {
+		m.clearVisiblePointerHover()
 		m.isDragging, m.isHoveringHandle = true, true
+		m.setComposerGripHover(true, m.composerGripHandleAt(msg.X, msg.Y))
+		m.setComposerGripDragging(true)
 		return m, nil
 	}
 	if m.beginPaneGesture(msg) {
 		return m, nil
 	}
+	if m.sidebarContinuationAt(msg.X, msg.Y) {
+		return m.forwardChat(msg)
+	}
 	region := m.hitTestRegion(msg.Y)
+	if region != regionContent && !m.sidebarContinuationAt(msg.X, msg.Y) {
+		m.clearVisiblePointerHover()
+	}
 	if region != regionMessageBar {
 		m.panelFocused = ""
 		if m.focusedPanel == PanelStatus {
@@ -3873,7 +4024,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		return m.forwardChat(msg)
 
 	case regionResizeHandle:
-		if msg.Button == tea.MouseLeft {
+		if msg.Button == tea.MouseLeft && m.composerResizeHit(msg.X, msg.Y) {
 			m.isDragging = true
 		}
 		return m, nil
@@ -3881,7 +4032,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 	case regionTabBar:
 		// Adjust coordinates for tab bar (relative to its start, accounting for padding)
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - tabFrameOrigin()
+		adjustedMsg.X = msg.X - m.tabOrigin()
 		adjustedMsg.Y = msg.Y - m.composerLayout().tabsTop
 		if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
 			return m, cmd
@@ -3892,7 +4043,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		if msg.Button != tea.MouseLeft {
 			return m, nil
 		}
-		if preview, ok := m.editor.AttachmentAtPosition(msg.X, msg.Y-m.composerLayout().bannerTop); ok {
+		if preview, ok := m.editor.AttachmentAtPosition(msg.X-m.composerColumn().X, msg.Y-m.composerLayout().bannerTop); ok {
 			if preview.IsImage {
 				supported := m.imageWriter != nil && m.imageWriter.Supported()
 				previewDialog := dialog.NewImageAttachmentPreviewDialog(m.ar, preview.Title, preview.MIME, preview.ImageData, supported)
@@ -3902,7 +4053,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 			return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewAttachmentPreviewDialog(m.ar, preview.Title, preview.Content)})
 		}
 		banner, ok := m.editor.(editor.BannerLayout)
-		if !ok || !banner.ContextBarToggleAt(msg.X, msg.Y-m.composerLayout().bannerTop) {
+		if !ok || !banner.ContextBarToggleAt(msg.X-m.composerColumn().X, msg.Y-m.composerLayout().bannerTop) {
 			return m, nil
 		}
 		m.editor.SetContextBarFocused(true)
@@ -3914,15 +4065,27 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		return m, cmd
 
 	case regionEditor:
+		column := m.composerColumn()
+		if msg.X < column.X || msg.X >= column.X+column.W {
+			return m, nil
+		}
 		m.editor.SetContextBarFocused(false)
-		// Focus editor on click
+		if ws := m.activeReview(); ws != nil && m.reviewModel() != nil && m.reviewCommentInput == nil {
+			cmd := m.startReviewGeneralInput(ws.anchor)
+			if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
+				adjustedMsg := msg
+				adjustedMsg.X = msg.X - m.composerColumn().X - m.editorFrame().GetMarginLeft() - m.editorFrame().GetPaddingLeft()
+				adjustedMsg.Y = msg.Y - m.editorTop() - m.editorFrame().GetPaddingTop()
+				return m, tea.Batch(cmd, m.updateEditorCmd(adjustedMsg))
+			}
+		}
 		if m.focusedPanel != PanelEditor {
 			m.focusedPanel = PanelEditor
 			m.chatPage.BlurMessages()
 		}
 		// Adjust coordinates for editor padding
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - m.editorFrame().GetMarginLeft() - m.editorFrame().GetPaddingLeft()
+		adjustedMsg.X = msg.X - m.composerColumn().X - m.editorFrame().GetMarginLeft() - m.editorFrame().GetPaddingLeft()
 		adjustedMsg.Y = msg.Y - m.editorTop() - m.editorFrame().GetPaddingTop()
 		return m, tea.Batch(m.updateEditorCmd(adjustedMsg), m.editor.Focus())
 	}
@@ -3932,37 +4095,49 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
 func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if m.reviewModel() != nil && m.reviewModel().MouseSelecting() {
+		return m, tea.Batch(m.clearVisiblePointerHover(), m.handleReviewCommentMouse(msg))
+	}
+	if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
+		return m, tea.Batch(m.clearVisiblePointerHover(), m.updateEditorCmd(m.reviewCommentMouse(msg)))
+	}
+	gripHovered := m.composerResizeHit(msg.X, msg.Y)
+	m.isHoveringHandle = gripHovered
+	m.setComposerGripHover(gripHovered, gripHovered && m.composerGripHandleAt(msg.X, msg.Y))
 	if hover, ok := m.editor.(editor.BannerHover); ok {
 		if m.dialogMgr.Open() || m.isDragging || m.paneGesture != nil || m.chatPage.IsSelecting() {
 			if hover.CancelBannerHover() {
 				m.viewCacheValid = false
 			}
 		} else if m.hitTestRegion(msg.Y) == regionContextBar {
-			hover.HoverBanner(msg.X, msg.Y-m.composerLayout().bannerTop)
+			hover.HoverBanner(msg.X-m.composerColumn().X, msg.Y-m.composerLayout().bannerTop)
 		} else {
 			hover.HoverBanner(-1, -1)
 		}
 	}
 	if cmd, captured := m.routeMessagesScrollbar(msg, false); captured {
-		return m, cmd
+		return m, tea.Batch(m.clearVisiblePointerHover(), cmd)
 	}
 	if m.paneGesture != nil {
+		m.clearVisiblePointerHover()
 		cmd := m.movePaneGesture(msg)
 		return m, cmd
 	}
 	if m.dialogMgr.Open() {
+		m.clearVisiblePointerHover()
 		var hoverCmd tea.Cmd
 		if !m.leanMode && !m.dialogMgr.Closing() && m.dialogMgr.TopIsBackground() {
 			y := -1
 			if m.hitTestRegion(msg.Y) == regionTabBar {
 				y = msg.Y - m.composerLayout().tabsTop
 			}
-			hoverCmd = m.tabBar.UpdateHover(msg.X-tabFrameOrigin(), y)
+			hoverCmd = m.tabBar.UpdateHover(msg.X-m.tabOrigin(), y)
 		}
 		dialogCmd := m.updateDialogCmd(msg)
 		return m, tea.Batch(hoverCmd, dialogCmd)
 	}
 	if m.reviewOwnsPointer(msg.X, msg.Y) {
+		m.clearVisiblePointerHover()
 		cmd := m.reviewHandleMouse(msg)
 		return m, cmd
 	}
@@ -3976,6 +4151,15 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	}
 
 	if !m.leanMode {
+		if _, _, hit := m.notification.BodyHit(msg.X, msg.Y); hit {
+			m.clearVisiblePointerHover()
+			updated, cmd := m.notification.HandleMouseMotion(msg.X, msg.Y)
+			m.notification = updated
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return m, tea.Batch(cmds...)
+		}
 		updated, cmd := m.notification.HandleMouseMotion(msg.X, msg.Y)
 		m.notification = updated
 		if cmd != nil {
@@ -3998,20 +4182,20 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 
 	if m.isDragging {
 		cmd := m.handleEditorResize(msg.Y)
-		return m, batchWith(cmd)
+		return m, batchWith(tea.Batch(m.clearVisiblePointerHover(), cmd))
 	}
 
 	if !m.leanMode && (!m.dialogMgr.Open() || (!m.dialogMgr.Closing() && m.dialogMgr.TopIsBackground()) || m.tabBar.HasPointerCapture()) {
 		captured := m.tabBar.HasPointerCapture()
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - tabFrameOrigin()
+		adjustedMsg.X = msg.X - m.tabOrigin()
 		adjustedMsg.Y = -1
 		if m.hitTestRegion(msg.Y) == regionTabBar && (!m.dialogMgr.Open() || (!m.dialogMgr.Closing() && m.dialogMgr.TopIsBackground())) {
 			adjustedMsg.Y = msg.Y - m.composerLayout().tabsTop
 		}
 		cmds = append(cmds, m.tabBar.Update(adjustedMsg))
 		if captured {
-			return m, tea.Batch(cmds...)
+			return m, tea.Batch(append(cmds, m.clearVisiblePointerHover())...)
 		}
 	}
 
@@ -4024,13 +4208,27 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	// goes (editor, tab bar, context strip), otherwise the selection freezes
 	// and the release-copy pair is lost.
 	if m.chatPage.IsSelecting() {
+		m.clearVisiblePointerHover()
 		model, cmd := m.forwardChat(msg)
 		return model, batchWith(cmd)
 	}
 
 	// Update hover state for resize handle
 	region := m.hitTestRegion(msg.Y)
-	m.isHoveringHandle = m.composerResizeHit(msg.X, msg.Y)
+	handleHovered := m.composerResizeHit(msg.X, msg.Y)
+	m.isHoveringHandle = handleHovered
+	m.setComposerGripHover(handleHovered, handleHovered && m.composerGripHandleAt(msg.X, msg.Y))
+	if m.sidebarContinuationAt(msg.X, msg.Y) {
+		m.clearVisiblePointerHoverExcept(m.paneFocus())
+		model, cmd := m.forwardChat(msg)
+		return model, batchWith(cmd)
+	}
+	if region != regionContent {
+		// The chat page sees no motion outside the content region, so end its
+		// sidebar edge hover here rather than leaving the grip lit.
+		chat.ClearSidebarEdgeHover(m.chatPage)
+		m.clearVisiblePointerHover()
+	}
 	switch region {
 	case regionContent:
 		if m.panePresentationEnabled() {
@@ -4048,8 +4246,48 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	return m, tea.Batch(cmds...)
 }
 
+func (m *appModel) clearVisiblePointerHover() tea.Cmd {
+	var cmds []tea.Cmd
+	add := func(page chat.Page) {
+		if page != nil {
+			cmds = append(cmds, chat.ClearSidebarHover(page))
+		}
+	}
+	add(m.chatPage)
+	if m.panePresentationEnabled() {
+		for _, id := range m.panes.Sessions() {
+			if id != m.paneFocus() && m.paneVisible(id) {
+				add(m.chatPages[id])
+			}
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *appModel) clearVisiblePointerHoverExcept(except string) tea.Cmd {
+	var cmds []tea.Cmd
+	if m.paneFocus() != except {
+		cmds = append(cmds, chat.ClearSidebarHover(m.chatPage))
+	}
+	if m.panePresentationEnabled() {
+		for _, id := range m.panes.Sessions() {
+			if id != except && id != m.paneFocus() && m.paneVisible(id) {
+				cmds = append(cmds, chat.ClearSidebarHover(m.chatPages[id]))
+			}
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 // handleMouseRelease routes mouse release events with adjusted coordinates.
 func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.reviewModel() != nil && m.reviewModel().MouseSelecting() {
+		m.clearVisiblePointerHover()
+		return m, m.handleReviewCommentMouse(msg)
+	}
+	if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
+		return m, tea.Batch(m.clearVisiblePointerHover(), m.updateEditorCmd(m.reviewCommentMouse(msg)))
+	}
 	if cmd, captured := m.routeMessagesScrollbar(msg, true); captured {
 		return m, cmd
 	}
@@ -4059,14 +4297,16 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 	}
 	if m.isDragging {
 		m.isDragging = false
+		m.setComposerGripDragging(false)
 		m.isHoveringHandle = m.composerResizeHit(msg.X, msg.Y)
+		m.setComposerGripHover(m.isHoveringHandle, m.isHoveringHandle && m.composerGripHandleAt(msg.X, msg.Y))
 		return m, nil
 	}
 
 	// Forward release to tab bar when a tab drag is active.
 	if m.tabBar.HasPointerCapture() {
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - tabFrameOrigin()
+		adjustedMsg.X = msg.X - m.tabOrigin()
 		adjustedMsg.Y = msg.Y - m.composerLayout().tabsTop
 		if m.dialogMgr.Open() && (!m.dialogMgr.TopIsBackground() || m.dialogMgr.Closing()) {
 			adjustedMsg.Y = -1
@@ -4092,6 +4332,9 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 		return m.forwardChat(msg)
 	}
 
+	if m.sidebarContinuationAt(msg.X, msg.Y) {
+		return m.forwardChat(msg)
+	}
 	region := m.hitTestRegion(msg.Y)
 	switch region {
 	case regionContent:
@@ -4101,7 +4344,7 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 		return m.forwardChat(msg)
 	case regionEditor:
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - m.editorFrame().GetMarginLeft() - m.editorFrame().GetPaddingLeft()
+		adjustedMsg.X = msg.X - m.composerColumn().X - m.editorFrame().GetMarginLeft() - m.editorFrame().GetPaddingLeft()
 		adjustedMsg.Y = msg.Y - m.editorTop() - m.editorFrame().GetPaddingTop()
 		return m.forwardEditor(adjustedMsg)
 	}
@@ -4115,31 +4358,50 @@ func (m *appModel) handleWheelCoalesced(msg messages.WheelCoalescedMsg) (tea.Mod
 		return m, nil
 	}
 	if m.dialogMgr.Open() {
-		return m.forwardDialog(msg)
+		return m, tea.Batch(m.clearVisiblePointerHover(), m.updateDialogCmd(msg))
+	}
+	if model := m.reviewModel(); model != nil {
+		if bounds, ok := m.chatPage.(interface{ ContentOverlayBounds() (int, int, int, int) }); ok {
+			if overlay, ok := m.chatPage.(interface{ ContentOverlayActive() bool }); ok && overlay.ContentOverlayActive() {
+				ox, oy, width, height := bounds.ContentOverlayBounds()
+				if msg.X >= ox && msg.X < ox+width && msg.Y >= oy && msg.Y < oy+height {
+					m.reviewHandleWheelDelta(msg.X, msg.Y, msg.Delta)
+					return m, nil
+				}
+			}
+		}
 	}
 	if m.reviewOwnsPointer(msg.X, msg.Y) {
-		button := tea.MouseWheelDown
-		if msg.Delta < 0 {
-			button = tea.MouseWheelUp
+		m.clearVisiblePointerHover()
+		if model := m.reviewModel(); model != nil {
+			button := tea.MouseWheelDown
+			if msg.Delta < 0 {
+				button = tea.MouseWheelUp
+			}
+			return m, m.reviewHandleMouse(tea.MouseWheelMsg{X: msg.X, Y: msg.Y, Button: button})
 		}
-		cmd := m.reviewHandleMouse(tea.MouseWheelMsg{X: msg.X, Y: msg.Y, Button: button})
-		return m, cmd
 	}
 
+	if m.sidebarContinuationAt(msg.X, msg.Y) {
+		return m.forwardChat(msg)
+	}
 	region := m.hitTestRegion(msg.Y)
 	switch region {
 	case regionTabBar:
-		if msg.X < tabFrameOrigin() || msg.X >= tabFrameOrigin()+tabFrameWidth(m.width) {
+		if msg.X < m.tabOrigin() || msg.X >= m.tabOrigin()+m.tabWidth() {
 			return m, nil
 		}
-		return m, m.tabBar.Update(messages.WheelCoalescedMsg{Delta: msg.Delta, X: msg.X - tabFrameOrigin(), Y: msg.Y - m.composerLayout().tabsTop})
+		return m, m.tabBar.Update(messages.WheelCoalescedMsg{Delta: msg.Delta, X: msg.X - m.tabOrigin(), Y: msg.Y - m.composerLayout().tabsTop})
 	case regionContent:
 		if m.panePresentationEnabled() {
 			return m.forwardPanePointer(msg, msg.X, msg.Y, false)
 		}
 		return m.forwardChat(msg)
 	case regionEditor:
-		m.editor.ScrollByWheel(msg.Delta)
+		column := m.composerColumn()
+		if msg.X >= column.X && msg.X < column.X+column.W {
+			m.editor.ScrollByWheel(msg.Delta)
+		}
 		return m, nil
 	}
 
@@ -4252,14 +4514,7 @@ func (m *appModel) renderResizeHandle(width int) string {
 	if innerWidth <= 0 {
 		return ""
 	}
-	centerStyle := styles.ResizeHandleHoverStyle
-	if m.isDragging {
-		centerStyle = styles.ResizeHandleActiveStyle
-	}
-	handle := centerStyle.Render(strings.Repeat("─", min(resizeHandleWidth, innerWidth)))
-	line := lipgloss.PlaceHorizontal(innerWidth, lipgloss.Center, handle,
-		lipgloss.WithWhitespaceChars("─"), lipgloss.WithWhitespaceStyle(styles.ResizeHandleStyle))
-	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(line)
+	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(grip.Horizontal(innerWidth, m.composerGrip.HandleHighlight(), m.composerGrip.Dragging(), m.composerGrip.Visibility()))
 }
 
 // lineWithSuffix appends a status suffix to the centered handle line,
@@ -4302,11 +4557,17 @@ func (m *appModel) View() tea.View {
 		m.viewTabGeneration == tabVisualGeneration(m.tabBar) &&
 		m.viewChatGeneration == chatVisualGeneration(m.chatPage) &&
 		m.viewSidebarGeneration == sidebarVisualGeneration(m.chatPage) && m.visiblePaneCacheValid() && m.paneStatusesMatch(m.viewPaneStatuses) {
+		if model := m.reviewModel(); model != nil && model.CommentInputActive() {
+			m.viewCache.Cursor = model.Cursor()
+		}
 		return m.viewCache
 	}
 	statuses := m.visiblePaneStatuses()
 	m.composingPaneStatuses = statuses
 	view := m.composeView()
+	if model := m.reviewModel(); model != nil && model.CommentInputActive() {
+		view.Cursor = model.Cursor()
+	}
 	m.composingPaneStatuses = nil
 	m.viewThemeGeneration = styles.ThemeGeneration()
 	m.viewAgentColorGeneration = styles.AgentColorGeneration()
@@ -4354,6 +4615,12 @@ func (m *appModel) composeView() tea.View {
 	default:
 		contentView = m.chatPage.View()
 	}
+	// Pane presentation already offsets its rows by the main inset; wrapping
+	// the chat-in opening again would shift the transcript by one row.
+	paneOwnsInset := m.opening != nil && m.opening.phase == openingChatIn && m.panePresentationEnabled()
+	if m.mainContentInset() > 0 && (m.reviewSurface() != nil || (m.opening != nil && !paneOwnsInset) || !m.panePresentationEnabled()) {
+		contentView = mainContentWithInset(contentView, m.width, m.mainContentHeight(), m.mainContentInset())
+	}
 
 	// Lean mode: editor appears right after the last message, with empty
 	// space pushed to the top via bottom-alignment.
@@ -4381,7 +4648,7 @@ func (m *appModel) composeView() tea.View {
 			layers = append(layers, m.notification.GetLayers()...)
 		}
 		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {
-			layers = append(layers, m.completions.GetLayers()...)
+			layers = append(layers, m.completionLayers()...)
 		}
 		return m.canvasView(paneClipped(composeRootLayers(layers, m.width, m.height), m.width, m.height), windowTitle, m.chatPage.IsWorking(), true)
 	}
@@ -4394,33 +4661,19 @@ func (m *appModel) composeView() tea.View {
 
 	// Combine: content | attachments | resize separator | tab bar | editor | context strip
 	var viewParts []string
+	dock := m.composerDock()
 	if m.contentHeight > 0 {
 		viewParts = append(viewParts, contentView)
 	}
-	if banner := m.editor.BannerView(m.width); banner != "" {
-		viewParts = append(viewParts, banner)
-	}
-	if m.separatorHeight > 0 {
-		viewParts = append(viewParts, paneClipped(m.renderResizeHandle(m.width), m.width, m.separatorHeight))
-	}
-	if tabBarView != "" && m.tabsHeight > 0 {
-		framed := m.tabFrameCache.render(tabBarView, m.width, m.tabsHeight, func() string {
-			clipped := paneClipped(tabBarView, tabFrameWidth(m.width), m.tabsHeight)
-			return paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorStyle.GetMarginRight(), 0, tabFrameOrigin()).Render(clipped), m.width, m.tabsHeight)
-		})
-		viewParts = append(viewParts, framed)
-	}
-	viewParts = append(viewParts, editorView)
-	if m.contextBar != nil && m.contextHeight > 0 {
-		raw := m.contextBar.View()
-		viewParts = append(viewParts, m.contextFrameCache.render(raw, m.width, m.contextHeight, func() string {
-			return paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorHMargin).Render(raw), m.width, m.contextHeight)
-		}))
+	if dock.height() > 0 {
+		block := m.composerDockView(tabBarView, editorView)
+		viewParts = append(viewParts, positionedClipped(block, m.width, dock.column.X, dock.column.W, dock.height()))
 	}
 	if m.messageBarHeight() > 0 {
 		viewParts = append(viewParts, m.renderMessageBar())
 	}
 	baseView := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
+	baseView = m.extendAlignedSidebar(baseView)
 
 	// Handle overlays
 	hasOverlays := m.dialogMgr.Open() || m.notification.Open() || m.completions.Open() || m.tour.Active() || m.tabBar.HasFloatingOverlay() || m.paneGesture != nil || m.paneHydration != nil || m.paneSource != nil
@@ -4445,8 +4698,8 @@ func (m *appModel) composeView() tea.View {
 		if ghost := m.paneGhostLayer(); ghost != nil {
 			allLayers = append(allLayers, ghost)
 		}
-		if drag := m.tabBar.GetDragLayerInfo(tabFrameWidth(m.width), m.composerLayout().tabsTop); drag != nil && !m.dialogMgr.Open() {
-			allLayers = append(allLayers, lipgloss.NewLayer(drag.Content).X(drag.X+tabFrameOrigin()).Y(drag.Y))
+		if drag := m.tabBar.GetDragLayerInfo(m.tabWidth(), m.composerLayout().tabsTop); drag != nil && !m.dialogMgr.Open() {
+			allLayers = append(allLayers, lipgloss.NewLayer(drag.Content).X(drag.X+m.tabOrigin()).Y(drag.Y))
 		}
 		if m.dialogMgr.Open() {
 			for _, layer := range m.dialogMgr.GetLayerInfos() {
@@ -4459,13 +4712,106 @@ func (m *appModel) composeView() tea.View {
 		}
 
 		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {
-			allLayers = append(allLayers, m.completions.GetLayers()...)
+			allLayers = append(allLayers, m.completionLayers()...)
 		}
 
 		return m.fullscreenView(composeRootLayers(allLayers, m.width, m.height), windowTitle)
 	}
 
 	return m.fullscreenView(baseView, windowTitle)
+}
+
+func (m *appModel) sidebarContinuationHeight() int {
+	if !m.layoutSettings.AlignInputWithMessages || m.leanMode || m.contentHeight <= 0 {
+		return 0
+	}
+	return max(0, m.sidebarContinuationEndY()-m.mainContentInset())
+}
+
+func (m *appModel) sidebarContinuationEndY() int {
+	return max(m.contentHeight, m.footerTop())
+}
+
+func (m *appModel) sidebarContinuationGeometry() (sidebarRect, handle chat.PresentationRect, ok bool) {
+	if !m.layoutSettings.AlignInputWithMessages || m.leanMode || m.contentHeight <= 0 {
+		return chat.PresentationRect{}, chat.PresentationRect{}, false
+	}
+	if m.panePresentationEnabled() {
+		return m.paneShell.Sidebar, m.paneShell.SidebarHandle, m.paneShell.SidebarHandle.Height > 1
+	}
+	page, ok := m.chatPage.(chat.SplitPresentation)
+	if !ok {
+		return chat.PresentationRect{}, chat.PresentationRect{}, false
+	}
+	pageWidth := m.width
+	if m.reviewDocked() {
+		pageWidth = m.reviewDockChatWidth()
+	}
+	shell := page.MeasureSplitShell(pageWidth, m.mainContentHeight())
+	if shell.SidebarHandle.Height <= 1 {
+		return chat.PresentationRect{}, chat.PresentationRect{}, false
+	}
+	endY := m.sidebarContinuationEndY()
+	inset := m.mainContentInset()
+	shell.Sidebar.Y += inset
+	shell.Sidebar.Height = max(shell.Sidebar.Height, endY-shell.Sidebar.Y)
+	shell.SidebarHandle.Y += inset
+	shell.SidebarHandle.Height = max(shell.SidebarHandle.Height, endY-shell.SidebarHandle.Y)
+	return shell.Sidebar, shell.SidebarHandle, true
+}
+
+func (m *appModel) sidebarContinuationAt(x, y int) bool {
+	sidebarRect, handle, ok := m.sidebarContinuationGeometry()
+	if !ok || y < m.contentHeight || y >= m.sidebarContinuationEndY() {
+		return false
+	}
+	return inPane(paneRect(sidebarRect), x, y) || inPane(paneRect(handle), x, y)
+}
+
+func (m *appModel) completionLayers() []*lipgloss.Layer {
+	layers := m.completions.GetLayers()
+	column := m.composerColumn()
+	if column.X == 0 {
+		return layers
+	}
+	for _, layer := range layers {
+		layer.X(column.X + layer.GetX())
+	}
+	return layers
+}
+
+// mainContentWithInset reserves one app-level row without adding nested
+// per-pane spacers. The body remains exactly the requested usable height.
+func mainContentWithInset(content string, width, bodyHeight, inset int) string {
+	if inset <= 0 {
+		return paneClipped(content, width, bodyHeight)
+	}
+	rows := make([]string, 0, inset+max(0, bodyHeight))
+	for range inset {
+		rows = append(rows, strings.Repeat(" ", max(0, width)))
+	}
+	if bodyHeight > 0 {
+		rows = append(rows, strings.Split(paneClipped(content, width, bodyHeight), "\n")...)
+	}
+	return strings.Join(rows, "\n")
+}
+
+// positionedClipped returns a full-width row block with content confined to
+// the composer/messages column while leaving the surrounding cells blank.
+func positionedClipped(content string, totalWidth, x, width, height int) string {
+	if totalWidth <= 0 || width <= 0 || height <= 0 {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	rows := make([]string, height)
+	for i := range rows {
+		row := ""
+		if i < len(lines) {
+			row = paneClipped(lines[i], width, 1)
+		}
+		rows[i] = strings.Repeat(" ", max(0, x)) + row + strings.Repeat(" ", max(0, totalWidth-x-width))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m *appModel) fullscreenView(content, windowTitle string) tea.View {
@@ -4528,6 +4874,7 @@ func (m *appModel) shutdownTimeoutOrDefault() time.Duration {
 // exit) and the context watcher (external cancellation).
 func (m *appModel) cleanupManagedResources() {
 	m.cleanupOnce.Do(func() {
+		m.gitReviewScopes.closeAll()
 		if m.themeWatcher != nil {
 			m.themeWatcher.Stop()
 		}
@@ -4567,6 +4914,8 @@ func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
 		m.notification.Cleanup()
 		m.panelAnimation.Stop()
+		m.stopReviewAnimations()
+		m.gitReviewScopes.closeAll()
 		m.contextClosed = true
 		m.cancelSessionOpening()
 		if m.hostedLoad != nil {
@@ -4718,6 +5067,7 @@ func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.V
 	view := tea.NewView(content)
 	view.AltScreen = !leanMode
 	view.MouseMode = tea.MouseModeAllMotion
+	view.KeyboardEnhancements.ReportEventTypes = true
 	// Preserve terminal-default cells; OSC 11 still follows the selected theme.
 	view.BackgroundColor = styles.Background
 	view.WindowTitle = windowTitle
@@ -4759,12 +5109,4 @@ func (m *appModel) reconcileInteractions(head *app.PresentationState, event runt
 		}
 	}
 	return tea.Sequence(cmds...)
-}
-
-func (m *appModel) focusedSessionDormant() bool {
-	if m.application == nil {
-		return false
-	}
-	status, exists := m.paneRenderStatus(m.paneFocus())
-	return exists && status.Dormant
 }

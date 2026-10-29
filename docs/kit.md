@@ -221,7 +221,9 @@ Managed fake/record, worktree and local database modes remain unsupported.
 following `--`, and client `--safety` / `--yolo` remain connection options.
 Standalone managed/remote CLI flexibility is unchanged.
 
-The Kit starts with the Black Amber theme. Choose another theme in the TUI or
+The Kit starts with the Docker Next - Dark theme (`docker-next-dark`). The theme
+sets colors only; for an optional host-side dedicated font, see
+[Custom terminal fonts](terminal-fonts.md). Choose another theme in the TUI or
 pass `--theme NAME` when connecting to override it.
 
 ### Lifecycle-owned API and recovery
@@ -266,15 +268,31 @@ Offline checks do not establish DAP/cloud/SBX conformance or model entitlement.
 
 ### API access and troubleshooting
 
-The managed listener binds guest **loopback only**, uses a private bearer token,
-and grants authenticated clients API-wide tool-execution authority. Clients are
-trusted peers, not isolated users or sessions. No port publication or browser
-CORS grant is added by this kit. For access outside the guest, use an explicit
-trusted tunnel; beyond loopback use TLS or a trusted tunnel and approve any
-browser origins explicitly. Direct SBX port publication targets the guest network
-address and cannot reach this loopback listener. A separately configured,
-authenticated non-loopback listener requires separate review; keep any host port
-binding loopback unless deliberately exposing it.
+The Kit's managed listener binds guest `0.0.0.0:9182` so SBX port publication
+can reach it. Port `9182` is fixed for Kit startup; on the next API ownership
+startup it overrides a previously saved ephemeral endpoint. A collision fails
+rather than falling back to another port or stopping an existing listener.
+Non-Kit managed APIs continue to select/reuse an ephemeral port by default. Managed discovery and local Kit clients continue using
+`http://127.0.0.1:9182`. The server requires its private bearer token on all API
+requests, including when reached through a published port. The token is
+kept in the guest's private managed state; broad binding does not make it a host
+credential.
+
+This exposes the API to any peer that can reach a guest interface, not just the
+sandbox itself. Authenticated clients have API-wide tool-execution authority;
+they are trusted peers, not isolated users or sessions. Host-port publication
+is a separate operator choice; prefer a host-loopback binding (for example host
+`127.0.0.1:8888` mapped to guest port `9182`) unless wider exposure has been
+deliberately reviewed. For access beyond the local host,
+use TLS or a trusted tunnel, and explicitly approve any browser origins; this Kit
+does not configure those or grant browser CORS. Do not expose the private token.
+The Kit currently always broad-binds; this is intentional for sandbox port
+forwarding. Standalone and non-Kit managed APIs retain their loopback default.
+
+This source change affects only newly built Kit images and future startup. It has
+not been activated in an existing sandbox; activation requires rebuilding the Kit
+and restarting/recreating the sandbox so its lifecycle startup runs the new
+command.
 
 Default managed state is under
 `/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/`. Creation-time
@@ -287,12 +305,16 @@ or share the token. The daemon alone owns its database and locking; do not start
 a second local client against that database or remove locks/state to bypass an
 incompatibility error.
 
-For readiness failures inspect the reported `server.log` locally, confirm state
-ownership/modes and free disk space, and check that the original workspace and
-startup inputs are still available. Stale server metadata is recovered under
-locks; a mismatched identity or occupied endpoint fails without killing another
-process. A settings/custom database path is not a substitute for the managed
-state base. Session listing from inside the guest uses:
+For readiness failures, use the reported stage. If `manifest.json` is missing,
+startup did not commit managed state; inspect SBX's lifecycle startup log at
+`/var/log/sbx-kit-startup.log` for an early config/load error. `server.log` is
+created only after startup configuration and snapshot parsing succeed, so it may
+not exist for those errors. When the manifest exists, inspect the reported probe
+error and `server.log` locally, confirm state ownership/modes and free disk space,
+and check that the original workspace and startup inputs are still available. Stale server metadata is recovered under locks; a mismatched
+identity or occupied endpoint fails without killing another process. A
+settings/custom database path is not a substitute for the managed state base.
+Session listing from inside the guest uses:
 
 ```sh
 /opt/async-agent/docker-agent sessions list --managed-api --managed-api-attach \

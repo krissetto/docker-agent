@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -147,6 +148,7 @@ func (p *chatPage) SetSplitPresentation(g *SplitPresentationGeometry) tea.Cmd {
 	if wasSidebarInteractive && !p.sidebarInteractive() {
 		p.releaseSidebarInput()
 	}
+	p.applyScrollbarVisibility()
 	return tea.Batch(p.SetSize(p.width, p.height), SetSidebarPresentationActive(p, !p.presentationHidden))
 }
 
@@ -157,6 +159,7 @@ func (p *chatPage) applySplitPresentation() tea.Cmd {
 		p.shellVisualGeneration++
 	}
 	p.appliedLayout = sl
+	p.syncSidebarGrip()
 	cmds := []tea.Cmd{
 		p.messages.SetPosition(g.Transcript.X, g.Transcript.Y),
 		p.messages.SetSize(g.Transcript.Width, g.Transcript.Height),
@@ -226,7 +229,11 @@ func (p *chatPage) SidebarHandleView() string {
 	}
 	g := p.splitPresentation
 	if g == nil {
-		return ""
+		sl := p.computeSidebarLayout()
+		if sl.mode != sidebarVertical || p.sidebarPresentationExtent <= sl.chatHeight {
+			return ""
+		}
+		return p.renderSidebarHandle(p.sidebarPresentationExtent)
 	}
 	r := g.Shell.SidebarHandle
 	return presentationView(p.renderSidebarHandle(r.Height), r.Width, r.Height)
@@ -251,6 +258,7 @@ func (p *chatPage) sidebarInteractive() bool {
 func (p *chatPage) releaseSidebarInput() {
 	p.lastSidebarClick = sidebarClick{}
 	p.isDraggingSidebar = false
+	p.resetSidebarGrip()
 	// End capture at an outside coordinate without committing title/queue edits.
 	p.sidebar.Update(tea.MouseReleaseMsg{X: -1, Y: -1, Button: tea.MouseLeft})
 }
@@ -263,7 +271,10 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 	p.shellVisualGeneration++
 	if !visible {
 		p.releaseSidebarInput()
+		p.messages.CancelPointerHover()
 		p.stopHiddenPresentation()
+		p.applyScrollbarVisibility()
+		p.SetScrollbarPointer(-1, -1)
 		return SetSidebarPresentationActive(p, false)
 	}
 	var resumeCmd tea.Cmd
@@ -274,6 +285,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 	if p.splitPresentation != nil {
 		layoutCmd = p.applySplitPresentation()
 	}
+	p.applyScrollbarVisibility()
 	return tea.Batch(resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden), p.continueHistoryCmd())
 }
 
@@ -295,7 +307,7 @@ func (p *chatPage) routeSplitMouseEvent(msg tea.Msg) tea.Cmd {
 	}
 	g := p.splitPresentation
 	if p.sidebarInteractive() && g.Shell.Sidebar.contains(x, y) {
-		p.messages.ClearReferenceHover()
+		p.messages.ClearPointerHover()
 		model, cmd := p.sidebar.Update(msg)
 		p.sidebar = model.(sidebar.Model)
 		return cmd
@@ -305,12 +317,32 @@ func (p *chatPage) routeSplitMouseEvent(msg tea.Msg) tea.Cmd {
 		hoverCmd = p.sidebar.ClearSubagentHover()
 	}
 	if !p.PointerTargetsMessages(x, y) {
-		p.messages.ClearReferenceHover()
-		return hoverCmd
+		p.messages.ClearPointerHover()
+		return tea.Batch(hoverCmd, p.messages.ClearPointerHover())
 	}
 	model, cmd := p.messages.Update(msg)
 	p.messages = model.(messages.Model)
 	return tea.Batch(hoverCmd, cmd)
+}
+
+// SessionUsage reads one session's usage snapshot from the sidebar, which owns the
+// per-session totals; false means the session has no recorded usage.
+func (p *chatPage) SessionUsage(sessionID string) (runtime.Usage, bool) {
+	if owner, ok := p.sidebar.(interface {
+		SessionUsage(sessionID string) (runtime.Usage, bool)
+	}); ok {
+		return owner.SessionUsage(sessionID)
+	}
+	return runtime.Usage{}, false
+}
+
+// ReplyHandoffActive reports whether the initial reply fade is still in flight.
+// Messages owns the state; false means it is absent or finished.
+func (p *chatPage) ReplyHandoffActive() bool {
+	if owner, ok := p.messages.(interface{ ReplyHandoffActive() bool }); ok {
+		return owner.ReplyHandoffActive()
+	}
+	return false
 }
 
 // SidebarCacheStats reports work counters without rendering or acquiring leases.

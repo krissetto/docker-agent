@@ -34,6 +34,6 @@ func TestAsyncMigrationsUpgradeUpstreamCatalog(t *testing.T) {
 	require.Equal(t, "preserved", title)
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT root_kind FROM generated_media_manifest WHERE session_id = 'upstream-session'`).Scan(&rootKind))
 	require.Equal(t, "workspace", rootKind)
-	_, err = db.ExecContext(ctx, `INSERT INTO session_items (session_id, position, item_type, actor_pending, actor_accepted, actor_turn_id) VALUES ('upstream-session', 0, 'message', 1, 1, 'pending-turn')`)
+	_, err = db.ExecContext(ctx, `INSERT INTO session_items (session_id, position, item_type, message_json, actor_pending, actor_accepted, actor_turn_id) VALUES ('upstream-session', 0, 'message', '{"role":"user","content":"pending"}', 1, 1, 'pending-turn')`)
 	require.NoError(t, err)
 }

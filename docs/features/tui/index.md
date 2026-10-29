@@ -59,7 +59,7 @@ settings:
 
 Omit `lean` or set it to `false` to keep the full TUI as the default. You can still use `--lean` for a single run, or `--lean=false` to use the full TUI when `settings.lean` is enabled. See [User Settings](../../configuration/user-settings/index.md) for the full precedence rules between flags and user config.
 
-The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to steer the active turn, or <kbd>Alt</kbd>+<kbd>Enter</kbd> to queue the message as a separate turn after the current one finishes. Pending messages appear with muted styling at the end of the live stream, labeled `Steering:` or `Follow-up:` so it's clear which turn each one will land on. Press <kbd>Alt</kbd>+<kbd>Up</kbd> to withdraw every still-pending steer/follow-up (and any locally queued message) back into the editor, concatenated in the order they were sent, so you can edit and resend them; messages the agent has already picked up are left alone.
+The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to queue the message as a separate turn after the current one finishes, or <kbd>Alt</kbd>+<kbd>Enter</kbd> to steer the active turn. Pending messages appear with muted styling at the end of the live stream, labeled `Steering:` or `Follow-up:` so it's clear which turn each one will land on. Press <kbd>Alt</kbd>+<kbd>Up</kbd> to withdraw every still-pending steer/follow-up (and any locally queued message) back into the editor, concatenated in the order they were sent, so you can edit and resend them; messages the agent has already picked up are left alone.
 
 The lean TUI supports a focused set of slash commands: `/new`, `/sessions [session-id]`, `/load <session-id>`, `/delete <session-id>`, `/star [session-id] [off]`, `/compact`, `/model`, `/effort`, `/copy`, `/clear`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. `/sessions` fuzzy-browses past sessions from the current working directory, while the ID-oriented commands use session/server-owned catalog and mutation paths so remote sessions remain supported. Type `/model` (or `/model <provider/model>`) to open a fuzzy-searchable model list or switch inline. Type `/copy` to copy the last assistant response to the clipboard.
 
@@ -102,7 +102,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/speak`           | Voice input via system speech-to-text (macOS only)                                   |
 | `/exit`            | Exit the application (aliases: `/quit`, `/q`)                                        |
 
-Slash commands (both built-in and named) execute immediately when entered. Regular chat messages sent while the agent is working are queued by default and processed in order once the current turn ends. To send messages into the ongoing stream instead, switch **While agent is working** to `Steer` on the **Behavior** tab of `/settings`; the agent picks them up mid-turn, and they appear in the transcript at the point the agent sees them.
+Slash commands (both built-in and named) execute immediately when entered. While the agent is working, <kbd>Enter</kbd> queues a regular chat message for the next turn; <kbd>Alt</kbd>+<kbd>Enter</kbd> steers it into the active turn, where it appears in the transcript when the agent picks it up. Slash commands still execute immediately.
 
 Selecting another top-level agent creates a fresh session identity bound to that agent and clones the current conversation into it. The original session and history remain available, and observers attached to it are not retargeted. Switching is rejected while the source session is active and from an attached sub-agent view.
 
@@ -182,13 +182,23 @@ The box stays visible for at least 1.5 seconds. Once the sub-agent produces its 
 ╰────────────────────────────╯
 ```
 
-**Chat — return transition:** Alongside the sidebar Return animation, the chat shows a one-line static transition between the two agent badges:
+**Chat — return transition:** Alongside the sidebar Return animation, the chat shows a one-line static transition naming both agents:
 
 ```text
 [child]  returned control to  [parent]
 ```
 
 This transition is not persisted — it does not reappear when you reload the session.
+
+### Sidebar hover behavior
+
+Pointer-addressable sidebar labels use a shared hover animation: muted at rest, emphasized while hovered,
+and back to their resting color when the pointer leaves. This applies to the Files/Git,
+Subagents, Todos, and Background summaries, model metadata, context usage, and cost.
+Semantic warning, error, activity, and identity colors remain distinct. Clicking a
+section does not latch its header into a bright or bold state; keyboard navigation
+keeps its separate disclosure/cursor indication. The narrow collapsed sidebar band
+has no individual todo-summary hover target and remains static.
 
 ### Context-Usage Gauge
 
@@ -206,7 +216,30 @@ The thresholds are proportional to the agent's configured `compaction_threshold`
 
 Clicking the token/context part of the sidebar's usage reading (the glyph, token count, context percentage — or the "compacting…" marker — and the `⚠ capped` marker) opens the `/context` dialog with the full breakdown. Clicking the cost part (the `$` figure and the sub-session count) opens the `/cost` dialog instead. The "Token Usage" section title itself is not clickable.
 
+Message **Copy** and **Edit** controls fade in and out within reserved space, without changing message height. Moving the pointer into the input, sidebar, or other UI clears their hover targets immediately while the fade finishes. Keyboard-selected message actions remain available. Fenced-code Copy controls are always visible and are unchanged.
+
 ### Thinking and Tool Details
+
+The full TUI groups intermediate replies, reasoning, tool activity, and coordination notices into one expandable **Work** block per human-input exchange. The last three regular assistant replies stay visible by default; notices alone do not fold them. Expand Work to inspect earlier activity without losing transcript history. The header uses bold italic text in the current theme’s accent color, with `[+]` to expand and `[-]` to collapse. While active, a spinner appears before **Working**.
+
+The session’s opening public message remains outside Work, including an initial
+assignment from another agent, and appears only once. That initial assignment’s
+body opens by default in compact mode; an explicit collapse or reopen is remembered.
+Later agent updates can still fold into Work. The opener is not counted against the visible-reply limit; pending
+receipts, internal runtime notices, and empty assistant prefixes are not openers.
+Source order is preserved if work already precedes the first public message.
+
+When an agent reply or background completion restarts the same exchange, the existing Work header becomes active again without adding a separate startup spinner. The standalone startup spinner is reserved for a fresh user message before the model begins producing work.
+
+The header reports completed tool calls as `(1 tool)` or `(N tools)`, including failed calls and tools inside thinking blocks; outgoing reply calls count once, while incoming agent replies, background-completion notices, reasoning, and pending or running calls do not increase the count.
+
+Expanded Work content is inset on both sides, with a blank row below the header and consistent spacing between reasoning, replies, and tool activity. This changes only the rendering bounds: nested thinking blocks, tool cards, and other expandable content retain their existing disclosure controls and behavior. Intermediate replies keep their original content without repeated “Earlier reply” headings. Assistant responses and thinking blocks do not repeat agent-name badges; incoming messages still identify their sender.
+
+**Visible replies** under `/settings` → **Appearance** selects **Latest only**, **Last 3** (default), **Last 5**, or **All**. It counts logical assistant prose messages within each human-input exchange, not streaming chunks, tools, reasoning, or coordination notices. Older prose remains accessible inside Work without duplicating the visible replies. When a reply moves into Work, it fades out and the remaining text moves smoothly into place before the incoming reply fades in. A streaming reply fades as one component: new chunks render at its current fade level without restarting the animation. Set `settings.visible_replies` to `latest`, `"3"`, `"5"`, or `all`; this preference has no effect while Compact work log is off.
+
+To restore the previous layout, turn off **Compact work log** under `/settings` → **Appearance**, or set `settings.compact_work_log: false`. The setting is on by default, previews immediately, and does not affect the lean TUI.
+
+Expanded shell tool cards keep output in a bounded scroll area with the shared scrollbar and edge fades. Scroll over the output to move within that card; reaching its top or bottom does not scroll the conversation behind it. Move the pointer outside the output to scroll the conversation instead. This also applies to shell cards inside expanded Work and Thinking blocks.
 
 Reasoning/thinking blocks are collapsed by default and carry a `Thinking` header badge. When collapsed, the TUI shows a short preview and compact tool summaries. Expand a block to see the full thinking content and the real tool renderers, including detailed tool output such as file edit diffs.
 
@@ -288,7 +321,9 @@ Attach file contents to your messages using the `@` trigger:
 Explain what the code in @pkg/agent/agent.go does
 ```
 
-The agent receives the full file contents in a structured `<attachments>` block, while the UI shows just the reference.
+The agent receives the attached contents alongside your message. In the full TUI, identifiable attachment references appear inline as numbered markers such as **📎1**, matched to filename rows below the message. A blank row separates the attachment list from the text; MIME/type labels are omitted. Messages without an identifiable inline reference still show the numbered filename rows. Click a row to open a read-only preview, or select the message and press <kbd>p</kbd> for the first attachment or <kbd>1</kbd>–<kbd>9</kbd> for a specific attachment. Image previews use the same terminal support as attachments in the input area.
+
+Previews use the content saved with the message, not a fresh read of the original path. Unsupported or unavailable content gets an explicit fallback; remote paths are never opened against the client filesystem. The original message and stored attachment data are preserved. Legacy path-only or URL-only attachments cannot be previewed without stored content; ambiguous path references remain literal rather than being guessed.
 
 For large or frequently-reused documents, or for getting content to an agent over the API or chat server instead of the TUI, see [Choosing a Large-Input Strategy](../../guides/headless/index.md#choosing-a-large-input-strategy).
 
@@ -489,8 +524,8 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Ctrl+O     | Toggle hide tool results                        |
 | Ctrl+Z     | Suspend TUI to background (resume with `fg`)    |
 | Escape     | Cancel current operation                        |
-| Enter      | Send message (or steer while the agent is running) |
-| Alt+Enter  | Queue a follow-up turn while the agent is running |
+| Enter      | Send message; queue it for the next turn while the agent is running |
+| Alt+Enter  | Steer into the active turn while the agent is running |
 | Alt+Up     | Recall all pending (steered/follow-up/queued) messages back into the editor for editing |
 | Shift+Enter | Insert a newline |
 | Up/Down    | Navigate message history                        |
@@ -506,10 +541,10 @@ This is the recommended way to replace the `Ctrl+J` newline fallback, which conf
 ```yaml
 settings:
   keybindings:
-    # Insert a newline with Alt+Enter instead of Ctrl+J. Shift+Enter still
-    # works automatically on terminals that report it.
+    # Replace the Ctrl+J newline fallback. Shift+Enter still works automatically
+    # on terminals that report it. Alt+Enter is reserved for steering.
     - action: "editor_newline"
-      keys: ["alt+enter"]
+      keys: ["alt+j"]
     # Allow several keys for one action.
     - action: "commands"
       keys: ["f2", "ctrl+k"]
@@ -553,16 +588,20 @@ Run `/settings` to open the settings dialog. Use <kbd>Tab</kbd> to switch betwee
 >
 > This section covers the `/settings` dialog. For the complete list of `settings:` fields (including ones with no dialog UI, like `permissions`, `hooks`, and `keybindings`) and how they interact with CLI flags and aliases, see [User Settings](../../configuration/user-settings/index.md).
 
+The full TUI reserves one blank row above its main content. A left-docked sidebar keeps a one-cell internal gap beside the messages and left-aligns its bottom status badges, including YOLO. The right dock retains its existing badge alignment.
+
 The **Appearance** tab selects the theme and customizes the layout. Layout changes show a live schematic preview and apply immediately to the UI behind the dialog:
 
 - **Sidebar position**: `Right` (default), `Left`, `Top`, or `Bottom`. Left/right keep the full vertical sidebar next to the chat; top/bottom render it as a compact horizontal band above or below the chat (session title, working directory, token usage, plus a one-line summary of the current agent and its model; in multi-agent configurations all team agents are listed by name after the current agent).
+- **Agent context %**: off by default. Turn it on to show each agent's context-window fill in the sidebar: subagent rows show it directly after the agent name, with the state still right-aligned, and participant lines and agent cards show it too. A subagent row reads its own session's usage, so same-named subagents each show their own value; a row drops the reading before it truncates a name or ID. The main context bar is unaffected. Set `settings.show_agent_context: true` to enable it.
+- **Align input with messages**: off by default. Turn it on to align the entire input dock—tabs, editor, and context-usage bar—with the messages column. These child components share one dock’s bounds, while a left/right sidebar extends uninterrupted beside the whole dock, down to the full-width global footer. With a hidden or top/bottom sidebar, the dock remains full width. This setting does not affect the lean TUI.
 - **Sidebar info mode**: `Compact` (default) or `Detailed`. Controls how the Agents panel renders agent rows — see [Agents Panel](#agents-panel) for details. Persisted as `settings.layout.sidebar_info_mode: detailed`; compact is the default and omitted from the config.
 - **Section spacing**: `Compact`, `Normal` (default), or `Relaxed`, the number of blank lines between the sidebar sections (1, 2, or 3).
 - **Sidebar sections**: toggle the visibility of the **Session path** (the working directory line, including its git branch) and the **Token usage**, **Agents**, **Tools**, and **Todos** sections. The session title is always shown.
 
-Appearance also controls split-diff rendering, expanded thinking, whether tool results are hidden by default, and **Show startup banner** — the ASCII-art banner drawn on an empty conversation (persisted as `settings.show_banner: false` when turned off, and honored by the lean TUI too). Select **Theme** to open the theme picker.
+Appearance also controls **Compact work log**, **Visible replies**, split-diff rendering, expanded thinking, whether tool results are hidden by default, and **Show startup banner** — the ASCII-art banner drawn on an empty conversation (persisted as `settings.show_banner: false` when turned off, and honored by the lean TUI too). Select **Theme** to open the theme picker.
 
-The **Behavior** tab controls busy-message handling, the auto-approve default, tab restoration, automatic snapshots, lean UI, and the maximum tab-title length. Restore-tabs and lean-UI changes take effect on the next launch. Enabling auto-approve requires confirmation.
+The **Behavior** tab shows the busy-message keys (Enter queues; Alt+Enter steers) and controls the auto-approve default, tab restoration, automatic snapshots, lean UI, and the maximum tab-title length. Restore-tabs and lean-UI changes take effect on the next launch. Enabling auto-approve requires confirmation.
 
 The **Notifications** tab enables completion sounds and sets the minimum task duration before a sound plays.
 
@@ -571,9 +610,9 @@ Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and 
 ```yaml
 # ~/.config/cagent/config.yaml
 settings:
-  busy_send_mode: queue # queue (default), steer
   layout:
     sidebar_position: left # right (default), left, top, bottom
+    align_input_with_messages: true # false (default): full-width input
     sidebar_info_mode: detailed # compact (default, omitted), detailed
     section_spacing: compact # normal (default), compact, relaxed
     hide_session_path: false
@@ -595,7 +634,36 @@ Customize the TUI appearance with built-in or custom themes:
 
 ### Built-in Themes
 
-`default`, `default-light`, `catppuccin-latte`, `catppuccin-mocha`, `dracula`, `gruvbox-dark`, `gruvbox-light`, `nord`, `one-dark`, `solarized-dark`, `tokyo-night`
+`docker-next-dark` (default), `docker-next-light`, `default` (Old School, the previous default), `black-amber`, `black-cyan`, `black-violet`, `calm-roots`, `catppuccin-latte`, `catppuccin-mocha`, `default-light`, `dracula`, `gruvbox-dark`, `gruvbox-light`, `neon-pink`, `nord`, `one-dark`, `solarized-dark`, `tokyo-night`, `white-cobalt`, `white-rose`, `white-teal`.
+
+The Docker Next themes change colors only. Typography is chosen by your terminal emulator. For an optional dedicated font, see [Custom terminal fonts](../../terminal-fonts.md) (a host-side launcher; it does not change fonts in your existing terminal or Docker Desktop).
+
+#### Docker Next palettes
+
+The palettes are derived from a small set of brand anchors. Each color in the theme files has a trailing comment with its anchor or derivation. Channels are sRGB, rounded to 8 bits:
+
+- `X +p% toward Y` = `X + p·(Y − X)`
+- `X p% over Y` = `Y + p·(X − Y)`
+- `hue h/s/l` = the HSL color with hue `h`, saturation `s`, lightness `l`
+
+| Anchor | Exact reference | Theme roles |
+| --- | --- | --- |
+| Base | `#475BFF` | Brand fills; dark accent text is lifted toward Zero, light accent text is darkened toward Console |
+| Canvas | `#F5F2EE` | Light raised surfaces |
+| Zero | `#FFFDFA` | Dark bright text; light page background |
+| Ether | `#101010` | Dark page background; light primary and bright text |
+| Ink | `#1D1D1D` | Dark raised surfaces; light code punctuation |
+| Launch | `#FF6A3D` | Busy and syntax accent; light variant `#AB4A2D` is Launch +35% toward Ether |
+| Sand | `#FFCEA5` | Dark warning; light warning `#9E4800` uses its hue (HSL 27/100/31) |
+| Neutral | `#DDD4C9` | Dark primary text; muted text and borders blend toward Ether |
+| Air | `#D1E4FF` | Dark info; light selection and badge tint |
+| Bloom | `#F3E5F6` | Highlight and badge hue, adapted to HSL 290/45/76 (dark) and 290/35/40 (light) |
+| Flux | `#00E476` | Dark success; light success `#096B3C` is Flux +57% toward Ether |
+| Trigger | `#FF3D40` | Dark error; light error `#AE2324` is Trigger +50% toward Root |
+| Console | `#3345D6` | Dark drag highlight; light info and links |
+| Root | `#5C0909` | Error background base; code and numeric literals |
+
+Contrast notes: Base is a brand fill, not body text. On Zero it reaches 4.91:1, but on Canvas it falls to 4.47:1, so light-theme accent text uses the darker `#4457F8` (5.22:1 on Zero, 4.75:1 on Canvas). Raised Base surfaces are limited to roles that only need 3:1. The ratios assume the page background is painted by the theme; transparent cells over your terminal's own background depend on that background matching the selected polarity. Primary body text also meets 4.5:1 in the existing inactive-pane dim state; secondary, accent, and status text retain the existing dimming behavior and can fall below that threshold. This is not an all-text accessibility guarantee.
 
 ### Auto Theme (match the terminal)
 
@@ -604,15 +672,15 @@ The special theme `auto` follows the terminal's light/dark background instead of
 ```yaml
 settings:
   theme: auto
-  theme_dark: default # optional, theme used on dark backgrounds (default: default)
-  theme_light: default-light # optional, theme used on light backgrounds (default: default-light)
+  theme_dark: docker-next-dark # optional, theme used on dark backgrounds (default: docker-next-dark)
+  theme_light: docker-next-light # optional, theme used on light backgrounds (default: docker-next-light)
 ```
 
 At startup the terminal background is queried (OSC 11) to pick the dark or light theme of the pair; non-interactive runs (pipes, CI) fall back to the dark theme. In terminals that report appearance changes (DEC mode 2031 — Ghostty, kitty, contour, …), flipping the OS or terminal appearance while Docker Agent is running switches the theme live. Terminals without that mode re-sync when the window regains focus.
 
 ### Custom Themes
 
-Create theme files in `~/.cagent/themes/` as YAML. Theme files are **partial overrides** — you only need to specify the colors you want to change. Any omitted keys fall back to the built-in default theme values.
+Create theme files in `~/.cagent/themes/` as YAML. Theme files are **partial overrides** — you only need to specify the colors you want to change. Any omitted keys fall back to the Old School (`default`) theme values, not the Docker Next defaults.
 
 ```yaml
 # ~/.cagent/themes/my-theme.yaml
@@ -673,7 +741,7 @@ settings:
 > [!WARNING]
 > **Partial overrides**
 >
-> All user themes are applied on top of the `default` theme. If you want to customize a built-in theme (e.g., `dracula`), copy its full YAML from the [built-in themes on GitHub](https://github.com/docker/docker-agent/tree/main/pkg/tui/styles/themes) into `~/.cagent/themes/` and edit the copy. Otherwise, omitted values will use `default` colors, not the original theme's colors.
+> All user themes are applied on top of the Old School (`default`) theme, so omitted values use its colors rather than Docker Next. If you want to customize a built-in theme (e.g., `dracula`), copy its full YAML from the [built-in themes on GitHub](https://github.com/docker/docker-agent/tree/main/pkg/tui/styles/themes) into `~/.cagent/themes/` and edit the copy. Otherwise, omitted values will use Old School colors, not the original theme's colors.
 
 ## Tool Permissions
 
@@ -719,3 +787,56 @@ local runtimes and new or restored sessions. Disabling it does not cancel
 already accepted work, delete the tree, or prevent attaching to existing
 sessions. Changes are applied only after a successful save. Remote runtimes
 that cannot enforce this preference reject the change without saving it.
+
+In the full-TUI sidebar, narrow subagent rows preserve tree connectors before truncating names. Hovered IDs take precedence over names and remain visible after their reveal animation settles. Automatically opened team branches collapse when their work is stopped; explicit manual expansion or collapse choices are preserved.
+
+### Background shell processes
+
+The sidebar's **Background** section is separate from **Subagents**: it lists only shell processes the owning session actually adopted, not transcript history or long-running child agents. When a process is adopted while the session is idle, the section opens automatically; it starts collapsed for an active stream, and you can collapse or reopen it manually. The manual collapsed/expanded choice is retained across empty process lists and subsequent adoptions for the same session. Running rows update live, and completed, stopped, or failed rows remain briefly before expiring.
+
+A parent’s Subagents row also shows the number of currently running background shell processes owned by that child session, without marking the child itself as busy. Each tab shows detailed processes owned by its own session. Selecting a process row navigates to its original shell tool call when that call is still uniquely present in the session transcript; otherwise the row is informational and cannot navigate. The TUI does not provide a process-kill action here. Completion output arrives automatically and can resume an idle agent; agents do not need to poll process status or keep issuing tools while waiting. Process inspection is for a specific diagnostic need, not routine completion checks.
+
+### Git changes and code review
+
+The sidebar uses one **Files - Git** header with a repository count. The collapsed header rests muted and highlights as one row on hover; when expanded, the active mode retains its distinct color. Keyboard focus does not latch the label bright or bold. Click the active mode label to collapse the section, or the other label to switch modes. From a collapsed header, either label opens its mode. **Files** starts with the working directory’s contents, not an extra row for the working directory itself. Folders start collapsed and load their contents when opened; explicit expansion choices survive refreshes and mode changes. **Git** shows changed paths grouped by repository, with worktrees nested beneath their repository. Green `+N` and red `−N` line counts appear inline beside each changed filename; repository totals stay separate. Binary or unavailable counts are omitted. Select a path to inspect a diff or whole-file view; press <kbd>f</kbd> to switch between them and <kbd>o</kbd> to open a local whole file in the configured external editor. Remote workspaces never fall back to local filesystem access.
+
+Opening **Files** bootstraps only the working-directory scope, then lists that directory.
+Opening a folder lists only that folder; it does not trigger nearby-repository discovery
+or load sibling and descendant folders. Git discovery warnings do not apply to Files,
+but errors and truncation of the requested directory remain visible. Remote Files
+requires a server with the root-only browse endpoint; older servers report browsing
+unavailable rather than falling back to a recursive scan or the client filesystem.
+
+Within one TUI, attached agents and subagents in the same authorized workspace reuse
+Files/Git results and join matching requests already in progress instead of starting
+another scan. Refresh results are shared with every attached view of that workspace;
+selection, expanded folders, and review drafts remain independent. Opening Files still
+does not start Git discovery. Opening Git reuses an existing full or partial inventory,
+or discovers repositories if only a Files browse root has been loaded. Explicit refresh
+requests fresh data; merely switching or attaching does not.
+
+This cache is bounded and in-memory, not persistent across application restarts.
+Sharing respects workspace, backend, source, and permission boundaries: identical path
+text on different servers is not the same workspace. Remote paths are resolved only
+by the server, never against the client's filesystem. Separate remote connection
+instances conservatively keep separate client caches. Updates propagate between views
+within the same TUI, not as live push notifications to independently launched clients.
+Leaving one view does not cancel a matching request while another view still needs it.
+The client checks session policy changes before sharing updates. A server-side team
+policy change without updated session metadata is not pushed into the client cache;
+rebuilding the attachment revalidates its effective permissions. The server still
+checks the current policy on every Files/Git request.
+
+**Git** discovery searches up to four directory levels, prioritizing shallow candidates
+and reading same-depth containers in bounded batches. It stops descending into discovered
+checkouts. Ordinary files do not consume the directory-discovery budget. Hidden and
+dependency directories are skipped; declared submodules and Git worktree metadata supply
+nested checkouts without walking every tracked file. The initial scan remains bounded
+to 100 distinct repositories (plus the current checkout or workspace row), so larger or deeper workspaces can still show
+**Incomplete**. **Continue scan** is available only for supported local providers;
+remote discovery currently has no continuation endpoint. Continuing can raise the
+depth limit to at most eight levels; discovery never deepens automatically. Remote sessions discover repositories on the server.
+
+Press <kbd>c</kbd> on a diff line, or drag text to anchor an inline review comment. Use the composer while a review inspector is open for an optional general comment; press <kbd>Enter</kbd> to send the general comment and any inline comments together to the currently active session, or <kbd>Escape</kbd> to return to review while keeping the draft. The normal chat composer draft is restored afterward. <kbd>R</kbd> opens the review draft and <kbd>s</kbd> previews its send action.
+
+Git comments include the selected change context and relevant line ranges. Files comments are plain snippet references—file path, selected lines, and your comment—without a review preamble. Submitted comments remain user messages and render as compact reference cards in the full TUI; the original snippet and comment remain available in the sent content.

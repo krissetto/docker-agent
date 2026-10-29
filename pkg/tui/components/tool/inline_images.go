@@ -92,6 +92,35 @@ func (m *inlineImagesModel) NeedsTick() bool {
 	return ok && view.NeedsTick()
 }
 
+func (m *inlineImagesModel) PreserveBodyScrollFrom(previous any) {
+	if view, ok := m.model.(interface{ PreserveBodyScrollFrom(previous any) }); ok {
+		view.PreserveBodyScrollFrom(unwrapBodyScrollState(previous))
+	}
+}
+
+func (m *inlineImagesModel) BodyScrollState() (int, bool, bool) {
+	view, ok := m.model.(interface{ BodyScrollState() (int, bool, bool) })
+	if !ok {
+		return 0, false, false
+	}
+	return view.BodyScrollState()
+}
+
+func unwrapBodyScrollState(previous any) any {
+	if view, ok := previous.(interface{ BodyScrollState() (int, bool, bool) }); ok {
+		return bodyScrollStateSnapshot{source: view}
+	}
+	return previous
+}
+
+type bodyScrollStateSnapshot struct {
+	source interface{ BodyScrollState() (int, bool, bool) }
+}
+
+func (s bodyScrollStateSnapshot) BodyScrollState() (int, bool, bool) {
+	return s.source.BodyScrollState()
+}
+
 func (m *inlineImagesModel) IsExpanded() bool {
 	view, ok := m.model.(interface{ IsExpanded() bool })
 	return ok && view.IsExpanded()
@@ -116,6 +145,35 @@ func (m *inlineImagesModel) IsToggleLine(line int) bool {
 func (m *inlineImagesModel) IsToggleAt(line, col int) bool {
 	view, ok := m.model.(interface{ IsToggleAt(line, col int) bool })
 	return ok && view.IsToggleAt(line, col)
+}
+
+func (m *inlineImagesModel) WheelAt(line, col, delta int) bool {
+	// Appended image rows are outside the wrapped tool's coordinate space and
+	// must leave wheel input available to the transcript.
+	if line >= lineCount(m.model.View()) {
+		return false
+	}
+	view, ok := m.model.(interface {
+		WheelAt(line, col, delta int) bool
+	})
+	return ok && view.WheelAt(line, col, delta)
+}
+
+func (m *inlineImagesModel) SetHoveredAt(line int, hovered bool) bool {
+	if line >= lineCount(m.model.View()) {
+		return false
+	}
+	view, ok := m.model.(interface {
+		SetHoveredAt(line int, hovered bool) bool
+	})
+	return ok && view.SetHoveredAt(line, hovered)
+}
+
+func lineCount(content string) int {
+	if content == "" {
+		return 0
+	}
+	return strings.Count(strings.TrimSuffix(content, "\n"), "\n") + 1
 }
 
 func (m *inlineImagesModel) Toggle() {

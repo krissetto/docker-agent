@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
+	view "github.com/docker/docker-agent/pkg/tui/components/review"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -367,4 +368,66 @@ func TestComposerHistoryGrowthYieldsToManualResizeAndRestoredDraft(t *testing.T)
 		require.False(t, root.editorHeightMotion.Running())
 		assertComposerSchedulerIdle(t, root, scheduler)
 	}
+}
+
+func TestComposerCollapsesWhileReviewFocusedAndRestoresDraft(t *testing.T) {
+	root, scheduler := composerShrinkRoot(t, false)
+	const draft = "first line\nsecond line\nthird line"
+	root.editor.SetValue(draft)
+	root.manualEditorHeight = 0
+	root.resizeAll()
+	originalHeight := root.editorHeight
+	originalContentHeight := root.contentHeight
+	chrome := [4]int{root.separatorHeight, root.tabsHeight, root.contextHeight, root.messageBarHeight()}
+	require.Greater(t, originalHeight, 1)
+
+	ws := newGitReviewWorkspace(root.paneFocus())
+	ws.open, ws.mode, ws.provider = true, view.ModeFiles, &fakeReviewProvider{}
+	runner := root.supervisor.GetRunner(ws.anchor)
+	require.NotNil(t, runner)
+	sess := runner.App.Session()
+	route, ok := root.supervisor.RouteGeneration(ws.anchor)
+	require.True(t, ok)
+	ws.sessionID, ws.workingDir, ws.route = sess.ID, sess.WorkingDir, route
+	root.gitReviewOwner = ws.anchor
+	root.gitReviews = map[string]*gitReviewWorkspace{ws.anchor: ws}
+	root.gitReviewGeneration++
+	root.viewCacheValid = false
+
+	root.Update(view.FocusRequestMsg{Owner: ws.anchor})
+	require.True(t, root.reviewFocused())
+	require.Equal(t, 1, root.editorHeightTarget)
+	require.Equal(t, chrome, [4]int{root.separatorHeight, root.tabsHeight, root.contextHeight, root.messageBarHeight()}, "focus collapse preserves composer-adjacent chrome")
+	require.False(t, root.editorShrinkDelayed, "review focus bypasses the ordinary shrink hold")
+	require.True(t, root.editorHeightMotion.Running())
+	require.Equal(t, editorShrinkDuration, root.editorHeightMotion.Duration())
+	require.Equal(t, draft, root.editor.Value(), "collapsing only changes allocation")
+	require.NotEqual(t, root.editor.View(), root.composerView(), "unfocused composer presentation is dimmed")
+
+	for root.editorHeightMotion.Running() {
+		scheduler.step(t, root)
+	}
+	require.Equal(t, 1, root.editorHeight)
+	require.Greater(t, root.contentHeight, originalContentHeight, "review focus reclaims the collapsed rows")
+	require.Equal(t, draft, root.editor.Value())
+	require.Nil(t, root.View().Cursor, "review focus removes the composer cursor")
+	require.NotNil(t, root.reviewModel(), "the review remains open while the composer collapses")
+	if model := root.reviewModel(); model != nil {
+		model.HandleWheelDelta(0, 1, 1)
+		require.True(t, model.Focused(), "inspector scrolling keeps keyboard focus")
+		root.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+		require.True(t, model.Focused(), "review keyboard navigation continues after collapse")
+	}
+
+	root.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	require.False(t, root.reviewFocused())
+	require.NotNil(t, root.reviewModel(), "review remains open while its context bar has focus")
+	require.True(t, root.editor.(reviewCommentEditor).CommentInputActive(), "review focus borrows a dedicated general-comment editor")
+	require.Equal(t, 1, root.editorHeightTarget, "the general review composer remains compact")
+	require.Equal(t, chrome, [4]int{root.separatorHeight, root.tabsHeight, root.contextHeight, root.messageBarHeight()}, "focus return preserves composer-adjacent chrome")
+	for root.editorHeightMotion.Running() {
+		scheduler.step(t, root)
+	}
+	require.Equal(t, 1, root.editorHeight)
+	require.Equal(t, draft, root.editor.Value(), "the chat draft is restored without closing the inspector")
 }

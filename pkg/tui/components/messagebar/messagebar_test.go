@@ -342,3 +342,13 @@ func TestDefaultBackgroundAcrossThemesSeveritiesAndActions(t *testing.T) {
 		assertDefaultBackground(t, m.View(), 80)
 	}
 }
+
+func TestCurrentMessageReturnsDetachedSnapshot(t *testing.T) {
+	m := New()
+	m.SetMessage(Message{Text: "notice", Actions: []Action{{Label: "Open"}}})
+	got := m.CurrentMessage()
+	got.Text = "changed"
+	got.Actions[0].Label = "Changed"
+	assert.Equal(t, "notice", m.CurrentMessage().Text)
+	assert.Equal(t, "Open", m.CurrentMessage().Actions[0].Label)
+}

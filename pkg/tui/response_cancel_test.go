@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -24,8 +25,11 @@ import (
 type responseHandle struct {
 	*lifecycleHandle
 
-	cancels      atomic.Int32
-	canceledTurn atomic.Value
+	cancels       atomic.Int32
+	canceledTurn  atomic.Value
+	cancelStarted chan struct{}
+	cancelStarts  atomic.Int32
+	cancelRelease <-chan struct{}
 }
 
 func (h *responseHandle) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
@@ -39,10 +43,19 @@ func (h *responseHandle) Observe(ctx context.Context, options runtime.ObserveOpt
 }
 
 func (h *responseHandle) Cancel(_ context.Context, turn string) (runtime.CancelResult, error) {
+	if h.cancelStarted != nil {
+		h.cancelStarts.Add(1)
+		select {
+		case h.cancelStarted <- struct{}{}:
+		default:
+		}
+		<-h.cancelRelease
+	}
 	h.cancels.Add(1)
 	h.canceledTurn.Store(turn)
 	if h.live != nil {
 		h.live <- runtime.SessionEvent{SessionID: h.id, TurnID: turn, TranscriptPosition: -1, Event: runtime.StreamStopped(h.id, "root", "cancelled")}
+		h.live <- runtime.SessionEvent{SessionID: h.id, TurnID: turn, TranscriptPosition: -1, Event: &runtime.TurnSettledEvent{Type: "turn_settled", SessionID: h.id, TurnID: turn, Outcome: runtime.TurnCanceled}}
 	}
 	return runtime.CancelResult{SessionID: h.id, TurnID: turn, Outcome: runtime.CancelAccepted}, nil
 }
@@ -196,9 +209,10 @@ func TestResponsePromptCannotCancelAnotherSession(t *testing.T) {
 	require.True(t, root.responsePrompt.armed)
 	require.Zero(t, first.cancels.Load())
 	require.Zero(t, second.cancels.Load(), "first Escape on another tab cannot accept old prompt")
-	_, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	_, confirm := root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Zero(t, first.cancels.Load())
-	require.Equal(t, int32(1), second.cancels.Load())
+	collectMsgs(confirm)
+	require.Equal(t, int32(1), second.cancels.Load(), "confirmation dispatches the owner cancel from its command")
 }
 
 func TestActualProgramResponsePromptRunAndModalGuards(t *testing.T) {
@@ -318,4 +332,46 @@ func TestTransientNoticesFiveSecondsReplacementPriorityAndPersistentIsolation(t 
 		require.Contains(t, root.messageBar.View(), "persistent")
 		require.Zero(t, root.ar.ActiveCount(), "deadline holds require no animation lease")
 	})
+}
+
+func TestActualProgramResponseCancellationDoesNotBlockUpdates(t *testing.T) {
+	root, handle := responseTestRoot(t)
+	root.interruptMode = messages.InterruptModeDoubleTap
+	root.chatPage.SetInterruptMode(messages.InterruptModeDoubleTap)
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	handle.cancelStarted, handle.cancelRelease = started, release
+	root.focusedPanel = PanelEditor
+	_ = root.editor.Focus()
+	model := &sidebarHoverProgram{root: root}
+	program := startTestProgram(t, root, model, tea.WithOutput(&cacheProgramWriter{}))
+	program.Send(runtime.StreamStarted("response-confirm-session", "root"))
+	waitForResponseAnimation(t, model)
+	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Eventually(t, func() bool {
+		frames := model.snapshot()
+		return len(frames) > 0 && strings.Contains(ansi.Strip(frames[len(frames)-1].content), "Double Esc within 3s")
+	}, time.Second, time.Millisecond)
+	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cancel command was not started")
+	}
+
+	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	program.Send(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	require.Eventually(t, func() bool { return root.editor.Value() == "x" }, time.Second, time.Millisecond,
+		"the event loop must process ordinary input while canonical cancellation waits")
+	require.Zero(t, handle.cancels.Load(), "the blocking owner call has not returned yet")
+	require.Equal(t, int32(1), handle.cancelStarts.Load(), "a repeated Escape cannot queue another owner call")
+	releaseOnce.Do(func() { close(release) })
+	require.Eventually(t, func() bool { return handle.cancels.Load() == 1 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		frames := model.snapshot()
+		return len(frames) > 0 && strings.Contains(ansi.Strip(frames[len(frames)-1].content), "Response cancelled.")
+	}, time.Second, time.Millisecond)
+	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Equal(t, int32(1), handle.cancels.Load(), "one confirmation dispatches one cancellation")
 }

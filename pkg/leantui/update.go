@@ -72,7 +72,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 	case ui.KeyShiftEnter:
 		m.screen.Editor.Insert([]rune{'\n'})
 	case ui.KeyAltEnter:
-		m.submitEditorMode(ctx, m.screen.Editor.Text(), busySubmitFollowUp)
+		m.submitEditorMode(ctx, m.screen.Editor.Text(), busySubmitSteer)
 	case ui.KeyAltUp:
 		m.cancelPendingMessages(ctx)
 	case ui.KeyTab:
@@ -321,11 +321,7 @@ type submitOptions struct {
 }
 
 func (m *model) submitEditor(ctx context.Context, text string) {
-	mode := busySubmitSteer
-	if m.queueSendMode {
-		mode = busySubmitFollowUp
-	}
-	m.submitEditorMode(ctx, text, mode)
+	m.submitEditorMode(ctx, text, busySubmitQueue)
 }
 
 func (m *model) submitEditorMode(ctx context.Context, text string, mode busySubmitMode) {
@@ -619,6 +615,7 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 	previousID := m.app.Session().ID
 	m.app.Close()
 	m.app = application
+	m.status.ReadOnly = application.IsReadOnly()
 	if m.viewers != nil {
 		m.subscribeViewer(m.viewers.ctx(), application)
 	}
@@ -1080,7 +1077,7 @@ func (m *model) resolveConfirm(ctx context.Context, req runtime.ResumeRequest) {
 func (m *model) resetConversation() {
 	m.clearInterruptIntent()
 	m.cancelViewAcquisition()
-	m.status.Dormant, m.status.Pending = false, 0
+	m.status.Dormant, m.status.Stopped, m.status.PauseArmed, m.status.Paused, m.status.Pending = false, false, false, false, 0
 	m.lifecycle = lifecycle.State{}
 	m.elicitations, m.maxIterations = nil, nil
 	m.subagentSnapshot = nil
@@ -1187,15 +1184,15 @@ func (m *model) commitHelp() {
 		entry("Tree: Up/Down select, Left/Right collapse/expand; Tab selects actions; u toggles Use subagents.")
 		entry("Enter opens the selected live viewer without sending; Esc closes the tree without cancelling work.")
 		entry("Sending targets the visible viewer. /back restores its predecessor without cancelling execution.")
-		entry("Restored · paused sessions wait for /resume; related sessions require their own explicit Resume.")
+		entry("A restored session wakes on a new message or /resume; already queued work and reports wait for /resume. Related sessions require their own explicit Resume.")
 		entry("/attach <path> adds a draft attachment; /drop lists draft and session files.")
 		entry("/clear only redraws here; in the full TUI it starts a new session.")
 
 		heading("Composer and sending")
-		entry("Enter: send input or draft attachments; while busy, steer (may queue), or queue when send-mode is queue.")
+		entry("Enter: send input; while busy, queue for the next turn.")
 		entry("LF / Ctrl+J and CR / Ctrl+M decode as Enter here, not newline or model selection.")
 		entry("Shift+Enter: insert newline (requires terminal keyboard support).")
-		entry("Alt+Enter: send; while busy, enqueue an end-of-turn follow-up.")
+		entry("Alt+Enter: send input; while busy, steer into the active turn.")
 		entry("Typing / bracketed paste: insert text; pasted CR characters are stripped.")
 		entry("! prefix: run a shell command instead of sending (not in read-only sessions).")
 

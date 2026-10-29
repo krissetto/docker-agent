@@ -170,5 +170,8 @@ func (m *model) agentIdentityView(width int) string {
 
 func (m *model) footerView(width int) string {
 	pill := m.yoloIndicator(width)
+	if m.layoutCfg.PaddingRight > 0 {
+		return pill + strings.Repeat(" ", max(0, width-ansi.StringWidth(pill)))
+	}
 	return strings.Repeat(" ", max(0, width-ansi.StringWidth(pill))) + pill
 }

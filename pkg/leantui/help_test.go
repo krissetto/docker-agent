@@ -312,7 +312,7 @@ func TestLeanHelpPendingRecallAndThinkingContext(t *testing.T) {
 func TestLeanHelpBusySendAliases(t *testing.T) {
 	for _, tc := range []struct {
 		sequence string
-		followUp bool
+		steer    bool
 	}{
 		{"\r", false}, {"\n", false}, {"\x1b\r", true}, {"\x1b[13;3u", true},
 	} {
@@ -322,15 +322,15 @@ func TestLeanHelpBusySendAliases(t *testing.T) {
 		m.screen.Editor.SetText("message")
 		m.handleKey(t.Context(), leanHelpKey(t, tc.sequence))
 		require.Len(t, m.pendingUsers, 1)
-		if tc.followUp {
-			assert.Len(t, handle.submitted, before+1)
-			assert.Empty(t, handle.sent)
-			assert.Equal(t, ui.PendingUserFollowUp, m.pendingUsers[0].Kind)
-		} else {
+		if tc.steer {
 			assert.Len(t, handle.submitted, before)
 			require.Len(t, handle.sent, 1)
 			assert.Equal(t, "message", handle.sent[0].Content)
 			assert.Equal(t, ui.PendingUserSteer, m.pendingUsers[0].Kind)
+		} else {
+			assert.Len(t, handle.submitted, before)
+			assert.Empty(t, handle.sent)
+			assert.Equal(t, ui.PendingUserFollowUp, m.queue[0].Kind)
 		}
 		assert.True(t, m.screen.Editor.IsEmpty())
 	}

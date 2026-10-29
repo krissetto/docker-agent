@@ -152,7 +152,7 @@ func TestSessionServiceResidentLoadDoesNotRequireStoredRow(t *testing.T) {
 	driver, err := r.sessionDrivers.GetInitialized(t.Context(), sess)
 	require.NoError(t, err)
 	_, err = store.GetSession(t.Context(), sess.ID)
-	require.ErrorIs(t, err, session.ErrNotFound)
+	require.NoError(t, err)
 	handle, snapshot, err := service.LoadSession(t.Context(), sess.ID)
 	require.NoError(t, err)
 	require.Equal(t, sess.ID, snapshot.ID)

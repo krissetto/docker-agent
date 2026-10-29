@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -1241,4 +1242,20 @@ agents:
 	assert.Contains(t, err.Error(), `unknown field "force_handoff"`)
 	assert.Contains(t, err.Error(), "supported by config version 10")
 	assert.Contains(t, err.Error(), "currently 2")
+}
+
+func TestHistoricalBackgroundJobsConfigRejectedAfterUpgrade(t *testing.T) {
+	for _, version := range []string{"12", "13", "14", "15"} {
+		t.Run(version, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`version: "%s"
+agents:
+  root:
+    model: openai/gpt-4
+    toolsets:
+      - type: background_jobs
+`, version))
+			_, err := Load(t.Context(), NewBytesSource("historical.yaml", data))
+			require.ErrorContains(t, err, "toolset type 'background_jobs' was removed")
+		})
+	}
 }

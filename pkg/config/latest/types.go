@@ -514,6 +514,9 @@ type ProviderConfig struct {
 	// then a model-level one, then this provider-level default. When all are
 	// unset, compaction reuses the agent's own model.
 	CompactionModel string `json:"compaction_model,omitempty"`
+	// CompactionPrompt replaces the built-in compaction user prompt for agents
+	// using this provider. Agent- and model-level values take precedence.
+	CompactionPrompt string `json:"compaction_prompt,omitempty"`
 }
 
 // FallbackConfig represents fallback model configuration for an agent.
@@ -737,6 +740,10 @@ type AgentConfig struct {
 	// Each entry is either a bare agent name or a {agent,name,description}
 	// object; see SubagentRef.
 	Subagents SubagentRefs `json:"subagents,omitempty" yaml:"subagents,omitempty"`
+	// SubagentAccess opts into discovery and communication beyond the legacy
+	// direct-child async subagent tools. Each capability is independent; an
+	// omitted field keeps the existing per-session behavior.
+	SubagentAccess *SubagentAccessConfig `json:"subagent_access,omitempty" yaml:"subagent_access,omitempty"`
 
 	AddDate            bool `json:"add_date,omitempty"`
 	AddEnvironmentInfo bool `json:"add_environment_info,omitempty"`
@@ -801,8 +808,12 @@ type AgentConfig struct {
 	// highest priority: it wins over a `compaction_model` set on the agent's
 	// model or provider; when all are unset, compaction reuses the agent's
 	// own model.
-	CompactionModel string   `json:"compaction_model,omitempty"`
-	AddPromptFiles  []string `json:"add_prompt_files,omitempty" yaml:"add_prompt_files,omitempty"`
+	CompactionModel string `json:"compaction_model,omitempty"`
+	// CompactionPrompt replaces the built-in user prompt used to generate
+	// summaries. The agent value takes precedence over model/provider defaults;
+	// manual /compact text and pre_compact hook context are still appended.
+	CompactionPrompt string   `json:"compaction_prompt,omitempty" yaml:"compaction_prompt,omitempty"`
+	AddPromptFiles   []string `json:"add_prompt_files,omitempty" yaml:"add_prompt_files,omitempty"`
 	// AddPromptFilesDepth also lists, by path only, the AddPromptFiles names
 	// found up to that many directory levels below the working directory
 	// (1 = direct subdirectories). Contents are not loaded; the agent reads
@@ -824,6 +835,38 @@ type AgentConfig struct {
 	UseToolsets []string     `json:"use_toolsets,omitempty"`
 	Hooks       *HooksConfig `json:"hooks,omitempty"`
 	Cache       *CacheConfig `json:"cache,omitempty"`
+}
+
+// SubagentAccessScope limits instance discovery or send_message targets.
+type SubagentAccessScope string
+
+const (
+	SubagentAccessChildren SubagentAccessScope = "children"
+	SubagentAccessTree     SubagentAccessScope = "tree"
+)
+
+// SubagentAccessConfig grants separate instance-tree discovery and messaging
+// scopes. The children scope retains parent messaging and direct children;
+// tree is limited to instances in the current root session's runtime tree.
+type SubagentAccessConfig struct {
+	ListAgents  SubagentAccessScope `json:"list_agents,omitempty" yaml:"list_agents,omitempty"`
+	SendMessage SubagentAccessScope `json:"send_message,omitempty" yaml:"send_message,omitempty"`
+}
+
+func (c *SubagentAccessConfig) validate() error {
+	if c == nil {
+		return nil
+	}
+	valid := func(scope SubagentAccessScope) bool {
+		return scope == "" || scope == SubagentAccessChildren || scope == SubagentAccessTree
+	}
+	if !valid(c.ListAgents) {
+		return fmt.Errorf("list_agents must be children or tree, got %q", c.ListAgents)
+	}
+	if !valid(c.SendMessage) {
+		return fmt.Errorf("send_message must be children or tree, got %q", c.SendMessage)
+	}
+	return nil
 }
 
 // SubagentRef references an agent this agent may delegate to and message
@@ -1334,6 +1377,10 @@ type ModelConfig struct {
 	// primary, compaction is triggered against the smaller window so the
 	// summary call can always ingest the conversation it must compact.
 	CompactionModel string `json:"compaction_model,omitempty"`
+	// CompactionPrompt replaces the built-in compaction user prompt for agents
+	// using this model. Agent-level values take precedence over this value,
+	// which takes precedence over a provider-level default.
+	CompactionPrompt string `json:"compaction_prompt,omitempty"`
 	// CompactionThreshold overrides, for agents running this model, the
 	// fraction of the context window at which proactive auto-compaction
 	// triggers. Must be greater than 0 and at most 1. It takes precedence over
@@ -1601,6 +1648,7 @@ func (f *FlexibleModelConfig) isShorthandOnly() bool {
 		f.FirstAvailable == nil &&
 		f.TitleModel == "" &&
 		f.CompactionModel == "" &&
+		f.CompactionPrompt == "" &&
 		f.CompactionThreshold == nil &&
 		f.Capabilities == nil &&
 		f.OutputCapabilities == nil &&
@@ -1735,7 +1783,7 @@ type Toolset struct {
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
 
-	// For `shell`, `background_jobs`, `script`, `mcp` or `lsp` tools
+	// For `shell`, `script`, `mcp` or `lsp` tools
 	Env map[string]string `json:"env,omitempty"`
 
 	// For the `todo` tool
@@ -1830,7 +1878,7 @@ type Toolset struct {
 	AllowPrivateIPs *bool `json:"allow_private_ips,omitempty" yaml:"allow_private_ips,omitempty"`
 
 	// For the `shell` toolset — foreground wait in seconds before an active
-	// command is retained as a background job. Defaults to 2 seconds; 0 disables.
+	// command is retained as a background process. Defaults to 2 seconds; 0 disables.
 	BackgroundAfter *int `json:"background_after,omitempty" yaml:"background_after,omitempty"`
 
 	// For the `shell` toolset — opt in to a sudo privilege escalation flow.
@@ -1839,13 +1887,6 @@ type Toolset struct {
 	// is declined automatically and sudo fails as before. No effect on Windows.
 	// nil/false keeps the default behaviour (sudo has no TTY and fails fast).
 	SudoAskpass *bool `json:"sudo_askpass,omitempty" yaml:"sudo_askpass,omitempty"`
-
-	// For the `background_jobs` toolset — opt in to background-job recall. When
-	// enabled, run_background_job exposes a recall boolean parameter. If the
-	// agent sets recall:true on a background job, the runtime injects a steering
-	// message with a short completion sentence and the job output when the job
-	// finishes.
-	Recall *bool `json:"recall,omitempty" yaml:"recall,omitempty"`
 
 	// For the `rag` tool
 	RAGConfig *RAGConfig `json:"rag_config,omitempty" yaml:"rag_config,omitempty"`

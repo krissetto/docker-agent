@@ -66,7 +66,7 @@ func TestPendingAgentReceiptPromotesStableDisclosureInConsumptionOrder(t *testin
 			require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAgentInput))
 			out := ansi.Strip(m.View())
 			require.NotContains(t, out, "awaiting consumption")
-			require.Contains(t, out, "Worker (node) sent a message v")
+			require.Contains(t, out, "From Worker (node) sent a message v")
 			require.Contains(t, out, "literal steering payload", "expanded state survives promotion")
 			require.Equal(t, 1, strings.Count(out, "literal steering payload"))
 			m.RemovePendingInput(input.TurnID)

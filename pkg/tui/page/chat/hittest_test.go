@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -19,6 +20,7 @@ func TestHandleMouseClick_SidebarUsageContext_OpensContextDialog(t *testing.T) {
 	t.Parallel()
 
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	setSidebarUsageFixture(p)
 	sl := p.computeSidebarLayout()
 	require.Equal(t, sidebarVertical, sl.mode)
 
@@ -39,6 +41,7 @@ func TestHandleMouseClick_SidebarUsage_OpensCostDialog(t *testing.T) {
 	t.Parallel()
 
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	setSidebarUsageFixture(p)
 	sl := p.computeSidebarLayout()
 	require.Equal(t, sidebarVertical, sl.mode)
 
@@ -62,4 +65,12 @@ func findUsageReadingLine(t *testing.T, strippedView string) (line, dollarOffset
 	}
 	t.Fatal("Token Usage reading line not found in sidebar view")
 	return 0, 0
+}
+
+func setSidebarUsageFixture(p *chatPage) {
+	p.sidebar.SetTokenUsage(&runtime.TokenUsageEvent{
+		SessionID:    "fixture-session",
+		AgentContext: runtime.AgentContext{AgentName: "root"},
+		Usage:        &runtime.Usage{},
+	})
 }

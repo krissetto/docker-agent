@@ -467,6 +467,76 @@ func deriveEmphasisBg(hex string) color.Color {
 	return lipgloss.Color(RGBToHex(nr, ng, nb))
 }
 
+func bestForeground(bg color.Color, candidates ...color.Color) color.Color {
+	if len(candidates) == 0 {
+		return lipgloss.NoColor{}
+	}
+	best := candidates[0]
+	bestContrast := contrastRatio(best, bg)
+	for _, candidate := range candidates[1:] {
+		if contrast := contrastRatio(candidate, bg); contrast > bestContrast {
+			best = candidate
+			bestContrast = contrast
+		}
+	}
+	return best
+}
+
+// deriveDiffEmphasisBg selects a nearby tint that keeps the diff text readable.
+func deriveDiffEmphasisBg(background, foreground string) color.Color {
+	if _, _, _, ok := parseHexRGB(background); !ok {
+		return lipgloss.Color(background)
+	}
+	fg := lipgloss.Color(foreground)
+	emphasis := deriveEmphasisBg(background)
+	if contrastRatio(fg, emphasis) >= 4.5 {
+		return emphasis
+	}
+	var tr, tg, tb float64
+	if contrastRatio(fg, lipgloss.Color("#ffffff")) > contrastRatio(fg, lipgloss.Color("#000000")) {
+		tr, tg, tb = 1, 1, 1
+	} else {
+		tr, tg, tb = 0, 0, 0
+	}
+	er, eg, eb := ColorToRGB(emphasis)
+	for step := 1; step <= 100; step++ {
+		alpha := float64(step) / 100
+		candidate := RGBToColor(er+(tr-er)*alpha, eg+(tg-eg)*alpha, eb+(tb-eb)*alpha)
+		if contrastRatio(fg, candidate) >= 4.5 {
+			return candidate
+		}
+	}
+	return emphasis
+}
+
+// deriveScrollbarTrack keeps custom themes' scrollbar gutter close to their surfaces.
+func deriveScrollbarTrack(shell, card, editor string) string {
+	surfaces := []string{shell, card, editor}
+	var total [3]float64
+	for _, surface := range surfaces {
+		r, g, b, ok := parseHexRGB(surface)
+		if !ok {
+			index, err := strconv.Atoi(surface)
+			if err != nil || index < 0 || index > 255 {
+				return shell
+			}
+			r, g, b = ColorToRGB(lipgloss.Color(surface))
+		}
+		total[0] += r
+		total[1] += g
+		total[2] += b
+	}
+	for i := range total {
+		total[i] /= float64(len(surfaces))
+	}
+	target := 1.0
+	if relativeLuminance(total[0], total[1], total[2]) > 0.5 {
+		target = 0
+	}
+	const blend = 0.1
+	return RGBToHex(total[0]+(target-total[0])*blend, total[1]+(target-total[1])*blend, total[2]+(target-total[2])*blend)
+}
+
 // raisedEditorBackground keeps partial/registered themes on their own palette.
 func raisedEditorBackground(background string) string {
 	r, g, b, ok := parseHexRGB(background)

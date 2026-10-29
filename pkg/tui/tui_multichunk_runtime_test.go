@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -118,14 +120,25 @@ type fullUIFrameProbe struct {
 	idle     atomic.Bool
 	errors   atomic.Int32
 	slow     bool
+	mu       sync.Mutex
+	plain    string
 }
 
 var fullUIChunkMarkers = [...]string{"FIRST-CHUNK-MARKER", "SECOND-CHUNK-MARKER", "FINAL-CHUNK-MARKER"}
 
 func (m *fullUIFrameProbe) Init() tea.Cmd { return m.root.Init() }
 
+func (m *fullUIFrameProbe) lastFrame() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.plain
+}
+
 func (m *fullUIFrameProbe) View() tea.View {
 	view := m.root.View()
+	m.mu.Lock()
+	m.plain = ansi.Strip(view.Content)
+	m.mu.Unlock()
 	for index, marker := range fullUIChunkMarkers {
 		if strings.Contains(view.Content, marker) {
 			m.visible[index].Store(true)
@@ -173,6 +186,7 @@ func fullUIStackDeadline(t *testing.T, milestone string, probe *fullUIFrameProbe
 	t.Helper()
 	stack := make([]byte, 2<<20)
 	n := goruntime.Stack(stack, true)
+	t.Logf("last frame before failure:\n%s", probe.lastFrame())
 	t.Fatalf("%s: provider Recv=%d UI chunks=%d stopped=%v\n%s", milestone, stream.calls.Load(), probe.chunks.Load(), probe.stopped.Load(), stack[:n])
 }
 
@@ -184,7 +198,8 @@ func TestActualFullTUIMultipleProviderChunks(t *testing.T) {
 		responses       bool
 		history, burst  int
 		terminal        string
-	}{{name: "normal"}, {name: "slow", slow: true}, {name: "reasoning", reasoning: true}, {name: "reasoning-slow", reasoning: true, slow: true}, {name: "tool", tool: true}, {name: "history-burst", history: 600, burst: 1500}, {name: "history-burst-slow", history: 600, burst: 1500, slow: true}, {name: "history-reasoning-tool", history: 600, reasoning: true, tool: true}, {name: "openai-responses", responses: true}, {name: "openai-reasoning-history", responses: true, reasoning: true, history: 600}, {name: "openai-responses-slow", responses: true, slow: true, burst: 1500}, {name: "openai-failed", responses: true, terminal: "failed"}, {name: "openai-incomplete", responses: true, terminal: "incomplete"}} {
+		mode            string
+	}{{name: "normal"}, {name: "slow", slow: true}, {name: "reasoning", reasoning: true, mode: "noncompact"}, {name: "reasoning-compact", reasoning: true, mode: "compact"}, {name: "reasoning-slow", reasoning: true, slow: true, mode: "noncompact"}, {name: "reasoning-slow-compact", reasoning: true, slow: true, mode: "compact"}, {name: "tool", tool: true}, {name: "history-burst", history: 600, burst: 1500}, {name: "history-burst-slow", history: 600, burst: 1500, slow: true}, {name: "history-reasoning-tool", history: 600, reasoning: true, tool: true, mode: "noncompact"}, {name: "history-reasoning-tool-compact", history: 600, reasoning: true, tool: true, mode: "compact"}, {name: "openai-responses", responses: true}, {name: "openai-reasoning-history", responses: true, reasoning: true, history: 600, mode: "noncompact"}, {name: "openai-reasoning-history-compact", responses: true, reasoning: true, history: 600, mode: "compact"}, {name: "openai-responses-slow", responses: true, slow: true, burst: 1500}, {name: "openai-failed", responses: true, terminal: "failed"}, {name: "openai-incomplete", responses: true, terminal: "incomplete"}} {
 		slow := variant.slow
 		t.Run(variant.name, func(t *testing.T) {
 			store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
@@ -250,11 +265,23 @@ func TestActualFullTUIMultipleProviderChunks(t *testing.T) {
 			for range variant.history {
 				sess.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "**history**\n\n```go\nfmt.Println(123)\n```\n\n"}))
 			}
-			require.NoError(t, store.AddSession(t.Context(), sess))
+			want := len(sess.Messages)
+			handle, err := owner.Runtime().CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
+			require.NoError(t, err)
 			sess, err = store.GetSession(t.Context(), sess.ID)
 			require.NoError(t, err)
+			require.Len(t, sess.Messages, want, "fixture history survives canonical creation")
+			require.False(t, handle.Metadata().Historical, "fixture must be a live session")
+			require.True(t, handle.Metadata().ExecutionAvailable, "fixture must execute turns")
 			a := app.New(t.Context(), owner.Runtime(), sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt))
 			root := New(t.Context(), nil, a, t.TempDir(), nil).(*appModel)
+			if variant.mode != "" {
+				setter, ok := root.chatPage.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd })
+				require.True(t, ok, "chat page exposes the compact Work mode")
+				setter.SetCompactWorkLog(variant.mode == "compact")
+				// Replacement pages (createSessionComponents) read the root field, not the chat page.
+				root.compactWorkLog = variant.mode == "compact"
+			}
 			probe := &fullUIFrameProbe{canceled: t.Context().Done(), updated: make(chan struct{}, 1), root: root, slow: slow}
 			program := tea.NewProgram(probe, tea.WithContext(t.Context()), tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithWindowSize(120, 40))
 			root.SetProgram(program)
@@ -284,6 +311,10 @@ func TestActualFullTUIMultipleProviderChunks(t *testing.T) {
 			for index, marker := range fullUIChunkMarkers {
 				close(stream.gates[index])
 				if variant.tool && index == 1 {
+					continue
+				}
+				if variant.mode == "compact" && index < 2 {
+					awaitCompactHidden(t, probe, stream, int32(index+1), marker)
 					continue
 				}
 				deadline := time.NewTimer(6 * time.Second)
@@ -316,5 +347,27 @@ func TestActualFullTUIMultipleProviderChunks(t *testing.T) {
 				require.Positive(t, probe.errors.Load(), "provider failure must be visible instead of indefinite spinner")
 			}
 		})
+	}
+}
+
+// awaitCompactHidden is the compact-Work counterpart of the visibility wait: reasoning chunks
+// are processed by the UI and stay hidden inside the active collapsed Work header until the
+// turn completes. Noncompact variants keep the original visibility wait.
+func awaitCompactHidden(t *testing.T, probe *fullUIFrameProbe, stream *fullUIChunkStream, processed int32, marker string) {
+	t.Helper()
+	deadline := time.NewTimer(6 * time.Second)
+	defer deadline.Stop()
+	for {
+		frame := probe.lastFrame()
+		if probe.chunks.Load() >= processed && strings.Contains(frame, "Working [+]") {
+			require.NotContains(t, frame, marker, "reasoning chunk must stay inside the collapsed Work group")
+			require.False(t, probe.stopped.Load(), "chunk must be processed before stream completion")
+			return
+		}
+		select {
+		case <-probe.updated:
+		case <-deadline.C:
+			fullUIStackDeadline(t, marker, probe, stream)
+		}
 	}
 }

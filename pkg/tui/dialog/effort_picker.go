@@ -162,7 +162,7 @@ func (d *effortPickerDialog) renderLevel(level effort.Level, selected bool) stri
 	currentBadgeStyle := styles.BadgeCurrentStyle
 	if selected {
 		nameStyle = styles.PaletteSelectedActionStyle
-		currentBadgeStyle = currentBadgeStyle.Background(styles.MobyBlue)
+		currentBadgeStyle = currentBadgeStyle.Foreground(styles.White).Background(styles.MobyBlue)
 	}
 
 	name := nameStyle.Render(" " + level.String() + " ")

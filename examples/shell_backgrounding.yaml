@@ -1,0 +1,12 @@
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Run long shell commands with automatic completion delivery.
+    instruction: |
+      Use the shell tool for commands. Commands that outlast the foreground window
+      continue internally and report their bounded output automatically.
+      Use list_running_processes, inspect_running_process, or kill_running_process
+      only to diagnose or stop a currently running shell command.
+    toolsets:
+      - type: shell
+        background_after: 2

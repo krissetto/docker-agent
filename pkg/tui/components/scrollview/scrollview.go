@@ -10,12 +10,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // ScrollKeyMap defines which keys trigger scroll actions.
@@ -120,6 +120,7 @@ type Model struct {
 	// scrollbar, so EnsureLineVisible works before SetContent is called.
 	scrollOffset     int
 	visualGeneration uint64
+	visibility       scrollbarVisibility
 }
 
 // New creates a new scrollview with the given options.
@@ -145,6 +146,8 @@ func (m *Model) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	m.updateScrollbarPosition()
+	m.updatePointerHover()
+	m.reconcileVisibility()
 	if m.totalHeight > 0 {
 		m.syncScrollbar()
 	}
@@ -156,13 +159,24 @@ func (m *Model) SetPosition(x, y int) {
 	m.xPos = x
 	m.yPos = y
 	m.updateScrollbarPosition()
+	m.updatePointerHover()
+	m.reconcileVisibility()
 }
 
 // SetContent provides the full content buffer and total height.
 // totalHeight may be >= len(lines) for virtual blank lines (e.g. bottomSlack).
 // Rebuild a fresh slice when content changes, or call InvalidateComposeCache
 // after modifying the existing buffer in place.
-func (m *Model) SetContent(lines []string, totalHeight int) {
+func (m *Model) SetContent(lines []string, totalHeight int) { m.setContent(lines, totalHeight, true) }
+
+// SetLayoutContent is [Model.SetContent] for a rewrapped or resized transcript.
+// A clamp caused by the rebuilt content is layout, so it never reveals or
+// schedules the scrollbar; real scrolling still does.
+func (m *Model) SetLayoutContent(lines []string, totalHeight int) {
+	m.setContent(lines, totalHeight, false)
+}
+
+func (m *Model) setContent(lines []string, totalHeight int, reveal bool) {
 	totalHeight = max(totalHeight, len(lines))
 	visible := func(content []string) []string {
 		start := min(m.scrollOffset, len(content))
@@ -180,6 +194,11 @@ func (m *Model) SetContent(lines []string, totalHeight int) {
 	if changed || before != m.scrollOffset {
 		m.visualGeneration++
 	}
+	if reveal && before != m.scrollOffset {
+		m.noteScrollActivity()
+	}
+	m.updatePointerHover()
+	m.reconcileVisibility()
 }
 
 // lineWidth returns the display width of content line i, memoized across frames.
@@ -223,6 +242,7 @@ func (m *Model) SetScrollbarDecorator(decorator ScrollbarDecorator) {
 		return
 	}
 	m.scrollbarDecorator = decorator
+	m.visibility.paint = scrollbarPaintCache{}
 	m.visualGeneration++
 }
 
@@ -262,7 +282,13 @@ func (m *Model) VisualGeneration() uint64 { return m.visualGeneration }
 func (m *Model) Changed(generation uint64) bool { return m.visualGeneration != generation }
 
 // SetScrollOffset sets the scroll offset, clamped when content dimensions are known.
-func (m *Model) SetScrollOffset(offset int) {
+func (m *Model) SetScrollOffset(offset int) { m.setScrollOffset(offset, true) }
+
+// SetLayoutScrollOffset re-anchors the offset after a viewport resize. It is
+// layout, not scrolling, so it never reveals or schedules the scrollbar.
+func (m *Model) SetLayoutScrollOffset(offset int) { m.setScrollOffset(offset, false) }
+
+func (m *Model) setScrollOffset(offset int, reveal bool) {
 	before := m.scrollOffset
 	m.scrollOffset = max(0, offset)
 	if m.totalHeight > 0 && m.height > 0 {
@@ -271,6 +297,9 @@ func (m *Model) SetScrollOffset(offset int) {
 	m.sb.SetScrollOffset(m.scrollOffset)
 	if m.scrollOffset != before {
 		m.visualGeneration++
+		if reveal {
+			m.noteScrollActivity()
+		}
 	}
 }
 
@@ -374,6 +403,21 @@ func (m *Model) UpdateMouse(msg tea.Msg) (handled bool, cmd tea.Cmd) {
 	changed := m.scrollOffset != prev || m.sb.IsDragging() != wasDragging
 	if changed {
 		m.visualGeneration++
+	}
+	v := &m.visibility
+	if dragging := m.sb.IsDragging(); dragging != v.dragging {
+		v.dragging = dragging
+		if !dragging && v.runtime != nil {
+			v.holdUntil = v.runtime.Now() + scrollbarVisibilityHold
+		}
+		m.reconcileVisibility()
+	}
+	if m.scrollOffset != prev {
+		m.noteScrollActivity()
+	}
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		point := mouse.Mouse()
+		m.SetScrollbarPointer(point.X, point.Y)
 	}
 	return changed || m.sb.IsDragging(), c
 }
@@ -587,8 +631,5 @@ func (m *Model) updateScrollbarPosition() {
 }
 
 func (m *Model) scrollbarLines() []string {
-	if m.scrollbarDecorator == nil {
-		return m.sb.ViewLines()
-	}
-	return strings.Split(m.scrollbarDecorator(m.sb.View()), "\n")
+	return m.composeScrollbar(m.sb.ViewLines())
 }

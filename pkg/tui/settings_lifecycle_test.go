@@ -110,7 +110,7 @@ func TestSettingsActualDraftPreservesUneditedConcurrentFields(t *testing.T) {
 func TestSettingsCancelRestoresActualRuntimeAndRejectsLatePreview(t *testing.T) {
 	setupSettingsConfigTest(t)
 	root, _, _ := frozenClockRoot(t, 120, 50)
-	require.NoError(t, saveTestSettings(root.layoutSettings, root.sendMode))
+	require.NoError(t, saveTestSettings(root.layoutSettings, messages.SendModeQueue))
 	before, err := os.ReadFile(userconfig.Path())
 	require.NoError(t, err)
 	root.dimInactivePanes = false
@@ -136,7 +136,7 @@ func TestSettingsCancelRestoresActualRuntimeAndRejectsLatePreview(t *testing.T) 
 func TestSettingsFailedSaveKeepsDraftPreviewAndCanRetry(t *testing.T) {
 	setupSettingsConfigTest(t)
 	root, _, _ := frozenClockRoot(t, 120, 50)
-	require.NoError(t, saveTestSettings(root.layoutSettings, root.sendMode))
+	require.NoError(t, saveTestSettings(root.layoutSettings, messages.SendModeQueue))
 	before, err := os.ReadFile(userconfig.Path())
 	require.NoError(t, err)
 	d := settingsFromRoot(t, root)

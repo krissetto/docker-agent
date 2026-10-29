@@ -81,6 +81,7 @@ func TestUnlimitedSessionResourcesForSessionsAndMailboxes(t *testing.T) {
 	policy.MaxSessions = UnlimitedSessionResources
 	policy.MailboxMessages = UnlimitedSessionResources
 	rt, err := NewLocalRuntime(t.Context(), newPolicyTestTeam(), WithSessionResourcePolicy(policy))
+	t.Cleanup(func() { _ = rt.Close() })
 	require.NoError(t, err)
 
 	for i := range 3 {

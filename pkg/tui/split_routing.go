@@ -61,3 +61,15 @@ func stampThinkingCycleCommand(origin string, generation uint64, cmd tea.Cmd) te
 		return result
 	})
 }
+
+func stampAttachmentPreviewCommand(id string, generation uint64, cmd tea.Cmd) tea.Cmd {
+	if id == "" || cmd == nil {
+		return cmd
+	}
+	return core.MapCommand(cmd, func(result tea.Msg) tea.Msg {
+		if _, ok := result.(messages.OpenUserAttachmentPreviewMsg); ok {
+			return messages.RoutedMsg{SessionID: id, RouteGeneration: generation, Inner: result}
+		}
+		return result
+	})
+}

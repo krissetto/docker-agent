@@ -85,8 +85,6 @@
           url: /tools/transfer-task/
         - title: Background Agents
           url: /tools/background-agents/
-        - title: Background Jobs
-          url: /tools/background-jobs/
     - label: Memory & Knowledge
       items:
         - title: Memory

@@ -55,6 +55,7 @@ colors:
   focus: "#FFC568"
   disabled: "#586575"
   status_adjacent: "#A4B2C2"
+  scrollbar_track: "#1f1f1f"
   badge_accent: "#FFC568"
   badge_info: "#7ACCE2"
   badge_success: "#8FD3A0"

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -73,6 +74,7 @@ type renderCache struct {
 	themeGeneration  uint64
 	width            int      // width used for rendering
 	reasoningVersion int      // version of reasoning content when cached
+	toolCount        int      // number of embedded tools when cached
 	lines            []string // last nonblank preview lines, independently owned
 	hasExtra         bool     // whether there's extra content beyond preview
 	truncated        bool     // more nonblank reasoning lines precede the preview
@@ -85,49 +87,57 @@ type expandedToolView interface {
 
 // Model represents a collapsible reasoning + tool calls block.
 type Model struct {
-	prepared            *PreparedReasoning
-	fadeStyles          []lipgloss.Style
-	fadeStylesValid     bool
-	fadeThemeGeneration uint64
-	ar                  *animation.Runtime
-	id                  string
-	agentName           string
-	showAgentBadge      bool          // render the agent badge above the header
-	contentItems        []contentItem // Ordered sequence of reasoning and tool calls
-	toolEntries         []toolEntry   // All tool entries (referenced by contentItems)
-	expanded            bool
-	selected            bool
-	width               int
-	height              int
-	sessionState        service.SessionStateReader
-	subagents           *subagentindex.Index
-	reasoningVersion    int                    // increments when reasoning content changes
-	cache               *renderCache           // cached rendering results
-	animationSub        animation.Subscription // whether we're registered with animation coordinator
+	prepared         *PreparedReasoning
+	ar               *animation.Runtime
+	id               string
+	agentName        string
+	contentItems     []contentItem // Ordered sequence of reasoning and tool calls
+	toolEntries      []toolEntry   // All tool entries (referenced by contentItems)
+	expanded         bool
+	selected         bool
+	width            int
+	height           int
+	sessionState     service.SessionStateReader
+	subagents        *subagentindex.Index
+	reasoningVersion int                    // increments when reasoning content changes
+	cache            *renderCache           // cached rendering results
+	animationSub     animation.Subscription // whether we're registered with animation coordinator
 	// now returns the current time. Defaults to time.Now; tests override it
 	// per-instance for deterministic fade/grace-period behaviour.
 	now func() time.Time
 }
 
-// fadeStyleForProgress caches the small fade palette per block and theme.
-func (m *Model) fadeStyleForProgress(progress float64) lipgloss.Style {
+// fadePalette is the theme-wide fade ramp. It depends only on the theme, so
+// every block shares one copy instead of retaining its own after a fade.
+type fadePalette struct {
+	generation uint64
+	styles     []lipgloss.Style
+}
+
+var fadePaletteCache atomic.Pointer[fadePalette]
+
+func currentFadePalette() *fadePalette {
 	generation := styles.ThemeGeneration()
-	if !m.fadeStylesValid || m.fadeThemeGeneration != generation {
-		startR, startG, startB, _ := styles.MutedStyle.GetForeground().RGBA()
-		endR, endG, endB, _ := lipgloss.Color(styles.CurrentTheme().Colors.Background).RGBA()
-		if m.fadeStyles == nil {
-			m.fadeStyles = make([]lipgloss.Style, fadeSteps+1)
-		}
-		for i := range fadeSteps + 1 {
-			p := float64(i) / float64(fadeSteps)
-			r := int(float64(startR>>8)*(1-p) + float64(endR>>8)*p)
-			g := int(float64(startG>>8)*(1-p) + float64(endG>>8)*p)
-			b := int(float64(startB>>8)*(1-p) + float64(endB>>8)*p)
-			m.fadeStyles[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b)))
-		}
-		m.fadeThemeGeneration, m.fadeStylesValid = generation, true
+	if palette := fadePaletteCache.Load(); palette != nil && palette.generation == generation {
+		return palette
 	}
-	return m.fadeStyles[min(max(int(progress*fadeSteps), 0), fadeSteps)]
+	startR, startG, startB, _ := styles.MutedStyle.GetForeground().RGBA()
+	endR, endG, endB, _ := lipgloss.Color(styles.CurrentTheme().Colors.Background).RGBA()
+	palette := &fadePalette{generation: generation, styles: make([]lipgloss.Style, fadeSteps+1)}
+	for i := range fadeSteps + 1 {
+		p := float64(i) / float64(fadeSteps)
+		r := int(float64(startR>>8)*(1-p) + float64(endR>>8)*p)
+		g := int(float64(startG>>8)*(1-p) + float64(endG>>8)*p)
+		b := int(float64(startB>>8)*(1-p) + float64(endB>>8)*p)
+		palette.styles[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b)))
+	}
+	fadePaletteCache.Store(palette)
+	return palette
+}
+
+// fadeStyleForProgress returns the quantized fade style for progress in [0, 1].
+func (m *Model) fadeStyleForProgress(progress float64) lipgloss.Style {
+	return currentFadePalette().styles[min(max(int(progress*fadeSteps), 0), fadeSteps)]
 }
 
 // New creates a new reasoning block.
@@ -159,15 +169,6 @@ func (m *Model) ID() string {
 // AgentName returns the agent name for this block.
 func (m *Model) AgentName() string {
 	return m.agentName
-}
-
-// SetShowAgentBadge controls whether the block renders the agent badge above
-// the Thinking header. The messages list enables it when the block does not
-// visually continue content from the same agent (e.g. reasoning that starts a
-// sub-agent's turn right after a transfer_task), mirroring the sender prefix
-// on standard assistant messages.
-func (m *Model) SetShowAgentBadge(show bool) {
-	m.showAgentBadge = show
 }
 
 // SetReasoning sets reasoning content (replaces all content items with a single reasoning item).
@@ -234,7 +235,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 		}
 		m.toolEntries[i].msg = msg
 		next := tool.New(m.ar, msg, m.sessionState, m.subagents)
-		next.SetSize(m.contentWidth(), 0)
+		next.SetSize(m.width, 0)
 		animation.StopView(entry.view)
 		agentmessage.PreserveExpansion(entry.view, next)
 		m.toolEntries[i].view = next
@@ -243,7 +244,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 
 	// New tool call - add to entries and track position in content sequence
 	view := tool.New(m.ar, msg, m.sessionState, m.subagents)
-	view.SetSize(m.contentWidth(), 0)
+	view.SetSize(m.width, 0)
 	toolIndex := len(m.toolEntries)
 	m.toolEntries = append(m.toolEntries, toolEntry{msg: msg, view: view})
 	m.contentItems = append(m.contentItems, contentItem{kind: contentItemTool, toolIndex: toolIndex})
@@ -325,9 +326,12 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 
 		// Recreate view to pick up new state
 		view := tool.New(m.ar, entry.msg, m.sessionState, m.subagents)
-		view.SetSize(m.contentWidth(), 0)
+		view.SetSize(m.width, 0)
 		animation.StopView(entry.view)
 		agentmessage.PreserveExpansion(entry.view, view)
+		if preserved, ok := view.(interface{ PreserveBodyScrollFrom(previous any) }); ok {
+			preserved.PreserveBodyScrollFrom(entry.view)
+		}
 		m.toolEntries[i] = entry
 		m.toolEntries[i].view = view
 
@@ -362,11 +366,50 @@ func (m *Model) SetCommittedReasoning(content string) {
 	m.cache = nil
 }
 
+// ReplaceLastReasoningSuffix reconciles a streamed segment without changing
+// the reasoning/tool sequence around it. It returns false when the expected
+// streamed segment is no longer present.
+func (m *Model) ReplaceLastReasoningSuffix(streamed, committed string) bool {
+	if streamed == "" {
+		return false
+	}
+	for i := range slices.Backward(m.contentItems) {
+		item := &m.contentItems[i]
+		if item.kind != contentItemReasoning {
+			continue
+		}
+		if !strings.HasSuffix(item.reasoning, streamed) {
+			return false
+		}
+		item.reasoning = strings.TrimSuffix(item.reasoning, streamed) + committed
+		m.reasoningVersion++
+		m.cache = nil
+		return true
+	}
+	return false
+}
+
 // RemoveUncommittedTools drops aborted partial calls without touching active tools.
 func (m *Model) RemoveUncommittedTools(committed []string) bool {
+	var remove []string
+	for _, entry := range m.toolEntries {
+		if entry.msg.ToolStatus == types.ToolStatusPending && !slices.Contains(committed, entry.msg.ToolCall.ID) {
+			remove = append(remove, entry.msg.ToolCall.ID)
+		}
+	}
+	return m.RemovePendingTools(remove)
+}
+
+// RemovePendingTools removes only the named pending tool calls. Callers use
+// this when a block spans message commits and only a subset of its tools is
+// still owned by the current, uncommitted assistant message.
+func (m *Model) RemovePendingTools(toolCallIDs []string) bool {
+	if len(toolCallIDs) == 0 {
+		return false
+	}
 	changed := false
 	for index, entry := range slices.Backward(m.toolEntries) {
-		if entry.msg.ToolStatus != types.ToolStatusPending || slices.Contains(committed, entry.msg.ToolCall.ID) {
+		if entry.msg.ToolStatus != types.ToolStatusPending || !slices.Contains(toolCallIDs, entry.msg.ToolCall.ID) {
 			continue
 		}
 		animation.StopView(entry.view)
@@ -384,6 +427,21 @@ func (m *Model) RemoveUncommittedTools(committed []string) bool {
 		m.cache = nil
 	}
 	return changed
+}
+
+// SetToolCallExpandedImmediately expands one source-owned tool card without
+// changing the surrounding reasoning block's geometry.
+func (m *Model) SetToolCallExpandedImmediately(toolCallID string, expanded bool) bool {
+	for _, entry := range m.toolEntries {
+		if entry.msg.ToolCall.ID != toolCallID {
+			continue
+		}
+		if view, ok := entry.view.(interface{ SetExpanded(expanded bool) }); ok {
+			view.SetExpanded(expanded)
+		}
+		return true
+	}
+	return false
 }
 
 // HasToolCall returns true if the block contains the given tool call ID.
@@ -474,6 +532,17 @@ func (m *Model) ToolCount() int {
 	return len(m.toolEntries)
 }
 
+// CompletedToolCount includes successful and failed calls, not in-flight calls.
+func (m *Model) CompletedToolCount() int {
+	count := 0
+	for _, entry := range m.toolEntries {
+		if entry.msg.ToolStatus == types.ToolStatusCompleted || entry.msg.ToolStatus == types.ToolStatusError {
+			count++
+		}
+	}
+	return count
+}
+
 // IsExpanded returns the current expanded state.
 func (m *Model) IsExpanded() bool {
 	return m.expanded
@@ -494,6 +563,19 @@ func (m *Model) Toggle() {
 	}
 }
 
+// SetExpandedImmediately applies an explicit navigation reveal without
+// changing the block's surrounding transcript geometry over time.
+func (m *Model) SetExpandedImmediately(expanded bool) {
+	if m.expanded == expanded {
+		return
+	}
+	if !expanded {
+		m.Toggle()
+		return
+	}
+	m.expanded = true
+}
+
 // SetExpanded sets the expanded state directly.
 func (m *Model) SetExpanded(expanded bool) {
 	if m.expanded != expanded {
@@ -508,10 +590,14 @@ func (m *Model) SetSelected(selected bool) {
 
 // messageStyle returns the appropriate style based on selection state.
 func (m *Model) messageStyle() lipgloss.Style {
+	style := styles.AssistantMessageStyle
 	if m.selected {
-		return styles.SelectedMessageStyle
+		style = styles.SelectedMessageStyle
 	}
-	return styles.AssistantMessageStyle
+	if m.width < style.GetHorizontalFrameSize()+2 {
+		style = style.Padding(0)
+	}
+	return style
 }
 
 // Init initializes the component.
@@ -572,24 +658,7 @@ func (m *Model) View() string {
 	} else {
 		content = m.renderCollapsed()
 	}
-	return m.agentBadgePrefix() + content
-}
-
-// rendersAgentBadge reports whether the agent badge actually renders: it
-// must be enabled and the agent name non-empty. Both rendering
-// (agentBadgePrefix) and hit-testing (headerLineIndex) rely on this single
-// condition so they can never diverge.
-func (m *Model) rendersAgentBadge() bool {
-	return m.showAgentBadge && m.agentName != ""
-}
-
-// agentBadgePrefix returns the agent badge line plus a blank separator when
-// enabled, using the same style and spacing as standard assistant messages.
-func (m *Model) agentBadgePrefix() string {
-	if !m.rendersAgentBadge() {
-		return ""
-	}
-	return styles.AgentBadgeStyleFor(m.agentName).MarginLeft(2).Render(m.agentName) + "\n\n"
+	return content
 }
 
 // SetSize sets the component dimensions.
@@ -602,9 +671,8 @@ func (m *Model) SetSize(width, height int) tea.Cmd {
 	}
 	m.width = width
 	m.height = height
-	contentWidth := m.contentWidth()
 	for _, entry := range m.toolEntries {
-		entry.view.SetSize(contentWidth, 0)
+		entry.view.SetSize(m.width, 0)
 	}
 	return nil
 }
@@ -615,7 +683,7 @@ func (m *Model) ensureCache() *renderCache {
 	contentWidth := m.contentWidth()
 
 	// Return existing cache if still valid
-	if m.cache != nil && m.cache.width == contentWidth && m.cache.themeGeneration == styles.ThemeGeneration() && m.cache.reasoningVersion == m.reasoningVersion {
+	if m.cache != nil && m.cache.width == contentWidth && m.cache.themeGeneration == styles.ThemeGeneration() && m.cache.reasoningVersion == m.reasoningVersion && m.cache.toolCount == len(m.toolEntries) {
 		return m.cache
 	}
 
@@ -652,7 +720,7 @@ func (m *Model) Height() int {
 
 // contentWidth returns width available for content.
 func (m *Model) contentWidth() int {
-	return m.width - styles.AssistantMessageStyle.GetHorizontalFrameSize()
+	return max(1, m.width-m.messageStyle().GetHorizontalFrameSize())
 }
 
 // renderExpanded renders the full block with all content in order.
@@ -662,9 +730,10 @@ func (m *Model) renderExpanded() string {
 }
 
 type toolRow struct {
-	view  layout.Model
-	start int
-	end   int
+	view       layout.Model
+	toolCallID string
+	start      int
+	end        int
 }
 
 func (m *Model) renderExpandedWithToolRows() (string, []toolRow) {
@@ -697,7 +766,7 @@ func (m *Model) renderExpandedWithToolRows() (string, []toolRow) {
 			content := m.renderToolExpanded(entry)
 			start := lineCount
 			appendPart(content)
-			rows = append(rows, toolRow{view: entry.view, start: start, end: lineCount})
+			rows = append(rows, toolRow{view: entry.view, toolCallID: entry.msg.ToolCall.ID, start: start, end: lineCount})
 			isLastItem := i == len(m.contentItems)-1
 			nextIsReasoning := !isLastItem && m.contentItems[i+1].kind == contentItemReasoning
 			if isLastItem || nextIsReasoning {
@@ -706,6 +775,20 @@ func (m *Model) renderExpandedWithToolRows() (string, []toolRow) {
 		}
 	}
 	return strings.Join(parts, "\n"), rows
+}
+
+// ToolCallLine returns the expanded block-local start line of one call.
+func (m *Model) ToolCallLine(toolCallID string) (int, bool) {
+	if toolCallID == "" {
+		return 0, false
+	}
+	_, rows := m.renderExpandedWithToolRows()
+	for _, row := range rows {
+		if row.toolCallID == toolCallID {
+			return row.start, true
+		}
+	}
+	return 0, false
 }
 
 func (m *Model) renderToolExpanded(entry toolEntry) string {
@@ -808,7 +891,13 @@ func (m *Model) renderHeader(expanded bool) string {
 		}
 	}
 
-	return m.messageStyle().Render(badge + indicator + toolInfo)
+	style := m.messageStyle().Width(max(0, m.width))
+	rendered := styles.RenderComposite(style, badge+indicator+toolInfo)
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, max(0, m.width), "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderReasoningChunk renders a single reasoning chunk with styling.
@@ -843,15 +932,9 @@ func (m *Model) renderReasoningPreviewWithTruncationInfo() (string, bool) {
 	previewLinesContent := cache.lines
 	reasoningTruncated := cache.truncated
 
-	// Style each line - dim the first line more if there's content above (truncated)
 	var styledLines []string
-	for i, line := range previewLinesContent {
-		if i == 0 && reasoningTruncated {
-			// Extra dim first line to indicate more content above
-			styledLines = append(styledLines, styles.MutedStyle.Italic(true).Faint(true).Render(line))
-		} else {
-			styledLines = append(styledLines, styles.MutedStyle.Italic(true).Render(line))
-		}
+	for _, line := range previewLinesContent {
+		styledLines = append(styledLines, styles.MutedStyle.Italic(true).Render(line))
 	}
 
 	preview := strings.Join(styledLines, "\n")
@@ -885,18 +968,9 @@ func (m *Model) ResumeAnimation() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// headerLineIndex returns the view line index of the Thinking header. The
-// agent badge, when shown, occupies two lines (badge + blank) above it.
-func (m *Model) headerLineIndex() int {
-	if m.rendersAgentBadge() {
-		return 2
-	}
-	return 0
-}
-
-// IsHeaderLine returns true if the given line index is the header line.
+// IsHeaderLine includes wrapped disclosure rows at narrow widths.
 func (m *Model) IsHeaderLine(lineIdx int) bool {
-	return lineIdx == m.headerLineIndex()
+	return lineIdx >= 0 && (lineIdx == 0 || lineIdx <= strings.Count(m.renderHeader(m.expanded), "\n"))
 }
 
 // IsToggleLine returns true if clicking this line should toggle the block.
@@ -910,14 +984,77 @@ func (m *Model) childViewAt(line int) (layout.Model, int, bool) {
 		return nil, 0, false
 	}
 	_, rows := m.renderExpandedWithToolRows()
-	offset := strings.Count(m.agentBadgePrefix(), "\n")
 	for _, row := range rows {
-		start, end := row.start+offset, row.end+offset
+		start, end := row.start, row.end
 		if line >= start && line < end {
 			return row.view, line - start, true
 		}
 	}
 	return nil, 0, false
+}
+
+// WheelAt forwards body-local wheel input to the tool row under the pointer.
+func (m *Model) WheelAt(line, col, delta int) bool {
+	child, local, found := m.childViewAt(line)
+	view, ok := child.(interface {
+		WheelAt(line, col, delta int) bool
+	})
+	return found && ok && view.WheelAt(local, col, delta)
+}
+
+// SetHoveredAt forwards header hover without exposing body lines to the
+// tool's disclosure affordance.
+func (m *Model) SetHoveredAt(line int, hovered bool) bool {
+	if !hovered {
+		changed := false
+		for _, entry := range m.toolEntries {
+			if view, ok := entry.view.(interface {
+				SetHoveredAt(line int, hovered bool) bool
+			}); ok {
+				changed = view.SetHoveredAt(0, false) || changed
+			}
+		}
+		return changed
+	}
+	child, local, found := m.childViewAt(line)
+	view, ok := child.(interface {
+		SetHoveredAt(line int, hovered bool) bool
+	})
+	return found && ok && view.SetHoveredAt(local, true)
+}
+
+// SetHoveredPositionAt routes gutter-precise hover to the tool row under the pointer.
+// Tool rows sit at block column zero, so the column passes through unchanged.
+func (m *Model) SetHoveredPositionAt(line, col int, hovered bool) bool {
+	if !hovered {
+		return m.SetHoveredAt(line, false)
+	}
+	child, local, found := m.childViewAt(line)
+	changed := false
+	for _, entry := range m.toolEntries {
+		if found && entry.view == child {
+			continue
+		}
+		if view, ok := entry.view.(interface {
+			SetHoveredAt(line int, hovered bool) bool
+		}); ok {
+			changed = view.SetHoveredAt(0, false) || changed
+		}
+	}
+	if !found {
+		return changed
+	}
+	if positional, ok := child.(interface {
+		SetHoveredPositionAt(line, col int, hovered bool) bool
+	}); ok {
+		return positional.SetHoveredPositionAt(local, col, true) || changed
+	}
+	if view, ok := child.(interface {
+		SetHoveredAt(line int, hovered bool) bool
+	}); ok {
+		return view.SetHoveredAt(local, true) || changed
+	}
+	return changed
 }
 
 func (m *Model) childToggleAt(line, col int) (interface{ Toggle() }, bool) {

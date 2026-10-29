@@ -88,14 +88,14 @@ func TestCompactModelFooterLeftAndPillRight(t *testing.T) {
 	require.Equal(t, ClickNone, result)
 }
 
-func TestModelUsesThemeForegroundAcrossTruncation(t *testing.T) {
+func TestModelRestsMutedAcrossTruncation(t *testing.T) {
 	original := styles.CurrentTheme()
 	t.Cleanup(func() { styles.ApplyTheme(original) })
 	m := newVisibilityTestSidebar(t).model
 	m.SetSize(60, 60)
-	for _, foreground := range []string{"#f1e2d3", "#182838"} {
+	for _, foreground := range []string{"#7391af", "#182838"} {
 		theme := *original
-		theme.Colors.TextPrimary = foreground
+		theme.Colors.TextMuted = foreground
 		styles.ApplyTheme(&theme)
 		for _, modelRef := range []string{"provider/LongModelIdentity", "other/AnotherModelIdentity"} {
 			m.SetAgentInfo("root", modelRef, "", 0, "", 0)
@@ -105,8 +105,8 @@ func TestModelUsesThemeForegroundAcrossTruncation(t *testing.T) {
 				row := strings.Split(m.View(), "\n")[m.modelStart]
 				cells := sidebarCells(row)
 				require.Greater(t, len(cells), m.layoutCfg.PaddingLeft)
-				expected := styles.BaseStyle.GetForeground()
-				require.NotNil(t, cells[m.layoutCfg.PaddingLeft].fg, "settled model glyph retains ordinary theme foreground")
+				expected := styles.MutedStyle.GetForeground()
+				require.NotNil(t, cells[m.layoutCfg.PaddingLeft].fg, "settled model glyph rests on the shared muted idle color")
 				require.Equal(t, color.NRGBAModel.Convert(expected), color.NRGBAModel.Convert(cells[m.layoutCfg.PaddingLeft].fg))
 			}
 		}

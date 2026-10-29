@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // subagentManager supervises async subagents above the per-session driver
@@ -32,6 +33,7 @@ type subagentManager struct {
 
 	mu                sync.Mutex
 	metricsMu         sync.Mutex
+	processCountMu    sync.Mutex
 	persistMu         sync.Mutex
 	persist           *subagentPersistence
 	coord             session.CoordinationStore
@@ -311,12 +313,24 @@ func (m *subagentManager) persistSnapshotLocked(alreadyLocked bool) {
 		if item.sess != nil {
 			item.sess.SetSubagentTree(&item.snap)
 		}
+		persisted := item.snap
+		persisted.Nodes = clearBackgroundProcessCounts(persisted.Nodes)
 		if _, ok := m.r.subagentStore.(*subagent.InMemoryStore); ok {
-			_ = m.r.subagentStore.SaveTree(context.WithoutCancel(m.ctx), item.id, item.snap)
+			_ = m.r.subagentStore.SaveTree(context.WithoutCancel(m.ctx), item.id, persisted)
 		} else if persist := m.persistence(); persist != nil {
-			persist.enqueueTree(item.id, item.snap)
+			persist.enqueueTree(item.id, persisted)
 		}
 	}
+}
+
+func clearBackgroundProcessCounts(nodes []subagent.NodeSnapshot) []subagent.NodeSnapshot {
+	out := make([]subagent.NodeSnapshot, len(nodes))
+	for i, node := range nodes {
+		out[i] = node
+		out[i].Node.BackgroundProcesses = 0
+		out[i].Children = clearBackgroundProcessCounts(node.Children)
+	}
+	return out
 }
 
 func snapshotForRoot(full subagent.Snapshot, rootID subagent.NodeID) (subagent.Snapshot, bool) {
@@ -802,6 +816,51 @@ func (m *subagentManager) startChildTitle(childSess *session.Session, task strin
 // markChildRunning records that a child driver's turn has started. This keeps
 // the swarm tree/TUI in sync when a previously-idle subagent is woken by a
 // descendant report or other detached input.
+func (m *subagentManager) updateBackgroundProcessCount(driver *sessionDriver) {
+	if m == nil || driver == nil {
+		return
+	}
+	m.processCountMu.Lock()
+	defer m.processCountMu.Unlock()
+	driver.mu.Lock()
+	count := 0
+	for _, process := range driver.backgroundProcesses {
+		if process.State == tools.BackgroundProcessRunning {
+			count++
+		}
+	}
+	sessionID := driver.sessionIDLocked()
+	driver.mu.Unlock()
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	tracked := m.sessions[sessionID]
+	if tracked == nil || tracked.topLevel || tracked.node == "" || m.closed {
+		m.mu.Unlock()
+		return
+	}
+	nodeID := tracked.node
+	rec := m.children[nodeID]
+	if rec == nil || rec.sessionID != sessionID {
+		m.mu.Unlock()
+		return
+	}
+	if rec.durable.Node.State == subagent.NodeStopped || m.sessionStoppingLocked(sessionID) {
+		// A stop fence clears the ephemeral projection even when process callbacks race stop.
+		count = 0
+	}
+	m.mu.Unlock()
+	changed, err := m.tree.UpdateIfChanged(nodeID, func(node *subagent.Node) {
+		if node.SessionID == sessionID {
+			node.BackgroundProcesses = count
+		}
+	})
+	if err == nil && changed {
+		m.persistSnapshot()
+	}
+}
+
 func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 	m.mu.Lock()
 	rec := m.children[childID]
@@ -915,7 +974,9 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 				child.durable = record
 			}
 		}
-		_ = m.tree.Update(record.Node.ID, func(n *subagent.Node) { n.State, n.NeedsAttention, n.WaitingOn = subagent.NodeStopped, false, "" })
+		_ = m.tree.Update(record.Node.ID, func(n *subagent.Node) {
+			n.State, n.NeedsAttention, n.WaitingOn, n.BackgroundProcesses = subagent.NodeStopped, false, "", 0
+		})
 	}
 	for _, child := range stopped {
 		if child.unwatch != nil {
@@ -931,7 +992,7 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 	}
 	for _, child := range stopped {
 		if d, ok := m.r.sessionDrivers.Lookup(child.sessionID); ok {
-			d.requestStop(false)
+			d.requestStopWithExplicitStopped()
 		}
 	}
 	m.mu.Lock()
@@ -1090,7 +1151,9 @@ func (m *subagentManager) nodeForSession(sessionID string) (subagent.NodeID, boo
 // publish duplicate driver generations.
 func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.NodeID) error {
 	restore := m.transition("restore:" + string(id))
-	restore.Lock()
+	if err := restore.LockContext(ctx); err != nil {
+		return err
+	}
 	defer restore.Unlock()
 
 	m.mu.Lock()
@@ -1132,7 +1195,10 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 	if loaded == nil || loaded.ID != sessionID || loaded.ParentID != parentSession {
 		return fail(errors.New("child session has invalid identity or parent binding"))
 	}
-	loaded = loaded.Clone()
+	if retained == nil {
+		// The retained snapshot is already a private clone; only store-loaded sessions need one.
+		loaded = loaded.Clone()
+	}
 	loaded.NonInteractive = true
 	loaded.AsyncSubagent = true
 
@@ -1171,6 +1237,7 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 	if oldUnwatch != nil {
 		oldUnwatch()
 	}
+	driver.projectBackgroundProcessCount()
 	return nil
 }
 
@@ -1193,6 +1260,126 @@ func (m *subagentManager) sendToChild(parentID string, id subagent.NodeID, body 
 		return rec.name, nil
 	}
 	return "", nil
+}
+
+// canMessageParent verifies the parent's edge from canonical runtime or durable
+// child membership. Session.ParentID alone is metadata, never a send grant.
+func (m *subagentManager) canMessageParent(ctx context.Context, sess *session.Session) bool {
+	if sess == nil || sess.ParentID == "" {
+		return false
+	}
+	m.mu.Lock()
+	for _, rec := range m.children {
+		if rec.sessionID == sess.ID {
+			allowed := rec.parentSession == sess.ParentID && rec.durable.Node.State != subagent.NodeStopped && !m.sessionStoppingLocked(sess.ID)
+			m.mu.Unlock()
+			return allowed
+		}
+	}
+	m.mu.Unlock()
+	reader, ok := m.r.sessionStore.(session.ChildRecordReader)
+	if !ok {
+		return false
+	}
+	record, err := reader.LoadChild(ctx, sess.ID)
+	return err == nil && record.Node.SessionID == sess.ID && record.ParentSessionID == sess.ParentID && record.Node.State != subagent.NodeStopped
+}
+
+// sendCommunicationToTree is the separately-authorized instance-tree route.
+// The caller's stable source session and recipient are both checked against
+// the same runtime root; this does not confer read or stop authority.
+func (m *subagentManager) sendCommunicationToTree(ctx context.Context, senderSessionID string, id subagent.NodeID, body, requestID string, mode subagent.DeliveryMode, senderName string) (subagent.DeliveryReceipt, error) {
+	receipt := subagent.DeliveryReceipt{RequestID: requestID, Target: string(id)}
+	root := m.rootSessionLockedSafe(senderSessionID)
+	if root == "" {
+		root = senderSessionID
+	}
+	transition := m.transition(root)
+	if err := transition.LockContext(ctx); err != nil {
+		return receipt, err
+	}
+	defer transition.Unlock()
+	if parentDriver, ok := m.r.sessionDrivers.Lookup(senderSessionID); ok {
+		if !m.r.sessionDelegationEnabledState(parentDriver.delegationState()) {
+			return receipt, errSubagentsDisabled
+		}
+	} else if !m.r.UseSubagents() {
+		return receipt, errSubagentsDisabled
+	}
+	senderNode := subagent.SessionRootID(senderSessionID)
+	if senderSessionID != root {
+		if node, tracked := m.nodeForSession(senderSessionID); tracked {
+			m.mu.Lock()
+			source := m.children[node]
+			valid := source != nil && source.sessionID == senderSessionID && source.durable.RootSessionID == root && source.durable.Node.State != subagent.NodeStopped && !m.sessionStoppingLocked(senderSessionID)
+			if live, ok := m.tree.Node(node); ok && live.State == subagent.NodeStopped {
+				valid = false
+			}
+			m.mu.Unlock()
+			if !valid {
+				receipt.Rejection = "unauthorized"
+				return receipt, &SessionError{Kind: SessionErrorInvalid, RequestID: requestID, Operation: SessionOperationSend, Detail: "sender instance is outside this session tree"}
+			}
+			senderNode = node
+		} else {
+			reader, ok := m.r.sessionStore.(session.ChildRecordReader)
+			if !ok {
+				receipt.Rejection = "unauthorized"
+				return receipt, &SessionError{Kind: SessionErrorInvalid, RequestID: requestID, Operation: SessionOperationSend, Detail: "sender instance membership is unavailable"}
+			}
+			record, err := reader.LoadChild(ctx, senderSessionID)
+			m.mu.Lock()
+			stopping := m.sessionStoppingLocked(senderSessionID)
+			m.mu.Unlock()
+			if err != nil || record.RootSessionID != root || record.Node.SessionID != senderSessionID || record.Node.State == subagent.NodeStopped || stopping {
+				receipt.Rejection = "unauthorized"
+				return receipt, &SessionError{Kind: SessionErrorInvalid, RequestID: requestID, Operation: SessionOperationSend, Detail: "sender instance is outside this session tree"}
+			}
+			senderNode = record.Node.ID
+		}
+	}
+
+	if senderNode == id {
+		return receipt, &SessionError{Kind: SessionErrorInvalid, Operation: SessionOperationSend, Detail: "cannot message yourself"}
+	}
+	rootNode := subagent.SessionRootID(root)
+	if id == rootNode {
+		m.mu.Lock()
+		stopping := m.sessionStoppingLocked(root)
+		m.mu.Unlock()
+		if stopping {
+			return receipt, &SessionError{Kind: SessionErrorStopped, RequestID: requestID, Operation: SessionOperationSend, Detail: "root session is stopping"}
+		}
+		if driver, ok := m.r.sessionDrivers.Lookup(root); ok && driver.isStopped() {
+			return receipt, &SessionError{Kind: SessionErrorStopped, RequestID: requestID, Operation: SessionOperationSend, Detail: "root session is stopped"}
+		}
+		rootReceipt, err := m.postAuthorizedAgentCommunication(ctx, root, agentCommunication(body, requestID, string(senderNode), senderName, mode))
+		return rootReceipt, err
+	}
+	m.mu.Lock()
+	rec := m.children[id]
+	if rec == nil {
+		m.mu.Unlock()
+		return receipt, &SessionError{Kind: SessionErrorNotFound, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("no subagent with id %q", id)}
+	}
+	if rec.durable.RootSessionID != root || m.rootSessionLocked(rec.sessionID) != root {
+		m.mu.Unlock()
+		receipt.Rejection = "unauthorized"
+		return receipt, &SessionError{Kind: SessionErrorInvalid, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("subagent %q is outside this session tree", id)}
+	}
+	if node, live := m.tree.Node(id); live && node.State == subagent.NodeStopped {
+		rec.durable.Node.State = subagent.NodeStopped
+	}
+	if rec.durable.Node.State == subagent.NodeStopped || m.sessionStoppingLocked(rec.sessionID) {
+		m.mu.Unlock()
+		return receipt, &SessionError{Kind: SessionErrorStopped, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("subagent %q has been stopped; spawn a new one", id)}
+	}
+	targetSession := rec.sessionID
+	m.mu.Unlock()
+	if err := m.ensureChildDriver(ctx, id); err != nil {
+		return receipt, err
+	}
+	return m.postAuthorizedAgentCommunication(ctx, targetSession, agentCommunication(body, requestID, string(senderNode), senderName, mode))
 }
 
 func (m *subagentManager) sendCommunicationToChild(ctx context.Context, parentID string, id subagent.NodeID, body, requestID string, mode subagent.DeliveryMode) (subagent.DeliveryReceipt, error) {
@@ -1229,7 +1416,7 @@ func (m *subagentManager) sendCommunicationToChild(ctx context.Context, parentID
 	}
 	// Rejected sends are retriable with the same identity; never blindly replay
 	// after ambiguous storage errors or successful inbox admission.
-	return m.postAgentCommunication(ctx, sessionID, agentCommunication(body, requestID, parentID, senderName, mode))
+	return m.postAuthorizedAgentCommunication(ctx, sessionID, agentCommunication(body, requestID, parentID, senderName, mode))
 }
 
 // hasRunningSubagents reports whether a session has descendants actively
@@ -1253,7 +1440,7 @@ func (m *subagentManager) hasRunningSubagentsLocked(sessionID string) bool {
 		if m.r.sessionDrivers != nil {
 			if d, ok := m.r.sessionDrivers.Lookup(rec.sessionID); ok {
 				d.mu.Lock()
-				active := d.running() || d.starting() || d.settling() || len(d.pending) != 0
+				active := d.running() || d.starting() || d.settling() || len(d.pending) != 0 || d.backgroundWorks != 0 || d.deferredCompletionReportTurnID != ""
 				d.mu.Unlock()
 				if active {
 					return true
@@ -1345,7 +1532,7 @@ func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) e
 	for id, rec := range m.children {
 		if deleting[rec.sessionID] {
 			_ = m.tree.Update(id, func(node *subagent.Node) {
-				node.State, node.NeedsAttention, node.WaitingOn = subagent.NodeStopped, false, ""
+				node.State, node.NeedsAttention, node.WaitingOn, node.BackgroundProcesses = subagent.NodeStopped, false, "", 0
 			})
 			if rec.unwatch != nil {
 				unwatches = append(unwatches, rec.unwatch)
@@ -1486,6 +1673,22 @@ func (r *LocalRuntime) allowedFromAgentForTeam(tm *team.Team, a *agent.Agent) []
 		})
 	}
 	return allowed
+}
+
+// Either admission grant (sub_agents or subagents) authorizes a restored child.
+func (r *LocalRuntime) restoreChildAuthorized(tm *team.Team, grantor *agent.Agent, childName string) bool {
+	if grantor == nil || childName == "" {
+		return false
+	}
+	if slices.ContainsFunc(grantor.SubAgents(), func(a *agent.Agent) bool { return a != nil && a.Name() == childName }) {
+		return true
+	}
+	for _, ref := range r.allowedFromAgentForTeam(tm, grantor) {
+		if ref.Agent == childName {
+			return true
+		}
+	}
+	return false
 }
 
 // SubagentTree returns the live async subagent swarm for this runtime, used by

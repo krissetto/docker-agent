@@ -62,5 +62,5 @@ func TestKitDefaultTheme(t *testing.T) {
 		} `yaml:"settings"`
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &config))
-	assert.Equal(t, "black-amber", config.Settings.Theme)
+	assert.Equal(t, "docker-next-dark", config.Settings.Theme)
 }

@@ -20,6 +20,10 @@ SDK build checks in [Docs/BUILD.md](Docs/BUILD.md) do not require signing.
   before save; API/session version and instance identity checked. Blank token
   retains a same-origin credential and changing origin deletes the previous
   credential before the new profile is saved.
+- **Sessions-first navigation:** active server/profile menu with per-window
+  session restoration, Waiting/Running/Recent groups and triage filters. The
+  primary New Session action uses the server-reported source, configured root
+  agent and workspace; ambiguous multi-source servers use explicit Options.
 - **Catalog and session:** paged root-session catalog, agent listing, create or
   create-and-start, confirmed prepare/open flow, initial snapshot, live bounded
   SSE replay/cursor validation, stateful transcript projection, reconnect and
@@ -44,6 +48,17 @@ SDK build checks in [Docs/BUILD.md](Docs/BUILD.md) do not require signing.
   capability/history/identity gated where supplied by the server.
   Recent-chat is available as a client call; this is not a complete historical
   conversation browser.
+- **Team topology and WidgetKit:** the Agents inspector keeps its accessible
+  outline and adds a pan/zoom GPU-composited Canvas map with state, attention,
+  and cost cues. Opening a child now requires explicit confirmation before the
+  existing prepare/confirm/open flow; it only opens existing server-owned work.
+  A native WidgetKit team summary aggregates live open sessions and agents
+  needing attention on iOS/iPadOS and macOS. It uses systemSmall/systemMedium
+  families on both platforms (macOS has no accessory family here). The App
+  Group snapshot has no
+  credentials, transcripts, session titles or prompts; the widget truthfully
+  prompts to open the app when no fresh live snapshot is available. It refreshes
+  from foreground app state every five minutes, not through background polling.
 - **Inspector:** typed read-only agent details (no instruction/definition text),
   actual team roster, effective session/source permission inspection, safety
   policy and session-rule editing, a confirmed legacy Toggle Autonomy action,
@@ -133,26 +148,20 @@ swift test
 ./Scripts/build-native.sh
 ```
 
-The authoritative unfiltered command `swift test --scratch-path /tmp/source-final-finite`
-passed all 115 tests in 14 suites (log: `/tmp/docker-agent-native-final-unfiltered.log`). Coverage
-includes deterministic Go-marshaled session, media, generated-media,
-source/root, inspector, workflow and advanced API fixtures; mocked AppModel
-HTTP/SSE send/retry/interaction flow; SSE idle-timeout, heartbeat, cancellation
-and authorization tests; scene lifecycle tests with a stalled URLProtocol;
-outbox/media persistence; raw-message-edit metadata preservation; fork ordinal
-and parent projection; and seven view-helper regressions. No live server or real
-credentials were used. Packaging built the current production sources with
-`DERIVED_DATA_ROOT=/tmp/DockerAgentProofFinal ./Scripts/build-native.sh` from
-`apple/`: unsigned iOS Simulator-SDK, iOS device-SDK, and macOS SDK builds all
-succeeded. Its safe macOS launch check remained alive for four seconds without
-log output before packaging terminated it; this validates process launch only,
-not visual behavior, live-server behavior, or iOS runtime. Current Xcode
-is 26.6 with Swift 6.3.3 / SDK
-26.5; no simulator runtime is installed. SDK builds do not launch the app. A
-packaging-owned safe macOS launch used the built app's `--ui-smoke-test` mode;
-PID 61325 remained alive four seconds with no log output before packaging
-terminated its own process. This validates launch only, not visuals, live server
-behavior, or iOS runtime.
+On 2026-10-19, `swift test --scratch-path /tmp/DockerAgentCombinedFinal`
+passed 137 tests in 14 suites (`/tmp/DockerAgentCombinedFinal-tests.log`).
+`DERIVED_DATA_ROOT=/tmp/DockerAgentCombinedFinal sh Scripts/build-native.sh`
+completed with exit 0 (`/tmp/DockerAgentCombinedFinal-build.log`): iOS simulator,
+iOS device and macOS app+widget builds succeeded. The source checker verified
+all 50 app source files exactly once per app target and the widget source
+exactly once; widget executable/extension metadata and embedded-binary
+validation passed. A designer-owned simulator install of app+widget succeeded
+without uninstalling the existing app/profile. The screenshot records the home
+screen only; tree interactions, widget gallery rendering and landscape behavior
+remain unverified. No live child session was attached or server work mutated.
+The synthetic focused tests cover layout/hit-test geometry and summary
+aggregation/dedup/offline behavior. See [Docs/BUILD.md](Docs/BUILD.md) for
+App Group distribution-signing limits and build evidence.
 
 ## Remaining first-class product scope
 
@@ -180,9 +189,16 @@ behavior, or iOS runtime.
   without a server API.
 - Git review is client-side annotation serialized as ordinary conversation
   text over read-only review routes, not a server comment or hosted-PR system.
-- The macOS smoke run verifies process launch only, not visual/accessibility
-  behavior. No simulator runtime or iOS runtime smoke test was available.
-  Background streaming and reliable off-screen notifications are not provided.
+- The widget extension is built for iOS/iPadOS and macOS WidgetKit hosts; it
+  requires App Group provisioning for distribution/physical-device sharing.
+  Without an authorized group, widget content is unavailable rather than
+  fabricated. WidgetKit updates are system-scheduled and bounded; they are not
+  a reliable live/background notification channel.
+- The tree map and explicit child-open confirmation have focused synthetic
+  checks and are installed in the iOS app, but no live child session was
+  attached; simulator tree/gesture and rendered-widget behavior still need a
+  runtime smoke. Background streaming and reliable off-screen notifications
+  are not provided.
 
 This is not complete TUI parity. Capability availability, source-defined safety
 and server identity remain authoritative; do not infer support from view or

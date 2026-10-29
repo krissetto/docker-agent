@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -90,14 +91,24 @@ func (m *appModel) measurePanes() (chat.SplitShellGeometry, splitRect, bool) {
 	if !ok || m.leanMode {
 		return chat.SplitShellGeometry{}, splitRect{}, false
 	}
-	shell := p.MeasureSplitShell(m.width, m.contentHeight)
-	if m.width > 0 && m.contentHeight > 0 && shell.TranscriptArea.Width == 0 {
+	shell := p.MeasureSplitShell(m.width, m.mainContentHeight())
+	if m.width > 0 && m.mainContentHeight() > 0 && shell.TranscriptArea.Width == 0 {
 		// Degenerate terminals cannot afford app padding or a sidebar. Keep
 		// the focused leaf visible in the cells that actually exist,
 		// without changing the immutable layout or saved sidebar preferences.
-		shell = chat.SplitShellGeometry{TranscriptArea: chat.PresentationRect{Width: m.width, Height: m.contentHeight}}
+		shell = chat.SplitShellGeometry{TranscriptArea: chat.PresentationRect{X: 0, Width: m.width, Height: m.mainContentHeight()}}
 	}
-	return shell, paneRect(shell.TranscriptArea), true
+	if inset := m.mainContentInset(); inset > 0 {
+		shell.TranscriptArea.Y += inset
+		shell.Sidebar.Y += inset
+		shell.SidebarHandle.Y += inset
+	}
+	bounds := paneRect(shell.TranscriptArea)
+	if bounds.Y == 0 {
+		bounds.Y = m.mainContentInset()
+		bounds.H = m.mainContentHeight()
+	}
+	return shell, bounds, true
 }
 
 func (m *appModel) paneVisible(id string) bool {
@@ -170,6 +181,12 @@ func (m *appModel) resizePanes() tea.Cmd {
 	cmds := []tea.Cmd{m.applyPaneSidebarSettings()}
 	if !m.panePresentationEnabled() {
 		m.paneGeometry = splitGeometry{}
+		if owner, ok := m.chatPage.(interface{ SetMainContentInset(inset int) }); ok {
+			owner.SetMainContentInset(m.mainContentInset())
+		}
+		if owner, ok := m.chatPage.(interface{ SetSidebarPresentationExtent(height int) }); ok {
+			owner.SetSidebarPresentationExtent(m.sidebarContinuationHeight())
+		}
 		for id, page := range m.chatPages {
 			if id == m.paneFocus() {
 				if p, ok := page.(chat.SplitPresentation); ok {
@@ -180,7 +197,7 @@ func (m *appModel) resizePanes() tea.Cmd {
 				cmds = append(cmds, setPaneVisible(page, id == m.paneFocus()))
 			}
 		}
-		return tea.Batch(append(cmds, m.chatPage.SetSize(m.width, m.contentHeight))...)
+		return tea.Batch(append(cmds, m.chatPage.SetSize(m.width, m.mainContentHeight()))...)
 	}
 	layout := m.paneLayout()
 	shell, bounds, ok := m.measurePanes()
@@ -188,18 +205,39 @@ func (m *appModel) resizePanes() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 	geometry := layout.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)
+	if m.layoutSettings.AlignInputWithMessages && shell.SidebarHandle.Height > 1 {
+		endY := m.footerTop()
+		if shell.Sidebar.Width > 0 {
+			shell.Sidebar.Height = max(shell.Sidebar.Height, endY-shell.Sidebar.Y)
+		}
+		if shell.SidebarHandle.Width > 0 {
+			shell.SidebarHandle.Height = max(shell.SidebarHandle.Height, endY-shell.SidebarHandle.Y)
+		}
+	}
 	if m.paneGesture != nil && (m.paneBounds != bounds || !samePaneGeometry(m.paneGeometry, geometry)) {
 		m.cancelPaneGesture()
 	}
 	m.paneBounds, m.paneShell, m.paneGeometry = bounds, shell, geometry
+	if owner, ok := m.chatPage.(interface{ SetMainContentInset(inset int) }); ok {
+		owner.SetMainContentInset(m.mainContentInset())
+	}
+	if owner, ok := m.chatPage.(interface{ SetSidebarPresentationExtent(height int) }); ok {
+		owner.SetSidebarPresentationExtent(m.sidebarContinuationHeight())
+	}
 	for id, page := range m.chatPages {
+		if owner, ok := page.(interface{ SetMainContentInset(inset int) }); ok {
+			owner.SetMainContentInset(m.mainContentInset())
+		}
+		if owner, ok := page.(interface{ SetSidebarPresentationExtent(height int) }); ok {
+			owner.SetSidebarPresentationExtent(m.sidebarContinuationHeight())
+		}
 		r, visible := geometry.Panes[id]
 		cmds = append(cmds, setPaneVisible(page, visible), chat.SetSidebarPresentationActive(page, visible && id == m.paneFocus()))
 		if !visible {
 			continue
 		}
 		transcript := m.paneAreas(r).transcript
-		cmds = append(cmds, page.SetSize(m.width, m.contentHeight), page.(chat.SplitPresentation).SetSplitPresentation(&chat.SplitPresentationGeometry{
+		cmds = append(cmds, page.SetSize(m.width, m.mainContentHeight()), page.(chat.SplitPresentation).SetSplitPresentation(&chat.SplitPresentationGeometry{
 			Transcript: presentationRect(transcript), Shell: shell, ShowSidebar: id == m.paneFocus(),
 		}))
 	}
@@ -341,10 +379,17 @@ func (m *appModel) paneAt(x, y int) string {
 // Pointer coordinates remain global: scrollview and message positions already
 // use absolute terminal cells. Wheels never change the shared composer owner.
 func (m *appModel) forwardPanePointer(msg tea.Msg, x, y int, focus bool) (tea.Model, tea.Cmd) {
+	if _, motion := msg.(tea.MouseMotionMsg); motion &&
+		(inPane(paneRect(m.paneShell.Sidebar), x, y) || inPane(paneRect(m.paneShell.SidebarHandle), x, y)) {
+		cmd := m.clearVisiblePointerHoverExcept(m.paneFocus())
+		model, forwarded := m.forwardChat(msg)
+		return model, tea.Batch(cmd, forwarded)
+	}
 	id := m.paneAt(x, y)
 	if id == "" {
 		if _, motion := msg.(tea.MouseMotionMsg); motion {
-			return m.forwardChat(msg)
+			model, cmd := m.forwardChat(msg)
+			return model, tea.Batch(m.clearVisiblePointerHover(), cmd)
 		}
 		if inPane(paneRect(m.paneShell.Sidebar), x, y) || inPane(paneRect(m.paneShell.SidebarHandle), x, y) || m.chatPage.IsSelecting() {
 			return m.forwardChat(msg)
@@ -353,11 +398,11 @@ func (m *appModel) forwardPanePointer(msg tea.Msg, x, y int, focus bool) (tea.Mo
 	}
 	var cmds []tea.Cmd
 	if _, motion := msg.(tea.MouseMotionMsg); motion {
-		cmds = append(cmds, chat.ClearSidebarHover(m.chatPage))
+		cmds = append(cmds, m.clearVisiblePointerHoverExcept(id))
 	}
 	areas := m.paneAreas(m.paneGeometry.Panes[id])
 	if !inPane(areas.transcript, x, y) {
-		if _, motion := msg.(tea.MouseMotionMsg); motion && id != m.paneFocus() {
+		if _, motion := msg.(tea.MouseMotionMsg); motion {
 			cmds = append(cmds, chat.ClearSidebarHover(m.chatPages[id]))
 		}
 		if inPane(areas.gap, x, y) {
@@ -525,6 +570,8 @@ type paneActivityKind uint8
 
 const (
 	paneActivityOutcome paneActivityKind = iota
+	paneActivityStopped
+	paneActivityReadOnly
 	paneActivityDormant
 	paneActivityPaused
 	paneActivityPausing
@@ -537,8 +584,16 @@ const (
 // paneActivityKind shares the precedence of static activity labels and the
 // running indicator with animation invalidation, without rendering labels.
 func (m *appModel) paneActivityKind(id string) paneActivityKind {
-	if status, exists := m.paneRenderStatus(id); exists && status.Dormant {
-		return paneActivityDormant
+	status, hasStatus := m.paneRenderStatus(id)
+	return m.paneActivityKindFor(id, status, hasStatus)
+}
+
+func (m *appModel) paneActivityKindFor(id string, status runtime.SessionStatus, hasStatus bool) paneActivityKind {
+	if m.paneReadOnly(id) {
+		return paneActivityReadOnly
+	}
+	if hasStatus && status.Stopped {
+		return paneActivityStopped
 	}
 	if state := m.sessionStates[id]; state != nil {
 		switch state.PauseState() {
@@ -546,6 +601,17 @@ func (m *appModel) paneActivityKind(id string) paneActivityKind {
 			return paneActivityPaused
 		case service.PausePausing:
 			return paneActivityPausing
+		}
+	}
+	if hasStatus {
+		if status.Paused {
+			return paneActivityPaused
+		}
+		if status.PauseArmed {
+			return paneActivityPausing
+		}
+		if status.Dormant {
+			return paneActivityDormant
 		}
 	}
 	for _, tab := range m.tabInfos {
@@ -567,11 +633,34 @@ func (m *appModel) paneActivityKind(id string) paneActivityKind {
 	return paneActivityOutcome
 }
 
+func (m *appModel) paneReadOnly(id string) bool {
+	if m.supervisor == nil {
+		return false
+	}
+	runner := m.supervisor.GetRunner(id)
+	return runner != nil && runner.App != nil && runner.App.IsReadOnly()
+}
+
 // paneActivity reads canonical per-session state; headers never acquire leases.
 func (m *appModel) paneActivity(id string) string {
-	switch m.paneActivityKind(id) {
+	status, hasStatus := m.paneRenderStatus(id)
+	return m.paneActivityForStatus(id, status, hasStatus)
+}
+
+func (m *appModel) paneActivityForStatus(id string, status runtime.SessionStatus, hasStatus bool) string {
+	switch m.paneActivityKindFor(id, status, hasStatus) {
+	case paneActivityStopped:
+		return styles.MutedStyle.Render("· stopped")
+	case paneActivityReadOnly:
+		return styles.MutedStyle.Render("· read-only")
 	case paneActivityDormant:
-		return styles.WarningStyle.Render("Restored · paused · /resume")
+		label := "Restored · dormant · message or /resume"
+		style := styles.MutedStyle
+		if status.Pending > 0 {
+			label += " · " + strconv.Itoa(status.Pending) + " inputs queued"
+			style = styles.WarningStyle
+		}
+		return style.Render(label)
 	case paneActivityPaused:
 		return styles.WarningStyle.Render("⏸ paused")
 	case paneActivityPausing:
@@ -717,6 +806,50 @@ func (m *appModel) composePanes() string {
 	view := m.paneRenderCache.render(rows, m.width)
 	m.cachePaneGestureBase(view)
 	return view
+}
+
+// extendAlignedSidebar keeps the vertical dock alongside the composer dock
+// (attachments, tabs, editor, context usage) down to the full-width footer.
+func (m *appModel) extendAlignedSidebar(base string) string {
+	sidebarRect, handleRect, ok := m.sidebarContinuationGeometry()
+	if !ok {
+		return base
+	}
+	page, ok := m.chatPage.(chat.SplitPresentation)
+	if !ok {
+		return base
+	}
+	endY := m.sidebarContinuationEndY()
+	layers := []*lipgloss.Layer{lipgloss.NewLayer(base)}
+	appendContinuation := func(content string, rect chat.PresentationRect) {
+		if rect.Width <= 0 || rect.Height <= 0 || content == "" {
+			return
+		}
+		rows := strings.Split(content, "\n")
+		addRange := func(start, end int) {
+			start = max(start, m.contentHeight)
+			end = min(end, endY)
+			if end <= start {
+				return
+			}
+			localStart := start - rect.Y
+			lines := make([]string, end-start)
+			for i := range lines {
+				index := localStart + i
+				if index >= 0 && index < len(rows) {
+					lines[i] = rows[index]
+				}
+			}
+			layers = append(layers, lipgloss.NewLayer(strings.Join(lines, "\n")).X(rect.X).Y(start))
+		}
+		addRange(m.contentHeight, endY)
+	}
+	appendContinuation(page.SidebarView(), sidebarRect)
+	appendContinuation(page.SidebarHandleView(), handleRect)
+	if len(layers) == 1 {
+		return base
+	}
+	return composeRootLayers(layers, m.width, m.height)
 }
 
 type paneRowSpan struct {

@@ -6,6 +6,7 @@ import (
 	stdimage "image"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // attachmentPreviewDialog uses the same read-only viewport and lifecycle as help.
@@ -151,4 +153,56 @@ func safeAttachmentText(text string) string {
 		}
 		return r
 	}, text)
+}
+
+// NewUserAttachmentPreviewDialog previews only bytes/text already present in the
+// session projection. It never resolves SourcePath or fetches remote content.
+func NewUserAttachmentPreviewDialog(ar *animation.Runtime, attachment types.UserAttachment, supported bool) Dialog {
+	const previewLimit = 20 << 20
+	title := attachment.Name
+	if title == "" {
+		title = "Attachment"
+	}
+	if attachment.SourcePath != "" {
+		title += " · " + attachment.SourcePath
+	}
+	if !attachment.Available {
+		reason := attachment.UnavailableReason
+		if reason == "" {
+			reason = "stored content unavailable"
+		}
+		return NewAttachmentPreviewDialog(ar, title, "Attachment preview unavailable: "+reason+".")
+	}
+	if strings.HasPrefix(attachment.MediaType, "image/") {
+		if len(attachment.Data) == 0 {
+			return NewAttachmentPreviewDialog(ar, title, "Image preview unavailable: stored image bytes are unavailable.")
+		}
+		return NewImageAttachmentPreviewDialog(ar, title, attachment.MediaType, attachment.Data, supported)
+	}
+	if attachment.Text != "" || strings.HasPrefix(attachment.MediaType, "text/") {
+		text := attachment.Text
+		if text == "" {
+			if !utf8.Valid(attachment.Data) {
+				return NewAttachmentPreviewDialog(ar, title, "Text preview unavailable: stored bytes are not valid UTF-8 text.")
+			}
+			text = string(attachment.Data)
+		}
+		if len(text) > previewLimit {
+			return NewAttachmentPreviewDialog(ar, title, "Text preview unavailable: attachment exceeds the 20 MiB preview limit.")
+		}
+		if attachment.SourcePath != "" {
+			text = "Source: " + attachment.SourcePath + "\n\n" + text
+		}
+		if len(text) > previewLimit {
+			return NewAttachmentPreviewDialog(ar, title, "Text preview unavailable: attachment exceeds the 20 MiB preview limit.")
+		}
+		return NewAttachmentPreviewDialog(ar, title, text)
+	}
+	if len(attachment.Data) > previewLimit {
+		return NewAttachmentPreviewDialog(ar, title, "Attachment preview unavailable: file exceeds the 20 MiB preview limit.")
+	}
+	if len(attachment.Data) > 0 {
+		return NewAttachmentPreviewDialog(ar, title, fmt.Sprintf("Preview unavailable for %s (%d bytes). Stored file content is not rendered as text.", attachment.MediaType, len(attachment.Data)))
+	}
+	return NewAttachmentPreviewDialog(ar, title, "Preview unavailable for this attachment type.")
 }

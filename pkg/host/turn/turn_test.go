@@ -193,7 +193,7 @@ func (h *reconnectHandle) Observe(ctx context.Context, options runtime.ObserveOp
 	if options.SinceEpoch != "old" || options.Since == nil || *options.Since != 3 {
 		panic("reconnect lost authority cursor")
 	}
-	return runtime.Observation{Initial: []runtime.SessionSnapshot{{Epoch: h.epoch, Cursor: 3}}, Replay: []runtime.SessionEvent{{TurnID: "owned", Sequence: 4, Event: &runtime.StreamStoppedEvent{}}}, Cancel: func() { h.detached.Add(1) }}, nil
+	return runtime.Observation{Initial: []runtime.SessionSnapshot{{Epoch: h.epoch, Cursor: 3}}, Replay: []runtime.SessionEvent{{Epoch: h.epoch, TurnID: "owned", Sequence: 4, Event: &runtime.StreamStoppedEvent{}}}, Cancel: func() { h.detached.Add(1) }}, nil
 }
 
 func TestOwnedTurnReconnectRetainsExactOwnership(t *testing.T) {

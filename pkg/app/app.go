@@ -226,6 +226,9 @@ func NewResolved(ctx context.Context, sessions runtime.SessionRuntime, committed
 		}
 		opts = append(opts, WithSubagentAttach(attach))
 	}
+	if info.Historical {
+		opts = append(opts, WithReadOnly())
+	}
 	app := newApp(ctx, sessions, sessionState{session: info.Session, handle: handle, binding: info.Binding}, true, opts...)
 	return app, nil
 }
@@ -273,7 +276,7 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 		opt(app)
 	}
 	state := app.state()
-	if state.handle != nil && state.handle.Metadata().Historical {
+	if !resolved && state.handle != nil && state.handle.Metadata().Historical {
 		app.readOnly = true
 	}
 	switch {
@@ -297,7 +300,7 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 		state.err = &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
 	}
 	app.replaceSessionState(state)
-	if state.handle != nil && state.handle.Metadata().Historical {
+	if !resolved && state.handle != nil && state.handle.Metadata().Historical {
 		app.readOnly = true
 	}
 
@@ -1296,7 +1299,7 @@ const subscriberBufferSize = 1024
 func (a *App) removeSubscriber(ch chan any) {
 	a.subsMu.Lock()
 	defer a.subsMu.Unlock()
-	a.subs = slices.DeleteFunc(a.subs, func(c chan any) bool { return c == ch })
+	a.subs = slices.DeleteFunc(slices.Clone(a.subs), func(c chan any) bool { return c == ch })
 	delete(a.subscriberDone, ch)
 }
 
@@ -1312,25 +1315,34 @@ func (a *App) startFanOut() {
 	go func() {
 		defer close(done)
 		for msg := range throttled {
+			// a.subs snapshot is read lock-free: removals replace it, appends write past its length.
 			a.subsMu.Lock()
-			subs := slices.Clone(a.subs)
-			cancellations := make([]<-chan struct{}, len(subs))
-			for i, ch := range subs {
-				cancellations[i] = a.subscriberDone[ch]
-			}
+			subs := a.subs
 			a.subsMu.Unlock()
-			for i, ch := range subs {
-				canceled := cancellations[i]
-
-				select {
-				case ch <- msg:
-				case <-canceled:
-				case <-busCtx.Done():
-					return
-				}
+			if !a.deliver(busCtx, subs, msg) {
+				return
 			}
 		}
 	}()
+}
+
+// deliver skips subscribers that unregistered after the snapshot, so a full, unread channel cannot stall the bus.
+func (a *App) deliver(busCtx context.Context, subs []chan any, msg any) bool {
+	for _, ch := range subs {
+		a.subsMu.Lock()
+		canceled, registered := a.subscriberDone[ch]
+		a.subsMu.Unlock()
+		if !registered {
+			continue
+		}
+		select {
+		case ch <- msg:
+		case <-canceled:
+		case <-busCtx.Done():
+			return false
+		}
+	}
+	return true
 }
 
 // SteerMessage resolves attachments into message parts and queues the result
@@ -1917,6 +1929,7 @@ func (a *App) throttleEvents(ctx context.Context, in <-chan any) <-chan any {
 					return
 				}
 			}
+			clear(buffer)
 			buffer = buffer[:0]
 			timerCh = nil
 		}

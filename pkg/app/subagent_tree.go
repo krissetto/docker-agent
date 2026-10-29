@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // SubagentTarget is a portable navigation target. SessionID is canonical; the
@@ -37,7 +39,7 @@ const (
 // LiveRuntimeTree reports whether topology comes from an in-process tree
 // shared by every view of the runtime, rather than this view's observation.
 func (a *App) LiveRuntimeTree() bool {
-	if handle := a.SessionHandle(); handle != nil && handle.Metadata().Historical {
+	if handle := a.SessionHandle(); handle != nil && !runtime.IsLocalSessionHandle(handle) && handle.Metadata().Historical {
 		return false
 	}
 	rt, ok := a.runtime.(subagentRuntime)
@@ -254,13 +256,24 @@ type treeWatch struct {
 }
 
 type watchedSession struct {
-	agent        string
-	ownCost      float64
-	running      bool
-	known        bool
-	seen         bool // events applied before this session's snapshot arrived
-	interactions map[string]runtime.InteractionKind
-	resolved     map[string]bool
+	agent                   string
+	ownCost                 float64
+	running                 bool
+	backgroundProcesses     int
+	backgroundProcessesSeen bool
+	known                   bool
+	seen                    bool // events applied before this session's snapshot arrived
+	interactions            map[string]runtime.InteractionKind
+	resolved                map[string]bool
+	seeded                  bool
+	seedKey                 seedKey
+}
+
+// seedKey identifies the usage last published for a descendant, so an unchanged
+// descendant is not looked up again.
+type seedKey struct {
+	input, output int64
+	ownCost       float64
 }
 
 func newTreeWatch(rootSessionID string) *treeWatch {
@@ -311,6 +324,15 @@ func (w *treeWatch) addLocked(snapshot runtime.SessionSnapshot) {
 	if snapshot.Session != nil {
 		s.ownCost = max(s.ownCost, snapshot.Session.OwnCost())
 	}
+	if !s.backgroundProcessesSeen {
+		s.backgroundProcesses = 0
+		for _, process := range snapshot.BackgroundProcesses {
+			if process.SessionID == id && process.State == tools.BackgroundProcessRunning {
+				s.backgroundProcesses++
+			}
+		}
+		s.backgroundProcessesSeen = true
+	}
 	s.agent = snapshot.Status.AgentName
 	if s.agent == "" && snapshot.Session != nil {
 		s.agent = snapshot.Session.AgentName
@@ -345,6 +367,21 @@ func (w *treeWatch) apply(envelope runtime.SessionEvent) bool {
 		cost := max(s.ownCost, *e.Usage.OwnCost)
 		changed := cost != s.ownCost
 		s.ownCost = cost
+		return changed
+	case *runtime.BackgroundProcessesEvent:
+		if e.SessionID == "" || e.SessionID != sessionID {
+			return false
+		}
+		s := w.session(sessionID)
+		count := 0
+		for _, process := range e.Processes {
+			if process.SessionID == sessionID && process.State == tools.BackgroundProcessRunning {
+				count++
+			}
+		}
+		changed := !s.backgroundProcessesSeen || count != s.backgroundProcesses
+		s.backgroundProcesses = count
+		s.backgroundProcessesSeen = true
 		return changed
 	case *runtime.SubagentTreeEvent:
 		if envelope.SessionID != w.rootSessionID {
@@ -534,6 +571,7 @@ func overlay(nodes []subagent.NodeSnapshot, sessions map[string]*watchedSession)
 		}
 		if s := sessions[sessionID]; s != nil {
 			node.Cost = max(node.Cost, s.ownCost)
+			node.BackgroundProcesses = s.backgroundProcesses
 			if node.SessionID == "" {
 				overlay(nodes[i].Children, sessions)
 				continue
@@ -576,8 +614,13 @@ func cloneNodes(nodes []subagent.NodeSnapshot) []subagent.NodeSnapshot {
 // exists, so remote views share topology, run state and attention. A tree
 // observation has no cursor: every (re)connect is a fresh baseline.
 func (a *App) startSubagentTreeWatch(ctx context.Context, handle runtime.SessionHandle, rootSessionID string, epoch uint64) {
-	// In-process handles publish topology through their runtime's live tree.
-	if a.LiveRuntimeTree() || handle == nil || rootSessionID == "" || runtime.IsLocalSessionHandle(handle) || handle.Metadata().Historical {
+	if handle == nil || rootSessionID == "" || handle.Metadata().Historical {
+		return
+	}
+	// In-process handles publish topology through their runtime's live tree, so
+	// only descendant usage is observed here; it has no live-tree equivalent.
+	if a.LiveRuntimeTree() || runtime.IsLocalSessionHandle(handle) {
+		go a.watchDescendantUsage(ctx, handle, rootSessionID, epoch)
 		return
 	}
 	watch := newTreeWatch(rootSessionID)
@@ -664,6 +707,197 @@ func retryTreeObservation(err error) bool {
 	return !errors.Is(err, runtime.ErrUnsupported)
 }
 
+// Each seeding call (one baseline batch, or one live addition) is bounded by these.
+var (
+	descendantSeedTimeout = 10 * time.Second
+	maxDescendantSeeds    = 32
+)
+
+// watchDescendantUsage forwards descendant usage for in-process roots, whose
+// topology the live runtime tree already publishes. A closed observation is
+// re-established at most maxTreeRebaselines times, without any timer.
+func (a *App) watchDescendantUsage(ctx context.Context, handle runtime.SessionHandle, rootSessionID string, epoch uint64) {
+	watch := &treeWatch{rootSessionID: rootSessionID, sessions: map[string]*watchedSession{}}
+	for attempt := 0; ctx.Err() == nil; attempt++ {
+		observation, err := handle.Observe(ctx, runtime.ObserveOptions{Tree: true, OrderedTree: true})
+		if err != nil {
+			if !retryTreeObservation(err) || attempt >= maxTreeRebaselines {
+				return
+			}
+			continue
+		}
+		a.consumeDescendantUsage(ctx, watch, observation, epoch)
+		if observation.Cancel != nil {
+			observation.Cancel()
+		}
+		if attempt >= maxTreeRebaselines {
+			return
+		}
+	}
+}
+
+// consumeDescendantUsage is the topology-free counterpart of consumeTreeObservation:
+// it seeds added descendants and forwards descendant usage, nothing else.
+func (a *App) consumeDescendantUsage(ctx context.Context, watch *treeWatch, observation runtime.Observation, epoch uint64) {
+	a.seedDescendantUsages(ctx, watch, observation.Initial, epoch)
+	for _, envelope := range observation.Replay {
+		a.forwardDescendantUsage(ctx, watch, envelope, epoch)
+	}
+	added, events, errs := observation.SessionsAdded, observation.Events, observation.Errors
+	updates := observation.TreeUpdates
+	for added != nil || events != nil || updates != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case update, ok := <-updates:
+			if !ok {
+				updates = nil
+				continue
+			}
+			if update.Snapshot != nil {
+				a.seedDescendantUsages(ctx, watch, []runtime.SessionSnapshot{*update.Snapshot}, epoch)
+			}
+			for _, envelope := range update.Replay {
+				a.forwardDescendantUsage(ctx, watch, envelope, epoch)
+			}
+			if update.Event != nil {
+				a.forwardDescendantUsage(ctx, watch, *update.Event, epoch)
+			}
+		case snapshot, ok := <-added:
+			if !ok {
+				added = nil
+				continue
+			}
+			a.seedDescendantUsages(ctx, watch, []runtime.SessionSnapshot{snapshot}, epoch)
+		case envelope, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			a.forwardDescendantUsage(ctx, watch, envelope, epoch)
+		case _, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			return
+		}
+	}
+}
+
+// seedDescendantUsages seeds descendant usage for one baseline or one live
+// addition. Each call gets its own budget: at most maxDescendantSeeds lookups,
+// and no new lookup once descendantSeedTimeout has elapsed within the call.
+// Calls do not share a lifetime budget, so a late child is always seeded.
+func (a *App) seedDescendantUsages(ctx context.Context, watch *treeWatch, snapshots []runtime.SessionSnapshot, epoch uint64) {
+	started := time.Now()
+	lookups := 0
+	for _, snapshot := range snapshots {
+		if lookups == maxDescendantSeeds || time.Since(started) >= descendantSeedTimeout {
+			return
+		}
+		if a.seedDescendantUsage(ctx, watch, snapshot, epoch) {
+			lookups++
+		}
+	}
+}
+
+// seedDescendantUsage publishes a descendant's current usage. It reports whether
+// an agent-info lookup was attempted. Unchanged usage is skipped before lookup,
+// and the epoch is checked after the lookup so an answer from a replaced view
+// cannot publish stale usage.
+func (a *App) seedDescendantUsage(ctx context.Context, watch *treeWatch, snapshot runtime.SessionSnapshot, epoch uint64) bool {
+	sess := snapshot.Session
+	if a.sessions == nil || epoch != a.bridgeEpoch.Load() || !descendantSeedable(sess, watch.rootSessionID) {
+		return false
+	}
+	key := newSeedKey(sess)
+	if watch.seedPublished(sess.ID, key) {
+		return false
+	}
+	handle, err := a.sessions.SessionByID(sess.ID)
+	if err != nil {
+		return true
+	}
+	provider, ok := handle.(runtime.SessionAgentInfoProvider)
+	if !ok {
+		return false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, descendantSeedTimeout)
+	defer cancel()
+	info, err := provider.SessionAgentInfo(lookupCtx)
+	if err != nil || info.Agent == nil || epoch != a.bridgeEpoch.Load() {
+		return true
+	}
+	if !a.deliverEvent(ctx, runtime.NewTokenUsageEvent(sess.ID, info.Agent.AgentName, runtime.SessionUsage(sess, info.Agent.ContextLimit))) {
+		return true
+	}
+	watch.markSeeded(sess.ID, key)
+	return true
+}
+
+// deliverEvent reports whether the event was handed to the bus. A dropped event
+// is not recorded as published, so the next addition can seed it again.
+func (a *App) deliverEvent(ctx context.Context, event any) bool {
+	// A select with both cases ready picks either; a canceled delivery must not enqueue.
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case a.events <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func newSeedKey(sess *session.Session) seedKey {
+	input, output := sess.Usage()
+	return seedKey{input: input, output: output, ownCost: sess.OwnCost()}
+}
+
+// seedPublished reports whether this usage was already published for the session.
+func (w *treeWatch) seedPublished(id string, key seedKey) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := w.sessions[id]
+	return s != nil && s.seeded && s.seedKey == key
+}
+
+func (w *treeWatch) markSeeded(id string, key seedKey) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := w.session(id)
+	s.seeded, s.seedKey = true, key
+}
+
+// descendantSeedable reports whether a snapshot is a non-root session with
+// recorded tokens, the only case where the restore seed carries usage.
+func descendantSeedable(sess *session.Session, rootSessionID string) bool {
+	if sess == nil || sess.ID == "" || sess.ID == rootSessionID {
+		return false
+	}
+	input, output := sess.Usage()
+	return input > 0 || output > 0
+}
+
+// forwardDescendantUsage republishes a descendant's per-session usage on the
+// bus. The root projection keeps only its own session's usage, and UIs key
+// usage by session ID, so child context and cost otherwise never reach them.
+func (a *App) forwardDescendantUsage(ctx context.Context, watch *treeWatch, envelope runtime.SessionEvent, epoch uint64) {
+	usage, ok := envelope.Event.(*runtime.TokenUsageEvent)
+	if !ok || usage.Usage == nil || envelope.Gap || envelope.SessionID == "" || envelope.SessionID == watch.rootSessionID {
+		return
+	}
+	if usage.SessionID != envelope.SessionID {
+		return
+	}
+	if epoch != a.bridgeEpoch.Load() {
+		return
+	}
+	a.sendEvent(ctx, usage)
+}
+
 const maxTreeRebaselines = 8
 
 // consumeTreeObservation projects one tree observation until it ends. With
@@ -671,10 +905,12 @@ const maxTreeRebaselines = 8
 // descendant without a topology edge yet.
 func (a *App) consumeTreeObservation(ctx context.Context, watch *treeWatch, observation runtime.Observation, epoch uint64, rebaseline bool) (progress, unplaced bool) {
 	watch.reset(observation.Initial)
+	a.seedDescendantUsages(ctx, watch, observation.Initial, epoch)
 	if watch.observedDescendants() {
 		a.emitSubagentTreeView(ctx, epoch)
 	}
 	apply := func(envelope runtime.SessionEvent) {
+		a.forwardDescendantUsage(ctx, watch, envelope, epoch)
 		if !envelope.Gap && watch.apply(envelope) {
 			a.emitSubagentTreeView(ctx, epoch)
 		}
@@ -699,6 +935,7 @@ func (a *App) consumeTreeObservation(ctx context.Context, watch *treeWatch, obse
 			progress = true
 			if update.Snapshot != nil {
 				watch.add(*update.Snapshot)
+				a.seedDescendantUsages(ctx, watch, []runtime.SessionSnapshot{*update.Snapshot}, epoch)
 				for _, seed := range update.Replay {
 					apply(seed)
 				}
@@ -713,6 +950,7 @@ func (a *App) consumeTreeObservation(ctx context.Context, watch *treeWatch, obse
 			}
 			progress = true
 			watch.add(snapshot)
+			a.seedDescendantUsages(ctx, watch, []runtime.SessionSnapshot{snapshot}, epoch)
 			a.emitSubagentTreeView(ctx, epoch)
 		case envelope, ok := <-events:
 			if !ok {

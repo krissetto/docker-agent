@@ -21,6 +21,7 @@ struct SessionView: View {
     @Environment(\.openSession) private var openSession
     @Environment(\.sessionDeleted) private var sessionDeleted
     @Environment(\.composerHandoff) private var composerHandoff
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let ref: SessionRef
 
     @State private var mode: SessionMode = .conversation
@@ -38,6 +39,8 @@ struct SessionView: View {
     @State private var exportDocument: SessionExportDocument?
     @State private var confirmingDelete = false
     @State private var actionError: String?
+    /// This view instance's lease on the open session; released exactly once when the view goes away.
+    @State private var lease: SessionViewLease?
 
     private var session: OpenSessionProjection? { model.openSessions[ref] }
     private var controls: SessionControlsProjection? { model.sessionControls[ref] }
@@ -47,10 +50,17 @@ struct SessionView: View {
         withActions(chrome)
     }
 
+    private var isCompact: Bool { sizeClass == .compact }
+
     private var chrome: some View {
         content
+            // Identifier only: no `.accessibilityElement(children:)` so every row and control keeps its own AX node.
+            .accessibilityIdentifier(SessionAccessibility.identity(ref))
             .navigationTitle(session?.title.nonEmpty ?? summary?.title.nonEmpty ?? "Session")
             .navigationSubtitle(session?.agentName ?? summary?.agentName ?? "")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar { toolbar }
             .inspector(isPresented: $showsInspector) {
                 if let session {
@@ -63,7 +73,7 @@ struct SessionView: View {
                 waitTask?.cancel()
                 // Keep an unsent draft so returning to this session restores it.
                 composerHandoff?.save(text: composerText, attachments: composerAttachments, for: ref)
-                model.closeSession(ref)
+                releaseLease()
             }
     }
 
@@ -136,25 +146,52 @@ struct SessionView: View {
                 Button {
                     openSession(parent)
                 } label: {
-                    Label(parentTitle(parent), systemImage: "arrow.up.left")
+                    if isCompact {
+                        Image(systemName: "arrow.up.left")
+                    } else {
+                        Label(parentTitle(parent), systemImage: "arrow.up.left")
+                    }
                 }
                 .help("Open the session that started this one")
+                .accessibilityLabel("Open parent session \(parentTitle(parent))")
             }
         }
-        ToolbarItem(placement: .principal) {
-            Picker("Mode", selection: $mode) {
-                ForEach(SessionMode.allCases) { mode in
-                    Label(mode.rawValue, systemImage: mode.symbol).tag(mode)
+        if isCompact {
+            // The principal slot would replace the title on iPhone. The mode picker rides in the session menu
+            // once controls are loaded; until then a plain menu keeps Review and Files reachable.
+            if controls == nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Picker("View", selection: $mode) {
+                            ForEach(SessionMode.allCases) { mode in
+                                Label(mode.rawValue, systemImage: mode.symbol).tag(mode)
+                            }
+                        }
+                    } label: {
+                        Label(mode.rawValue, systemImage: mode.symbol)
+                    }
+                    .disabled(session == nil)
+                    .accessibilityLabel("View, \(mode.rawValue)")
                 }
             }
-            .pickerStyle(.segmented)
-            .labelStyle(.titleOnly)
-            .fixedSize()
-            .disabled(session == nil)
+        } else {
+            ToolbarItem(placement: .principal) {
+                Picker("Mode", selection: $mode) {
+                    ForEach(SessionMode.allCases) { mode in
+                        Label(mode.rawValue, systemImage: mode.symbol).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelStyle(.titleOnly)
+                .fixedSize()
+                .disabled(session == nil)
+            }
         }
         if let session {
-            ToolbarItem(placement: .status) {
-                ConnectionStatusView(state: session.connection, refreshedAt: session.refreshedAt)
+            if !isCompact {
+                ToolbarItem(placement: .status) {
+                    ConnectionStatusView(state: session.connection, refreshedAt: session.refreshedAt)
+                }
             }
             if let controls {
                 ToolbarItem(placement: .primaryAction) {
@@ -164,7 +201,8 @@ struct SessionView: View {
                         currentAgent: session.agentName,
                         agents: model.teamRosterBySession[ref] ?? [],
                         readOnly: controls.isReadOnly,
-                        actions: menuActions(controls)
+                        actions: menuActions(controls),
+                        mode: isCompact ? $mode : nil
                     )
                 }
             }
@@ -191,9 +229,32 @@ struct SessionView: View {
             if composerText.isEmpty { composerText = prefill } else { pendingPrefill = prefill }
         }
         openError = nil
-        do { try await model.openSession(ref) } catch { openError = error.localizedDescription; return }
+        do {
+            let token = try await model.acquireSessionView(ref)
+            // A token that arrives after this view's task was cancelled is released at once, never kept.
+            if Task.isCancelled { model.releaseSessionView(token); return }
+            if let lease, lease.ref == ref {
+                // Try Again while still holding a lease: keep one, never two.
+                model.releaseSessionView(token)
+            } else {
+                releaseLease()
+                lease = token
+            }
+        } catch is CancellationError {
+            // Only this view's wait was cancelled; the shared open continues for other owners.
+            return
+        } catch {
+            openError = error.localizedDescription
+            return
+        }
         _ = try? await model.loadSessionControls(ref)
         _ = try? await model.loadTeamRoster(ref)
+    }
+
+    /// Idempotent: releasing a token twice, or a token the model no longer tracks, is harmless by contract.
+    private func releaseLease() {
+        if let lease { model.releaseSessionView(lease) }
+        lease = nil
     }
 
     private func menuActions(_ controls: SessionControlsProjection) -> SessionMenuActions {
@@ -264,6 +325,10 @@ struct SessionView: View {
 
     private var banners: [SessionBanner] {
         var result: [SessionBanner] = []
+        if isCompact, let session, session.connection != .live, session.connection != .unknown {
+            let when = Format.relative(session.refreshedAt).map { " since \($0)" } ?? ""
+            result.append(SessionBanner(symbol: "dot.radiowaves.left.and.right", text: session.connection.label + when, tint: session.connection.tint))
+        }
         if let pendingPrefill {
             result.append(SessionBanner(symbol: "text.insert", text: "A message from the original session is ready to insert.", tint: .accentColor, actionTitle: "Insert") {
                 composerText += (composerText.hasSuffix("\n") ? "\n" : "\n\n") + pendingPrefill
@@ -337,6 +402,7 @@ struct ConversationPane: View {
     @State private var forkError: String?
     @State private var forkErrorOffersRefresh = false
     @Environment(\.openSession) private var openSessionAction
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var finding = false
     @State private var findQuery = ""
     @State private var matchIndex = 0
@@ -387,6 +453,11 @@ struct ConversationPane: View {
         }
     }
 
+    /// The model owns paging errors (matched to its own request ID) and their generation guard; the view only asks.
+    private func loadOlder() async {
+        try? await model.loadOlderSessionHistory(ref)
+    }
+
     private var promptsAvailable: Bool {
         guard let controls = model.sessionControls[ref] else { return false }
         return controls.allows(SessionCapability.mcpPrompts) || controls.allows(SessionCapability.forkSkills)
@@ -402,7 +473,11 @@ struct ConversationPane: View {
             Task { try? await model.retry(ref) }
         }, resolveMedia: { reference in
             try await model.resolveGeneratedMedia(ref, reference: reference)
-        }, matchIDs: Set(matches), currentMatchID: currentMatch, onContinueFromHere: canFork ? { forkTarget = $0 } : nil, onBranchHere: canFork ? { branchTarget = $0.branchAnchor } : nil)
+        }, matchIDs: Set(matches), currentMatchID: currentMatch, onContinueFromHere: canFork ? { forkTarget = $0 } : nil, onBranchHere: canFork ? { branchTarget = $0.branchAnchor } : nil, omittedCount: session.omittedTranscriptItemCount,
+                       history: session.transcriptWindow,
+                       isLoadingOlder: model.historyPageLoading.contains(ref),
+                       loadOlderError: model.historyPageErrors[ref],
+                       onLoadOlder: { await loadOlder() })
         .safeAreaInset(edge: .top, spacing: 0) {
             if finding { findBar(matches.count) }
         }
@@ -437,14 +512,19 @@ struct ConversationPane: View {
         }
         .overlay {
             if session.transcript.isEmpty {
-                ContentUnavailableView("New Session", systemImage: "sparkles", description: Text("Send a message to \(session.agentName) to begin."))
+                ContentUnavailableView {
+                    Label("Ready", systemImage: "sparkles")
+                } description: {
+                    Text("Nothing has happened here yet. Tell \(session.agentName.nonEmpty ?? "the agent") what to work on.")
+                }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: Metrics.s) {
-                if session.state.isActive {
-                    ActivityStrip(session: session, onShowAgents: onShowAgents)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                if teamLineVisible {
+                    ActivityStrip(session: session, onShowAgents: onShowAgents, onStop: { try await model.cancel(ref) })
+                        .frame(minHeight: Metrics.target)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
                 ForEach(banners) { banner in
                     SessionBannerView(banner: banner)
@@ -455,6 +535,7 @@ struct ConversationPane: View {
                 if let controls = model.sessionControls[ref], !controls.pendingInputs.isEmpty {
                     QueuedInputsView(
                         inputs: controls.pendingInputs,
+                        shownInTranscript: QueuedTurns.shown(in: session.transcript),
                         edit: controls.allows(SessionCapability.editing) ? { input, text in
                             try await model.editPendingInput(ref, turnID: input.turnID, content: text, expectedContent: input.content)
                         } : nil,
@@ -476,12 +557,22 @@ struct ConversationPane: View {
                 }
                 composer
             }
-            .padding(.horizontal, Metrics.m)
-            .padding(.bottom, Metrics.s)
+            .padding(.horizontal, Metrics.s)
+            .padding(.bottom, Metrics.xs)
             .frame(maxWidth: Metrics.readingWidth + 2 * Metrics.m)
             .frame(maxWidth: .infinity)
-            .animation(.snappy, value: session.state)
+            // Animate the team line's insertion/removal only; nothing else in the stack moves on state ticks.
+            .animation(Motion.reveal(reduceMotion), value: teamLineVisible)
         }
+    }
+
+    /// Authoritative, state-derived: the root is working (running or stopping), a sub-agent in the shown
+    /// tree is running, or a person is needed (open interaction or an agent flagged for attention).
+    /// Queued or waiting alone is not "working". No timers.
+    private var teamLineVisible: Bool {
+        let tally = TeamTally(session.agentTree)
+        return TeamLineVisibility.isVisible(rootState: session.state, interactions: session.interactions.count,
+                                            runningSubagents: tally.runningSubagents, attention: tally.needsYou)
     }
 
     private var composer: some View {
@@ -587,6 +678,20 @@ extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
 }
 
+/// Turn IDs whose user message already appears in the transcript as a queued card (exact IDs, no text matching).
+enum QueuedTurns {
+    static func shown(in transcript: [TranscriptItem]) -> Set<String> {
+        Set(transcript.compactMap { $0.userInputState == .queued ? $0.turnID : nil })
+    }
+}
+
+/// Pure rule for the team line, shared with tests.
+enum TeamLineVisibility {
+    static func isVisible(rootState: SessionState, interactions: Int, runningSubagents: Int, attention: Int = 0) -> Bool {
+        rootState == .running || rootState == .cancelling || interactions > 0 || runningSubagents > 0 || attention > 0
+    }
+}
+
 struct SessionBanner: Identifiable {
     let symbol: String
     let text: String
@@ -612,7 +717,7 @@ struct SessionBannerView: View {
         }
         .padding(.horizontal, Metrics.m)
         .padding(.vertical, Metrics.s)
-        .background(.fill.quaternary, in: .rect(cornerRadius: Metrics.chipRadius, style: .continuous))
+        .floatingChip()
         .accessibilityElement(children: .combine)
     }
 }

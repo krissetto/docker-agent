@@ -64,7 +64,7 @@ private struct PendingSendRow: View {
         }
         .padding(.horizontal, Metrics.m)
         .padding(.vertical, Metrics.s)
-        .background(.fill.quaternary, in: .rect(cornerRadius: Metrics.chipRadius, style: .continuous))
+        .floatingChip()
         .accessibilityElement(children: .contain)
         .confirmationDialog("Discard this message?", isPresented: $confirmingDiscard, titleVisibility: .visible) {
             Button("Discard", role: .destructive) { run { try await discard(record) } }

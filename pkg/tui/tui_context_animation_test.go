@@ -66,7 +66,7 @@ func TestActualProgramContextUsageLifecycleAndIdleCleanup(t *testing.T) {
 		}
 	}
 	initial := snapshot()
-	require.NotContains(t, initial.content, "Context ", "fresh sessions have no empty context strip")
+	require.Contains(t, initial.content, "Context 0%", "fresh sessions retain the empty context strip")
 	require.Zero(t, initial.active)
 	usage := runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 75, ContextLimit: 100})
 	program.Send(messages.SessionRuntimeEventMsg{Event: usage})
@@ -98,7 +98,7 @@ func TestActualProgramContextUsageLifecycleAndIdleCleanup(t *testing.T) {
 	program.Send(messages.RoutedMsg{SessionID: "context-second", Inner: messages.SessionRuntimeEventMsg{Event: runtime.NewTokenUsageEvent("context-second", "root", &runtime.Usage{ContextLength: 1, ContextLimit: 100})}})
 	require.Eventually(t, func() bool { return strings.Contains(snapshot().contextView, "Context 90%") }, time.Second, time.Millisecond, "late background updates cannot pull the selected target back")
 	program.Send(messages.SessionRuntimeEventMsg{Event: &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: &session.Session{ID: "profile"}}}})
-	require.NotContains(t, snapshot().content, "Context ", "projection reset removes the stale usage strip")
+	require.Contains(t, snapshot().content, "Context 0%", "projection reset clears usage without removing the strip")
 	require.Eventually(t, func() bool { return snapshot().active == 0 }, time.Second, time.Millisecond)
 	settled := snapshot()
 	neverInTestLoop(t, func() bool { return snapshot().ticks != settled.ticks }, 80*time.Millisecond, "settled context has no tick lease")
@@ -147,19 +147,30 @@ func TestContextUsageHydratesCanonicalRestoredSnapshotAndInertGeometry(t *testin
 	require.Equal(t, before, root.editor.Value())
 }
 
-func TestContextStripGeometryTracksUsageReadiness(t *testing.T) {
+func TestContextStripGeometryStaysStableAcrossUsageReadiness(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	defer root.ar.Stop()
 	root.sessionState.SetCurrentAgentName("root")
-	require.Zero(t, root.contextHeight)
+	require.Equal(t, 1, root.contextHeight, "new sessions reserve the usage row before receiving tokens")
+	require.Contains(t, ansi.Strip(root.View().Content), "Context 0%")
+	initialTop := root.editorTop()
+	initialContentHeight := root.contentHeight
 	_, _ = root.Update(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 25, ContextLimit: 100, Cost: 0.01}))
+	require.Equal(t, initialTop, root.editorTop())
+	require.Equal(t, initialContentHeight, root.contentHeight)
 	require.Equal(t, 1, root.contextHeight)
 	_, editorHeight := root.editor.GetSize()
 	stripY := root.editorTop() + editorHeight
 	require.Equal(t, regionContextUsage, root.hitTestRegion(stripY))
 	restored := session.New(session.WithID("profile"))
 	_, _ = root.Update(messages.SessionRuntimeEventMsg{Event: &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: restored}}})
-	require.Zero(t, root.contextHeight, "reset removes the strip row when the replacement has no usage")
+	require.Equal(t, 1, root.contextHeight, "reset to zero usage keeps the strip row")
+	require.Equal(t, initialTop, root.editorTop())
+	require.Equal(t, initialContentHeight, root.contentHeight)
+	require.Contains(t, ansi.Strip(root.View().Content), "Context 0%")
+	root.leanMode = true
+	root.resizeAll()
+	require.Zero(t, root.contextHeight, "lean mode still omits context chrome")
 }
 
 func TestActualProgramContextSurvivesStreamingPartialUsage(t *testing.T) {

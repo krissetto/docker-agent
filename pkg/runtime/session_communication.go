@@ -11,13 +11,21 @@ import (
 // postCommunication acknowledges admission only; waking and model consumption
 // are deliberately outside the commit point.
 func (d *sessionDriver) postCommunication(ctx context.Context, msg QueuedMessage) (subagent.DeliveryReceipt, error) {
+	return d.postCommunicationWithAuthorization(ctx, msg, false)
+}
+
+func (d *sessionDriver) postAuthorizedCommunication(ctx context.Context, msg QueuedMessage) (subagent.DeliveryReceipt, error) {
+	return d.postCommunicationWithAuthorization(ctx, msg, true)
+}
+
+func (d *sessionDriver) postCommunicationWithAuthorization(ctx context.Context, msg QueuedMessage, authorizeDormant bool) (subagent.DeliveryReceipt, error) {
 	receipt := subagent.DeliveryReceipt{RequestID: msg.RequestID, Target: d.sessionID()}
 	if msg.guidance() {
 		receipt.Disposition = subagent.DeliveryGuidance
 	} else {
 		receipt.Disposition = subagent.DeliveryNewTurn
 	}
-	admission, err := d.admitInputReceipt(ctx, msg, SessionOperationPost, true)
+	admission, err := d.admitInputReceiptWithAuthorization(ctx, msg, SessionOperationPost, true, false, nil, authorizeDormant)
 	if err != nil {
 		return receipt, err
 	}
@@ -50,6 +58,14 @@ func (m *subagentManager) postAgentCommunication(ctx context.Context, target str
 		return subagent.DeliveryReceipt{RequestID: msg.RequestID, Target: target}, &SessionError{Kind: SessionErrorNotFound, SessionID: target, RequestID: msg.RequestID, Operation: SessionOperationPost, Detail: "recipient has no live inbox; message was not accepted"}
 	}
 	return d.postCommunication(ctx, msg)
+}
+
+func (m *subagentManager) postAuthorizedAgentCommunication(ctx context.Context, target string, msg QueuedMessage) (subagent.DeliveryReceipt, error) {
+	d, ok := m.r.sessionDrivers.Lookup(target)
+	if !ok {
+		return subagent.DeliveryReceipt{RequestID: msg.RequestID, Target: target}, &SessionError{Kind: SessionErrorNotFound, SessionID: target, RequestID: msg.RequestID, Operation: SessionOperationPost, Detail: "recipient has no live inbox; message was not accepted"}
+	}
+	return d.postAuthorizedCommunication(ctx, msg)
 }
 
 func agentCommunication(body, requestID, senderID, senderName string, mode subagent.DeliveryMode) QueuedMessage {

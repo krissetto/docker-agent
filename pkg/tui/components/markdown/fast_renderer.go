@@ -15,6 +15,7 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	xansi "github.com/charmbracelet/x/ansi"
 	runewidth "github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/lrucache"
@@ -742,6 +743,7 @@ type tableCell struct {
 	rendered    string // rendered with inline styles
 	width       int    // visual width (excluding ANSI codes)
 	longestWord int    // width of longest single word (for minimum column width)
+	widestRune  int    // width of the widest rune; a column can never be narrower
 }
 
 // tableLayout holds the computed table layout parameters
@@ -751,11 +753,12 @@ type tableLayout struct {
 	sep        string // separator string (" │ " or "│")
 	dividerSep string // divider join string ("─┼─" or "┼")
 	needsWrap  bool   // whether cells need wrapping
+	stacked    bool   // no structured layout fits; render each cell as a labelled block
 }
 
-// computeTableLayout calculates viewport-fit column widths using proportional distribution.
-// It returns the column widths and separator configuration that fit within viewportWidth.
-func computeTableLayout(desired, headerWidths []int, viewportWidth int) tableLayout {
+// computeTableLayout fits column widths to viewportWidth. A table whose widest runes
+// cannot fit even with compact separators is stacked instead.
+func computeTableLayout(desired, minWidths, hardWidths []int, viewportWidth int) tableLayout {
 	numCols := len(desired)
 	if numCols == 0 {
 		return tableLayout{}
@@ -768,7 +771,6 @@ func computeTableLayout(desired, headerWidths []int, viewportWidth int) tableLay
 		compactSepWidth = 1
 	)
 
-	// Calculate total natural width with wide separators
 	totalDesired := 0
 	for _, w := range desired {
 		totalDesired += w
@@ -788,27 +790,25 @@ func computeTableLayout(desired, headerWidths []int, viewportWidth int) tableLay
 		}
 	}
 
-	// Try with wide separators first
 	sepWidth := wideSepWidth
 	sep := " │ "
 	dividerSep := "─┼─"
 	availableForCells := viewportWidth - (numCols-1)*sepWidth
+	hardNeeded := sumHardWidths(hardWidths, numCols)
 
-	// If wide separators don't leave enough room, try compact
-	minColWidth := 1
-	if availableForCells < numCols*minColWidth {
+	// Compact separators are only worth switching to when wide ones cannot hold the widest runes.
+	if availableForCells < hardNeeded {
 		sepWidth = compactSepWidth
 		sep = "│"
 		dividerSep = "┼"
 		availableForCells = viewportWidth - (numCols-1)*sepWidth
 	}
 
-	// If even compact mode can't fit, use minimal widths
-	if availableForCells < numCols*minColWidth {
-		availableForCells = numCols * minColWidth
+	if availableForCells < hardNeeded {
+		return tableLayout{stacked: true}
 	}
 
-	colWidths := distributeWidth(desired, headerWidths, availableForCells)
+	colWidths := distributeWidth(desired, minWidths, hardWidths, availableForCells)
 
 	return tableLayout{
 		colWidths:  colWidths,
@@ -819,48 +819,67 @@ func computeTableLayout(desired, headerWidths []int, viewportWidth int) tableLay
 	}
 }
 
-// distributeWidth distributes available width proportionally to desired widths.
-// Columns that need less than their proportional share keep their desired width,
-// and the excess is redistributed to columns that need more.
-// minWidths specifies the minimum width for each column (e.g., longest word).
-func distributeWidth(desired, minWidths []int, available int) []int {
+// sumHardWidths is the narrowest table width that keeps every wide rune whole.
+func sumHardWidths(hardWidths []int, numCols int) int {
+	total := 0
+	for i := range numCols {
+		total += max(1, hardWidthAt(hardWidths, i))
+	}
+	return total
+}
+
+func hardWidthAt(hardWidths []int, i int) int {
+	if i < len(hardWidths) {
+		return hardWidths[i]
+	}
+	return 0
+}
+
+// distributeWidth splits available cell width across columns. When every column
+// fits its longest word, the remainder grows columns toward their desired width.
+// Otherwise the short columns keep their longest word first (see waterFillWidths).
+func distributeWidth(desired, minWidths, hardWidths []int, available int) []int {
 	numCols := len(desired)
 	if numCols == 0 {
 		return nil
 	}
 
-	colWidths := make([]int, numCols)
-
-	// Calculate total desired width
 	totalDesired := 0
 	for _, w := range desired {
 		totalDesired += w
 	}
-
-	// If we have enough space for everything, use desired widths
 	if totalDesired <= available {
+		colWidths := make([]int, numCols)
 		copy(colWidths, desired)
 		return colWidths
 	}
 
-	// Start with minimum widths (longest word in column), capped at desired
-	remaining := available
+	caps := make([]int, numCols)
+	soft := make([]int, numCols)
+	hard := make([]int, numCols)
+	sumSoft := 0
 	for i, d := range desired {
+		caps[i] = max(d, 1)
 		minW := 1
 		if i < len(minWidths) && minWidths[i] > minW {
 			minW = minWidths[i]
 		}
-		colWidths[i] = min(d, minW)
-		remaining -= colWidths[i]
+		soft[i] = min(caps[i], minW)
+		hard[i] = min(caps[i], max(1, hardWidthAt(hardWidths, i)))
+		sumSoft += soft[i]
+	}
+	if sumSoft > available {
+		return waterFillWidths(hard, soft, available)
 	}
 
-	// Distribute remaining width proportionally to columns that still need more
+	colWidths := make([]int, numCols)
+	copy(colWidths, soft)
+	remaining := available - sumSoft
 	for remaining > 0 {
-		// Find columns that can still grow
 		totalNeed := 0
-		for i, d := range desired {
-			if colWidths[i] < d {
-				totalNeed += d - colWidths[i]
+		for i := range numCols {
+			if colWidths[i] < caps[i] {
+				totalNeed += caps[i] - colWidths[i]
 			}
 		}
 		if totalNeed == 0 {
@@ -874,25 +893,22 @@ func distributeWidth(desired, minWidths []int, available int) []int {
 			remainder float64
 		}, 0, numCols)
 
-		for i, d := range desired {
-			need := d - colWidths[i]
+		for i := range numCols {
+			need := caps[i] - colWidths[i]
 			if need <= 0 {
 				continue
 			}
-			// Proportional share of remaining width
 			share := float64(remaining) * float64(need) / float64(totalNeed)
 			intPart := int(share)
 			fracPart := share - float64(intPart)
 
-			// Cap at what the column actually needs
 			if intPart > need {
 				intPart = need
 			}
 			colWidths[i] += intPart
 			distributed += intPart
 
-			// Track remainder for later distribution
-			if colWidths[i] < d {
+			if colWidths[i] < caps[i] {
 				remainders = append(remainders, struct {
 					idx       int
 					remainder float64
@@ -902,8 +918,6 @@ func distributeWidth(desired, minWidths []int, available int) []int {
 
 		remaining -= distributed
 
-		// Distribute leftover 1-by-1 to columns with largest remainders
-		// Sort by remainder descending
 		slices.SortFunc(remainders, func(a, b struct {
 			idx       int
 			remainder float64
@@ -916,21 +930,52 @@ func distributeWidth(desired, minWidths []int, available int) []int {
 			if remaining <= 0 {
 				break
 			}
-			if colWidths[r.idx] < desired[r.idx] {
+			if colWidths[r.idx] < caps[r.idx] {
 				colWidths[r.idx]++
 				remaining--
 			}
 		}
 	}
 
-	// Ensure minimum of 1 for all columns
-	for i := range colWidths {
-		if colWidths[i] < 1 {
-			colWidths[i] = 1
+	return colWidths
+}
+
+// waterFillWidths gives every column clamp(level, floor, ceil) for the largest
+// level that fits in available, so narrow columns reach their ceiling first and
+// wide columns share the rest. Requires sum(floor) <= available and floor <= ceil.
+func waterFillWidths(floor, ceil []int, available int) []int {
+	maxCeil := 0
+	for _, c := range ceil {
+		maxCeil = max(maxCeil, c)
+	}
+	level := 0
+	for candidate := 1; candidate <= maxCeil; candidate++ {
+		total := 0
+		for i := range floor {
+			total += max(floor[i], min(ceil[i], candidate))
 		}
+		if total > available {
+			break
+		}
+		level = candidate
 	}
 
-	return colWidths
+	widths := make([]int, len(floor))
+	total := 0
+	for i := range floor {
+		widths[i] = max(floor[i], min(ceil[i], level))
+		total += widths[i]
+	}
+	for i := range widths {
+		if total >= available {
+			break
+		}
+		if widths[i] < ceil[i] {
+			widths[i]++
+			total++
+		}
+	}
+	return widths
 }
 
 // tryTable checks for markdown tables
@@ -1003,8 +1048,22 @@ func (p *parser) tryTable(line string) bool {
 		}
 	}
 
+	hardWidths := make([]int, numCols)
+	for _, row := range rows {
+		for i, cell := range row {
+			if cell.widestRune > hardWidths[i] {
+				hardWidths[i] = cell.widestRune
+			}
+		}
+	}
+
 	// Compute viewport-fit layout
-	layout := computeTableLayout(desired, minWidths, p.width)
+	layout := computeTableLayout(desired, minWidths, hardWidths, p.width)
+	if layout.stacked {
+		p.renderTableStacked(rows, p.width)
+		p.out.WriteByte('\n')
+		return true
+	}
 	colWidths := layout.colWidths
 
 	// Build separator line based on fitted widths
@@ -1025,6 +1084,45 @@ func (p *parser) tryTable(line string) bool {
 
 	p.out.WriteByte('\n')
 	return true
+}
+
+// renderTableStacked is the fallback for viewports too narrow for columns: each
+// cell becomes a wrapped block preceded by its header label, so no content is lost.
+func (p *parser) renderTableStacked(rows [][]tableCell, width int) {
+	header := rows[0]
+	data := rows[1:]
+	if len(data) == 0 {
+		for _, cell := range header {
+			p.writeWrappedBlock(cell.rendered, width, true)
+		}
+		return
+	}
+	for k, row := range data {
+		if k > 0 {
+			p.out.WriteByte('\n')
+		}
+		for i, cell := range row {
+			if i < len(header) {
+				p.writeWrappedBlock(header[i].rendered, width, true)
+			}
+			p.writeWrappedBlock(cell.rendered, width, false)
+		}
+	}
+}
+
+// writeWrappedBlock writes rendered text wrapped to width, one physical line per row.
+func (p *parser) writeWrappedBlock(rendered string, width int, bold bool) {
+	if rendered == "" {
+		return
+	}
+	for line := range strings.SplitSeq(p.wrapText(rendered, width), "\n") {
+		if bold {
+			p.styles.ansiBold.renderTo(&p.out, line)
+		} else {
+			p.out.WriteString(line)
+		}
+		p.out.WriteByte('\n')
+	}
 }
 
 // buildTableSeparatorLine builds the horizontal separator line for table header
@@ -1236,6 +1334,7 @@ func (p *parser) renderTableRow(line string) []tableCell {
 			rendered:    rendered,
 			width:       width,
 			longestWord: longestWordWidth(cellText),
+			widestRune:  widestRuneWidth(cellText),
 		})
 		start = i + 1
 	}
@@ -1973,6 +2072,15 @@ func longestWordWidth(s string) int {
 		}
 	}
 	return maxWidth
+}
+
+// widestRuneWidth returns the largest display width of any rune in s.
+func widestRuneWidth(s string) int {
+	widest := 0
+	for _, r := range s {
+		widest = max(widest, runewidth.RuneWidth(r))
+	}
+	return widest
 }
 
 // textWidth calculates the visual width of plain text (no ANSI codes).
@@ -2740,6 +2848,9 @@ func chromaToLipgloss(tokenType chroma.TokenType, style *chroma.Style) lipgloss.
 	if entry.Colour.IsSet() {
 		lipStyle = lipStyle.Foreground(lipgloss.Color(entry.Colour.String()))
 	}
+	if tokenType == chroma.Error && entry.Background.IsSet() {
+		lipStyle = lipStyle.Background(lipgloss.Color(entry.Background.String()))
+	}
 	if entry.Bold == chroma.Yes {
 		lipStyle = lipStyle.Bold(true)
 	}
@@ -2768,15 +2879,6 @@ func (p *parser) wrapUncached(text string, width int) string {
 	// Fast path: if the text fits in one line, return as-is.
 	if ansiStringWidth(text) <= width {
 		return text
-	}
-
-	// Fast path: no spaces — just break the long word.
-	if !strings.ContainsAny(text, " \t") {
-		broken := breakWord(text, width)
-		if len(broken) == 1 {
-			return broken[0]
-		}
-		return strings.Join(broken, "\n")
 	}
 
 	var out strings.Builder
@@ -2822,17 +2924,14 @@ func (p *parser) wrapUncached(text string, width int) string {
 		}
 		word := text[wordStart:i]
 
-		// Fold this word's ANSI codes into the active set BEFORE handling it.
-		// For a long word that gets split, this ensures the continuation-line
-		// breaks below close and re-open any styles that were opened inside the
-		// word, instead of replaying only the styles active before it.
-		active = updateActiveStyles(active, wordAnsi)
-		// Layout decision: do we need to wrap before this word?
-		haveLine := lineWidth > 0
-		needsWrap := haveLine && lineWidth+1+wordWidth > width
-		if wordWidth > width && haveLine {
-			needsWrap = true
+		// Styles in effect where a long word starts; its breaks restart from here.
+		var before []string
+		if wordWidth > width {
+			before = slices.Clone(active)
 		}
+		active = updateActiveStyles(active, wordAnsi)
+		haveLine := lineWidth > 0
+		needsWrap := haveLine && (lineWidth+1+wordWidth > width || wordWidth > width)
 		if needsWrap {
 			writeLineBreak(&out, active)
 			lineWidth = 0
@@ -2842,19 +2941,7 @@ func (p *parser) wrapUncached(text string, width int) string {
 		}
 
 		if wordWidth > width {
-			// Long word: break it into pieces, separated by line breaks that close
-			// and restore the currently-active styles.
-			broken := breakWord(word, width)
-			for j, part := range broken {
-				if j > 0 {
-					writeLineBreak(&out, active)
-				}
-				out.WriteString(part)
-			}
-			// Always end a broken-word run with a line break so the following
-			// word starts on a fresh line.
-			writeLineBreak(&out, active)
-			lineWidth = 0
+			active, lineWidth = writeBrokenWord(&out, word, width, before)
 		} else {
 			out.WriteString(word)
 			lineWidth += wordWidth
@@ -2862,6 +2949,54 @@ func (p *parser) wrapUncached(text string, width int) string {
 	}
 
 	return out.String()
+}
+
+// writeBrokenWord splits a word wider than width at grapheme boundaries, re-opening
+// the styles open at each break. It returns the open styles and the last line width.
+func writeBrokenWord(out *strings.Builder, word string, width int, active []string) ([]string, int) {
+	cur := active
+	lineWidth := 0
+	for j := 0; j < len(word); {
+		if word[j] == '\x1b' {
+			end, kind := scanAnsiSequence(word, j)
+			out.WriteString(word[j:end])
+			if kind != 0 {
+				cur = updateActiveStyles(cur, []string{word[j:end]})
+			}
+			j = end
+			continue
+		}
+		end := j
+		for end < len(word) && word[end] != '\x1b' {
+			end++
+		}
+		graphemes := uniseg.NewGraphemes(word[j:end])
+		for graphemes.Next() {
+			start, stop := graphemes.Positions()
+			cluster := word[j+start : j+stop]
+			clusterWidth := ansiStringWidth(cluster)
+			if lineWidth+clusterWidth > width && lineWidth > 0 {
+				writeLineBreak(out, cur)
+				lineWidth = 0
+			}
+			if clusterWidth <= width {
+				out.WriteString(cluster)
+				lineWidth += clusterWidth
+				continue
+			}
+			for _, r := range cluster {
+				rw := runewidth.RuneWidth(r)
+				if lineWidth+rw > width && lineWidth > 0 {
+					writeLineBreak(out, cur)
+					lineWidth = 0
+				}
+				out.WriteRune(r)
+				lineWidth += rw
+			}
+		}
+		j = end
+	}
+	return cur, lineWidth
 }
 
 // writeLineBreak emits a styled line break: it closes any active CSI styles,
@@ -2892,44 +3027,6 @@ func updateActiveStyles(active, newCodes []string) []string {
 		}
 	}
 	return active
-}
-
-func breakWord(word string, maxWidth int) []string {
-	if maxWidth <= 0 {
-		return []string{word}
-	}
-
-	var parts []string
-	var current strings.Builder
-	currentWidth := 0
-
-	for i := 0; i < len(word); {
-		if word[i] == '\x1b' {
-			end, _ := scanAnsiSequence(word, i)
-			current.WriteString(word[i:end])
-			i = end
-			continue
-		}
-
-		r, size := utf8.DecodeRuneInString(word[i:])
-		rw := runewidth.RuneWidth(r)
-
-		if currentWidth+rw > maxWidth && currentWidth > 0 {
-			parts = append(parts, current.String())
-			current.Reset()
-			currentWidth = 0
-		}
-
-		current.WriteRune(r)
-		currentWidth += rw
-		i += size
-	}
-
-	if current.Len() > 0 {
-		parts = append(parts, current.String())
-	}
-
-	return parts
 }
 
 // buildStylePrimitive converts an ansi.StylePrimitive to a lipgloss.Style.

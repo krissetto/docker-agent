@@ -391,17 +391,31 @@ func TestActualProgramEditorDirectResizeAndPostSendCollapse(t *testing.T) {
 			return shellSnapshot{}
 		}
 	}
+	// The fixture's scrollbar reveal holds for 2*MediumDuration (1000ms) and then
+	// fades. Let that finite lease settle before the manual baseline is measured.
+	require.Eventually(t, func() bool { return snapshot().active == 0 }, 3*time.Second, time.Millisecond, "scrollbar hold settles before the manual baseline")
 	initial := snapshot()
 	require.Equal(t, 1, initial.editorHeight)
 	program.Send(tea.MouseClickMsg{X: 40, Y: initial.tabY - 1, Button: tea.MouseLeft})
 	require.True(t, snapshot().resizeDragging)
+	// The press starts the composer grip's finite reveal. Let it finish first, so the
+	// zero-tick checks below measure only the manual height change.
+	heightStable := true
+	require.Eventually(t, func() bool {
+		s := snapshot()
+		heightStable = heightStable && s.editorHeight == initial.editorHeight
+		return s.active == 0
+	}, 3*time.Second, time.Millisecond, "press-started grip reveal settles before the manual baseline")
+	require.True(t, heightStable, "the press reveal changes no height while it runs")
+	gripSettled := snapshot()
+	require.Equal(t, initial.editorHeight, gripSettled.editorHeight, "the press reveal leaves the height unchanged when settled")
 	program.Send(tea.MouseMotionMsg{X: 40, Y: initial.tabY - 10, Button: tea.MouseLeft})
 	require.Eventually(t, func() bool {
 		s := snapshot()
 		return s.resizeDragging && !s.heightMoving && s.editorHeight > initial.editorHeight && s.editorHeight == s.editorTarget
 	}, time.Second, time.Millisecond, "each accepted coalesced motion allocates directly")
 	first := snapshot()
-	require.Equal(t, initial.ticks, first.ticks, "manual motion needs no animation frame lease")
+	require.Equal(t, gripSettled.ticks, first.ticks, "manual motion needs no animation frame lease")
 	program.Send(tea.MouseMotionMsg{X: 40, Y: initial.tabY - 11, Button: tea.MouseLeft})
 	// Release flushes the pending coalesced motion before ending the gesture.
 	program.Send(tea.MouseReleaseMsg{X: 40, Y: initial.tabY - 11, Button: tea.MouseLeft})
@@ -411,7 +425,7 @@ func TestActualProgramEditorDirectResizeAndPostSendCollapse(t *testing.T) {
 	require.Equal(t, first.editorHeight+1, expanded.editorHeight, "release applies the final accepted pointer without chasing")
 	require.Equal(t, expanded.editorTarget, expanded.editorHeight, "empty input honors manual resize")
 	require.Zero(t, expanded.active)
-	require.Equal(t, initial.ticks, expanded.ticks)
+	require.Equal(t, gripSettled.ticks, expanded.ticks, "zero ticks across the full manual height change")
 	// Automatic content growth remains immediate. Sending clears the manual
 	// request and animates back to the automatic one-line empty-input target.
 	for i, line := range []string{"first", "second", "third", "fourth", "fifth", "sixth"} {

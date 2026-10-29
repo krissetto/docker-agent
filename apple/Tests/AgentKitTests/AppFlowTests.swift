@@ -26,7 +26,14 @@ struct AppFlowTests {
             #expect(body?["source"] as? String == "workspace-source.yaml")
             #expect(body?["agent_name"] as? String == "planner")
             let input = body?["input"] as? [String: Any]
-            #expect(input?["content"] as? String == "new root task")
+            if body?["title"] as? String == "Keep this title" {
+                #expect(input?["content"] as? String == "an explicit session request")
+                #expect(input?["generate_title"] as? Bool == false)
+            } else {
+                #expect(body?["title"] as? String == "")
+                #expect(input?["content"] as? String == "new root task")
+                #expect(input?["generate_title"] as? Bool == true)
+            }
             #expect(input?["request_id"] as? String != nil)
             return .response(202, Data(#"{"session_id":"created-session","turn_id":"created-turn"}"#.utf8))
         }
@@ -49,6 +56,7 @@ struct AppFlowTests {
             let body = try Self.jsonObject(Self.requestBody(request))
             #expect(body?["content"] as? String == "retry this exact input")
             #expect(body?["request_id"] as? String == "flow-request-1")
+            #expect(body?["generate_title"] as? Bool == true)
             if state.nextMessageFailure() { return .failure(URLError(.networkConnectionLost)) }
             return .response(202, Data(#"{"session_id":"session-demo-001","turn_id":"turn-accepted"}"#.utf8))
         }
@@ -77,23 +85,35 @@ struct AppFlowTests {
         let discovered = try await model.loadAgents(serverID: serverID)
         let configuredRoot = try #require(discovered.first { $0.name == "workspace-source.yaml" })
         #expect(configuredRoot.rootAgentName == "planner")
-        _ = try await model.createSession(serverID: serverID, source: configuredRoot, firstMessage: "new root task")
+        _ = try await model.createSession(serverID: serverID, source: configuredRoot, firstMessage: "new root task", operationID: UUID())
         let startRequests = state.requests.filter { $0.httpMethod == "POST" && $0.url?.path == "/api/v2/sessions/start" }
         #expect(startRequests.count == 1)
+        let explicitOperationID = UUID()
+        _ = try await model.createSession(serverID: serverID, source: configuredRoot, title: "Keep this title",
+                                          firstMessage: "an explicit session request", operationID: explicitOperationID)
+        let updatedStartRequests = state.requests.filter { $0.httpMethod == "POST" && $0.url?.path == "/api/v2/sessions/start" }
+        #expect(updatedStartRequests.count == 2)
+        let explicitStart = try Self.jsonObject(Self.requestBody(updatedStartRequests[1]))
+        #expect(explicitStart?["title"] as? String == "Keep this title")
+        #expect((explicitStart?["input"] as? [String: Any])?["generate_title"] as? Bool == false)
         let missingRootSource = AgentOption(name: "legacy-source.yaml", rootAgentName: nil)
         await #expect(throws: APIError.self) {
             try await model.createSession(serverID: serverID, source: missingRootSource, firstMessage: "must not create")
         }
-        #expect(state.requests.filter { $0.httpMethod == "POST" && $0.url?.path == "/api/v2/sessions/start" }.count == 1)
+        #expect(state.requests.filter { $0.httpMethod == "POST" && $0.url?.path == "/api/v2/sessions/start" }.count == 2)
 
         await model.refreshCatalog(serverID)
         #expect(model.sessions.contains { $0.ref.sessionID == "session-demo-001" })
 
         let ref = SessionRef(serverID: serverID, sessionID: "session-demo-001")
-        try await model.openSession(ref)
+        async let firstOpen: Void = model.openSession(ref)
+        async let duplicateOpen: Void = model.openSession(ref)
+        _ = try await (firstOpen, duplicateOpen)
         let openRequests = state.requests.map { "\($0.httpMethod ?? "")|\($0.url?.path ?? "")" }
         #expect(openRequests.contains("GET|/api/v2/sessions/session-demo-001"))
         #expect(openRequests.contains("PATCH|/api/v2/sessions/session-demo-001"))
+        #expect(state.requests.filter { $0.url?.path == "/api/v2/sessions/session-demo-001" && $0.httpMethod == "GET" }.count == 1)
+        #expect(state.requests.filter { $0.url?.path == "/api/v2/sessions/session-demo-001" && $0.httpMethod == "PATCH" }.count == 1)
 
         try await waitUntil(timeout: .seconds(5)) {
             model.openSessions[ref]?.cursor == 16 && model.openSessions[ref]?.state == .settled
@@ -121,6 +141,8 @@ struct AppFlowTests {
         let firstRequestID = firstPostBody?["request_id"] as? String
         let retryRequestID = retryPostBody?["request_id"] as? String
         #expect(firstRequestID == retryRequestID)
+        #expect(firstPostBody?["generate_title"] as? Bool == true)
+        #expect(retryPostBody?["generate_title"] as? Bool == true)
 
         await #expect(throws: APIError.self) {
             try await model.send(ref, content: "retry this exact input", requestID: "flow-request-1")
@@ -135,6 +157,7 @@ struct AppFlowTests {
             request.httpMethod == "POST" && request.url?.path == "/api/v2/sessions/session-demo-001/responses"
         }
         #expect(hasResponsePost)
+        model.closeSession(ref)
         model.closeSession(ref)
     }
 

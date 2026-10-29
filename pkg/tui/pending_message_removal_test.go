@@ -52,10 +52,18 @@ func TestPendingRemovalRejectsChangedSessionAndRoute(t *testing.T) {
 			case "cleanup":
 				root.contextClosed = true
 			}
+			gen := root.metadataGeneration
 			_, cmd := root.Update(confirmed)
-			msg, ok := cmd().(notification.ShowMsg)
-			require.True(t, ok)
-			require.Contains(t, msg.Text, "session changed")
+			notes := 0
+			for _, msg := range filterMetadataRefresh(t, root, gen, collectMsgs(cmd)) {
+				note, ok := msg.(notification.ShowMsg)
+				if !ok {
+					t.Fatalf("stale confirmation dispatched %T", msg)
+				}
+				notes++
+				require.Contains(t, note.Text, "session changed")
+			}
+			require.Equal(t, 1, notes)
 			select {
 			case <-handle.removed:
 				t.Fatal("stale confirmation reached runtime")

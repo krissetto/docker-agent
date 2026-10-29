@@ -121,6 +121,9 @@ var (
 	Focus          color.Color
 	Disabled       color.Color
 	StatusAdjacent color.Color
+
+	// ScrollbarTrack is a deliberately subtle gutter color, distinct from the thumb.
+	ScrollbarTrack color.Color
 )
 
 // Base Styles
@@ -479,7 +482,7 @@ var (
 	// NOTE: Rebuilt by ApplyTheme() using theme's suggestion_ghost color.
 	SuggestionGhostStyle = BaseStyle.Foreground(TextMutedGray).Background(EditorBg)
 	// SuggestionCursorStyle renders the first character of a suggestion inside the cursor.
-	// Uses the same blue accent background as the normal cursor, with ghost-colored foreground text.
+	// Uses the accent background with a readable contrast foreground.
 	// NOTE: Rebuilt by ApplyTheme().
 	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(TextMutedGray)
 
@@ -502,9 +505,9 @@ var (
 
 // Scrollbar
 var (
-	TrackStyle       = lipgloss.NewStyle().Foreground(BorderSecondary)
-	ThumbStyle       = lipgloss.NewStyle().Foreground(Info).Background(BackgroundAlt)
-	ThumbActiveStyle = lipgloss.NewStyle().Foreground(TextBright).Background(BackgroundAlt)
+	TrackStyle       = lipgloss.NewStyle().Foreground(ScrollbarTrack)
+	ThumbStyle       = lipgloss.NewStyle().Foreground(Info)
+	ThumbActiveStyle = lipgloss.NewStyle().Foreground(TextBright)
 )
 
 // Resize Handle Style
@@ -597,9 +600,14 @@ var (
 			Padding(0, 3, 0, 1)
 
 	ThinkingBadgeStyle = BaseStyle.
-				Foreground(TextMuted). // Muted blue, distinct from gray italic content
+				Foreground(TextMuted). // Muted text, distinct from gray italic content
 				Bold(true).
 				Italic(true)
+
+	WorkHeaderStyle = BaseStyle.
+			Foreground(Accent).
+			Bold(true).
+			Italic(true)
 )
 
 // Deprecated styles (kept for backward compatibility)
@@ -730,8 +738,8 @@ func MarkdownStyle() ansi.StyleConfig {
 	textColor := colors.TextPrimary
 	textSecondary := colors.TextSecondary
 
-	// Chroma colors with fallbacks from default theme
-	defaults := DefaultTheme().Chroma
+	// Chroma colors with fallbacks from the Old School base so partial palettes keep their inherited values
+	defaults := legacyBaseTheme().Chroma
 	chromaComment := ch.Comment
 	if chromaComment == "" {
 		chromaComment = defaults.Comment
@@ -982,7 +990,7 @@ func MarkdownStyle() ansi.StyleConfig {
 					Color: &chromaNameAttribute,
 				},
 				NameClass: ansi.StylePrimitive{
-					Color:     &chromaErrorFg,
+					Color:     &chromaKeywordType,
 					Underline: new(true),
 					Bold:      new(true),
 				},

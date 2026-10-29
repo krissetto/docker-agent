@@ -64,6 +64,7 @@ import (
 func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	seed := false
 	previousTurnID := p.lifecycle.TurnID
+	previousDepth := p.lifecycle.Depth()
 	if bridged, ok := msg.(msgtypes.SessionRuntimeEventMsg); ok {
 		msg = bridged.Event
 		seed = bridged.Seed
@@ -85,6 +86,8 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, nil
 	case *app.SessionResetEvent:
 		return true, p.resetProjection(msg.Snapshot)
+	case *runtime.BackgroundProcessesEvent:
+		return true, p.setBackgroundProcesses(msg.SessionID, msg.Processes)
 	case *runtime.InteractionResolvedEvent:
 		return true, nil
 	// ===== Error and Warning Events =====
@@ -124,7 +127,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Stream Lifecycle Events =====
 	case *runtime.StreamStartedEvent:
-		return true, p.handleStreamStarted(msg, seed)
+		return true, p.handleStreamStarted(msg, seed, previousDepth == 0)
 
 	case *runtime.StreamStoppedEvent:
 		return true, p.handleStreamStopped(msg)
@@ -143,7 +146,13 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			}
 			p.applyLifecycle(msg)
 		}
-		return true, p.finishTurnPresentation()
+		workElapsed := time.Duration(0)
+		if !p.streamStartTime.IsZero() {
+			workElapsed = time.Since(p.streamStartTime)
+		}
+		cmd := tea.Batch(p.finishTurnPresentation(), p.setWorkStatus(false, workElapsed))
+		p.streamStartTime = time.Time{}
+		return true, cmd
 
 	// ===== Content Events =====
 	case *runtime.PendingUserMessageAcceptedEvent:
@@ -151,6 +160,15 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		p.applyLifecycle(msg)
+		if msg.Immediate {
+			queued := len(p.messageQueue)
+			p.messageQueue = slices.DeleteFunc(p.messageQueue, func(item queuedMessage) bool { return item.turnID == msg.TurnID })
+			p.messages.RemovePendingInput(msg.TurnID)
+			if len(p.messageQueue) != queued {
+				return true, p.syncQueueToSidebar()
+			}
+			return true, nil
+		}
 		if !lifecycle.IsUserInput(msg.InputOrigin) {
 			input := session.UserMessage(msg.Message, msg.MultiContent...)
 			input.TurnID, input.Pending = msg.TurnID, true
@@ -234,7 +252,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		finalized := p.messages.CompleteAssistant(msg)
-		return true, tea.Batch(finalized, p.handleMessageAdded(msg))
+		return true, tea.Batch(finalized, p.handleMessageAdded(msg), p.commitBackgroundToolCalls(msg))
 
 	case *runtime.AgentChoiceEvent:
 		return true, p.handleAgentChoice(msg)
@@ -247,7 +265,8 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Tool Events =====
 	case *runtime.PartialToolCallEvent:
-		return true, p.handlePartialToolCall(msg)
+		cmd := p.handlePartialToolCall(msg)
+		return true, cmd
 
 	case *runtime.ToolCallEvent:
 		return true, p.handleToolCall(msg)
@@ -443,20 +462,36 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 	p.sidebar.SetTokenUsage(msg)
 }
 
-func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed bool) tea.Cmd {
+func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed bool, rootWasIdle ...bool) tea.Cmd {
+	wasRootIdle := p.lifecycle.Depth() == 0
+	if len(rootWasIdle) > 0 {
+		wasRootIdle = rootWasIdle[0]
+	}
 	p.ownedSkillStream = p.ownedSkillOperation != ""
 
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
 	p.streamCancelled = false
 	p.applyLifecycle(msg)
-	p.streamStartTime = time.Now()
+	if wasRootIdle {
+		p.streamStartTime = time.Now()
+	}
 	spinnerCmd := p.setWorking(true)
+	var workCmd tea.Cmd
+	if wasRootIdle {
+		workCmd = p.setWorkStatus(true, 0)
+	}
 	var pendingCmd tea.Cmd
-	if p.app == nil || p.app.AttachedSubagent() == nil || !seed {
+	showPending := p.app == nil || p.app.AttachedSubagent() == nil || !seed
+	if showPending && wasRootIdle {
+		if owner, ok := p.messages.(interface{ HasWorkInCurrentExchange() bool }); ok && owner.HasWorkInCurrentExchange() {
+			showPending = false
+		}
+	}
+	if showPending {
 		pendingCmd = p.setPendingResponse(true)
 	}
 	sidebarCmd := p.forwardToSidebar(msg)
-	return tea.Batch(pendingCmd, spinnerCmd, sidebarCmd)
+	return tea.Batch(pendingCmd, spinnerCmd, sidebarCmd, workCmd)
 }
 
 func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
@@ -505,6 +540,15 @@ func (p *chatPage) handleAgentSwitching(msg *runtime.AgentSwitchingEvent) tea.Cm
 	return tea.Batch(cmd, returnCmd, p.messages.ScrollToBottom())
 }
 
+func (p *chatPage) setWorkStatus(active bool, elapsed time.Duration) tea.Cmd {
+	if owner, ok := p.messages.(interface {
+		SetWorkStatus(active bool, elapsed time.Duration) tea.Cmd
+	}); ok {
+		return owner.SetWorkStatus(active, elapsed)
+	}
+	return nil
+}
+
 func (p *chatPage) finishSkillOperation() tea.Cmd {
 	p.msgCancel = nil
 	p.streamCancelled = false
@@ -540,6 +584,11 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	// Outermost stream stopped — fully clean up. This is the exact-content
 	// boundary for the active root response; nested stops leave the parent's
 	// deferred tail intact until the parent itself stops or the user re-enters it.
+	workElapsed := time.Duration(0)
+	if !p.streamStartTime.IsZero() {
+		workElapsed = time.Since(p.streamStartTime)
+	}
+	workCmd := p.setWorkStatus(false, workElapsed)
 	finalizeCmd := p.messages.FinalizeStream()
 	// Only play the success sound when the stream completed normally.
 	// Errors already trigger a failure sound via ErrorEvent, and
@@ -554,9 +603,10 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	// Accepted journal turns require TurnSettled; identity-free legacy streams finish on stop.
 	if p.lifecycle.TurnID != "" {
 		p.setPendingResponse(false)
-		return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), sidebarCmd)
+		return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), sidebarCmd, workCmd)
 	}
-	return tea.Batch(finalizeCmd, sidebarCmd, p.finishTurnPresentation())
+	p.streamStartTime = time.Time{}
+	return tea.Batch(finalizeCmd, sidebarCmd, p.finishTurnPresentation(), workCmd)
 }
 
 func (p *chatPage) finishTurnPresentation() tea.Cmd {
@@ -756,6 +806,10 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 			cmds = append(cmds, p.resolveGeneratedMediaCmd(mediaRequests))
 		}
 		cmds = append(cmds, p.hydrateSidebarSession(snapshot.Session))
+		p.backgroundSidebarSeeded = false
+		if transcript {
+			p.backgroundLinkCacheValid = false
+		}
 		p.snapshotEnd = snapshot.TranscriptPosition
 		if snapshot.Session.MessageCount() > 0 {
 			p.showStartupBanner = false
@@ -771,6 +825,20 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 		message.ReportOutcome = input.ReportOutcome
 		cmds = append(cmds, p.messages.AddInputMessage(message, input.SessionPosition))
 	}
+	ownerSessionID := snapshot.Status.SessionID
+	if snapshot.Session != nil {
+		ownerSessionID = snapshot.Session.ID
+	} else if ownerSessionID == "" && p.app != nil && p.app.Session() != nil {
+		ownerSessionID = p.app.Session().ID
+	}
+	if ownerSessionID != "" {
+		cmds = append(cmds, p.setBackgroundProcesses(ownerSessionID, snapshot.BackgroundProcesses))
+	} else {
+		p.backgroundProcesses = nil
+		p.backgroundProcessToolCalls = nil
+		p.backgroundLinkToolCallIDs = nil
+		p.backgroundLinkCacheValid = false
+	}
 	for _, event := range snapshot.Presentation {
 		if team, ok := event.(*runtime.TeamInfoEvent); ok {
 			p.sessionState.SetAvailableAgents(team.AvailableAgents)
@@ -782,7 +850,13 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 	running := snapshot.Status.State == runtime.SessionStateRunning || snapshot.Status.State == runtime.SessionStateQueued || snapshot.Status.State == runtime.SessionStateCancelling
 	p.streamCancelled = false
 	cmds = append(cmds, p.setWorking(running))
+	workElapsed := time.Duration(0)
+	if running && !p.streamStartTime.IsZero() {
+		workElapsed = time.Since(p.streamStartTime)
+	}
+	cmds = append(cmds, p.setWorkStatus(running, workElapsed))
 	if !running {
+		p.streamStartTime = time.Time{}
 		p.messages.RemoveSpinner()
 	}
 	return tea.Batch(cmds...)

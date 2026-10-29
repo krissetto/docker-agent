@@ -20,7 +20,7 @@ import (
 func TestAuthoritativeResetReplacesChatTranscriptQueueAndStatus(t *testing.T) {
 	sess := session.New(session.WithID("s"))
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.messages.AddUserMessage("stale")
 	p.messages.AddUserMessage("also stale")
 	p.messageQueue = []queuedMessage{{turnID: "stale", content: "old"}}
@@ -40,7 +40,7 @@ func TestAuthoritativeResetReplacesChatTranscriptQueueAndStatus(t *testing.T) {
 func TestTypedQueueAndPromotionReplay(t *testing.T) {
 	sess := session.New(session.WithID("s"))
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.messages.SetSize(100, 200)
 	origins := []session.InputOrigin{session.InputOriginRuntime, session.InputOriginAgent, session.InputOriginUser, "", "future"}
 	var pending []runtime.PendingInput
@@ -92,7 +92,7 @@ func TestTypedQueueAndPromotionReplay(t *testing.T) {
 func TestTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	sess := session.New(session.WithID("s"))
 	a, _ := newSessionTestApp(t, sess, nil, nil)
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 	p.messages.SetSize(100, 200)
 	for i, origin := range []session.InputOrigin{session.InputOriginRuntime, session.InputOriginAgent, session.InputOriginAgent} {
 		id := string(rune('a' + i))
@@ -115,7 +115,7 @@ func TestTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	}
 	check := func() {
 		out := ansi.Strip(p.messages.View())
-		assert.Equal(t, 1, strings.Count(out, "worker (12345) · report received"))
+		assert.Equal(t, 1, strings.Count(out, "From worker (12345) · report received"))
 		assert.Contains(t, out, "worker (12345)")
 		assert.NotContains(t, out, "original parent delegation")
 		assert.Equal(t, 2, strings.Count(out, "sent a message >"))
@@ -135,7 +135,7 @@ func TestDirectTypedInputMode(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			sess := session.New(session.WithID("s"))
 			a, _ := newSessionTestApp(t, sess, nil, nil)
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithCompactWorkLog(false)).(*chatPage)
 			p.messages.SetSize(100, 40)
 			p.handleRuntimeEvent(&runtime.UserMessageEvent{TurnID: "direct", Message: "clean input", InputOrigin: session.InputOriginAgent, InputMode: mode, SenderName: "worker", SenderID: "12345678-long-id"})
 			assert.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeAgentInput))

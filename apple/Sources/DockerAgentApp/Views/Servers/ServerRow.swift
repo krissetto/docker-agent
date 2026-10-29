@@ -13,10 +13,18 @@ struct ServerRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if server.connectionIssue == .identityChanged {
+                    Text("Identity changed. Edit and test to reconnect.")
+                        .font(.caption)
+                        .foregroundStyle(Palette.signalText)
+                        .lineLimit(2)
+                }
             }
         }
         .badge(server.sessionCount)
         .accessibilityElement(children: .combine)
-        .accessibilityValue("\(server.state.label), \(server.sessionCount) sessions")
+        .accessibilityValue(server.connectionIssue == .identityChanged
+                            ? "Server identity changed. Edit and test to reconnect. \(server.sessionCount) sessions"
+                            : "\(server.state.label), \(server.sessionCount) sessions")
     }
 }

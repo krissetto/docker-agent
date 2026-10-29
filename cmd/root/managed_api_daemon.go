@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,14 +100,34 @@ func (f *apiFlags) prepareManagedDaemon() (func(), error) {
 		m = previous
 	}
 	startup := m.Startup()
-	f.listenAddr = "127.0.0.1:0"
+	host, err := managedListenHost(f.managedAPIListenHost)
+	if err != nil {
+		return fail(err)
+	}
+	port := f.managedAPIListenPort
+	if port < 0 || port > 65535 {
+		return fail(errors.New("managed API listen port must be between 0 and 65535"))
+	}
 	if d, err := managedReadDescriptor(f.managedState); err == nil {
 		digest, _ := m.Digest()
 		if !managedValidAddress(d.Address) || d.Fingerprint != digest || d.Workspace != startup.Workspace || d.Source != startup.SourceKey {
 			return fail(errors.New("saved managed endpoint identity mismatch"))
 		}
-		f.listenAddr = strings.TrimPrefix(d.Address, "http://")
+		if port == 0 {
+			_, savedPort, splitErr := net.SplitHostPort(strings.TrimPrefix(d.Address, "http://"))
+			if splitErr != nil {
+				return fail(errors.New("saved managed endpoint has an invalid port"))
+			}
+			port, err = strconv.Atoi(savedPort)
+			if err != nil || port < 1 || port > 65535 {
+				return fail(errors.New("saved managed endpoint has an invalid port"))
+			}
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return fail(err)
+	}
+	f.listenAddr, err = managedListenerAddress(host, strconv.Itoa(port))
+	if err != nil {
 		return fail(err)
 	}
 	if f.fakeResponses != "" || f.recordPath != "" || f.pullIntervalMins != 0 {
@@ -147,11 +168,16 @@ func (f *apiFlags) serveManaged(ctx context.Context, s *server.Server, ln net.Li
 	if f.manifest == nil {
 		return s.Serve(ctx, ln)
 	}
+	address, err := managedDiscoveryAddress(ln.Addr())
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- s.Serve(serveCtx, ln) }()
-	d := managedDescriptor{Address: "http://" + ln.Addr().String(), InstanceID: identity.InstanceID, Fingerprint: identity.ConfigFingerprint, Workspace: identity.WorkspaceRoot, Source: identity.Source, PID: os.Getpid()}
+	d := managedDescriptor{Address: address, InstanceID: identity.InstanceID, Fingerprint: identity.ConfigFingerprint, Workspace: identity.WorkspaceRoot, Source: identity.Source, PID: os.Getpid()}
 	readyCtx, stop := context.WithTimeout(ctx, managedStartupTimeout)
 	defer stop()
 	for {

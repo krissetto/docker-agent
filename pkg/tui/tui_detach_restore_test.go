@@ -154,7 +154,17 @@ func TestActualProgramResetHydratesSameSessionCanonicalTree(t *testing.T) {
 			root := newSidebarProgramRoot(t, application)
 			_, _ = root.updateWithLifecycle(runtime.TeamInfo([]runtime.AgentDetails{{Name: "root"}, {Name: "worker"}, {Name: "reviewer"}}, "root"))
 			program := startTestProgram(t, root, &shellProgramModel{root: root}, tea.WithOutput(&cacheProgramWriter{}))
-			require.Contains(t, ansi.Strip(expandProgramSubagents(t, program, "RestoredGrandchild").content), "RestoredGrandchild")
+			frame := expandProgramSubagents(t, program, "RestoredChild")
+			childX, childY := sidebarProgramPoint(t, frame.content, "RestoredChild")
+			// Click just beyond the rendered identity: this is the child's own
+			// branch disclosure hit region, not its attach/name target.
+			branchX := childX + ansi.StringWidth("RestoredChild") + 1
+			program.Send(tea.MouseClickMsg{X: branchX, Y: childY, Button: tea.MouseLeft})
+			require.Eventually(t, func() bool {
+				return strings.Contains(ansi.Strip(sidebarProgramSnapshot(t, program).content), "RestoredGrandchild")
+			}, time.Second, time.Millisecond, "explicit child disclosure reveals its grandchild")
+			frame = sidebarProgramSnapshot(t, program)
+			require.Contains(t, ansi.Strip(frame.content), "RestoredGrandchild")
 			reset := session.New(session.WithID(sess.ID), session.WithAgentName("root"))
 			reset.AddMessage(session.UserMessage("RESET-TRANSCRIPT"))
 			program.Send(&app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: reset, Status: runtime.SessionStatus{SessionID: sess.ID, AgentName: "root", State: runtime.SessionStateSettled}}})

@@ -144,7 +144,7 @@ func (m *Model) buildRows() []row {
 	for ri := range snap.Repositories {
 		b.repository(ri)
 	}
-	if snap.Scope.Note != "" && !b.f.active() {
+	if snap.Scope.Note != "" && m.mode != ModeFiles && !b.f.active() {
 		b.note(snap.Scope.Note, 0, toneMuted)
 	}
 	if b.f.active() && len(b.rows) == 0 {

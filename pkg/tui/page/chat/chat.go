@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 	"github.com/docker/docker-agent/pkg/tui/commands"
@@ -30,6 +32,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
+	"github.com/docker/docker-agent/pkg/tui/types"
 	"github.com/docker/docker-agent/pkg/tui/widgets/help"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
@@ -158,9 +161,6 @@ type Page interface {
 	// section spacing, section visibility, and agent info mode) and
 	// relayouts the page.
 	SetLayoutSettings(settings msgtypes.LayoutSettings) tea.Cmd
-	// SetSendMode sets what happens to messages sent while the agent is
-	// working: steer into the ongoing stream or queue until the turn ends.
-	SetSendMode(mode msgtypes.SendMode)
 	// SetInterruptMode sets how Esc interrupts a running stream.
 	SetInterruptMode(mode msgtypes.InterruptMode)
 	// SetShowBanner controls whether the ASCII-art startup banner is drawn
@@ -219,20 +219,35 @@ type chatPage struct {
 	sidebarClickNow  func() time.Time
 
 	// State
-	working              bool
-	leanMode             bool
-	hideSidebar          bool
-	layoutSettings       msgtypes.LayoutSettings
-	splitSidebarSettings *SidebarSettings
-	contentOverlay       ContentOverlay
-	sendMode             msgtypes.SendMode
+	working                   bool
+	leanMode                  bool
+	compactWorkLog            bool
+	visibleReplies            msgtypes.VisibleReplies
+	rootScrollbarsActive      bool
+	mainContentInset          int
+	sidebarPresentationExtent int
+	hideSidebar               bool
+	layoutSettings            msgtypes.LayoutSettings
+	splitSidebarSettings      *SidebarSettings
+	contentOverlay            ContentOverlay
 
 	msgCancel       context.CancelFunc
 	cancel          context.CancelFunc
 	streamCancelled bool
 	// lifecycle owns nested stream and pending-turn transitions.
-	lifecycle   lifecycle.State
-	inputReplay lifecycle.InputReplay
+	lifecycle                    lifecycle.State
+	inputReplay                  lifecycle.InputReplay
+	backgroundProcesses          []tools.BackgroundProcess
+	backgroundProcessToolCalls   map[string]struct{}
+	backgroundLinkSession        *session.Session
+	backgroundLinkItemCount      int
+	backgroundLinkRevision       uint64
+	backgroundLinkProcesses      []tools.BackgroundProcess
+	backgroundLinkToolCallIDs    map[string]struct{}
+	backgroundLinkToolCallCounts map[string]int
+	backgroundLinkSeenPositions  map[int]struct{}
+	backgroundLinkCacheValid     bool
+	backgroundSidebarSeeded      bool
 	// ownedSkillOperation is the exact operation admitted by this page.
 	// Foreign journal lifecycle events never affect its busy boundary.
 	ownedSkillOperation string
@@ -299,6 +314,7 @@ type chatPage struct {
 	sidebarDragStartX     int  // X position when drag started
 	sidebarDragStartWidth int  // Sidebar preferred width when drag started
 	sidebarDragMoved      bool // True if mouse moved beyond threshold during drag
+	sidebarGrip           sidebarGripState
 
 	// appliedLayout is the layout geometry last pushed to child components by
 	// SetSize. Update compares it against the live layout to catch silent
@@ -316,6 +332,25 @@ type chatPage struct {
 // layout and rendering (lean mode or explicit --sidebar=false).
 func (p *chatPage) sidebarHidden() bool {
 	return p.leanMode || p.hideSidebar
+}
+
+// SetMainContentInset offsets screen-space hit geometry while the root renders
+// its single blank top row outside the page view.
+func (p *chatPage) SetMainContentInset(height int) {
+	height = max(0, height)
+	if p.mainContentInset == height {
+		return
+	}
+	p.mainContentInset = height
+	if p.width > 0 && p.height > 0 {
+		p.SetSize(p.width, p.height)
+	}
+}
+
+// SetSidebarPresentationExtent lets the full-TUI shell extend a vertical dock
+// beside its composer without changing the transcript's usable height.
+func (p *chatPage) SetSidebarPresentationExtent(height int) {
+	p.sidebarPresentationExtent = max(0, height)
 }
 
 // computeSidebarLayout calculates the layout based on current state.
@@ -422,22 +457,35 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 	pageCtx, cancel := context.WithCancel(ctx)
 	index := subagentindex.New()
 	p := &chatPage{
-		ar:                ar,
-		cancel:            cancel,
-		ctx:               func() context.Context { return context.WithoutCancel(ctx) },
-		sidebar:           sidebar.New(ar, pageCtx, sessionState),
-		messages:          messages.New(ar, sessionState, index),
-		subagents:         index,
-		app:               a,
-		keyMap:            defaultKeyMap(),
-		commandParser:     commands.NewParser(),
-		sessionState:      sessionState,
-		showStartupBanner: true,
+		ar:                   ar,
+		cancel:               cancel,
+		ctx:                  func() context.Context { return context.WithoutCancel(ctx) },
+		sidebar:              sidebar.New(ar, pageCtx, sessionState),
+		messages:             messages.New(ar, sessionState, index),
+		subagents:            index,
+		app:                  a,
+		keyMap:               defaultKeyMap(),
+		commandParser:        commands.NewParser(),
+		sessionState:         sessionState,
+		showStartupBanner:    true,
+		compactWorkLog:       true,
+		visibleReplies:       msgtypes.VisibleRepliesThree,
+		rootScrollbarsActive: true,
+		sidebarGrip:          newSidebarGripState(ar),
 	}
 
 	for _, opt := range opts {
 		opt(p)
 	}
+	if compact, ok := p.messages.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
+		compact.SetCompactWorkLog(p.compactWorkLog && !p.leanMode)
+	}
+	if replies, ok := p.messages.(interface {
+		SetVisibleReplies(policy msgtypes.VisibleReplies) tea.Cmd
+	}); ok {
+		_ = replies.SetVisibleReplies(p.visibleReplies)
+	}
+	p.applyScrollbarVisibility()
 
 	return p
 }
@@ -449,6 +497,27 @@ type PageOption func(*chatPage)
 func WithLeanMode() PageOption {
 	return func(p *chatPage) {
 		p.leanMode = true
+	}
+}
+
+// WithCompactWorkLog selects the grouped transcript presentation. Lean pages
+// always remain ungrouped, regardless of option order.
+func WithVisibleReplies(policy msgtypes.VisibleReplies) PageOption {
+	return func(p *chatPage) {
+		p.visibleReplies = msgtypes.ParseVisibleReplies(string(policy))
+	}
+}
+
+func WithCompactWorkLog(enabled bool) PageOption {
+	return func(p *chatPage) {
+		p.compactWorkLog = enabled
+	}
+}
+
+// WithAgentContextReadings shows each sidebar agent's context fill when enabled.
+func WithAgentContextReadings(enabled bool) PageOption {
+	return func(p *chatPage) {
+		p.sidebar.SetAgentContextReadings(enabled)
 	}
 }
 
@@ -485,14 +554,6 @@ func WithLayoutSettings(settings msgtypes.LayoutSettings) PageOption {
 		p.sidebar.SetSectionGap(settings.SectionSpacing.BlankLines())
 		p.sidebar.SetAgentInfoMode(agentInfoMode(settings.SidebarInfoMode))
 		p.sidebar.SetActiveAgentsOnly(settings.ActiveAgentsOnly)
-	}
-}
-
-// WithSendMode sets the initial behavior of messages sent while the agent
-// is working: steer into the ongoing stream or queue until the turn ends.
-func WithSendMode(mode msgtypes.SendMode) PageOption {
-	return func(p *chatPage) {
-		p.sendMode = mode
 	}
 }
 
@@ -615,7 +676,16 @@ func WatchGitBranch(page Page) tea.Cmd {
 func ClearSidebarHover(page Page) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
 		p.lastSidebarClick = sidebarClick{}
-		return tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearReferenceHover())
+		p.setSidebarGripHover(false, false)
+		return tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearPointerHover())
+	}
+	return nil
+}
+
+// ClearPointerHover releases every transcript-owned pointer target on a page.
+func ClearPointerHover(page Page) tea.Cmd {
+	if p, ok := page.(*chatPage); ok {
+		return p.messages.ClearPointerHover()
 	}
 	return nil
 }
@@ -623,7 +693,7 @@ func ClearSidebarHover(page Page) tea.Cmd {
 // SetSidebarPresentationActive prevents hidden updates from acquiring finite animation leases.
 func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
-		p.messages.SetReferencePresentationActive(active && !p.presentationHidden)
+		p.messages.SetReferencePresentationActive(!p.presentationHidden)
 		active = active && p.sidebarInteractive()
 		if !active {
 			p.lastSidebarClick = sidebarClick{}
@@ -632,16 +702,13 @@ func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 			return owner.SetPresentationActive(active)
 		}
 	}
-	if !active {
-		CancelSidebarPresentation(page)
-	}
 	return nil
 }
 
 // CancelSidebarPresentation releases finite presentation animations when a page is hidden.
 func CancelSidebarPresentation(page Page) {
 	if p, ok := page.(*chatPage); ok {
-		p.messages.CancelReferenceHover()
+		p.messages.CancelPointerHover()
 		switch presentation := p.sidebar.(type) {
 		case interface{ CancelPresentation() }:
 			presentation.CancelPresentation()
@@ -712,6 +779,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// update's timers may be collected after it.
 	p.pendingTimers = nil
 	if handled, cmd := p.overlayMouse(msg); handled {
+		if _, motion := msg.(tea.MouseMotionMsg); motion {
+			return p, tea.Batch(p.messages.ClearPointerHover(), cmd)
+		}
 		return p, cmd
 	}
 	if p.IsMessagesScrollbarDragging() {
@@ -722,9 +792,17 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			model, cmd := p.messages.Update(msg)
 			p.messages = model.(messages.Model)
 			if _, motion := msg.(tea.MouseMotionMsg); motion {
-				cmd = tea.Batch(cmd, p.sidebar.ClearSubagentHover())
+				cmd = tea.Batch(cmd, p.sidebar.ClearSubagentHover(), p.messages.ClearPointerHover())
 			}
 			return p, cmd
+		}
+	}
+	if tick, ok := msg.(animation.TickMsg); ok {
+		p.tickSidebarGrip(tick)
+		if !p.presentationHidden && !p.leanMode && p.rootScrollbarsActive {
+			if owner, ok := p.contentOverlay.(interface{ UpdateAnimation(msg tea.Msg) bool }); ok && owner.UpdateAnimation(tick) {
+				p.shellVisualGeneration++
+			}
 		}
 	}
 	switch msg := msg.(type) {
@@ -801,7 +879,7 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return p, nil
 
 	case steerSentMsg:
-		return p, notification.InfoCmd("Message sent to the working agent · /settings to queue instead")
+		return p, notification.InfoCmd("Message steered into the working agent")
 
 	case steerFailedMsg:
 		return p, notification.ErrorCmd(fmt.Sprintf("Could not attach the message to the running stream: %v", msg.err))
@@ -1024,7 +1102,7 @@ func (p *chatPage) renderSidebarHandle(height int) string {
 	if height <= 0 {
 		return ""
 	}
-	lines := make([]string, height)
+	lines := p.sidebarHandleLines(height)
 
 	expandGlyph, collapseGlyph := "«", "»"
 	if p.layoutSettings.SidebarPosition == msgtypes.SidebarLeft {
@@ -1036,18 +1114,78 @@ func (p *chatPage) renderSidebarHandle(height int) string {
 		glyph = expandGlyph
 	}
 	lines[0] = styles.MutedStyle.Render(glyph)
-	for i := 1; i < height; i++ {
-		lines[i] = " "
-	}
 
 	return strings.Join(lines, "\n")
+}
+
+// SetAgentContextReadings toggles the sidebar's per-agent context readings.
+func (p *chatPage) SetAgentContextReadings(enabled bool) {
+	p.sidebar.SetAgentContextReadings(enabled)
+}
+
+// SetCompactWorkLog toggles grouped transcript presentation; lean mode always disables it.
+func (p *chatPage) SetCompactWorkLog(enabled bool) tea.Cmd {
+	p.compactWorkLog = enabled
+	if owner, ok := p.messages.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
+		return owner.SetCompactWorkLog(enabled && !p.leanMode)
+	}
+	return nil
+}
+
+func (p *chatPage) SetVisibleReplies(policy msgtypes.VisibleReplies) tea.Cmd {
+	p.visibleReplies = msgtypes.ParseVisibleReplies(string(policy))
+	if owner, ok := p.messages.(interface {
+		SetVisibleReplies(policy msgtypes.VisibleReplies) tea.Cmd
+	}); ok {
+		return owner.SetVisibleReplies(p.visibleReplies)
+	}
+	return nil
+}
+
+// SetScrollbarsActive receives root page-focus visibility without changing model activity.
+func (p *chatPage) SetScrollbarsActive(active bool) {
+	p.rootScrollbarsActive = active
+	p.applyScrollbarVisibility()
+}
+
+func (p *chatPage) applyScrollbarVisibility() {
+	messagesActive := p.rootScrollbarsActive && !p.presentationHidden && !p.leanMode && p.contentOverlay == nil
+	if owner, ok := p.messages.(interface{ SetScrollbarsActive(active bool) }); ok {
+		owner.SetScrollbarsActive(messagesActive)
+	}
+	sidebarActive := p.rootScrollbarsActive && !p.presentationHidden && !p.sidebarHidden() &&
+		(p.splitPresentation == nil || p.splitPresentation.ShowSidebar)
+	if owner, ok := p.sidebar.(interface{ SetScrollbarActive(active bool) bool }); ok {
+		owner.SetScrollbarActive(sidebarActive)
+	}
+}
+
+// SetScrollbarPointer forwards absolute terminal coordinates to visible scrollable surfaces.
+func (p *chatPage) SetScrollbarPointer(x, y int) {
+	messagesX, messagesY := x, y
+	if !p.rootScrollbarsActive || p.presentationHidden || p.contentOverlay != nil || p.leanMode {
+		messagesX, messagesY = -1, -1
+	}
+	if owner, ok := p.messages.(interface{ SetScrollbarPointer(x, y int) }); ok {
+		owner.SetScrollbarPointer(messagesX, messagesY)
+	}
+	sidebarX, sidebarY := x, y
+	if !p.rootScrollbarsActive || p.presentationHidden || p.sidebarHidden() ||
+		(p.splitPresentation != nil && !p.splitPresentation.ShowSidebar) {
+		sidebarX, sidebarY = -1, -1
+	}
+	if owner, ok := p.sidebar.(interface{ SetScrollbarPointer(x, y int) bool }); ok {
+		owner.SetScrollbarPointer(sidebarX, sidebarY)
+	}
 }
 
 func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	p.width = width
 	p.height = height
 	if p.splitPresentation != nil {
-		return p.applySplitPresentation()
+		cmd := p.applySplitPresentation()
+		p.applyScrollbarVisibility()
+		return cmd
 	}
 
 	var cmds []tea.Cmd
@@ -1055,15 +1193,17 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	// Compute layout once and use it for all sizing
 	sl := p.computeSidebarLayout()
 	p.appliedLayout = sl
+	p.syncSidebarGrip()
 
 	switch sl.mode {
 	case sidebarVertical:
 		p.sidebar.SetMode(sidebar.ModeVertical)
 		p.sidebar.SetMirroredPadding(sl.sidebarOnLeft)
+		sidebarHeight := max(sl.chatHeight, p.sidebarPresentationExtent)
 		cmds = append(cmds,
-			p.sidebar.SetSize(sl.sidebarWidth-toggleColumnWidth, sl.chatHeight),
-			p.sidebar.SetPosition(styles.AppPadding+sl.sidebarStartX, 0),
-			p.messages.SetPosition(styles.AppPadding+sl.chatStartX, 0),
+			p.sidebar.SetSize(sl.sidebarWidth-toggleColumnWidth, sidebarHeight),
+			p.sidebar.SetPosition(styles.AppPadding+sl.sidebarStartX, p.mainContentInset),
+			p.messages.SetPosition(styles.AppPadding+sl.chatStartX, p.mainContentInset),
 		)
 	case sidebarCollapsed, sidebarCollapsedNarrow:
 		p.sidebar.SetMode(sidebar.ModeCollapsed)
@@ -1074,13 +1214,14 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 		}
 		cmds = append(cmds,
 			p.sidebar.SetSize(sl.sidebarWidth, sl.sidebarHeight),
-			p.sidebar.SetPosition(styles.AppPadding, sl.bandY()),
-			p.messages.SetPosition(styles.AppPadding, messagesY),
+			p.sidebar.SetPosition(styles.AppPadding, sl.bandY()+p.mainContentInset),
+			p.messages.SetPosition(styles.AppPadding, messagesY+p.mainContentInset),
 		)
 	}
 
 	cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight), p.reconcileSidebarLayout())
 	p.layoutOverlay()
+	p.applyScrollbarVisibility()
 
 	return tea.Batch(cmds...)
 }
@@ -1118,6 +1259,14 @@ func CancelResponse(page Page) (tea.Cmd, bool) {
 func CancelResponseIntent(page Page, cancel func() runtime.CancelOutcome) (tea.Cmd, bool) {
 	p, ok := page.(*chatPage)
 	if !ok || p.app == nil || cancel == nil || cancel() == runtime.CancelNotActive {
+		return nil, false
+	}
+	return p.finishCancelStream(true), true
+}
+
+func FinishCancelResponse(page Page, outcome runtime.CancelOutcome) (tea.Cmd, bool) {
+	p, ok := page.(*chatPage)
+	if !ok || p.app == nil || outcome == runtime.CancelNotActive {
 		return nil, false
 	}
 	return p.finishCancelStream(true), true
@@ -1168,7 +1317,8 @@ type skillAdmissionMsg struct {
 }
 
 // state they are processed immediately, steered into the ongoing stream, or
-// queued until the current turn ends.
+// queued until the current turn ends. Enter requests queueing; Alt+Enter
+// explicitly requests steering. Legacy FollowUp sends remain queued.
 func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// Handle "exit", "quit", and ":q" as special keywords to quit the session
 	// immediately, equivalent to the /exit slash command.
@@ -1215,22 +1365,20 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// Alt+Enter explicitly requests a separate end-of-turn follow-up. When the
-	// agent is idle there is no active turn to follow, so process it normally.
-	if msg.FollowUp && p.working && p.app != nil {
+	// While working, explicit Enter sends and legacy follow-ups enter the
+	// session-owned end-of-turn queue. Alt+Enter explicitly steers into the
+	// active turn; old busy_send_mode preferences never override these keys.
+	if msg.Queue || msg.FollowUp {
 		cmd := p.followUpResolved(classified)
 		return p, cmd
 	}
-
-	// While the agent is working, the configured send mode decides the
-	// default: steer injects the message into the ongoing stream; queue
-	// submits it to the session-owned FIFO for a later turn.
-	if msg.Queue || msgtypes.ParseSendMode(string(p.sendMode)) == msgtypes.SendModeQueue {
-		cmd := p.followUpResolved(classified)
+	if msg.Steer {
+		cmd := p.steerResolved(classified)
 		return p, cmd
 	}
 
-	cmd := p.steerResolved(classified)
+	// Non-composer callers retain the safe, queue-by-default behavior.
+	cmd := p.followUpResolved(classified)
 	return p, cmd
 }
 
@@ -1352,64 +1500,77 @@ func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attach
 	if sess == nil || position < 0 || position >= len(sess.Messages) {
 		return nil
 	}
-
 	item := sess.Messages[position]
-	if !item.IsMessage() || item.Message == nil {
+	if !item.IsMessage() || item.Message == nil || !lifecycle.IsUserInput(item.Message.InputOrigin) {
 		return nil
 	}
 
-	msg := item.Message.Message
-	if len(msg.MultiContent) <= 1 {
-		// No attachments - only the main text content or nothing
-		return nil
-	}
-
-	var attachments []msgtypes.Attachment
-	const legacyPrefix = "Contents of "
-
-	// Skip the first part (main text content), look for attachment parts
-	for i := 1; i < len(msg.MultiContent); i++ {
-		part := msg.MultiContent[i]
-
-		if part.Type == chat.MessagePartTypeDocument && part.Document != nil {
-			content := part.Document.Source.InlineText
-			data := part.Document.Source.InlineData
-			mimeType := part.Document.MimeType
-
-			if content != "" || len(data) > 0 {
-				attachments = append(attachments, msgtypes.Attachment{
-					Name:     part.Document.Name,
-					Content:  content,
-					MimeType: mimeType,
-					Data:     data,
-				})
+	parts := item.Message.Message.MultiContent
+	attachments := make([]msgtypes.Attachment, 0, len(parts))
+	storedText := make(map[string]struct{})
+	for _, part := range parts {
+		if part.Document == nil {
+			continue
+		}
+		doc := part.Document
+		name := doc.Name
+		if doc.Source.InlineText != "" {
+			for _, textPart := range parts {
+				if textPart.Type != chat.MessagePartTypeText || !strings.HasPrefix(textPart.Text, item.Message.Message.Content) {
+					continue
+				}
+				_, projected := types.ProjectUserAttachments(item.Message.Message.Content, []chat.MessagePart{textPart})
+				for _, attachment := range projected {
+					if attachment.Text == doc.Source.InlineText && attachment.SourcePath != "" {
+						name = attachment.SourcePath
+						break
+					}
+				}
+				break
 			}
-			continue
 		}
-
-		if part.Type != chat.MessagePartTypeText {
-			continue
-		}
-		text := part.Text
-		if !strings.HasPrefix(text, legacyPrefix) {
-			continue
-		}
-		// Parse "Contents of <filename>: <dataURL>"
-		rest := text[len(legacyPrefix):]
-		before, after, ok := strings.Cut(rest, ": ")
-		if !ok {
-			continue
-		}
-		filename := before
-		content := after
-		if filename != "" && content != "" {
+		if len(doc.Source.InlineData) > 0 {
 			attachments = append(attachments, msgtypes.Attachment{
-				Name:    filename,
-				Content: content,
+				Name: name, MimeType: doc.MimeType, Data: slices.Clone(doc.Source.InlineData),
+			})
+		} else if doc.Source.InlineText != "" {
+			storedText[doc.Source.InlineText] = struct{}{}
+			attachments = append(attachments, msgtypes.Attachment{
+				Name: name, MimeType: doc.MimeType, Content: doc.Source.InlineText,
 			})
 		}
 	}
-
+	for _, part := range parts {
+		if part.Type != chat.MessagePartTypeText || !strings.HasPrefix(part.Text, item.Message.Message.Content) {
+			continue
+		}
+		_, projected := types.ProjectUserAttachments(item.Message.Message.Content, []chat.MessagePart{part})
+		for _, attachment := range projected {
+			if attachment.SourcePath == "" || attachment.Text == "" {
+				continue
+			}
+			if _, exists := storedText[attachment.Text]; exists {
+				continue
+			}
+			// Structured inline-file tags carry their bytes as text; preserve the
+			// original path only as the attachment's name, never as an I/O request.
+			attachments = append(attachments, msgtypes.Attachment{
+				Name: attachment.SourcePath, Content: attachment.Text, MimeType: attachment.MediaType,
+			})
+		}
+		break
+	}
+	const legacyPrefix = "Contents of "
+	for _, part := range parts {
+		if part.Type != chat.MessagePartTypeText || !strings.HasPrefix(part.Text, legacyPrefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(part.Text, legacyPrefix)
+		name, content, ok := strings.Cut(rest, ": ")
+		if ok && name != "" && content != "" {
+			attachments = append(attachments, msgtypes.Attachment{Name: name, Content: content})
+		}
+	}
 	return attachments
 }
 
@@ -1594,11 +1755,6 @@ func (p *chatPage) SetLayoutSettings(settings msgtypes.LayoutSettings) tea.Cmd {
 	return p.SetSize(p.width, p.height)
 }
 
-// SetSendMode sets the behavior of messages sent while the agent is working.
-func (p *chatPage) SetSendMode(mode msgtypes.SendMode) {
-	p.sendMode = mode
-}
-
 func (p *chatPage) SetInterruptMode(mode msgtypes.InterruptMode) {
 	p.interruptMode = mode
 }
@@ -1610,9 +1766,15 @@ func (p *chatPage) SetShowBanner(show bool) {
 // SetRoutingID records the tab identity this page's routed UI timers are
 // addressed to. See Page.SetRoutingID.
 func (p *chatPage) SetRoutingID(id string) {
+	changed := p.routingID != id
 	p.routingID = id
 	if owner, ok := p.messages.(interface{ SetImagePreviewSessionID(string) }); ok {
 		owner.SetImagePreviewSessionID(id)
+	}
+	if changed {
+		if owner, ok := p.messages.(interface{ CancelImagePreviewClick() }); ok {
+			owner.CancelImagePreviewClick()
+		}
 	}
 }
 
@@ -1665,7 +1827,17 @@ func (p *chatPage) PointerTargetsMessages(x, y int) bool {
 		return !p.presentationHidden && g.Transcript.contains(x, y)
 	}
 	sl := p.computeSidebarLayout()
-	return !sl.isInBand(y) && (sl.mode != sidebarVertical || p.presentationSidebarSettings().Collapsed || !sl.isInSidebar(x-styles.AppPadding))
+	return y >= p.mainContentInset && !sl.isInBand(y-p.mainContentInset) && (sl.mode != sidebarVertical || p.presentationSidebarSettings().Collapsed || !sl.isInSidebar(x-styles.AppPadding))
+}
+
+// sidebarLocalPoint maps screen coordinates into the sidebar's own space. It
+// must match handleSidebarClickType: the root's blank top row is part of y, not
+// of the sidebar's rows, and the vertical sidebar starts after AppPadding.
+func (p *chatPage) sidebarLocalPoint(x, y int) (int, int) {
+	if g := p.splitPresentation; g != nil {
+		return x - g.Shell.Sidebar.X, y - g.Shell.Sidebar.Y
+	}
+	return x - styles.AppPadding - p.computeSidebarLayout().sidebarStartX, y - p.mainContentInset
 }
 
 // handleSidebarClickType checks what was clicked in the sidebar area.
@@ -1682,10 +1854,10 @@ func (p *chatPage) handleSidebarClickType(x, y int) (sidebar.ClickResult, string
 
 	switch sl.mode {
 	case sidebarCollapsedNarrow, sidebarCollapsed:
-		return p.sidebar.HandleClickType(adjustedX, sl.bandContentY(y))
+		return p.sidebar.HandleClickType(adjustedX, sl.bandContentY(y-p.mainContentInset))
 	case sidebarVertical:
 		if sl.isInSidebar(adjustedX) {
-			return p.sidebar.HandleClickType(adjustedX-sl.sidebarStartX, y)
+			return p.sidebar.HandleClickType(adjustedX-sl.sidebarStartX, y-p.mainContentInset)
 		}
 	}
 
@@ -1694,6 +1866,25 @@ func (p *chatPage) handleSidebarClickType(x, y int) (sidebar.ClickResult, string
 
 // routeMouseEvent routes mouse events to the appropriate component based on coordinates.
 func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
+	if p.splitPresentation == nil {
+		y := -1
+		switch event := msg.(type) {
+		case tea.MouseClickMsg:
+			y = event.Y
+		case tea.MouseMotionMsg:
+			y = event.Y
+		case tea.MouseReleaseMsg:
+			y = event.Y
+		case msgtypes.WheelCoalescedMsg:
+			y = event.Y
+		}
+		if y >= 0 && y < p.mainContentInset {
+			if _, motion := msg.(tea.MouseMotionMsg); motion {
+				return tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearPointerHover())
+			}
+			return nil
+		}
+	}
 	if p.splitPresentation != nil {
 		return p.routeSplitMouseEvent(msg)
 	}
@@ -1710,9 +1901,9 @@ func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 	}
 	adjustedX := x - styles.AppPadding
 	inSidebar := sl.mode == sidebarVertical && !p.presentationSidebarSettings().Collapsed && sl.isInSidebar(adjustedX)
-	inBand := !p.hideSidebar && !p.leanMode && sl.isInBand(y) && adjustedX >= 0 && adjustedX < sl.innerWidth
+	inBand := !p.hideSidebar && !p.leanMode && sl.isInBand(y-p.mainContentInset) && adjustedX >= 0 && adjustedX < sl.innerWidth
 	if inSidebar || inBand {
-		p.messages.ClearReferenceHover()
+		p.messages.ClearPointerHover()
 		model, cmd := p.sidebar.Update(msg)
 		p.sidebar = model.(sidebar.Model)
 		return cmd
@@ -1721,7 +1912,7 @@ func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 	// Motion left the sidebar: preserve the finite hover-exit command.
 	var hoverCmd tea.Cmd
 	if _, ok := msg.(tea.MouseMotionMsg); ok {
-		hoverCmd = p.sidebar.ClearSubagentHover()
+		hoverCmd = tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearPointerHover())
 	}
 
 	model, cmd := p.messages.Update(msg)
@@ -1763,6 +1954,9 @@ func (p *chatPage) FocusMessageAt(x, y int) tea.Cmd {
 // BlurMessages removes focus from the messages panel
 func (p *chatPage) BlurMessages() {
 	p.messages.Blur()
+	if owner, ok := p.messages.(interface{ CancelImagePreviewClick() }); ok {
+		owner.CancelImagePreviewClick()
+	}
 }
 
 // ScrollToBottom scrolls the messages viewport to the bottom if auto-scroll is active.

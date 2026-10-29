@@ -48,6 +48,8 @@ extension SessionControlsProjection {
 
 struct SessionInspector: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.dismiss) private var dismiss
     let session: OpenSessionProjection
     let controls: SessionControlsProjection?
     @Binding var tab: InspectorTab
@@ -58,16 +60,24 @@ struct SessionInspector: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Inspector", selection: $tab) {
-                ForEach(tabs) { tab in
-                    Image(systemName: tab.symbol)
-                        .accessibilityLabel(tab.rawValue)
-                        .help(tab.rawValue)
-                        .tag(tab)
+            HStack(spacing: Metrics.m) {
+                Picker("Inspector", selection: $tab) {
+                    ForEach(tabs) { tab in
+                        Image(systemName: tab.symbol)
+                            .accessibilityLabel(tab.rawValue)
+                            .help(tab.rawValue)
+                            .tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                // On iPhone the inspector is a sheet; give it a visible way out besides the swipe.
+                if sizeClass == .compact {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                        .accessibilityIdentifier("inspector.done")
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .padding(Metrics.m)
             if let controls, controls.isReadOnly {
                 Label(controls.historical ? "Read-only history" : "Execution unavailable", systemImage: "lock")
@@ -75,12 +85,12 @@ struct SessionInspector: View {
                     .foregroundStyle(.secondary)
                     .padding(.bottom, Metrics.s)
             }
-            Text(tab.rawValue)
-                .font(.headline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Metrics.l)
-            switch tabs.contains(tab) ? tab : .agents {
-            case .agents: AgentsInspector(session: session, tree: controls?.agentTree.nonEmpty ?? session.agentTree, canStop: controls?.allows(SessionCapability.stopSubtree) == true)
+            let shown = tabs.contains(tab) ? tab : .agents
+            if shown != .agents {
+                InspectorHeader(title: shown.rawValue)
+            }
+            switch shown {
+            case .agents: AgentsInspector(session: session, tree: session.agentTree.nonEmpty ?? controls?.agentTree.nonEmpty ?? [], canStop: controls?.allows(SessionCapability.stopSubtree) == true)
             case .todos: todos
             case .safety: SafetyTab(ref: session.ref, readOnly: controls?.isReadOnly ?? false)
             case .tools: ToolsTab(ref: session.ref, readOnly: controls?.isReadOnly ?? false)
@@ -119,44 +129,141 @@ extension Array {
     var nonEmpty: Self? { isEmpty ? nil : self }
 }
 
+extension SessionToolsetProjection {
+    /// Servers sometimes report a Go type ("*subagent.ToolSet") instead of a toolset name.
+    /// Show the package as a plain word; `name` stays raw because restart keys on it.
+    var displayName: String {
+        var raw = name.trimmingCharacters(in: .whitespaces)
+        guard raw.hasPrefix("*") || raw.lowercased().hasSuffix(".toolset") else { return raw }
+        raw = String(raw.drop(while: { $0 == "*" }))
+        if let dot = raw.lastIndex(of: "."), raw[raw.index(after: dot)...].lowercased() == "toolset" {
+            raw = String(raw[..<dot])
+        }
+        if let slash = raw.lastIndex(of: "/") { raw = String(raw[raw.index(after: slash)...]) }
+        switch raw.lowercased() {
+        case "subagent", "subagents": return "Sub-agents"
+        case "": return name
+        default: return raw.prefix(1).uppercased() + raw.dropFirst()
+        }
+    }
+}
+
+/// Tab title on the text edge; the subtitle states the tab's situation in words, the trailing slot holds its one control.
+private struct InspectorHeader<Trailing: View>: View {
+    let title: String
+    var subtitle: String? = nil
+    @ViewBuilder var trailing: () -> Trailing
+
+    init(title: String, subtitle: String? = nil, @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
+        self.title = title
+        self.subtitle = subtitle
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.s) {
+            VStack(alignment: .leading, spacing: Metrics.xxs) {
+                Text(title).font(.headline)
+                if let subtitle {
+                    Text(subtitle).font(.rowDetail).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: Metrics.s)
+            trailing()
+        }
+        .padding(.horizontal, Metrics.l)
+        .padding(.bottom, Metrics.s)
+    }
+}
+
 private struct AgentsInspector: View {
     @Environment(AppModel.self) private var model
     let session: OpenSessionProjection
     let tree: [AgentNodeProjection]
     var canStop = false
     @Environment(\.openSession) private var openSession
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.dismiss) private var dismiss
     @State private var inspecting: InspectTarget?
+    @State private var pendingOpen: AgentNodeProjection?
+    @State private var presentation: AgentPresentation = .list
+    @State private var openError: String?
     @State private var stopping: AgentNodeProjection?
     @State private var stopRequested: Set<String> = []
     @State private var stopError: String?
+    @State private var collapsed: Set<String> = []
+
+    private enum AgentPresentation: String, CaseIterable {
+        case list = "List", map = "Map"
+        var symbol: String { self == .list ? "list.bullet.indent" : "point.3.connected.trianglepath.dotted" }
+    }
 
     private struct InspectTarget: Identifiable {
         let agent: String
         var id: String { agent }
     }
 
+    /// Display-only "here" marker; see `currentNodeID(for:agentName:)` for the uniqueness guard.
+    private var currentNodeID: String? { tree.currentNodeID(for: session.ref, agentName: session.agentName) }
+
+    private func isCurrent(_ node: AgentNodeProjection) -> Bool {
+        node.session == session.ref || node.id == currentNodeID
+    }
+
     var body: some View {
-        List {
-            if tree.isEmpty {
-                row(name: session.agentName, ref: nil) {
-                    AgentNodeRow(name: session.agentName, state: session.state, needsAttention: !session.interactions.isEmpty, isCurrent: true)
-                }
-            } else {
-                OutlineGroup(tree, children: \.childrenOrNil) { node in
-                    row(name: node.agentName, ref: node.session, node: node) {
-                        AgentNodeRow(name: node.agentName, state: node.state, needsAttention: node.needsAttention, isCurrent: node.session == session.ref, waitingOn: stopRequested.contains(node.id) && node.state.isActive ? "stopping…" : node.waitingOn, cost: node.cost)
+        VStack(spacing: 0) {
+            let tally = TeamTally(tree)
+            InspectorHeader(title: tree.isEmpty ? "Agents" : tally.title, subtitle: tree.isEmpty ? nil : tally.sentence) {
+                if !tree.isEmpty {
+                    Picker("Team view", selection: $presentation) {
+                        ForEach(AgentPresentation.allCases, id: \.self) { view in
+                            Image(systemName: view.symbol).accessibilityLabel(view.rawValue).help(view.rawValue).tag(view)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
                 }
             }
+            if tree.isEmpty {
+                ContentUnavailableView("No agents yet", systemImage: "person.2", description: Text("Sub-agents appear here when \(session.agentName.nonEmpty ?? "the agent") delegates work."))
+            } else if presentation == .map {
+                TeamTreeMap(roots: tree, currentSession: session.ref, currentID: currentNodeID, canStop: canStop,
+                            onInspect: { inspecting = InspectTarget(agent: $0.agentName) },
+                            onOpen: requestOpen,
+                            onStop: canStop ? { stopping = $0 } : nil)
+            } else {
+                List {
+                    AgentOutlineRows(nodes: tree, collapsed: $collapsed) { node in
+                        row(name: node.agentName, ref: node.session, node: node, isCurrent: isCurrent(node)) {
+                            AgentNodeRow(node: node, isCurrent: isCurrent(node), stopping: stopRequested.contains(node.id) && node.state.isActive)
+                        }
+                    }
+                }
+                .listStyle(.sidebar)
+            }
         }
-        .listStyle(.sidebar)
         .sheet(item: $inspecting) { target in
             AgentDetailsSheet(ref: session.ref, agent: target.agent)
+        }
+        .confirmationDialog("Open \(pendingOpen?.agentName ?? "agent")?", isPresented: Binding(get: { pendingOpen != nil }, set: { if !$0 { pendingOpen = nil } }), titleVisibility: .visible, presenting: pendingOpen) { node in
+            // Identifiers carry the node id (not the title) so automation can prove which agent is being opened.
+            Button("Open Session") { openConfirmed(node) }
+                .accessibilityIdentifier("team.attach.confirm.\(node.id)")
+        } message: { node in
+            Text("This opens the existing \(node.agentName) session after the server confirms its identity and team ancestry. Existing agent work continues; no new agent or work is started.")
+                .accessibilityIdentifier("team.attach.target.\(node.session.map { "\($0.serverID.uuidString).\($0.sessionID)" } ?? "none")")
         }
         .confirmationDialog(stopTitle, isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }), titleVisibility: .visible, presenting: stopping) { node in
             Button("Stop", role: .destructive) { stop(node) }
         } message: { node in
             Text(stopMessage(node))
+        }
+        .alert("Couldn't Open Session", isPresented: Binding(get: { openError != nil }, set: { if !$0 { openError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(openError ?? "")
         }
         .alert("Couldn't Stop", isPresented: Binding(get: { stopError != nil }, set: { if !$0 { stopError = nil } })) {
             Button("OK", role: .cancel) {}
@@ -186,6 +293,23 @@ private struct AgentsInspector: View {
         return "Stops this agent and everything it started. Its parent and other agents keep running. History is kept."
     }
 
+    private func requestOpen(_ node: AgentNodeProjection) {
+        guard node.session != nil, node.session != session.ref else { return }
+        pendingOpen = node
+    }
+
+    private func openConfirmed(_ node: AgentNodeProjection) {
+        pendingOpen = nil
+        guard let ref = node.session, ref.serverID == session.ref.serverID else {
+            openError = "This agent has no attachable session on the current server."
+            return
+        }
+        // On iPhone the inspector is a sheet owned by the current SessionView, which stays in the
+        // navigation stack after the push; dismiss it first or it keeps covering the opened child.
+        if sizeClass == .compact { dismiss() }
+        openSession(ref)
+    }
+
     private func stop(_ node: AgentNodeProjection) {
         stopRequested.insert(node.id)
         Task {
@@ -198,15 +322,28 @@ private struct AgentsInspector: View {
         }
     }
 
-    private func row(name: String, ref: SessionRef?, node: AgentNodeProjection? = nil, @ViewBuilder label: () -> some View) -> some View {
-        HStack(spacing: Metrics.xs) {
-            Button {
-                if let ref, ref != session.ref { openSession(ref) }
-            } label: {
+    private func row(name: String, ref: SessionRef?, node: AgentNodeProjection? = nil, isCurrent: Bool = false, @ViewBuilder label: () -> some View) -> some View {
+        let attachable = ref != nil && ref != session.ref && !isCurrent
+        // Stable per-node identifiers: names repeat across a team, ids do not. Attachable rows also carry
+        // the session ref they would open, so automation can match it against the opened session.
+        let nodeID = node?.id ?? ref?.sessionID ?? name
+        let target = ref.map { "\($0.serverID.uuidString).\($0.sessionID)" } ?? ""
+        return HStack(spacing: Metrics.xs) {
+            // A plain label for agents that can't be opened keeps them readable; disabled buttons would dim them.
+            // Only attachable rows expose "teamlist.node.<id>" as a button; others are labels.
+            if attachable {
+                Button {
+                    if let node { requestOpen(node) }
+                    else if let ref { pendingOpen = AgentNodeProjection(id: ref.sessionID, session: ref, agentName: name) }
+                } label: {
+                    label()
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("teamlist.node.\(nodeID).session.\(target)")
+            } else {
                 label()
+                    .accessibilityIdentifier("teamlist.label.\(nodeID)")
             }
-            .buttonStyle(.plain)
-            .disabled(ref == nil || ref == session.ref)
             Button {
                 inspecting = InspectTarget(agent: name)
             } label: {
@@ -215,15 +352,42 @@ private struct AgentsInspector: View {
             .buttonStyle(.borderless)
             .help("Inspect \(name)")
             .accessibilityLabel("Inspect \(name)")
+            .accessibilityIdentifier("teamlist.inspect.\(nodeID)")
         }
+        // Keep the attach and Inspect actions as separate VoiceOver/automation elements inside List rows.
+        .accessibilityElement(children: .contain)
         .contextMenu {
             Button("Inspect", systemImage: "info.circle") { inspecting = InspectTarget(agent: name) }
-            if let ref, ref != session.ref {
-                Button("Open Session", systemImage: "arrow.right.circle") { openSession(ref) }
+            if attachable, let ref {
+                Button("Open Session…", systemImage: "arrow.right.circle") { if let node { requestOpen(node) } else { pendingOpen = AgentNodeProjection(id: ref.sessionID, session: ref, agentName: name) } }
             }
             if canStop, let node, node.session != nil, node.state.isActive {
                 Divider()
                 Button("Stop…", systemImage: "stop.circle", role: .destructive) { stopping = node }
+            }
+        }
+    }
+}
+
+/// Outline that starts fully expanded so the whole team is visible on a phone; groups stay collapsible.
+private struct AgentOutlineRows<Row: View>: View {
+    let nodes: [AgentNodeProjection]
+    @Binding var collapsed: Set<String>
+    @ViewBuilder let row: (AgentNodeProjection) -> Row
+
+    var body: some View {
+        ForEach(nodes) { node in
+            if node.children.isEmpty {
+                row(node)
+            } else {
+                DisclosureGroup(isExpanded: Binding(
+                    get: { !collapsed.contains(node.id) },
+                    set: { expanded in if expanded { collapsed.remove(node.id) } else { collapsed.insert(node.id) } }
+                )) {
+                    AgentOutlineRows(nodes: node.children, collapsed: $collapsed, row: row)
+                } label: {
+                    row(node)
+                }
             }
         }
     }
@@ -318,35 +482,40 @@ private struct ToolsTab: View {
 }
 
 private struct AgentNodeRow: View {
-    let name: String
-    let state: SessionState
-    let needsAttention: Bool
+    let node: AgentNodeProjection
     let isCurrent: Bool
-    // Populated once the tree projection carries them; hidden while nil.
-    var waitingOn: String? = nil
-    var cost: Double? = nil
+    var stopping = false
+
+    private var state: TeamState { TeamState(node) }
+    /// Quiet agents keep only their icon; words are spent on who is acting or asking.
+    private var detail: String? {
+        if stopping { return "Stopping" }
+        return state.isQuiet && node.waitingOn == nil ? nil : node.teamDetail
+    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Metrics.s) {
-            AgentDot(name: name)
+            AgentDot(name: node.agentName)
             VStack(alignment: .leading, spacing: 1) {
-                Text(name).fontWeight(isCurrent ? .semibold : .regular)
-                if let waitingOn, !waitingOn.isEmpty {
-                    Text(waitingOn.capitalized)
-                        .font(.caption)
-                        .foregroundStyle(waitingOn == "failed" ? .red : .orange)
+                Text(node.agentName)
+                    .font(isCurrent ? .rowTitle : .body)
+                    .foregroundStyle(state.isQuiet && !isCurrent ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                if let detail {
+                    Text(detail).font(.rowDetail).foregroundStyle(stopping ? AnyShapeStyle(.secondary) : AnyShapeStyle(state.tint))
                 }
             }
             Spacer()
-            if let cost, cost > 0 {
-                Text(Format.cost(cost))
-                    .font(.caption.monospacedDigit())
+            if node.cost > 0 {
+                Text(Format.cost(node.cost))
+                    .font(.monoSmall.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            if needsAttention && waitingOn == nil {
-                Image(systemName: "hand.raised.fill").foregroundStyle(.orange).accessibilityLabel("Needs you")
+            if isCurrent {
+                Text("here").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                    .padding(.horizontal, Metrics.xs).background(.fill.tertiary, in: .capsule)
+                    .accessibilityLabel("This session")
             }
-            StateIcon(state: state).font(.caption)
+            StateIcon(state: node.state).font(.caption)
         }
         .accessibilityElement(children: .combine)
     }

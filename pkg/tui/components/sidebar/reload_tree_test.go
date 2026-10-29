@@ -46,6 +46,7 @@ func TestReloadAuthoritativeRootTopologyAndNestedActions(t *testing.T) {
 
 func assertReloadTreeActions(t *testing.T, m *model) {
 	t.Helper()
+	testOpenAllSubagentBranches(m)
 	view := ansi.Strip(m.View())
 	assert.Contains(t, view, "worker")
 	assert.Contains(t, view, "reviewer")

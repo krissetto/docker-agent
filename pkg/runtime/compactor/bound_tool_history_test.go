@@ -18,11 +18,11 @@ import (
 func TestCompactorBoundsHistoricalResultWithoutChangingHistory(t *testing.T) {
 	t.Parallel()
 	payload := strings.Repeat("世", 1_000_000) + "diagnostic tail"
-	sess := session.New(session.WithUserMessage("inspect the job"))
+	sess := session.New(session.WithUserMessage("inspect the old item"))
 	presentation := []chat.AssistantPart{{Type: chat.AssistantPartToolCall, ToolCallID: "old-call"}}
 	sess.AddMessage(&session.Message{Message: chat.Message{
 		Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "old-call", Function: tools.FunctionCall{Name: "logs"}}},
-		ToolDefinitions: []tools.Tool{{Name: "logs", Category: "background_jobs"}}, Presentation: presentation,
+		ToolDefinitions: []tools.Tool{{Name: "logs", Category: "shell"}}, Presentation: presentation,
 	}})
 	sess.AddMessage(&session.Message{Message: chat.Message{
 		Role: chat.MessageRoleTool, ToolCallID: "old-call", Content: payload, IsError: true,

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1453,9 +1454,11 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 	t.Parallel()
 
 	// helperDrained closes when worker's subagent_stop hook fires (the
-	// nested helper sub-session fully drained); it gates worker's final
-	// turn. workerDrained closes when root's subagent_stop hook fires (the
-	// worker sub-session fully drained); it gates the test's progress.
+	// nested helper sub-session fully drained). It no longer gates worker's
+	// final turn: that turn is gated on the canonical helper report in its
+	// model input (see nestedReportIn). workerDrained closes when root's
+	// subagent_stop hook fires (the worker sub-session fully drained); it
+	// gates the test's progress.
 	helperDrained := make(chan struct{})
 	workerDrained := make(chan struct{})
 
@@ -1467,16 +1470,16 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 			Build(),
 		newStreamBuilder().AddContent("dispatched worker").AddStopWithUsage(10, 5).Build(),
 	}}
-	// The release gate makes worker's final turn wait until the nested
-	// helper task has drained — a deterministic stand-in for the "poll
-	// until done" turns a real model would issue.
-	workerProv := &stepProvider{id: "test/mock-model", steps: []providerStep{
+	// The gated step makes worker's final turn wait until the helper report
+	// is in the model input of the call it serves. Steering cancels a call
+	// that is still waiting, and the requeued step then serves the next call.
+	workerProv := &nestedWorkerProvider{stepProvider: &stepProvider{id: "test/mock-model"}, steps: []nestedWorkerStep{
 		{stream: newStreamBuilder().
 			AddToolCallName("call_run_helper", agenttool.ToolNameRunBackgroundAgent).
 			AddToolCallArguments("call_run_helper", `{"agent":"helper","task":"do the nested work"}`).
 			AddToolCallStopWithUsage(10, 5).
 			Build()},
-		{release: helperDrained, stream: newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build()},
+		{gated: true, stream: newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build()},
 	}}
 	helperProv := &mockProvider{
 		id:     "test/mock-model",
@@ -1673,6 +1676,149 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 
 	assert.Equal(t, "root", rt.currentAgent().Name(),
 		"the shared current agent must still be root after the whole chain")
+}
+
+// nestedWorkerStep is one scripted model call for the nested test's worker. A
+// gated step returns its stream only once the helper report is in the model
+// input of the call it serves (see nestedReportIn); until then the call blocks.
+type nestedWorkerStep struct {
+	stream chat.MessageStream
+	gated  bool
+}
+
+// nestedWorkerProvider is this test's worker model only; the shared
+// stepProvider is untouched. The helper report reaches the model input only
+// after it is drained into the worker's transcript, so the gate is the model's
+// own input, not an event or a timing signal. A gated call that is canceled
+// before it returns anything puts its step back at the head of the queue.
+type nestedWorkerProvider struct {
+	*stepProvider
+
+	qmu   sync.Mutex
+	steps []nestedWorkerStep
+}
+
+// nestedReportHead and nestedReportTail are the canonical helper report, as
+// childTurnReport builds it (session_coordination.go): a user message reading
+// `Subagent "helper" (<id>) finished its turn. Full response: "nested helper done"`.
+const (
+	nestedReportHead = `Subagent "helper" (`
+	nestedReportTail = `finished its turn. Full response: "nested helper done"`
+)
+
+// nestedGateDeadline bounds how long a gated call may block. Hitting it fails
+// the test loudly rather than hanging.
+const nestedGateDeadline = 10 * time.Second
+
+// nestedReportIn reports whether the model input carries the canonical helper
+// report as a user message. The helper's tool result and system text cannot match.
+func nestedReportIn(messages []chat.Message) bool {
+	for _, m := range messages {
+		if m.Role == chat.MessageRoleUser && strings.Contains(m.Content, nestedReportHead) && strings.Contains(m.Content, nestedReportTail) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *nestedWorkerProvider) CreateChatCompletionStream(ctx context.Context, messages []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	p.qmu.Lock()
+	if len(p.steps) == 0 {
+		p.qmu.Unlock()
+		return &mockStream{}, nil
+	}
+	step := p.steps[0]
+	p.steps = p.steps[1:]
+	p.qmu.Unlock()
+
+	if step.gated && !nestedReportIn(messages) {
+		timer := time.NewTimer(nestedGateDeadline)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			// Canceled before any content was returned: the step is unconsumed.
+			p.requeue(step)
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, fmt.Errorf("worker call never received the helper report within %s", nestedGateDeadline)
+		}
+	}
+	inner := step.stream
+	if inner == nil {
+		inner = &mockStream{}
+	}
+	s := &nestedRequeueStream{MessageStream: inner, p: p, step: step}
+	s.idle = sync.NewCond(&s.mu)
+	return s, nil
+}
+
+// requeue puts step back at the head of the queue so the next call serves it.
+func (p *nestedWorkerProvider) requeue(step nestedWorkerStep) {
+	p.qmu.Lock()
+	p.steps = append([]nestedWorkerStep{step}, p.steps...)
+	p.qmu.Unlock()
+}
+
+// nestedRequeueStream requeues a scripted step at most once, and only when it
+// is closed with zero chunks read. A chunk that was returned is never replayed.
+// Close waits for an in-flight Recv (sync.Cond releases the mutex while it
+// waits), so a Recv cannot race with the requeue claim. Recv after Close returns
+// io.EOF without reading. The wait is safe only because the inner stream here is
+// the test's mockStream, whose Recv never blocks. Do not reuse this wrapper for a
+// blocking stream.
+type nestedRequeueStream struct {
+	chat.MessageStream
+
+	p         *nestedWorkerProvider
+	step      nestedWorkerStep
+	mu        sync.Mutex
+	idle      *sync.Cond
+	inFlight  int
+	delivered bool
+	closed    bool
+	requeued  bool
+}
+
+func (s *nestedRequeueStream) Recv() (chat.MessageStreamResponse, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return chat.MessageStreamResponse{}, io.EOF
+	}
+	s.inFlight++
+	s.mu.Unlock()
+
+	resp, err := s.MessageStream.Recv()
+
+	s.mu.Lock()
+	s.inFlight--
+	if err == nil {
+		s.delivered = true
+	}
+	s.idle.Broadcast()
+	s.mu.Unlock()
+	return resp, err
+}
+
+func (s *nestedRequeueStream) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	for s.inFlight > 0 {
+		s.idle.Wait()
+	}
+	eligible := !s.delivered && !s.requeued && (s.step.stream != nil || s.step.gated)
+	if eligible {
+		s.requeued = true
+	}
+	s.mu.Unlock()
+	if eligible {
+		s.p.requeue(s.step)
+	}
+	s.MessageStream.Close()
 }
 
 func TestBackgroundElicitationNotesUseCanonicalMarker(t *testing.T) {

@@ -21,14 +21,28 @@ import (
 
 func newDriverTestRuntime(t *testing.T) *LocalRuntime {
 	t.Helper()
+	// Cleanups capture the resources created here, never the mutable fields,
+	// which tests may replace (for example, with a nil store).
+	store := session.NewInMemorySessionStore()
 	r := &LocalRuntime{
-		ctx:    func() context.Context { return context.WithoutCancel(t.Context()) },
-		policy: DefaultSessionResourcePolicy(),
+		ctx:          func() context.Context { return context.WithoutCancel(t.Context()) },
+		policy:       DefaultSessionResourcePolicy(),
+		now:          time.Now,
+		telemetry:    defaultTelemetry{},
+		sessionStore: store,
+		fallback:     newFallbackExecutor(),
 	}
+	r.fallback.cooldowns = newCooldownManager(r.now)
+	r.fallback.telemetry = r.telemetry
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	r.applyResourcePolicy()
 	r.sessionEvents = newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes)
-	r.sessionDrivers = newSessionDriverRegistry(r)
-	t.Cleanup(func() { require.NoError(t, r.sessionDrivers.CloseContext(context.WithoutCancel(t.Context()))) })
+	drivers := newSessionDriverRegistry(r)
+	r.sessionDrivers = drivers
+	subagents := newSubagentManager(r)
+	r.subagents = subagents
+	t.Cleanup(subagents.Close)
+	t.Cleanup(func() { require.NoError(t, drivers.CloseContext(context.WithoutCancel(t.Context()))) })
 	return r
 }
 
@@ -65,8 +79,8 @@ func TestDeliverMessageSteersIntoLiveSessionLoop(t *testing.T) {
 	d.openSettledLocked()
 	d.mu.Unlock()
 
-	assert.True(t, r.sessionDrivers.PostKnown(t.Context(), "sess", QueuedMessage{Content: "note-1"}, false))
-	assert.True(t, r.sessionDrivers.PostKnown(t.Context(), "sess", QueuedMessage{Content: "note-2"}, false))
+	assert.True(t, r.sessionDrivers.PostKnown(t.Context(), "sess", QueuedMessage{Content: "note-1", InputMode: "steer"}, false))
+	assert.True(t, r.sessionDrivers.PostKnown(t.Context(), "sess", QueuedMessage{Content: "note-2", InputMode: "steer"}, false))
 
 	steered := r.drainSessionSteer("sess")
 	require.Len(t, steered, 2)

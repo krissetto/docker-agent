@@ -216,8 +216,8 @@ func TestReferenceHoverOccurrenceAndCanonicalCollisionIsolation(t *testing.T) {
 func TestReferenceHoverClippedScrollDragAndImmediateExit(t *testing.T) {
 	m := referenceFixture(t, "reply", 18)
 	hoverLastReferenceCell(t, m)
-	m.ClearReferenceHover()
-	require.False(t, m.ar.HasActive(), "exit before the first frame has nothing to animate")
+	m.CancelPointerHover()
+	require.False(t, m.referenceHoverAnimation.IsActive(), "exit before the first frame has nothing to animate")
 	require.Empty(t, m.referenceHoverValues)
 	m.SetSize(18, 4)
 	m.setScrollOffset(1)

@@ -70,6 +70,14 @@ type Settings struct {
 	// ExpandThinking expands reasoning/tool blocks in the TUI by default.
 	// Defaults to false when not set.
 	ExpandThinking *bool `yaml:"expand_thinking,omitempty"`
+	// CompactWorkLog groups intermediate activity in the full TUI. Defaults to true.
+	CompactWorkLog *bool `yaml:"compact_work_log,omitempty"`
+	// ShowAgentContext shows each agent's context-window fill in the sidebar.
+	// Defaults to false.
+	ShowAgentContext bool `yaml:"show_agent_context,omitempty"`
+	// VisibleReplies limits regular assistant replies retained in the transcript;
+	// defaults to the latest three.
+	VisibleReplies string `yaml:"visible_replies,omitempty"`
 	// SplitDiffView enables side-by-side split diff rendering for file edits.
 	// Defaults to true when not set.
 	SplitDiffView *bool `yaml:"split_diff_view,omitempty"`
@@ -93,10 +101,10 @@ type Settings struct {
 	// resolving to ThemeDark or ThemeLight.
 	Theme string `yaml:"theme,omitempty"`
 	// ThemeDark is the theme applied when Theme is "auto" and the terminal
-	// background is dark. Defaults to "default".
+	// background is dark. Defaults to "docker-next-dark".
 	ThemeDark string `yaml:"theme_dark,omitempty"`
 	// ThemeLight is the theme applied when Theme is "auto" and the terminal
-	// background is light. Defaults to "default-light".
+	// background is light. Defaults to "docker-next-light".
 	ThemeLight string `yaml:"theme_light,omitempty"`
 	// YOLO enables auto-approve mode for all tool calls globally. Legacy
 	// alias for Safety: autonomous; when both are set, Safety wins.
@@ -145,9 +153,8 @@ type Settings struct {
 	// Panel customizes the independent bottom panel. Unset uses defaults;
 	// an explicitly empty elements list disables the panel.
 	Panel *PanelSettings `yaml:"panel,omitempty"`
-	// BusySendMode controls what happens to messages sent while the agent is
-	// working: "queue" (default) holds them until the current turn ends,
-	// "steer" injects them into the ongoing stream. Managed via /settings.
+	// BusySendMode is retained for config compatibility. TUI send routing is
+	// now explicit: Enter queues while busy and Alt+Enter steers.
 	BusySendMode string `yaml:"busy_send_mode,omitempty"`
 	// InterruptConfirmation controls how Esc interrupts a running stream:
 	// "always" (default) shows a confirmation dialog, "double-tap" requires
@@ -204,6 +211,8 @@ type LayoutSettings struct {
 	HideTools bool `yaml:"hide_tools,omitempty"`
 	// HideTodos hides the todo list section in the sidebar.
 	HideTodos bool `yaml:"hide_todos,omitempty"`
+	// AlignInputWithMessages aligns the composer with the chat message column.
+	AlignInputWithMessages bool `yaml:"align_input_with_messages,omitempty"`
 }
 
 // GetLayout returns the layout settings, falling back to defaults when unset.
@@ -214,8 +223,8 @@ func (s *Settings) GetLayout() LayoutSettings {
 	return *s.Layout
 }
 
-// GetBusySendMode returns the raw busy-send mode ("steer", "queue", or ""
-// when unset; unknown values are normalized by the TUI layer).
+// GetBusySendMode returns the legacy raw busy-send mode ("steer", "queue",
+// or "" when unset). It no longer controls TUI send routing.
 func (s *Settings) GetBusySendMode() string {
 	if s == nil {
 		return ""
@@ -269,6 +278,29 @@ func (s *Settings) GetExpandThinking() bool {
 		return false
 	}
 	return *s.ExpandThinking
+}
+
+// GetCompactWorkLog returns whether intermediate activity is grouped, defaulting to true.
+func (s *Settings) GetCompactWorkLog() bool {
+	return s == nil || s.CompactWorkLog == nil || *s.CompactWorkLog
+}
+
+// GetShowAgentContext returns whether sidebar agents show their context fill, defaulting to false.
+func (s *Settings) GetShowAgentContext() bool {
+	return s != nil && s.ShowAgentContext
+}
+
+// GetVisibleReplies returns a normalized visible-replies preference, defaulting to three.
+func (s *Settings) GetVisibleReplies() string {
+	if s == nil {
+		return "3"
+	}
+	switch s.VisibleReplies {
+	case "latest", "5", "all":
+		return s.VisibleReplies
+	default:
+		return "3"
+	}
 }
 
 // GetSplitDiffView returns whether split diff view is enabled, defaulting to true.

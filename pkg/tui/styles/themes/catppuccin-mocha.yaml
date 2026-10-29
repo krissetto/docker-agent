@@ -5,7 +5,7 @@ colors:
   text_bright: "#cdd6f4"
   text_primary: "#cdd6f4"
   text_secondary: "#bac2de"
-  text_muted: "#9399b2"
+  text_muted: "#949ab2"
   text_faint: "#6c7086"
   
   # Accent colors
@@ -45,18 +45,18 @@ colors:
   diff_remove_bg: "#3d2a36"
   
   # UI element colors
-  line_number: "#7f849c"
+  line_number: "#969aad"
   separator: "#585b70"
   selected: "#585b70"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#7f849c"
+  suggestion_ghost: "#969aad"
   tab_bg: "#1e1e2e"
   tab_active_bg: "#313244"
   tab_active_fg: "#cdd6f4"
   tab_inactive_fg: "#9399b2"
   tab_border: "#89b4fa"
 
-  placeholder: "#9399b2"
+  placeholder: "#949ab2"
   # Shared shell/editor semantic colors
   editor_bg: "#313244"
   card_bg: "#313244"
@@ -72,10 +72,11 @@ colors:
   resize: "#585b70"
   resize_hover: "#89dceb"
   resize_active: "#cdd6f4"
-  hint: "#9399b2"
+  hint: "#949ab2"
   focus: "#89b4fa"
   disabled: "#6c7086"
   status_adjacent: "#bac2de"
+  scrollbar_track: "#393947"
 
   
   # Badge colors
@@ -85,7 +86,7 @@ colors:
 
 chroma:
   # Syntax highlighting colors - Catppuccin style
-  comment: "#7f849c"
+  comment: "#969aad"
   comment_preproc: "#f5c2e7"
   keyword: "#cba6f7"
   keyword_reserved: "#f38ba8"
@@ -101,7 +102,7 @@ chroma:
   literal_string: "#a6e3a1"
   literal_string_escape: "#94e2d5"
   generic_deleted: "#f38ba8"
-  generic_subheading: "#7f849c"
+  generic_subheading: "#969aad"
   background: "#1e1e2e"
   error_fg: "#f38ba8"
   error_bg: "#3d2a36"

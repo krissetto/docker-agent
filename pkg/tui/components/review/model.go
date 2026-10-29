@@ -2,14 +2,16 @@ package review
 
 import (
 	"maps"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
@@ -74,9 +76,11 @@ type Model struct {
 	lastSelection Selection
 	hint          string
 
-	navSV, readSV *scrollview.Model
-	revealed      bool
-	inspector     bool // diff inspector: reader only; the sidebar is the navigator
+	navSV, readSV    *scrollview.Model
+	scrollbarRuntime *animation.Runtime
+	scrollbarActive  bool
+	revealed         bool
+	inspector        bool // diff inspector: reader only; the sidebar is the navigator
 
 	splitPref bool
 
@@ -87,15 +91,23 @@ type Model struct {
 	deleteArmed   string
 	staleComments map[string]bool
 
-	editing    bool
-	editor     textarea.Model
-	editAnchor Anchor
-	editID     string
-
-	sendPreview readerState
-	previewDoc  Document
-	pendingJump *Anchor
-	docSeq      uint64
+	dragging              bool
+	commentInput          *editor.Input
+	commentAnchor         Anchor
+	commentID             string
+	commentItem           int
+	commentExpanded       map[string]bool
+	mouseStart            *mousePoint
+	mouseMoved            bool
+	pendingPosition       *documentPosition
+	pendingComment        *Comment
+	commentRequestSeq     uint64
+	pendingCommentRequest string
+	commentSaving         bool
+	sendPreview           readerState
+	previewDoc            Document
+	pendingJump           *Anchor
+	docSeq                uint64
 }
 
 // ViewState captures presentation for exact return after workspace switches.
@@ -127,22 +139,87 @@ func New(owner string) *Model {
 	m.syncFilterPlaceholder()
 	m.search = newInput("search this file")
 	m.reader.anchor = -1
+	m.commentItem = -1
+	m.commentExpanded = make(map[string]bool)
+	m.reader.inlineAfter = -1
 	m.sendPreview.anchor = -1
 	m.sendPreview.noCursor = true
-	m.editor = newEditor()
 	return m
 }
 
 // newPanelScrollview reuses the shared scrollbar and edge-fade policy with a
 // reserved column so wrapping never shifts when the scrollbar appears.
 func newPanelScrollview() *scrollview.Model {
-	return scrollview.New(scrollview.WithKeyMap(nil), scrollview.WithReserveScrollbarSpace(true), scrollview.WithWheelStep(3))
+	return scrollview.New(scrollview.WithKeyMap(nil), scrollview.WithReserveScrollbarSpace(true), scrollview.WithWheelStep(2))
 }
+
+// SetAnimationRuntime binds review scrollbars to the owner's animation clock.
+// Rebinding the same runtime preserves hidden/suspended state.
+func (m *Model) SetAnimationRuntime(runtime *animation.Runtime) {
+	if m.scrollbarRuntime == runtime {
+		return
+	}
+	m.scrollbarRuntime = runtime
+	g := m.geometry()
+	m.scrollbarActive = runtime != nil
+	m.navSV.SetAnimationRuntime(runtime)
+	m.readSV.SetAnimationRuntime(runtime)
+	m.navSV.SetScrollbarActive(m.scrollbarActive && g.showNav)
+	m.readSV.SetScrollbarActive(m.scrollbarActive && g.showRead)
+}
+
+// SetScrollbarActive suspends visibility while the review surface is hidden.
+func (m *Model) SetScrollbarActive(active bool) bool {
+	if m.scrollbarRuntime == nil {
+		return false
+	}
+	m.scrollbarActive = active
+	g := m.geometry()
+	navChanged := m.navSV.SetScrollbarActive(active && g.showNav)
+	readChanged := m.readSV.SetScrollbarActive(active && g.showRead)
+	return navChanged || readChanged
+}
+
+// SetScrollbarPointer updates proximity without routing a mouse event.
+func (m *Model) SetScrollbarPointer(x, y int) bool {
+	g := m.geometry()
+	changed := false
+	if g.showNav && m.scrollbarActive {
+		changed = m.navSV.SetScrollbarPointer(x, y) || changed
+	} else {
+		m.navSV.SetScrollbarPointer(-1, -1)
+	}
+	if g.showRead && m.scrollbarActive {
+		changed = m.readSV.SetScrollbarPointer(x, y) || changed
+	} else {
+		m.readSV.SetScrollbarPointer(-1, -1)
+	}
+	return changed
+}
+
+// UpdateAnimation advances review scrollbar opacity on an accepted owner tick.
+func (m *Model) UpdateAnimation(msg tea.Msg) bool {
+	g := m.geometry()
+	changed := false
+	if g.showNav && m.scrollbarActive {
+		changed = m.navSV.UpdateAnimation(msg) || changed
+	}
+	if g.showRead && m.scrollbarActive {
+		changed = m.readSV.UpdateAnimation(msg) || changed
+	}
+	return changed
+}
+
+// StopAnimation releases any review scrollbar lease and clears its pointer.
+func (m *Model) StopAnimation() { m.SetScrollbarActive(false) }
 
 // syncScrollviews mirrors the virtual offsets and totals into the scrollviews.
 // Mutators call it so View only renders; it touches cached rows and layout only.
 func (m *Model) syncScrollviews() {
+	m.syncCommentInputSize()
 	g := m.geometry()
+	m.navSV.SetScrollbarActive(m.scrollbarActive && g.showNav)
+	m.readSV.SetScrollbarActive(m.scrollbarActive && g.showRead)
 	if g.showNav {
 		m.navSV.SetSize(max(1, g.navW-navPadding), g.navBodyH)
 		m.navSV.SetPosition(m.x+g.navX+navPadding, m.y+g.navBodyY)
@@ -214,6 +291,7 @@ func (m *Model) SetInspector(on bool) {
 	}
 	m.reader.invalidate()
 	m.ensureLineVisible()
+	m.syncScrollviews()
 }
 
 func (m *Model) navCollapsed() bool { return m.navHidden || (m.inspector && !m.draftOpen) }
@@ -235,6 +313,9 @@ func (m *Model) ReloadDocument(key DocumentKey) tea.Cmd {
 }
 
 func (m *Model) reloadDocument(key DocumentKey) tea.Cmd {
+	if !m.prepareCommentDocumentChange(key) {
+		return nil
+	}
 	m.area = areaReader
 	keepDocument := m.hasDoc && m.doc.Key == key && m.doc.State == StateReady
 	m.requested, m.hasRequest = key, true
@@ -246,16 +327,175 @@ func (m *Model) reloadDocument(key DocumentKey) tea.Cmd {
 	return m.emit(OpenDocumentRequestMsg{Owner: m.owner, Key: key})
 }
 
+// OpenCounterpart opens the same path on another review surface and restores a useful line/viewport.
+func (m *Model) OpenCounterpart(key DocumentKey, oldLine, newLine, top int) tea.Cmd {
+	position := &documentPosition{Old: oldLine, New: newLine, Top: top}
+	m.mode, m.area = key.Mode, areaReader
+	m.drilled = !m.geometry().twoColumn
+	if m.hasRequest && m.requested == key && m.hasDoc && m.doc.State == StateReady {
+		m.pendingPosition = nil
+		if m.restoreDocumentPosition(*position) {
+			m.syncScrollviews()
+			return nil
+		}
+	}
+	m.pendingPosition = position
+	return m.OpenDocument(key)
+}
+
+func (m *Model) restoreDocumentPosition(position documentPosition) bool {
+	if m.doc.State != StateReady {
+		return false
+	}
+	find := func(want int, newer bool) int {
+		if want <= 0 {
+			return -1
+		}
+		best, distance := -1, int(^uint(0)>>1)
+		for i, source := range m.doc.Lines {
+			n := source.Old
+			if newer {
+				n = source.New
+			}
+			if n <= 0 {
+				continue
+			}
+			if n == want {
+				return i
+			}
+			d := n - want
+			if d < 0 {
+				d = -d
+			}
+			if d < distance {
+				best, distance = i, d
+			}
+		}
+		return best
+	}
+	index := find(position.New, true)
+	if index < 0 {
+		index = find(position.Old, false)
+	}
+	if index < 0 {
+		return false
+	}
+	m.reader.line = m.reader.lineItem[index]
+	m.reader.top = position.Top
+	m.ensureLineVisible()
+	return true
+}
+
+// HandleCommentResult applies an ACK only to the exact outstanding inline save.
+func (m *Model) HandleCommentResult(msg CommentResultMsg) bool {
+	if msg.Owner != m.owner || msg.RequestID == "" || msg.RequestID != m.pendingCommentRequest || m.commentInput == nil {
+		return false
+	}
+	m.pendingCommentRequest = ""
+	m.commentSaving = false
+	if msg.Err != "" {
+		m.hint = "Comment not saved: " + sanitize(msg.Err)
+		m.syncCommentInputSize()
+		m.syncScrollviews()
+		return true
+	}
+	m.reader.charSelection = nil
+	m.reader.anchor = -1
+	m.finishCommentInput(false)
+	return true
+}
+
 func (m *Model) Focus()        { m.focused = true }
 func (m *Model) Blur()         { m.focused = false }
 func (m *Model) Focused() bool { return m.focused }
-func (m *Model) Mode() Mode    { return m.mode }
+
+// Cursor returns the active inline editor cursor for Bubble Tea rendering.
+func (m *Model) Cursor() *tea.Cursor {
+	if m.commentInput == nil {
+		return nil
+	}
+	cursor := m.commentInput.Cursor()
+	if cursor == nil {
+		return nil
+	}
+	g := m.geometry()
+	frame := m.commentInput.Frame()
+	cursor.X += m.x + g.readerX + 1 + frame.GetMarginLeft() + frame.GetBorderLeftSize() + frame.GetPaddingLeft()
+	cursor.Y += m.y + g.readerBodyY + m.commentCardTop() - m.reader.top + 1 + frame.GetMarginTop() + frame.GetBorderTopSize() + frame.GetPaddingTop()
+	if cursor.X < m.x+g.readerX || cursor.X >= m.x+g.readerX+g.readerW || cursor.Y < m.y+g.readerBodyY || cursor.Y >= m.y+g.readerBodyY+g.readerBodyH {
+		return nil
+	}
+	return cursor
+}
+func (m *Model) Mode() Mode { return m.mode }
 
 func (m *Model) DocumentState() LoadState { return m.doc.State }
 
 // Capturing reports an active text input; the host must not run navigation
 // or tab shortcuts while it is true.
-func (m *Model) Capturing() bool { return m.filterActive || m.searchOn || m.editing }
+func (m *Model) Capturing() bool { return m.filterActive || m.searchOn || m.commentInput != nil }
+
+// BeginRangeSelection anchors the current diff line for a keyboard range gesture.
+func (m *Model) BeginRangeSelection() {
+	if m.CommentSelectionContext() {
+		m.area = areaReader
+		if m.reader.anchor < 0 {
+			m.reader.anchor = m.reader.line
+		}
+		m.hint = ""
+		m.ensureLineVisible()
+	}
+}
+
+// CommentSelectionContext reports whether the reader owns a comment shortcut.
+func (m *Model) CommentSelectionContext() bool {
+	return m.area == areaReader && m.readerVisible() && m.hasDoc && m.doc.State == StateReady && len(m.reader.items) > 0 && !m.previewing() && !m.filterActive && !m.searchOn && m.commentInput == nil
+}
+
+// MouseSelecting reports an active click-drag selection.
+func (m *Model) MouseSelecting() bool { return m.dragging }
+
+// StartComment opens an inline editor for the current diff selection.
+func (m *Model) StartComment() tea.Cmd { return m.startComment() }
+
+// CommentInputActive reports whether the inline comment editor owns keyboard input.
+func (m *Model) CommentInputActive() bool { return m.commentInput != nil }
+
+// CommentInputStatus provides concise context for the active inline editor.
+func (m *Model) CommentInputStatus() string {
+	if m.commentInput == nil {
+		return ""
+	}
+	return commentStatus(m.commentAnchor) + " · Enter save · Esc cancel · Shift+Enter newline"
+}
+
+// HandleWheelDelta applies accumulated terminal wheel ticks at review coordinates.
+// Terminals provide discrete events, not reliable pixel, velocity, or phase data.
+func (m *Model) HandleWheelDelta(x, y, delta int) {
+	if delta == 0 {
+		return
+	}
+	localX, localY := x-m.x, y-m.y
+	if localX < 0 || localY < 0 || localX >= m.width || localY >= m.height {
+		return
+	}
+	g := m.geometry()
+	if !m.inReader(localX, g) && !m.inNavigator(localX, g) {
+		return
+	}
+	distance := delta * 2
+	m.wheel(localX, distance)
+	if m.dragging && m.inReader(localX, m.geometry()) && len(m.reader.items) > 0 {
+		g := m.geometry()
+		m.reader.layout(m.readerWidth())
+		row := g.readerBodyH - 1
+		if distance < 0 {
+			row = 0
+		}
+		m.reader.line = m.reader.itemAtRow(max(0, min(m.reader.total-1, m.reader.top+row)))
+	}
+	m.syncScrollviews()
+}
 
 func (m *Model) SetSession(s Session) { m.session = s }
 
@@ -295,6 +535,20 @@ func (m *Model) revealCurrent() {
 	}
 }
 
+// ClearDirectories invalidates whole-file folder data and in-flight directory
+// guards. It deliberately does not request replacement folders; the host owns
+// the refresh boundary and decides when the new snapshot is ready.
+func (m *Model) ClearDirectories() {
+	clear(m.dirs)
+	for key := range m.loadPending {
+		if strings.HasPrefix(key, "dir:") {
+			delete(m.loadPending, key)
+		}
+	}
+	m.invalidateRows()
+	m.syncScrollviews()
+}
+
 func (m *Model) SetDirectory(d Directory) tea.Cmd {
 	m.dirs[dirID{d.WorktreeID, d.Path}] = d
 	if d.State != StateLoading {
@@ -314,16 +568,56 @@ func (m *Model) SetDocument(d Document) tea.Cmd {
 	if !m.hasRequest || d.Key != m.requested {
 		return nil
 	}
+	if m.commentInput != nil && !m.prepareCommentDocumentChange(d.Key) {
+		return nil
+	}
+	if m.commentInput != nil && m.hasDoc && m.doc.Key == d.Key && d.State == StateError {
+		m.hint = "File refresh failed; your comment is still open"
+		return nil
+	}
 	defer func() { m.docSeq++ }()
 	same := m.hasDoc && m.doc.Key == d.Key && m.doc.State == StateReady
 	m.doc, m.hasDoc = d, true
 	m.reader.split = m.splitEffective()
 	m.reader.setDocument(&m.doc, same)
+	if m.pendingPosition != nil && d.State == StateReady {
+		position := *m.pendingPosition
+		m.pendingPosition = nil
+		m.restoreDocumentPosition(position)
+	}
 	m.syncReaderComments()
+	if m.commentInput != nil {
+		if item, ok := m.reader.commentItem(m.commentAnchor); ok {
+			m.commentItem = item
+			m.reader.inlineAfter = item
+			m.reader.line = item
+			m.reader.invalidate()
+		} else if d.State == StateReady {
+			m.hint = "Selected line changed; comment is still open"
+			m.commentItem = -1
+			m.reader.inlineAfter = -1
+		} else {
+			m.commentItem = -1
+			m.reader.inlineAfter = -1
+		}
+	}
+	var pending *Comment
+	if d.State == StateReady && m.pendingComment != nil && m.commentMatchesDocument(m.pendingComment.Anchor, d.Key) {
+		copy := *m.pendingComment
+		pending, m.pendingComment = &copy, nil
+	}
 	m.jumpToAnchor()
 	m.reader.recomputeMatches(newMatcher(m.search.Value()))
 	m.ensureLineVisible()
 	m.syncScrollviews()
+	cmd := m.highlightDocument()
+	if pending != nil {
+		cmd = tea.Batch(cmd, m.beginCommentInput(pending.Anchor, pending.ID, pending.Body))
+	}
+	return cmd
+}
+
+func (m *Model) highlightDocument() tea.Cmd {
 	job, seq, owner := m.reader.highlight, m.docSeq+1, m.owner
 	m.reader.highlight = nil
 	if job == nil {
@@ -526,10 +820,14 @@ func (m *Model) navHeaderRows() int {
 }
 
 func (m *Model) readerHeaderRows() int {
-	if !m.previewing() && (m.searchOn || m.search.Value() != "") {
-		return 2
+	if m.previewing() {
+		return 1
 	}
-	return 1
+	rows := 2 // title and a blank separator before file content
+	if m.searchOn || m.search.Value() != "" {
+		rows++
+	}
+	return rows
 }
 
 func (m *Model) geometry() geometry {
@@ -603,7 +901,7 @@ func (m *Model) bodyHeight() int       { return max(0, m.panelHeight()-m.navHead
 func (m *Model) readerBodyHeight() int { return max(0, m.panelHeight()-m.readerHeaderRows()) }
 
 // panelHeight leaves room for the comment editor, which spans both panels.
-func (m *Model) panelHeight() int { return max(1, m.height-m.editorRows()) }
+func (m *Model) panelHeight() int { return max(1, m.height) }
 
 func (m *Model) ensureCursorVisible() {
 	h := m.bodyHeight()

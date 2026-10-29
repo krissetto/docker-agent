@@ -77,8 +77,11 @@ type Snapshot struct {
 	Generation    uint64
 	CapturedAt    time.Time
 	MaybeOutdated bool
-	Scope         Scope
-	Repositories  []Repository
+	// Browse marks a root-only folder bootstrap. Its repositories are not a Git
+	// inventory and must not be presented as complete.
+	Browse       bool
+	Scope        Scope
+	Repositories []Repository
 }
 
 type Scope struct {
@@ -89,7 +92,9 @@ type Scope struct {
 	Unavailable string
 	// Note explains a partial result (for example limited discovery); it is
 	// not a freshness signal and never hides the data that was found.
-	Note string
+	Note        string
+	LimitReason string
+	LimitValue  int
 }
 
 type Repository struct {
@@ -103,15 +108,16 @@ type Repository struct {
 }
 
 type Worktree struct {
-	ID       string
-	Path     string
-	Branch   string
-	Detached string
-	Current  bool
-	Linked   bool
-	State    LoadState
-	Err      string
-	Files    []FileChange
+	ID          string
+	Path        string
+	Branch      string
+	Detached    string
+	Current     bool
+	Linked      bool
+	State       LoadState
+	CountsState LoadState
+	Err         string
+	Files       []FileChange
 }
 
 type FileChange struct {
@@ -159,6 +165,22 @@ type Line struct {
 	Text     string
 }
 
+type ChangeKind string
+
+const (
+	ChangeNone     ChangeKind = ""
+	ChangeAdded    ChangeKind = "added"
+	ChangeModified ChangeKind = "modified"
+	ChangeDeleted  ChangeKind = "deleted"
+)
+
+// DocumentIndicator decorates an existing whole-file line without changing
+// the file text. Line is one-based; zero denotes a change in an empty file.
+type DocumentIndicator struct {
+	Line int
+	Kind ChangeKind
+}
+
 type Document struct {
 	Key       DocumentKey
 	State     LoadState
@@ -168,6 +190,7 @@ type Document struct {
 	Note, Err string
 	// PatchHeader enables patch copies; empty means hunks are not reconstructable.
 	PatchHeader string
+	Indicators  []DocumentIndicator
 }
 
 // Session describes the session the composer stays attached to.
@@ -198,6 +221,8 @@ type Anchor struct {
 	NewStart, NewEnd             int
 	Context                      []string
 	Version                      string
+	StartColumn, EndColumn       int
+	CharacterRange               bool
 }
 
 type Comment struct {
@@ -225,6 +250,7 @@ type DraftView struct {
 	Target  string
 	Preview string
 	Token   string
+	General string
 }
 
 type CopyKind int
@@ -249,6 +275,22 @@ type OpenDocumentRequestMsg struct {
 	Key   DocumentKey
 }
 
+// OpenExternalEditorRequestMsg asks the host to open a local whole-file view
+// in its configured editor. The component performs no IO or capability checks.
+type OpenExternalEditorRequestMsg struct {
+	Owner string
+	Key   DocumentKey
+}
+
+// CounterpartRequestMsg asks the host to switch review surfaces while retaining the closest line.
+type CounterpartRequestMsg struct {
+	Owner                 string
+	Key                   DocumentKey
+	OldLine, NewLine, Top int
+}
+
+type GeneralCommentRequestMsg struct{ Owner string }
+
 type CopyRequestMsg struct {
 	Owner         string
 	Kind          CopyKind
@@ -260,13 +302,28 @@ type CloseRequestMsg struct{ Owner string }
 // FocusRequestMsg asks the host to give the review keyboard focus after a click.
 type FocusRequestMsg struct{ Owner string }
 
-type AddCommentMsg struct {
-	Owner  string
-	Anchor Anchor
-	Body   string
+// CommentInputRequestMsg asks the host to borrow the standard composer for a new or edited comment.
+type CommentInputRequestMsg struct {
+	Owner    string
+	Anchor   Anchor
+	ID, Body string
 }
 
-type EditCommentMsg struct{ Owner, ID, Body string }
+type AddCommentMsg struct {
+	Owner     string
+	RequestID string
+	Anchor    Anchor
+	Body      string
+}
+
+type EditCommentMsg struct {
+	Owner, ID, Body string
+	RequestID       string
+}
+
+// CommentResultMsg acknowledges an asynchronous host-side draft mutation.
+// Err is empty only when the exact request was accepted.
+type CommentResultMsg struct{ Owner, RequestID, Err string }
 
 type DeleteCommentMsg struct{ Owner, ID string }
 

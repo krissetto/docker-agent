@@ -11,6 +11,9 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
+
+	textlayout "github.com/docker/docker-agent/pkg/tui/text"
 
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -25,6 +28,13 @@ const (
 // item is one cursor stop in the reader. Unified items show one line; split
 // items pair an old (left) and new (right) line. Equal sides span the width.
 type item struct{ left, right int }
+
+type textPoint struct{ line, column int }
+type readerCharSelection struct{ start, end textPoint }
+type commentNote struct {
+	ID, Preview, Body string
+	Expanded          bool
+}
 
 func (it item) full() bool { return it.left == it.right }
 
@@ -48,8 +58,11 @@ type readerState struct {
 	hunks          []int // items that start a hunk
 	added, removed int
 
-	comments map[int][]string // item → comment previews shown under it
-	noCursor bool             // read-only text such as the send preview
+	comments      map[int][]commentNote // item → expandable comment previews shown under it
+	charSelection *readerCharSelection
+	inlineAfter   int
+	inlineLines   []string
+	noCursor      bool // read-only text such as the send preview
 
 	keepPosition bool
 
@@ -80,6 +93,9 @@ func (r *readerState) setDocument(doc *Document, same bool) {
 	keep := r.keepPosition || same
 	r.keepPosition = false
 	r.buildItems(r.split)
+	if !keep {
+		r.charSelection = nil
+	}
 	if keep {
 		r.line = min(r.line, max(0, len(r.items)-1))
 		if r.anchor >= len(r.items) {
@@ -170,9 +186,15 @@ func (r *readerState) setSplit(split bool) {
 		anchor = r.primary(r.itemAt(r.anchor))
 	}
 	r.buildItems(split)
-	r.line = r.lineItem[cursor]
-	if anchor >= 0 {
+	if cursor >= 0 && cursor < len(r.lineItem) {
+		r.line = r.lineItem[cursor]
+	} else {
+		r.line = min(max(0, r.line), max(0, len(r.items)-1))
+	}
+	if anchor >= 0 && anchor < len(r.lineItem) {
 		r.anchor = r.lineItem[anchor]
+	} else {
+		r.anchor = -1
 	}
 }
 
@@ -185,9 +207,26 @@ func (r *readerState) itemAt(i int) item {
 
 func (r *readerState) invalidate() { r.cacheValid = false }
 
+func expandTabs(s string) string {
+	var b strings.Builder
+	col := 0
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		cluster := g.Str()
+		if cluster == "\t" {
+			n := tabWidth - col%tabWidth
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+			continue
+		}
+		b.WriteString(cluster)
+		col += g.Width()
+	}
+	return b.String()
+}
+
 func sanitize(s string) string {
-	s = strings.ReplaceAll(s, "\t", strings.Repeat(" ", tabWidth))
-	s = ansi.Strip(s)
+	s = expandTabs(ansi.Strip(s))
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || isBidiControl(r) {
 			return ' '
@@ -219,7 +258,7 @@ func (r *readerState) gutter(width int) gutter {
 	if r.doc == nil {
 		return gutter{}
 	}
-	g := gutter{digits: r.digits, numbers: 2, marker: r.doc.Key.Mode == ModeChanges}
+	g := gutter{digits: r.digits, numbers: 2, marker: r.doc.Key.Mode == ModeChanges || len(r.doc.Indicators) > 0}
 	if !g.marker {
 		g.numbers = 1
 	}
@@ -247,10 +286,7 @@ func rowsFor(text string, width int) int {
 
 func (r *readerState) textRows(i, width int) int {
 	it := r.items[i]
-	if !r.split || it.full() {
-		if r.split {
-			return rowsFor(r.text[it.left], max(1, width-1))
-		}
+	if !r.split {
 		return rowsFor(r.text[it.left], r.contentWidth(width))
 	}
 	_, tw := r.splitGeometry(width)
@@ -273,7 +309,10 @@ func (r *readerState) layout(width int) {
 	row := 0
 	for i := range r.items {
 		r.starts[i] = row
-		row += r.textRows(i, width) + len(r.comments[i])
+		row += r.textRows(i, width) + r.commentRows(i)
+		if i == r.inlineAfter {
+			row += len(r.inlineLines)
+		}
 	}
 	r.starts[len(r.items)] = row
 	r.total = row
@@ -283,6 +322,17 @@ func (r *readerState) layout(width int) {
 func (r *readerState) itemAtRow(row int) int {
 	i := sort.Search(len(r.items), func(i int) bool { return r.starts[i+1] > row })
 	return min(i, max(0, len(r.items)-1))
+}
+
+func (r *readerState) commentRows(i int) int {
+	n := 0
+	for _, c := range r.comments[i] {
+		n++
+		if c.Expanded {
+			n += max(1, len(strings.Split(c.Body, "\n")))
+		}
+	}
+	return n
 }
 
 func (r *readerState) ensureVisible(width, height int) {
@@ -416,7 +466,11 @@ func (r *readerState) selectedLines() []int {
 	var out []int
 	for i := from; i <= to && i < len(r.items); i++ {
 		it := r.items[i]
-		for _, side := range []int{it.left, it.right} {
+		sides := []int{it.left, it.right}
+		if r.split {
+			sides = []int{it.right}
+		}
+		for _, side := range sides {
 			if side >= 0 && !slices.Contains(out, side) {
 				out = append(out, side)
 			}
@@ -438,7 +492,22 @@ func (r *readerState) copyText() (string, int) {
 		if l.Kind == LineNote {
 			continue
 		}
-		b.WriteString(diffLine(l, r.doc.Key.Mode))
+		text := l.Text
+		if r.charSelection != nil {
+			lo, hi := selectionColumnsForLine(*r.charSelection, i, runeCount(text))
+			text = runeSlice(text, lo, hi)
+		}
+		if r.doc.Key.Mode == ModeChanges {
+			switch l.Kind {
+			case LineAdd:
+				text = "+" + text
+			case LineRemove:
+				text = "-" + text
+			default:
+				text = " " + text
+			}
+		}
+		b.WriteString(text)
 		b.WriteByte('\n')
 		n++
 	}
@@ -464,10 +533,27 @@ func (r *readerState) anchorFor() (Anchor, bool) {
 		return Anchor{}, false
 	}
 	a := Anchor{Path: r.doc.Key.Path, Mode: r.doc.Key.Mode, Group: r.doc.Key.Group, WorktreeID: r.doc.Key.WorktreeID}
-	for _, i := range r.selectedLines() {
+	selected := r.selectedLines()
+	if len(selected) == 0 {
+		return Anchor{}, false
+	}
+	if r.charSelection != nil {
+		start, end := r.charSelection.start, r.charSelection.end
+		if pointLess(end, start) {
+			start, end = end, start
+		}
+		a.CharacterRange = true
+		a.StartColumn, a.EndColumn = start.column, end.column
+	}
+	for _, i := range selected {
 		l := r.doc.Lines[i]
 		if l.Kind == LineHunk || l.Kind == LineNote {
 			continue
+		}
+		text := l.Text
+		if r.charSelection != nil {
+			lo, hi := selectionColumnsForLine(*r.charSelection, i, runeCount(text))
+			text = runeSlice(text, lo, hi)
 		}
 		if l.Old > 0 {
 			a.OldStart, a.OldEnd = minNonZero(a.OldStart, l.Old), max(a.OldEnd, l.Old)
@@ -475,13 +561,51 @@ func (r *readerState) anchorFor() (Anchor, bool) {
 		if l.New > 0 {
 			a.NewStart, a.NewEnd = minNonZero(a.NewStart, l.New), max(a.NewEnd, l.New)
 		}
-		a.Context = append(a.Context, diffLine(l, r.doc.Key.Mode))
+		if r.doc.Key.Mode == ModeChanges {
+			switch l.Kind {
+			case LineAdd:
+				text = "+" + text
+			case LineRemove:
+				text = "-" + text
+			default:
+				text = " " + text
+			}
+		}
+		a.Context = append(a.Context, text)
 	}
 	if len(a.Context) == 0 {
 		return Anchor{}, false
 	}
 	a.Version = anchorVersion(a)
 	return a, true
+}
+
+func runeCount(s string) int { return len([]rune(s)) }
+func runeSlice(s string, start, end int) string {
+	r := []rune(s)
+	start = max(0, min(start, len(r)))
+	end = max(start, min(end, len(r)))
+	return string(r[start:end])
+}
+func pointLess(a, b textPoint) bool {
+	return a.line < b.line || a.line == b.line && a.column < b.column
+}
+func selectionColumnsForLine(s readerCharSelection, line, count int) (int, int) {
+	a, b := s.start, s.end
+	if pointLess(b, a) {
+		a, b = b, a
+	}
+	if line < a.line || line > b.line {
+		return 0, 0
+	}
+	start, end := 0, count
+	if line == a.line {
+		start = a.column
+	}
+	if line == b.line {
+		end = b.column
+	}
+	return max(0, min(start, count)), max(0, min(end, count))
 }
 
 func minNonZero(a, b int) int {
@@ -496,7 +620,7 @@ func anchorVersion(a Anchor) string {
 	h := sha256.New()
 	parts := []string{
 		a.WorktreeID, a.Path, strconv.Itoa(int(a.Mode)), strconv.Itoa(int(a.Group)),
-		strconv.Itoa(a.OldStart), strconv.Itoa(a.OldEnd), strconv.Itoa(a.NewStart), strconv.Itoa(a.NewEnd),
+		strconv.Itoa(a.OldStart), strconv.Itoa(a.OldEnd), strconv.Itoa(a.NewStart), strconv.Itoa(a.NewEnd), strconv.Itoa(a.StartColumn), strconv.Itoa(a.EndColumn), strconv.FormatBool(a.CharacterRange),
 	}
 	for _, part := range parts {
 		h.Write([]byte(part))
@@ -514,18 +638,40 @@ func (r *readerState) matchesAnchor(a Anchor) bool {
 	if r.doc == nil {
 		return false
 	}
-	var context []string
+	var lines []Line
 	for _, line := range r.doc.Lines {
 		if line.Kind == LineHunk || line.Kind == LineNote {
 			continue
 		}
-		oldMatch := a.OldStart > 0 && line.Old >= a.OldStart && line.Old <= a.OldEnd
-		newMatch := a.NewStart > 0 && line.New >= a.NewStart && line.New <= a.NewEnd
-		if oldMatch || newMatch {
-			context = append(context, diffLine(line, r.doc.Key.Mode))
+		old := a.OldStart > 0 && line.Old >= a.OldStart && line.Old <= a.OldEnd
+		newer := a.NewStart > 0 && line.New >= a.NewStart && line.New <= a.NewEnd
+		if old || newer {
+			lines = append(lines, line)
 		}
 	}
-	return slices.Equal(context, a.Context)
+	if len(lines) != len(a.Context) {
+		return false
+	}
+	for i, line := range lines {
+		text := line.Text
+		if a.CharacterRange {
+			lo, hi := 0, runeCount(text)
+			if i == 0 {
+				lo = a.StartColumn
+			}
+			if i == len(lines)-1 {
+				hi = a.EndColumn
+			}
+			text = runeSlice(text, lo, hi)
+		}
+		if r.doc.Key.Mode == ModeChanges {
+			text = string(diffLine(line, r.doc.Key.Mode)[0]) + text
+		}
+		if text != a.Context[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *readerState) commentItem(a Anchor) (int, bool) {
@@ -567,8 +713,23 @@ func (r *readerState) copyPatch(whole bool) (string, int) {
 			hunkLines = append(hunkLines, i)
 		}
 	}
-	selected := r.selectedLines()
-	from, to := selected[0], selected[len(selected)-1]
+	from, to := 0, len(r.doc.Lines)-1
+	if !whole {
+		from, to = len(r.doc.Lines), -1
+		start, end := r.selection()
+		for itemIndex := start; itemIndex <= end && itemIndex < len(r.items); itemIndex++ {
+			it := r.items[itemIndex]
+			for _, line := range []int{it.left, it.right} {
+				if line >= 0 {
+					from = min(from, line)
+					to = max(to, line)
+				}
+			}
+		}
+		if to < from {
+			return "", 0
+		}
+	}
 	var b strings.Builder
 	b.WriteString(strings.TrimRight(r.doc.PatchHeader, "\n"))
 	b.WriteByte('\n')
@@ -607,15 +768,32 @@ func (r *readerState) render(width, height int, focused bool, query matcher) []s
 		textRows := r.textRows(i, width)
 		st := rowState{cursor: i == r.line && !r.noCursor, selected: selecting && i >= from && i <= to, focused: focused, commented: len(r.comments[i]) > 0}
 		if seg >= textRows {
-			out = append(out, r.commentRow(r.comments[i][seg-textRows], width))
-			continue
+			commentOffset := seg - textRows
+			painted := false
+			for _, note := range r.comments[i] {
+				rows := 1
+				if note.Expanded {
+					rows += max(1, len(strings.Split(note.Body, "\n")))
+				}
+				if commentOffset < rows {
+					out = append(out, r.commentNoteRow(note, commentOffset, width))
+					painted = true
+					break
+				}
+				commentOffset -= rows
+			}
+			if painted {
+				continue
+			}
+			if i == r.inlineAfter && commentOffset < len(r.inlineLines) {
+				out = append(out, r.inlineLines[commentOffset])
+				continue
+			}
 		}
 		it := r.items[i]
 		switch {
-		case r.split && !it.full():
-			out = append(out, r.splitRow(it, seg, width, st, query))
 		case r.split:
-			out = append(out, st.mark()+r.fullRow(it.left, seg, max(1, width-1), query, st.cursor && focused))
+			out = append(out, r.splitRow(it, seg, width, st, query))
 		default:
 			out = append(out, r.unifiedRow(it.left, seg, width, st, query))
 		}
@@ -628,11 +806,11 @@ type rowState struct{ cursor, selected, focused, commented bool }
 func (s rowState) mark() string {
 	switch {
 	case s.cursor && s.focused:
-		return styles.HighlightWhiteStyle.Render("▌")
-	case s.cursor:
-		return styles.MutedStyle.Render("▌")
+		return styles.InfoStyle.Render("›")
 	case s.selected:
 		return styles.InfoStyle.Render("▐")
+	case s.cursor:
+		return styles.MutedStyle.Render("›")
 	case s.commented:
 		return styles.InfoStyle.Render("•")
 	}
@@ -646,9 +824,51 @@ func (s rowState) numberStyle() lipgloss.Style {
 	return styles.LineNumberStyle
 }
 
-func (r *readerState) commentRow(body string, width int) string {
-	text := " ┊ " + body
-	return styles.InfoStyle.Render(ansi.Truncate(text, width, "…"))
+func (r *readerState) commentNoteRow(note commentNote, offset, width int) string {
+	if offset == 0 {
+		affordance := "▸"
+		if note.Expanded {
+			affordance = "⌄"
+		}
+		return fit(styles.InfoStyle.Render(" ┊ ")+ansi.Truncate(note.Preview, max(1, width-8), "…")+styles.MutedStyle.Render("  "+affordance), width)
+	}
+	lines := strings.Split(note.Body, "\n")
+	body := lines[min(offset-1, len(lines)-1)]
+	return fit(styles.InfoStyle.Render("   ")+styles.BaseStyle.Background(styles.CardBg).Foreground(styles.TextPrimary).Render(ansi.Truncate("   "+sanitize(body), max(1, width-3), "…")), width)
+}
+
+func (r *readerState) indicator(line int) ChangeKind {
+	if r.doc == nil {
+		return ChangeNone
+	}
+	for _, i := range r.doc.Indicators {
+		if i.Line == line {
+			return i.Kind
+		}
+	}
+	return ChangeNone
+}
+func indicatorStyle(k ChangeKind) lipgloss.Style {
+	switch k {
+	case ChangeAdded:
+		return styles.SuccessStyle
+	case ChangeModified:
+		return styles.WarningStyle
+	case ChangeDeleted:
+		return styles.ErrorStyle
+	}
+	return styles.MutedStyle
+}
+func indicatorGlyph(k ChangeKind) string {
+	switch k {
+	case ChangeAdded:
+		return "+"
+	case ChangeModified:
+		return "~"
+	case ChangeDeleted:
+		return "−"
+	}
+	return " "
 }
 
 func (r *readerState) number(n int, show bool) string {
@@ -676,13 +896,14 @@ func (r *readerState) unifiedRow(i, seg, width int, st rowState, query matcher) 
 		cells += st.numberStyle().Render(r.number(n, first))
 	}
 	if g.marker {
-		cells += lineStyle(l.Kind).Render(sign(l.Kind, first) + " ")
+		marker := sign(l.Kind, first)
+		style := lineStyle(l.Kind)
+		if kind := r.indicator(l.New); kind != ChangeNone {
+			marker, style = indicatorGlyph(kind), indicatorStyle(kind)
+		}
+		cells += style.Render(marker + " ")
 	}
 	return cells + r.content(i, seg, cw, query, st.cursor && st.focused)
-}
-
-func (r *readerState) fullRow(i, seg, width int, query matcher, current bool) string {
-	return r.content(i, seg, width, query, current)
 }
 
 func (r *readerState) splitRow(it item, seg, width int, st rowState, query matcher) string {
@@ -700,7 +921,7 @@ func (r *readerState) splitRow(it item, seg, width int, st rowState, query match
 		if seg >= rowsFor(r.text[i], tw) {
 			return st.numberStyle().Render(r.number(0, false)) + lineStyle(l.Kind).Render(strings.Repeat(" ", side-r.digits-1))
 		}
-		return st.numberStyle().Render(r.number(n, first)) + lineStyle(l.Kind).Render(sign(l.Kind, first)+" ") + r.content(i, seg, tw, query, st.cursor && st.focused)
+		return st.numberStyle().Render(r.number(n, first)) + lineStyle(l.Kind).Render(sign(l.Kind, first)+" ") + r.contentSelected(i, seg, tw, query, st.cursor && st.focused, !oldSide)
 	}
 	divider := styles.MutedStyle.Render("│")
 	row := st.mark() + render(it.left, true) + divider + render(it.right, false)
@@ -736,10 +957,30 @@ func lineStyle(kind LineKind) lipgloss.Style {
 // content renders one wrapped segment of a line: syntax tokens over the diff
 // background, with search matches taking precedence.
 func (r *readerState) content(i, seg, width int, query matcher, current bool) string {
+	return r.contentSelected(i, seg, width, query, current, true)
+}
+
+func (r *readerState) contentSelected(i, seg, width int, query matcher, current, selection bool) string {
 	l := r.doc.Lines[i]
 	base := lineStyle(l.Kind)
 	text := ansi.Cut(r.text[i], seg*width, (seg+1)*width)
 	pad := strings.Repeat(" ", max(0, width-ansi.StringWidth(text)))
+	if selection && r.charSelection != nil {
+		line := r.doc.Lines[i].Text
+		start, end := selectionColumnsForLine(*r.charSelection, i, runeCount(line))
+		if end > start {
+			cellStart := textlayout.RuneToCell(line, start, textlayout.Config{TabWidth: tabWidth})
+			cellEnd := textlayout.RuneToCell(line, end, textlayout.Config{TabWidth: tabWidth})
+			lo, hi := max(0, cellStart-seg*width), min(width, cellEnd-seg*width)
+			if hi > lo {
+				before := ansi.Cut(r.text[i], seg*width, seg*width+lo)
+				middle := ansi.Cut(r.text[i], seg*width+lo, seg*width+hi)
+				after := ansi.Cut(r.text[i], seg*width+hi, (seg+1)*width)
+				style := styles.BaseStyle.Background(styles.Selected).Foreground(styles.SelectedFg)
+				return base.Render(before) + style.Render(middle) + base.Render(after+pad)
+			}
+		}
+	}
 	if spans := query.index(text); len(spans) > 0 {
 		match := base.Reverse(true)
 		if current {

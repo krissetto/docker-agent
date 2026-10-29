@@ -249,23 +249,9 @@ func TestLabelToolCall_ShellCommandAliasKey(t *testing.T) {
 	assert.Equal(t, ClassDestructive, label.Class)
 }
 
-func TestLabelToolCall_BackgroundJobUsesClassifier(t *testing.T) {
-	safe := LabelToolCall(BackgroundJobToolName, map[string]any{"cmd": "git log --oneline"}, false, false)
-	assert.Equal(t, ClassSafe, safe.Class)
-	assert.Equal(t, OriginClassifier, safe.Origin)
-
-	destructive := LabelToolCall(BackgroundJobToolName, map[string]any{"command": "rm -rf /tmp/x"}, false, false)
-	assert.Equal(t, ClassDestructive, destructive.Class)
-	assert.Equal(t, "high", destructive.BlastRadius)
-
-	unknown := LabelToolCall(BackgroundJobToolName, map[string]any{"cmd": "npm run dev"}, false, false)
-	assert.Equal(t, ClassUnknown, unknown.Class)
-}
-
 func TestIsCommandTool(t *testing.T) {
 	assert.True(t, IsCommandTool(ShellToolName))
-	assert.True(t, IsCommandTool(BackgroundJobToolName))
-	assert.False(t, IsCommandTool("list_background_jobs"))
+	assert.False(t, IsCommandTool("list_running_processes"))
 	assert.False(t, IsCommandTool("read_file"))
 }
 

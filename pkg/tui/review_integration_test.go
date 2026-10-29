@@ -48,6 +48,7 @@ type reviewChatPage struct {
 }
 
 func (p *reviewChatPage) SetGitChanges(c sidebar.GitChanges) tea.Cmd { p.git = c; return nil }
+func (p *reviewChatPage) SetGitMode(mode view.Mode) tea.Cmd          { p.git.Mode = mode; return nil }
 func (p *reviewChatPage) GitWatchState() sidebar.GitWatchMsg {
 	if p.watch.Owner != "" {
 		return p.watch
@@ -93,18 +94,42 @@ func (p *reviewChatPage) FocusMessageAt(_, _ int) tea.Cmd { p.focused = true; re
 
 type reviewEditor struct {
 	mockEditor
-	keys       int
-	focused    bool
-	hasContext bool
-	ctxFocused bool
+	value         string
+	savedValue    string
+	keys          int
+	focused       bool
+	hasContext    bool
+	ctxFocused    bool
+	commentActive bool
+	commentBody   string
 }
 
 func (e *reviewEditor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	if _, ok := msg.(tea.KeyPressMsg); ok {
+	if key, ok := msg.(tea.KeyPressMsg); ok {
 		e.keys++
+		if e.commentActive && key.Text != "" {
+			e.commentBody += key.Text
+		}
+	}
+	if paste, ok := msg.(tea.PasteMsg); ok && e.commentActive {
+		e.commentBody += paste.Content
 	}
 	return e, nil
 }
+func (e *reviewEditor) Value() string {
+	if e.commentActive {
+		return e.commentBody
+	}
+	return e.value
+}
+func (e *reviewEditor) SetValue(v string) {
+	if e.commentActive {
+		e.commentBody = v
+	} else {
+		e.value = v
+	}
+}
+func (e *reviewEditor) GetSize() (int, int)                 { return 140, 3 }
 func (e *reviewEditor) Focus() tea.Cmd                      { e.focused = true; return nil }
 func (e *reviewEditor) Blur() tea.Cmd                       { e.focused = false; return nil }
 func (e *reviewEditor) HasContextBar() bool                 { return e.hasContext }
@@ -112,11 +137,45 @@ func (e *reviewEditor) IsContextBarFocused() bool           { return e.ctxFocuse
 func (e *reviewEditor) SetContextBarFocused(f bool)         { e.ctxFocused = f }
 func (e *reviewEditor) TryStartArgumentCompletion() tea.Cmd { return nil }
 func (e *reviewEditor) AcceptSuggestion() tea.Cmd           { return nil }
+func (e *reviewEditor) BeginCommentInput() bool {
+	e.savedValue = e.value
+	e.commentActive = true
+	e.commentBody = ""
+	return true
+}
+func (e *reviewEditor) CommentInputActive() bool  { return e.commentActive }
+func (e *reviewEditor) CommentInputValue() string { return e.commentBody }
+func (e *reviewEditor) SetCommentInputValue(v string) {
+	if e.commentActive {
+		e.commentBody = v
+	}
+}
+func (e *reviewEditor) FinishCommentInput() (string, bool) {
+	if !e.commentActive {
+		return "", false
+	}
+	body := e.commentBody
+	e.commentActive, e.commentBody = false, ""
+	e.value = e.savedValue
+	e.savedValue = ""
+	return body, true
+}
+
+func countString(values []string, want string) int {
+	n := 0
+	for _, value := range values {
+		if value == want {
+			n++
+		}
+	}
+	return n
+}
 
 type fakeReviewProvider struct {
 	fail       bool
 	mu         sync.Mutex
 	snapshots  int
+	browses    int
 	documents  []gitreview.DocumentKey
 	dirs       []string
 	worktrees  []string
@@ -124,23 +183,47 @@ type fakeReviewProvider struct {
 	refreshErr bool
 }
 
+// BrowseRoot is the root-only bootstrap: it never increments the full-scan count.
+func (p *fakeReviewProvider) BrowseRoot(context.Context) (gitreview.Snapshot, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.browses++
+	// Mirrors Local.BrowseRoot: an existing full inventory is reused unchanged.
+	if p.snapshots > 0 {
+		return p.inventory(uint64(p.snapshots)), nil
+	}
+	generation := uint64(1)
+	return gitreview.Snapshot{Generation: generation, Browse: true, Scope: gitreview.Scope{Label: "/work"}, Repositories: []gitreview.Repository{
+		{ID: "r1", Name: "work", Kind: gitreview.KindNone, Worktrees: []gitreview.Worktree{
+			{ID: "w1", Path: "/work", Branch: "main", Current: true, State: "unscanned", CountsState: gitreview.StateUnscanned},
+		}},
+	}}, nil
+}
+
 func (p *fakeReviewProvider) Snapshot(context.Context) (gitreview.Snapshot, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.snapshots++
-	return gitreview.Snapshot{Generation: uint64(p.snapshots), Scope: gitreview.Scope{Label: "/work"}, Repositories: []gitreview.Repository{
-		{ID: "r1", Name: "work", Kind: gitreview.KindPrimary, Worktrees: []gitreview.Worktree{
-			{ID: "w1", Path: "/work", Branch: "main", Current: true, State: "changed", Files: []gitreview.FileChange{{Path: "Dockerfile.dev", Group: gitreview.GroupUnstaged, Status: "M", Added: 1, Removed: 1}, {Path: "a.go", Group: gitreview.GroupUnstaged, Status: "M", Added: 1}}},
-			{ID: "w2", Path: "/work/wt", Branch: "feature", Linked: true, State: "changed", Files: []gitreview.FileChange{{Path: "b.go", Group: gitreview.GroupStaged, Status: "A", Added: 2}}},
-			{ID: "w3", Path: "/work/det", Detached: true, DetachedHead: "3e336a8", State: "clean"},
-		}},
-	}}, nil
+	return p.inventory(uint64(p.snapshots)), nil
 }
+
+// inventory is the full repository inventory; callers hold p.mu.
+func (p *fakeReviewProvider) inventory(generation uint64) gitreview.Snapshot {
+	return gitreview.Snapshot{Generation: generation, Scope: gitreview.Scope{Label: "/work"}, Repositories: []gitreview.Repository{
+		{ID: "r1", Name: "work", Kind: gitreview.KindPrimary, Worktrees: []gitreview.Worktree{
+			{ID: "w1", Path: "/work", Branch: "main", Current: true, State: "unscanned", CountsState: gitreview.StateUnscanned, Files: []gitreview.FileChange{{Path: "Dockerfile.dev", Group: gitreview.GroupUnstaged, Status: "M", Added: 1, Removed: 1}, {Path: "a.go", Group: gitreview.GroupUnstaged, Status: "M", Added: 1}}},
+			{ID: "w2", Path: "/work/wt", Branch: "feature", Linked: true, State: "unscanned", CountsState: gitreview.StateUnscanned, Files: []gitreview.FileChange{{Path: "b.go", Group: gitreview.GroupStaged, Status: "A", Added: 2}}},
+			{ID: "w3", Path: "/work/det", Detached: true, DetachedHead: "3e336a8", State: "unscanned", CountsState: gitreview.StateUnscanned},
+		}},
+	}}
+}
+
 func (p *fakeReviewProvider) LoadWorktree(_ context.Context, id string) (gitreview.Worktree, error) {
 	p.mu.Lock()
 	p.worktrees = append(p.worktrees, id)
 	p.mu.Unlock()
-	return gitreview.Worktree{ID: id, State: "clean"}, nil
+	path, branch := map[string]string{"w1": "/work", "w2": "/work/wt", "w3": "/work/det"}[id], map[string]string{"w1": "main", "w2": "feature"}[id]
+	return gitreview.Worktree{ID: id, Path: path, Branch: branch, Current: id == "w1", State: "clean", CountsState: gitreview.StateReady}, nil
 }
 func (p *fakeReviewProvider) RefreshWorktree(ctx context.Context, id string) (gitreview.Worktree, error) {
 	p.mu.Lock()
@@ -234,11 +317,11 @@ func (h *reviewHarness) pump(cmd tea.Cmd) {
 		}
 		switch msg := msg.(type) {
 		case nil:
-		case gitReviewTaskResult, view.RefreshRequestMsg, view.LoadWorktreeRequestMsg, view.LoadDirectoryRequestMsg,
+		case gitReviewTaskResult, reviewExternalEditorDone, view.CommentInputRequestMsg, view.CommentResultMsg, view.CounterpartRequestMsg, view.GeneralCommentRequestMsg, view.OpenExternalEditorRequestMsg, view.RefreshRequestMsg, view.LoadWorktreeRequestMsg, view.LoadDirectoryRequestMsg,
 			view.OpenDocumentRequestMsg, view.CloseRequestMsg, view.DockToggleRequestMsg, view.FocusRequestMsg,
 			view.SelectionChangedMsg, view.HighlightedMsg, view.AddCommentMsg, view.EditCommentMsg, view.DeleteCommentMsg,
 			view.PreviewDraftMsg, view.SendDraftMsg, view.CancelPreviewMsg, gitReviewSendResult,
-			dialog.OpenDialogMsg, dialog.CloseDialogMsg, sidebar.GitRequestMsg, messages.RevealGitChangesMsg, dialog.ReviewTargetResultMsg, dialog.ReviewTargetMoreMsg, sidebar.GitWatchMsg, gitAutoRefreshMsg, gitReviewCatalogResult, gitReviewResolved, gitReviewAgents:
+			dialog.OpenDialogMsg, dialog.CloseDialogMsg, sidebar.GitRequestMsg, messages.RevealGitChangesMsg, dialog.ReviewTargetResultMsg, dialog.ReviewTargetMoreMsg, sidebar.GitWatchMsg, gitAutoRefreshMsg, gitReviewCatalogResult, gitReviewResolved, gitReviewAgents, gitReviewIdentityMsg, gitReviewPeerContent:
 			_, next := h.m.Update(msg)
 			queue = append(queue, next)
 		default:
@@ -335,31 +418,36 @@ func TestReviewInspectorKeepsSidebarAndOwnsKeys(t *testing.T) {
 	assert.NotContains(t, content, "visible chat transcript")
 	assert.NotContains(t, content, "Changes  Draft", "no second Changes navigator")
 
-	h.key("j", "c", "x", "ctrl+w")
-	assert.Zero(t, h.editor.keys, "inspector keys never reach the composer")
+	h.key("j", "x", "ctrl+w")
+	assert.Zero(t, h.editor.keys, "inspector navigation never reaches the composer")
 	assert.Zero(t, h.page.keys, "or the hidden transcript")
 	assert.True(t, h.m.reviewFocused(), "Ctrl+W never closes the session or inspector")
+	h.key("c")
+	require.True(t, h.m.reviewModel().CommentInputActive(), "c opens the inline comment editor")
+	h.key("esc") // cancel the comment capture
+	require.NotNil(t, h.m.reviewModel(), "cancelling a comment keeps the inspector open")
 	h.key("esc")
-	assert.Nil(t, h.m.reviewModel(), "Esc closes the inspector")
+	assert.Nil(t, h.m.reviewModel(), "Esc closes the inspector after comment capture is cancelled")
 	assert.Nil(t, h.page.overlay, "the transcript is back")
 	assert.True(t, h.page.focused, "and focused")
 	assert.NotNil(t, h.page.git.Snapshot, "Git data stays live for the sidebar")
 }
 
-func TestReviewChangesCommandRevealsSidebarSectionWithoutIOUntilExpand(t *testing.T) {
+func TestReviewChangesCommandRevealsSidebarAndPrewarmsMetadata(t *testing.T) {
 	h := newReviewHarness(t, 140)
 	h.pump(h.m.syncGitReview())
 	assert.True(t, h.page.git.Available, "the section is offered")
-	assert.Zero(t, h.provider.snapshots, "nothing is scanned before the user expands it")
-	assert.Nil(t, h.m.gitReviews[h.m.reviewAnchor()], "no review state exists yet")
+	assert.Equal(t, 1, h.provider.snapshots, "the visible collapsed sidebar performs one bounded metadata scan")
 
 	_, cmd := h.m.Update(messages.RevealGitChangesMsg{})
 	h.pump(cmd)
 	assert.Equal(t, 1, h.page.revealed)
 	assert.Equal(t, PanelSidebarGit, h.m.focusedPanel, "/changes focuses the section")
 	assert.True(t, h.page.gitFocused)
-	assert.Equal(t, 1, h.provider.snapshots, "expanding runs the bounded discovery once")
-	assert.Empty(t, h.provider.worktrees, "no worktree status until one is expanded")
+	assert.Equal(t, 1, h.provider.snapshots, "expanding reuses discovery")
+	assert.Equal(t, 3, len(h.provider.worktrees), "discovered worktrees receive bounded metadata-only prewarm")
+	assert.Empty(t, h.provider.documents, "prewarm never reads diffs or history")
+	assert.Empty(t, h.provider.dirs, "prewarm never loads file contents")
 	assert.Nil(t, h.page.overlay, "no surface opens")
 
 	h.key("j", "x")
@@ -371,7 +459,8 @@ func TestReviewChangesCommandRevealsSidebarSectionWithoutIOUntilExpand(t *testin
 
 	_, cmd = h.m.Update(sidebar.GitRequestMsg{Owner: "s1", Action: sidebar.GitLoadWorktree, WorktreeID: "w2"})
 	h.pump(cmd)
-	assert.Equal(t, []string{"w2"}, h.provider.worktrees, "status loads for the expanded worktree only")
+	assert.Equal(t, []string{"w1", "w2", "w3", "w2"}, h.provider.worktrees, "explicit expansion can request its metadata again")
+	assert.Empty(t, h.provider.documents, "expanding Git status does not load a diff")
 }
 
 func TestReviewTabCycleReturnsToReviewNotHiddenTranscript(t *testing.T) {
@@ -418,7 +507,8 @@ func TestReviewPointerOwnsContentArea(t *testing.T) {
 	assert.Zero(t, h.page.keys)
 	assert.False(t, h.page.focused, "clicks never reach the hidden chat")
 	assert.True(t, h.m.reviewFocused(), "a click focuses review")
-	assert.True(t, h.m.reviewOwnsPointer(0, 0))
+	assert.False(t, h.m.reviewOwnsPointer(0, 0), "the application-owned top inset does not belong to review")
+	assert.True(t, h.m.reviewOwnsPointer(0, 1), "review owns its visible content below the inset")
 	assert.False(t, h.m.reviewOwnsPointer(0, h.m.contentHeight), "composer rows stay with the composer")
 }
 
@@ -561,7 +651,8 @@ func TestReviewRootFrameShowsDiffBodyAndTerminatesErrors(t *testing.T) {
 	assert.NotContains(t, frame, "visible chat transcript", "undocked review replaces the transcript")
 
 	h.provider.fail = true
-	h.key("J")
+	_, cmd := h.m.Update(view.OpenDocumentRequestMsg{Owner: "s1", Key: view.DocumentKey{Mode: view.ModeChanges, WorktreeID: "w1", Path: "Dockerfile.dev", Group: view.GroupUnstaged}})
+	h.pump(cmd)
 	frame = ansi.Strip(h.m.composeView().Content)
 	assert.NotContains(t, frame, "Loading…", "a failed request never leaves the reader loading")
 	assert.Contains(t, frame, "⚠ document unavailable")
@@ -660,4 +751,110 @@ func TestReviewContextHelp(t *testing.T) {
 	assert.Equal(t, "Changes review — reader", doc.Context, "the inspector's own context help")
 	h.key("/")
 	assert.Equal(t, "Changes review — typing search", h.m.helpDocument().Context)
+}
+
+func TestReviewHoldCPreservesExistingKeyboardRange(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.open(false)
+	model := h.m.reviewModel()
+	_, cmd := h.m.Update(tea.KeyboardEnhancementsMsg{Flags: ansi.KittyReportEventTypes})
+	h.pump(cmd)
+	_, cmd = h.m.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
+	h.pump(cmd)
+	selected := model.Save().SelectFrom
+	require.GreaterOrEqual(t, selected, 0)
+	h.key("c")
+	assert.Equal(t, selected, model.Save().SelectFrom, "tap-c anchors, not replaces, an existing range")
+	h.key("down")
+	_, cmd = h.m.Update(tea.KeyReleaseMsg{Code: 'c'})
+	h.pump(cmd)
+	assert.True(t, h.m.reviewModel().CommentInputActive())
+	assert.Equal(t, selected, model.Save().SelectFrom, "the comment editor keeps the original range anchor")
+	h.key("esc")
+}
+
+func TestReviewSearchAndUppercaseCRemainReviewCommands(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.open(false)
+	model := h.m.reviewModel()
+	h.key("/")
+	_, cmd := h.m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	h.pump(cmd)
+	assert.False(t, model.CommentInputActive(), "search text c is not stolen as a comment shortcut")
+	assert.Contains(t, ansi.Strip(model.View()), "c", "search field receives the character")
+}
+
+func TestReviewHoldCSelectsRangeAndUnsupportedTerminalUsesImmediateFallback(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.open(false)
+	_, cmd := h.m.Update(tea.KeyboardEnhancementsMsg{Flags: ansi.KittyReportEventTypes})
+	h.pump(cmd)
+	h.key("c")
+	assert.True(t, h.m.reviewHoldC, "supported terminals start a hold gesture")
+	assert.False(t, h.m.reviewModel().CommentInputActive(), "press alone never starts the inline editor")
+	h.key("j", "j")
+	_, cmd = h.m.Update(tea.KeyReleaseMsg{Code: 'c'})
+	h.pump(cmd)
+	require.True(t, h.m.reviewModel().CommentInputActive(), "releasing c opens the inline editor")
+	h.key("esc")
+
+	_, cmd = h.m.Update(tea.KeyboardEnhancementsMsg{})
+	h.pump(cmd)
+	h.key("c")
+	require.True(t, h.m.reviewModel().CommentInputActive(), "terminals without key-up support use c as an immediate comment action")
+	h.key("esc")
+}
+
+func TestReviewHoldCReleaseAfterContextChangesDoesNotOpenComment(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.open(false)
+	_, cmd := h.m.Update(tea.KeyboardEnhancementsMsg{Flags: ansi.KittyReportEventTypes})
+	h.pump(cmd)
+	h.key("c", "/")
+	assert.True(t, h.m.reviewHoldC, "hold state waits for the actual c release")
+	_, cmd = h.m.Update(tea.KeyReleaseMsg{Code: 'c'})
+	h.pump(cmd)
+	assert.False(t, h.m.reviewModel().CommentInputActive(), "release outside reader context cannot start a comment")
+	assert.False(t, h.m.reviewHoldC, "the stale hold is cleared")
+	_, cmd = h.m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	h.pump(cmd)
+	assert.False(t, h.m.reviewModel().CommentInputActive(), "c types in search after the hold release")
+}
+
+func TestReviewShiftCDoesNotStartCommentShortcut(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.open(false)
+	_, cmd := h.m.Update(tea.KeyboardEnhancementsMsg{Flags: ansi.KittyReportEventTypes})
+	h.pump(cmd)
+	msg := tea.KeyPressMsg{Code: 'c', ShiftedCode: 'C', Mod: tea.ModShift, Text: "C"}
+	_, cmd = h.m.Update(msg)
+	h.pump(cmd)
+	assert.False(t, h.m.reviewModel().CommentInputActive(), "physical Shift+C does not activate lowercase c comment")
+	assert.False(t, h.m.reviewHoldC, "Shift+C is not a hold gesture")
+}
+
+func TestClosingDiffInspectorDoesNotRestoreReviewTargetHint(t *testing.T) {
+	h := newReviewHarness(t, 140)
+	h.openDockerfile() // opened from the composer, so close restores composer focus
+	ws := h.m.activeReview()
+	require.NotNil(t, ws)
+
+	_, cmd := h.m.Update(sidebar.GitRequestMsg{Owner: "s1", Action: sidebar.GitOpen, WorktreeID: "w2", Path: "b.go", Group: view.GroupStaged})
+	h.pump(cmd)
+	_, mismatch := ws.current().TargetMismatch()
+	require.True(t, mismatch)
+	for i := 0; i < 4 && h.m.focusedPanel != PanelEditor; i++ {
+		h.key("tab")
+	}
+	require.Equal(t, PanelEditor, h.m.focusedPanel)
+	h.pump(h.m.syncGitReview())
+	require.Equal(t, gitReviewHintOwner, h.m.messageBar.CurrentMessage().Owner)
+
+	h.key("tab", "q") // return focus to the diff, then close it
+	require.Nil(t, h.m.reviewModel(), "closing the diff inspector hides the review surface")
+	require.Equal(t, PanelEditor, h.m.focusedPanel, "the original composer focus is restored")
+	assert.Zero(t, ws.hint.Generation, "a hidden review relinquishes its mismatch notice")
+	assert.Empty(t, h.m.messageBar.CurrentMessage().Text, "the hint is cleared instead of remaining as a persistent message")
+	h.pump(h.m.syncGitReview())
+	assert.Zero(t, ws.hint.Generation, "hidden review updates cannot re-arm the notice")
 }

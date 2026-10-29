@@ -21,9 +21,10 @@ type RetainedRendering interface {
 }
 
 // editorInput is the complete, immutable input to inner editor composition.
-// The full outer frame is materialized separately by the owner. Focus, selection,
-// scrolling and suggestions have already been materialized by the widget owner
-// into Textarea; history state is represented by the optional History artifact.
+// The full outer frame is materialized separately by the owner. Focus, selection
+// and scrolling have already been materialized by the widget owner into Textarea;
+// suggestions are overlaid after framing (see materializeFrame) and history state
+// is represented by the optional History artifact.
 // This is retained owner-materialized output, not an independent editable model
 // or a second implementation of editing and wrapping geometry.
 type editorInput struct {
@@ -41,17 +42,9 @@ func drawEditor(in editorInput) string {
 	return view
 }
 
-type suggestionArtifact struct {
-	generation, theme uint64
-	suggestion        string
-	valid             bool
-	view              string
-}
-
 type editorRendering struct {
 	composition retained.Slot[editorInput]
 	body        uint64
-	suggestion  suggestionArtifact
 }
 
 // captureInput synchronizes presentation theme before
@@ -60,24 +53,11 @@ func (e *editor) captureInput(fresh bool) editorInput {
 	if e.themeGeneration != styles.ThemeGeneration() {
 		e.refreshTheme()
 	}
-	showSuggestion := e.textarea.Focused() && e.hasSuggestion && e.suggestion != ""
 	var view string
 	if fresh {
 		view = e.textarea.FreshView()
 	} else {
 		view = e.textarea.View()
-	}
-	if showSuggestion {
-		cached := &e.rendering.suggestion
-		generation := e.textarea.Generation()
-		if fresh || !cached.valid || cached.generation != generation || cached.theme != e.themeGeneration || cached.suggestion != e.suggestion {
-			view = e.applySuggestionOverlay(view)
-			if !fresh {
-				*cached = suggestionArtifact{generation: e.textarea.Generation(), theme: e.themeGeneration, suggestion: e.suggestion, valid: true, view: view}
-			}
-		} else {
-			view = cached.view
-		}
 	}
 	history := ""
 	if e.historySearch.active && e.height > 1 {
@@ -90,6 +70,10 @@ func (e *editor) captureInput(fresh bool) editorInput {
 	return editorInput{Textarea: view, History: history}
 }
 
+func (e *editor) suggestionShown() bool {
+	return e.textarea.Focused() && e.hasSuggestion && e.suggestion != ""
+}
+
 // materializeFrame deliberately uses the complete authoritative Style rather
 // than reconstructing selected properties. Styles can contain transforms,
 // borders and properties without public getters. The resulting immutable ANSI
@@ -97,7 +81,15 @@ func (e *editor) captureInput(fresh bool) editorInput {
 func (e *editor) materializeFrame(view string) string {
 	e.rendering.body++
 	frame := e.Frame()
-	return renderInputFrame(frame, e.width, view)
+	framed := renderInputFrame(frame, e.width, view)
+	if !e.suggestionShown() {
+		return framed
+	}
+	// Overlay after framing: RenderComposite re-applies the frame background after
+	// every background SGR, which would erase the suggestion's cursor block.
+	originX := frame.GetMarginLeft() + frame.GetBorderLeftSize() + frame.GetPaddingLeft()
+	originY := frame.GetMarginTop() + frame.GetBorderTopSize() + frame.GetPaddingTop()
+	return e.applySuggestionOverlay(framed, originX, originY)
 }
 func (e *editor) FreshView() string {
 	return e.materializeFrame(e.rendering.composition.Fresh(e.captureInput(true), drawEditor))
