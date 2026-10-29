@@ -67,6 +67,9 @@ func TestActualProgramTabWheelRoutingClampAndBoundaryOrder(t *testing.T) {
 	program.Send(tea.MouseWheelMsg{X: 30, Y: initial.tabY, Button: tea.MouseWheelRight})
 	program.Send(tea.MouseWheelMsg{X: 1, Y: 1, Button: tea.MouseWheelUp})
 	program.Send(tea.MouseReleaseMsg{X: 1, Y: 1, Button: tea.MouseLeft})
+	// The transcript scrollbar revealed by that scroll fades on wall-clock animation ticks.
+	// Baseline the inert-wheel checks after the reveal has fully faded, or the fade reads as scrolling.
+	require.Eventually(t, func() bool { return snapshot().active == 0 }, 3*time.Second, time.Millisecond, "scrollbar reveal settles")
 	mixed := snapshot()
 	require.NotEqual(t, initial.tabView, mixed.tabView)
 	require.NotEqual(t, transcript(initial), transcript(mixed), "outside vertical wheel still scrolls transcript")
