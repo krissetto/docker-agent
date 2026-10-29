@@ -131,7 +131,25 @@ func TestRootCellSliceSuppressesHorizontallyClippedImageMarkers(t *testing.T) {
 	require.Contains(t, rootCellSlice(line, 0, 8), marker)
 }
 
+// inlineImageRenderingEnabled reads the process-wide inline image switch through
+// RenderMarkers, the only public path that honors it. The probe is valid for any
+// positive bounds: an enabled switch always yields markers.
+func inlineImageRenderingEnabled() bool {
+	probe := tuiimage.Inline{PNGData: []byte("inline-rendering-probe"), Width: 1, Height: 1}
+	return len(tuiimage.RenderMarkers(probe, 8)) > 0
+}
+
+// preserveInlineImageRendering restores the global switch to its value at test
+// start, so tests that change it through writer settings do not leak into others.
+func preserveInlineImageRendering(t *testing.T) {
+	t.Helper()
+	original := inlineImageRenderingEnabled()
+	t.Cleanup(func() { tuiimage.SetRenderingEnabled(original) })
+}
+
 func TestRootImageMarkersRespectModalOcclusionAndTerminalEdges(t *testing.T) {
+	preserveInlineImageRendering(t)
+	tuiimage.SetRenderingEnabled(true)
 	img := tuiimage.Inline{PNGData: []byte("registered-test-image"), Width: 100, Height: 100}
 	markers := tuiimage.RenderMarkers(img, 14)
 	for i := range markers {

@@ -171,6 +171,7 @@ func TestSettingsNestedPickerForcedCleanupRestoresEntryAndOuterTheme(t *testing.
 }
 
 func TestSettingsRollbackRestoresRawUnsupportedImagePreference(t *testing.T) {
+	preserveInlineImageRendering(t)
 	setupSettingsConfigTest(t)
 	root, _, _ := frozenClockRoot(t, 120, 50)
 	writer := tuiimage.NewWriter(&bytes.Buffer{})
@@ -184,6 +185,14 @@ func TestSettingsRollbackRestoresRawUnsupportedImagePreference(t *testing.T) {
 	settingsCancel(t, root, d)
 	require.True(t, writer.Enabled())
 	require.False(t, writer.RenderingEnabled())
+}
+
+// The rollback test disables the process-wide inline image switch via its writer;
+// after it finishes, later tests that render image markers must see it enabled again.
+func TestRollbackLeavesInlineImageRenderingUnchangedForLaterTests(t *testing.T) {
+	before := inlineImageRenderingEnabled()
+	t.Run("rollback", TestSettingsRollbackRestoresRawUnsupportedImagePreference)
+	require.Equal(t, before, inlineImageRenderingEnabled(), "inline image switch must not leak out of the rollback test")
 }
 
 func TestSettingsShutdownRollsBackThemeAndInvalidatesDraft(t *testing.T) {
