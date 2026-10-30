@@ -1,6 +1,7 @@
 package latex
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,4 +50,9 @@ func TestRenderRejectsUnsupportedAndMalformed(t *testing.T) {
 		_, ok := Render(source, false)
 		assert.False(t, ok, source)
 	}
+}
+
+func ExampleRender() {
+	rendered, _ := Render(`\mathbb{C}^3 \to \mathbb{C}^3`, false)
+	fmt.Println(rendered) // Output: ℂ³ → ℂ³
 }
