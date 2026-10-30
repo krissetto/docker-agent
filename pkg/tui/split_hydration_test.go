@@ -82,6 +82,15 @@ func TestActualProgramColdRestoredPaneDragAndPickerHydrateOnce(t *testing.T) {
 			x, y := paneTabPoint(t, root, "cold")
 			_, bounds, _ := root.measurePanes()
 			program := startPaneProgram(t, root)
+			// Record which tabs open a background feed, on the update goroutine.
+			var opened []string
+			program.Send(paneProgramAction{apply: func(m *appModel) tea.Cmd {
+				m.backgroundStatusOpen = func(tabID string) tea.Cmd {
+					opened = append(opened, tabID)
+					return func() tea.Msg { return nil }
+				}
+				return nil
+			}})
 			if method == "drag" {
 				program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				motion := tea.MouseMotionMsg{X: bounds.X, Y: bounds.Y, Button: tea.MouseLeft}
@@ -97,6 +106,17 @@ func TestActualProgramColdRestoredPaneDragAndPickerHydrateOnce(t *testing.T) {
 			require.Equal(t, []string{"cold", "profile"}, s.panes)
 			require.Contains(t, s.content, "cold persisted transcript")
 			require.EqualValues(t, 1, store.reads.Load())
+			var coldOpens int
+			program.Send(paneProgramAction{apply: func(m *appModel) tea.Cmd {
+				for _, id := range opened {
+					if id == "cold" {
+						coldOpens++
+					}
+				}
+				return nil
+			}})
+			queryPaneProgram(t, program)
+			require.Equal(t, 1, coldOpens, "hydration starts the source's background feed once, without waiting for another switch")
 			var repeatedInits atomic.Int32
 			var generation uint64
 			program.Send(paneProgramAction{apply: func(m *appModel) tea.Cmd {

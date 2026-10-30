@@ -134,13 +134,22 @@ func TestClosedPaneSourcePrepareCommitAdoptsExactlyOnce(t *testing.T) {
 	commit := root.finishPaneSourcePrepared(prepared)
 	require.Zero(t, rt.prepared.commits, "commit IO runs only in command")
 	result := commit().(paneSourceCommittedMsg)
+	var opened []string
+	root.backgroundStatusOpen = func(tabID string) tea.Cmd {
+		opened = append(opened, tabID)
+		return func() tea.Msg { return nil }
+	}
 	root.finishPaneSourceCommitted(result)
 	require.Equal(t, "closed-source", root.paneFocus())
 	require.Equal(t, []string{"profile", "closed-source"}, root.panes.Sessions())
 	require.Same(t, rt.prepared.handle, root.application.SessionHandle())
 	require.Equal(t, 4, root.supervisor.Count())
+	require.Equal(t, 1, countOpenedTab(opened, "closed-source"), "the adopted loaded view starts its background feed once")
+	require.Len(t, opened, len(distinctOpened(opened)), "no tab opens its feed twice")
+	beforeDuplicate := len(opened)
 	root.finishPaneSourceCommitted(result)
 	require.Equal(t, 4, root.supervisor.Count(), "late duplicate completion cannot add another view")
+	require.Len(t, opened, beforeDuplicate, "a late duplicate completion does not reopen any feed")
 	require.Zero(t, rt.prepared.handle.releases.Load())
 	root.handleSwitchTab("profile")
 	require.Equal(t, "original draft", root.editor.Value())
@@ -418,4 +427,22 @@ func TestPendingTwoDormancyChangeInvalidatesCachedAndForcedHeaderEqually(t *test
 	root.viewCacheValid = false
 	forced := root.View().Content
 	require.Equal(t, cached, forced)
+}
+
+func countOpenedTab(values []string, want string) int {
+	n := 0
+	for _, v := range values {
+		if v == want {
+			n++
+		}
+	}
+	return n
+}
+
+func distinctOpened(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		set[v] = struct{}{}
+	}
+	return set
 }

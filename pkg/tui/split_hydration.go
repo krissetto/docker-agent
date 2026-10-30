@@ -138,5 +138,7 @@ func (m *appModel) finishPaneHydration(msg paneHydratedMsg) tea.Cmd {
 	m.commitPaneWorkspace(tx.next)
 	m.viewCacheValid = false
 	_, focusCmd := m.handleSwitchTab(tx.destination)
-	return tea.Batch(m.routePaneCmd(tx.source, initCmd), focusCmd)
+	// The source is loaded now, so its background feed opens here rather than
+	// waiting for an unrelated switch.
+	return tea.Batch(m.routePaneCmd(tx.source, initCmd), focusCmd, m.ensureBackgroundStatusFeeds())
 }

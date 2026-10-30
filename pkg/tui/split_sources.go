@@ -199,5 +199,6 @@ func (m *appModel) adoptPaneSource() tea.Cmd {
 		destination = tx.destination
 	}
 	_, focus := m.handleSwitchTab(destination)
-	return tea.Batch(initCmd, focus)
+	// An adopted view is loaded now; its background feed opens here too.
+	return tea.Batch(initCmd, focus, m.ensureBackgroundStatusFeeds())
 }
