@@ -336,6 +336,21 @@ func TestSubagentManagerMarksChildRunningWhenDriverWakes(t *testing.T) {
 		rec, ok := rt.subagents.Read("eeeee")
 		return ok && rec.state == subagent.NodeRunning
 	}, 2*time.Second, 10*time.Millisecond)
+	// Read reports the driver phase, which flips before the start's OnStarted
+	// callback projects the tree. Await that projection itself: the live tree
+	// node, then the root snapshot markChildRunning persists after the update.
+	require.Eventually(t, func() bool {
+		node, ok := rt.subagents.tree.Node("eeeee")
+		return ok && node.State == subagent.NodeRunning
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		snap, err := rt.subagentStore.LoadTree(t.Context(), "parent")
+		if err != nil || snap == nil {
+			return false
+		}
+		state, ok := subagentSnapshotNodeState(snap, "eeeee")
+		return ok && state == subagent.NodeRunning
+	}, 2*time.Second, 10*time.Millisecond)
 	node, ok := rt.subagents.tree.Node("eeeee")
 	require.True(t, ok)
 	assert.Equal(t, subagent.NodeRunning, node.State)
@@ -343,6 +358,23 @@ func TestSubagentManagerMarksChildRunningWhenDriverWakes(t *testing.T) {
 	stored, err := rt.subagentStore.LoadTree(t.Context(), "parent")
 	require.NoError(t, err)
 	require.NotNil(t, stored)
+}
+
+// subagentSnapshotNodeState finds a node's state anywhere in a persisted snapshot.
+func subagentSnapshotNodeState(snap *subagent.Snapshot, id subagent.NodeID) (subagent.NodeState, bool) {
+	var walk func(nodes []subagent.NodeSnapshot) (subagent.NodeState, bool)
+	walk = func(nodes []subagent.NodeSnapshot) (subagent.NodeState, bool) {
+		for _, n := range nodes {
+			if n.Node.ID == id {
+				return n.Node.State, true
+			}
+			if state, ok := walk(n.Children); ok {
+				return state, true
+			}
+		}
+		return "", false
+	}
+	return walk(snap.Nodes)
 }
 
 func TestDeliverMessageReturnsFalseWhenNoReceiver(t *testing.T) {
