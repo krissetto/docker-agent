@@ -195,6 +195,16 @@ func (m *Model) SetReasoning(content string) {
 	m.cache = nil // invalidate cache
 }
 
+// ClearReasoning drops the reasoning text and keeps tool entries in order, so
+// a declined reasoning segment disappears without retracting tools.
+func (m *Model) ClearReasoning() {
+	m.contentItems = slices.DeleteFunc(m.contentItems, func(item contentItem) bool {
+		return item.kind == contentItemReasoning
+	})
+	m.reasoningVersion++
+	m.cache = nil
+}
+
 // AppendReasoning appends to the reasoning content.
 // Creates a new reasoning item if the last item was a tool, otherwise appends to the last reasoning item.
 func (m *Model) AppendReasoning(content string) {

@@ -35,6 +35,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -99,6 +100,15 @@ type Model interface {
 	AppendToolOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd
 	AddToolResult(msg *runtime.ToolCallResponseEvent, status types.ToolStatus) tea.Cmd
 	AppendToLastMessage(agentName, content string) tea.Cmd
+	// AppendAssistantContent, AppendReasoningContent and the methods below
+	// keep streamed content on its logical message (session and message ID).
+	AppendAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd
+	AppendReasoningContent(sessionID, messageID, agentName, content string) tea.Cmd
+	// ResetReasoningContent discards reasoning already shown for one message.
+	ResetReasoningContent(sessionID, messageID, agentName string) tea.Cmd
+	ReconcileAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd
+	AppendAssistantMediaContent(sessionID, messageID, agentName string, media []types.AssistantMedia) tea.Cmd
+	AdoptAssistantMediaIdentity(sessionID, messageID, agentName string, media []types.AssistantMedia)
 	// BreakMessageGroup prevents merging across streams without flushing deferred content.
 	BreakMessageGroup()
 	// AppendAssistantMedia attaches generated media to the agent's current
@@ -3094,6 +3104,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			restoredMedia := generatedMedia[pos]
 			if hasContent || len(restoredMedia) > 0 {
 				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, visibleContent)
+				msg.SessionID, msg.MessageID = sess.ID, smsg.Message.MessageID
 				m.responseGroups[msg] = replayResponseGroup
 				msg.AssistantMedia = restoredMedia
 				appendSessionMessage(msg, m.createMessageView(msg))
@@ -3441,7 +3452,18 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 			}
 		}
 	} else if event.Message != nil && event.Message.Message.Presentation == nil && len(event.Message.Message.ToolCalls) == 0 {
-		cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(event.GetAgentName(), chat.VisibleAssistantContent(event.Message.Message.Content), event.Message.Message.ReasoningContent, false))
+		agentName, messageID := event.GetAgentName(), event.Message.Message.MessageID
+		content := chat.VisibleAssistantContent(event.Message.Message.Content)
+		if messageID != "" && !streamcontent.IsLegacy(messageID) {
+			// A runtime message ID settles its own row. Reasoning is finalized
+			// as before; the canonical text then joins the row with that
+			// identity, or starts one, so a repeated completion adds no copy.
+			cmd = tea.Batch(cmd,
+				m.FinalizeStreamedAssistant(agentName, "", event.Message.Message.ReasoningContent, false),
+				m.ReconcileAssistantContent(event.SessionID, messageID, agentName, content))
+		} else {
+			cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(agentName, content, event.Message.Message.ReasoningContent, false))
+		}
 	}
 	m.committedMessageCount = len(m.messages)
 	return cmd
@@ -3607,6 +3629,7 @@ func (m *model) UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd {
 		changed := false
 		for j, item := range msg.AssistantMedia {
 			if resolved, ok := byID[item.ID]; ok {
+				resolved.Key = item.Key
 				msg.AssistantMedia[j] = resolved
 				changed = true
 			}

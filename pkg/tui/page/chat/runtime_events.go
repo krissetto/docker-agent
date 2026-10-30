@@ -470,6 +470,7 @@ func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed boo
 	p.ownedSkillStream = p.ownedSkillOperation != ""
 
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
+	p.contentIdentity.Finish(p.contentSession(msg.SessionID))
 	if p.contentSessionID == p.contentSession(msg.SessionID) {
 		p.messages.BreakMessageGroup()
 	}
@@ -521,6 +522,7 @@ func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 		return nil
 	}
 	p.trackContentSession(msg.SessionID)
+	identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), msg.MessageID)
 	// Track that we've received assistant content
 	p.hasReceivedAssistantContent = true
 	// Clear pending response indicator - first chunk has arrived
@@ -528,7 +530,7 @@ func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 	// Content is useful activity: acknowledge the sidebar's outbound transfer
 	// box when this agent is a delegation target.
 	activityCmd := p.sidebar.SetAgentActivity(msg.AgentName)
-	return tea.Batch(activityCmd, p.messages.AppendToLastMessage(msg.AgentName, msg.Content))
+	return tea.Batch(activityCmd, p.messages.AppendAssistantContent(identity.SessionID, identity.MessageID, msg.AgentName, msg.Content))
 }
 
 func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningEvent) tea.Cmd {
@@ -536,9 +538,10 @@ func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningE
 		return nil
 	}
 	p.trackContentSession(msg.SessionID)
+	identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), msg.MessageID)
 	p.setPendingResponse(false)
 	activityCmd := p.sidebar.SetAgentActivity(msg.AgentName)
-	return tea.Batch(activityCmd, p.messages.AppendReasoning(msg.AgentName, msg.Content))
+	return tea.Batch(activityCmd, p.messages.AppendReasoningContent(identity.SessionID, identity.MessageID, msg.AgentName, msg.Content))
 }
 
 // handleAgentSwitching forwards transfer_task hop boundaries to the sidebar
@@ -581,6 +584,7 @@ func (p *chatPage) finishSkillOperation() tea.Cmd {
 }
 
 func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd {
+	p.contentIdentity.Finish(p.contentSession(msg.SessionID))
 	if p.contentSessionID == p.contentSession(msg.SessionID) {
 		p.messages.BreakMessageGroup()
 	}

@@ -30,6 +30,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
@@ -261,6 +262,7 @@ type chatPage struct {
 	teamAgentNames      []string // last team roster; a change re-renders cached messages with fresh agent colors
 	streamStartTime     time.Time
 	contentSessionID    string
+	contentIdentity     streamcontent.Tracker
 
 	// routingID is the tab identity this page's routed UI timers are
 	// addressed to; empty for standalone pages (timers then fire unrouted,

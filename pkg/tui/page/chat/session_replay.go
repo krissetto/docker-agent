@@ -64,7 +64,7 @@ func (p *chatPage) beginReplay(snapshot runtime.SessionSnapshot) tea.Cmd {
 		var media map[int][]types.AssistantMedia
 		var requests []generatedMediaRequest
 		if canResolve {
-			media, requests = collectGeneratedMedia(prepared.Session)
+			media, requests = collectGeneratedMedia(prepared.Session, nil)
 		}
 		return replayPreparedMsg{inputReplay: inputReplay, generation: generation, prepared: prepared, snapshot: snapshot, media: media, requests: requests}
 	})

@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -58,17 +59,28 @@ func (p *chatPage) handleMessageAdded(msg *runtime.MessageAddedEvent) tea.Cmd {
 	if p.streamCancelled || msg.CommittedRole() != chat.MessageRoleAssistant {
 		return nil
 	}
-	if !p.app.CanResolveGeneratedFiles() {
-		return nil
-	}
 	parts, agentName := msg.GeneratedMedia, msg.AgentName
+	messageID := ""
 	if msg.Message != nil {
 		parts = msg.Message.Message.MultiContent
+		messageID = msg.Message.Message.MessageID
 		if msg.Message.AgentName != "" {
 			agentName = msg.Message.AgentName
 		}
 	}
-	placeholders, requests := generatedImageMedia(parts)
+	identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), messageID)
+	if msg.Message != nil && msg.Message.Message.Content != "" {
+		// The canonical text itself was settled by messages.CompleteAssistant.
+		p.hasReceivedAssistantContent = true
+		p.setPendingResponse(false)
+		defer p.contentIdentity.Finish(identity.SessionID)
+	}
+	if !p.app.CanResolveGeneratedFiles() {
+		return nil
+	}
+	placeholders, requests := generatedImageMedia(identity.SessionID, identity.MessageID, parts, &p.contentIdentity)
+	// A legacy canonical replay adopts the identity of the restored manifest item it matches.
+	p.messages.AdoptAssistantMediaIdentity(identity.SessionID, identity.MessageID, agentName, placeholders)
 	if len(placeholders) == 0 {
 		return nil
 	}
@@ -78,7 +90,7 @@ func (p *chatPage) handleMessageAdded(msg *runtime.MessageAddedEvent) tea.Cmd {
 	p.setPendingResponse(false)
 	return tea.Batch(
 		p.sidebar.SetAgentActivity(agentName),
-		p.messages.AppendAssistantMedia(agentName, placeholders),
+		p.messages.AppendAssistantMediaContent(identity.SessionID, identity.MessageID, agentName, placeholders),
 		p.resolveGeneratedMediaCmd(requests),
 	)
 }
@@ -91,17 +103,20 @@ func (p *chatPage) collectRestoredGeneratedMedia(sess *session.Session) (map[int
 	if !p.app.CanResolveGeneratedFiles() {
 		return nil, nil
 	}
-	return collectGeneratedMedia(sess)
+	return collectGeneratedMedia(sess, &p.contentIdentity)
 }
 
-func collectGeneratedMedia(sess *session.Session) (map[int][]types.AssistantMedia, []generatedMediaRequest) {
+// collectGeneratedMedia extracts restored generated media. registry is nil
+// when called off the UI goroutine (background replay), in which case every
+// placeholder gets a fresh ID instead of reusing one the page already issued.
+func collectGeneratedMedia(sess *session.Session, registry *streamcontent.Tracker) (map[int][]types.AssistantMedia, []generatedMediaRequest) {
 	var restored map[int][]types.AssistantMedia
 	var requests []generatedMediaRequest
 	for pos, item := range sess.Messages {
 		if !item.IsMessage() || item.Message.Implicit || item.Message.Message.Role != chat.MessageRoleAssistant {
 			continue
 		}
-		placeholders, reqs := generatedImageMedia(item.Message.Message.MultiContent)
+		placeholders, reqs := generatedImageMedia(sess.ID, item.Message.Message.MessageID, item.Message.Message.MultiContent, registry)
 		if len(placeholders) == 0 {
 			continue
 		}
@@ -121,7 +136,11 @@ func collectGeneratedMedia(sess *session.Session) (map[int][]types.AssistantMedi
 // supports additionally get a resolution request. References with an
 // unknown (empty) root kind stay unavailable by design. User attachments
 // (inline sources) and ownerless references are not extracted.
-func generatedImageMedia(parts []chat.MessagePart) ([]types.AssistantMedia, []generatedMediaRequest) {
+//
+// Each item gets a stable Key derived from session, message and artifact. When
+// registry is non-nil, a key seen before reuses its placeholder ID and is not
+// requested again, so a replayed canonical reference joins the same item.
+func generatedImageMedia(sessionID, messageID string, parts []chat.MessagePart, registry *streamcontent.Tracker) ([]types.AssistantMedia, []generatedMediaRequest) {
 	var media []types.AssistantMedia
 	var requests []generatedMediaRequest
 	for _, part := range parts {
@@ -141,9 +160,27 @@ func generatedImageMedia(parts []chat.MessagePart) ([]types.AssistantMedia, []ge
 		if name == "" {
 			name = "generated media"
 		}
-		item := types.AssistantMedia{Fallback: fmt.Sprintf("Generated image %q is unavailable.", name)}
-		if src.ArtifactRoot == chat.ArtifactRootWorkspace {
-			item.ID = generatedMediaIDs.Add(1)
+		// A legacy (ID-less) stream key ignores the message ID, so the
+		// restored manifest entry and its later canonical replay still match.
+		keyMessageID := messageID
+		if streamcontent.IsLegacy(messageID) {
+			keyMessageID = ""
+		}
+		key := fmt.Sprintf("%q:%q:%q:%q:%q:%q:%q", sessionID, keyMessageID, src.ArtifactOwnerSessionID, src.ArtifactRoot, src.ArtifactPath, doc.MimeType, name)
+		id, seen := uint64(0), false
+		if registry != nil {
+			id, seen = registry.MediaID(key)
+		}
+		if !seen {
+			if src.ArtifactRoot == chat.ArtifactRootWorkspace {
+				id = generatedMediaIDs.Add(1)
+			}
+			if registry != nil {
+				registry.RememberMedia(key, id)
+			}
+		}
+		item := types.AssistantMedia{ID: id, Key: key, Fallback: fmt.Sprintf("Generated image %q is unavailable.", name)}
+		if src.ArtifactRoot == chat.ArtifactRootWorkspace && !seen {
 			requests = append(requests, generatedMediaRequest{
 				id: item.ID,
 				ref: runtime.GeneratedFileRef{

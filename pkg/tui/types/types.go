@@ -76,13 +76,21 @@ type AssistantMedia struct {
 	// ID links an item awaiting asynchronous resolution to the result that
 	// replaces it (see messages.Model.UpdateAssistantMedia). Zero means
 	// static: the item is final and never replaced.
-	ID       uint64
+	ID uint64
+	// Key is the stable manifest identity (session, message, artifact). It is
+	// never rendered; it lets a replayed canonical reference join the item
+	// already shown instead of appending a duplicate.
+	Key      string
 	Image    *tuiimage.Inline
 	Fallback string
 }
 
 // Message represents a single message in the chat
 type Message struct {
+	// SessionID and MessageID identify the logical assistant message a streamed
+	// or canonical chunk belongs to. Empty for messages without an identity.
+	SessionID      string
+	MessageID      string
 	TurnID         string
 	Pending        bool
 	InputOrigin    session.InputOrigin
