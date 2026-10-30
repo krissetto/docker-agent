@@ -20,6 +20,7 @@ import (
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -94,6 +95,7 @@ type sessionTestSession struct {
 	steerQueued    bool
 	cancelable     map[string]bool
 	withdrawErr    error
+	cancels        []string
 }
 
 func (s *sessionTestSession) CancelPendingMessage(_ context.Context, turnID string) (bool, error) {
@@ -181,8 +183,17 @@ func (*sessionTestSession) Respond(context.Context, runtime.InteractionResponse)
 	return nil
 }
 
-func (s *sessionTestSession) Cancel(context.Context, string) (runtime.CancelResult, error) {
+func (s *sessionTestSession) Cancel(_ context.Context, target string) (runtime.CancelResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancels = append(s.cancels, target)
 	return runtime.CancelResult{SessionID: s.id, Outcome: runtime.CancelAccepted}, nil
+}
+
+func (s *sessionTestSession) canceled() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.cancels...)
 }
 
 func (s *sessionTestSession) submitted() []runtime.TurnInput {
@@ -654,4 +665,33 @@ func TestRecallErrorKeepsCanonicalPendingProjection(t *testing.T) {
 		assert.False(t, restored)
 	}
 	assert.Len(t, p.messageQueue, 1)
+}
+
+// Accepted messages are runtime-owned. A clear request must refuse them with a
+// warning and leave the projection, the withdrawal state and the runtime untouched.
+func TestClearQueueRefusesAcceptedMessages(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+	accepted := []queuedMessage{{turnID: "accepted-steer", content: "first accepted"}, {turnID: "accepted-follow", content: "second accepted"}}
+	p.messageQueue = slices.Clone(accepted)
+	handle.cancelable = map[string]bool{"accepted-steer": true, "accepted-follow": true}
+
+	_, cmd := p.Update(messages.ClearQueueMsg{})
+	require.NotNil(t, cmd)
+	var notices []notification.ShowMsg
+	for _, msg := range runTimerCmd(t, cmd) {
+		if note, ok := msg.(notification.ShowMsg); ok {
+			notices = append(notices, note)
+		}
+	}
+	require.Len(t, notices, 1)
+	assert.Equal(t, notification.TypeWarning, notices[0].Type)
+	assert.Equal(t, "Accepted messages cannot be cleared", notices[0].Text)
+
+	assert.Equal(t, accepted, p.messageQueue, "accepted messages stay in the projection in order")
+	assert.Equal(t, map[string]bool{"accepted-steer": true, "accepted-follow": true}, handle.cancelable, "no withdrawal was attempted")
+	assert.Empty(t, handle.canceled(), "no runtime cancel was issued")
 }
