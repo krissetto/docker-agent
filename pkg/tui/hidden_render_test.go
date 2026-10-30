@@ -192,6 +192,16 @@ func (p *atomicViewPage) View() string {
 	return p.Page.View()
 }
 
+// Update keeps the wrapper as the root's page. Returning the inner page would
+// drop the counter after the first update.
+func (p *atomicViewPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	updated, cmd := p.Page.Update(msg)
+	if page, ok := updated.(chat.Page); ok {
+		p.Page = page
+	}
+	return p, cmd
+}
+
 func TestActualProgramHiddenSuppressesStreamWrites(t *testing.T) {
 	root, _, _ := frozenClockRoot(t, 120, 40)
 	page := &atomicViewPage{Page: root.chatPage}
@@ -219,8 +229,11 @@ func TestActualProgramHiddenSuppressesStreamWrites(t *testing.T) {
 	require.Equal(t, baselineWrites, writer.writes.Load(), "hidden chunks must not reach the terminal")
 	require.Equal(t, baselinePageViews, page.views.Load(), "hidden chunks must not compose frames")
 
+	// Positive control: visibility must compose again, or the counter is dead.
+	hiddenViews := page.views.Load()
 	program.Send(tmuxVisibilityMsg{})
 	programAck(t, program)
+	require.Greater(t, page.views.Load(), hiddenViews, "visible catch-up must compose through the counted page")
 	require.Contains(t, ansi.Strip(programFrame(t, program)), "VISIBILITY-CATCHUP")
 }
 
