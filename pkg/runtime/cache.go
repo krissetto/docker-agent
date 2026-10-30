@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
@@ -107,7 +109,9 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 		"agent", a.Name(), "session_id", sess.ID)
 	modelID := a.Model(ctx).ID().String()
 	events.Emit(AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage()))
+	// A replay emits no chunks, so the identity lives on the persisted message only.
 	addAgentMessage(sess, a, &chat.Message{
+		MessageID: uuid.NewString(),
 		Role:      chat.MessageRoleAssistant,
 		Content:   cached,
 		CreatedAt: time.Now().Format(time.RFC3339),

@@ -329,7 +329,7 @@ func TestAssistantPresentationHarnessDisplayOnly(t *testing.T) {
 	before := sess.GetMessages(a)
 	var boundary *MessageAddedEvent
 	parts := []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "think"}, {Type: chat.AssistantPartToolCall, ToolCallID: "harness-a", Tool: &chat.AssistantTool{Call: tools.ToolCall{ID: "harness-a"}}}}
-	(&LocalRuntime{now: time.Now}).recordHarnessAssistantMessage(sess, a, "", "test", nil, 0, parts, EventSinkFunc(func(ev Event) {
+	(&LocalRuntime{now: time.Now}).recordHarnessAssistantMessage(sess, a, "", "test", nil, 0, parts, "", EventSinkFunc(func(ev Event) {
 		if e, ok := ev.(*MessageAddedEvent); ok {
 			boundary = e
 		}

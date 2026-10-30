@@ -191,3 +191,21 @@ func TestPersistentMessageIDsObserverStateIsRunLocal(t *testing.T) {
 	assert.Equal(t, "one", msgs[0].Message.Content)
 	assert.Equal(t, "two", msgs[1].Message.Content)
 }
+
+// Adapted from upstream 386454d2f: a harness run's chunks and its persisted
+// message share one identity.
+func TestPersistentMessageIDsHarnessFinalization(t *testing.T) {
+	t.Parallel()
+	store := newIdentityStore(t)
+	sess := session.New()
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	obs := newPersistenceObserver(store)
+	obs.OnEvent(t.Context(), sess, AgentChoiceReasoning("root", sess.ID, "thought", "harness-id"))
+	obs.OnEvent(t.Context(), sess, AgentChoice("root", sess.ID, "answer", "harness-id"))
+	r := &LocalRuntime{now: time.Now}
+	r.recordHarnessAssistantMessage(sess, agent.New("root", "test"), "answer", "test", nil, 0, nil, "harness-id", EventSinkFunc(func(ev Event) { obs.OnEvent(t.Context(), sess, ev) }))
+	msgs := persistedMessages(t, store, sess.ID)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "harness-id", msgs[0].Message.MessageID)
+	assert.Equal(t, "answer", msgs[0].Message.Content)
+}
