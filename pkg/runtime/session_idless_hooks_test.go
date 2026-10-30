@@ -192,3 +192,41 @@ func TestMixedIDAndIDlessHooksKeepFIFOOrder(t *testing.T) {
 	inputs, _ := prov.modelInputs()
 	assert.Equal(t, []string{"A", "B", "C"}, inputs)
 }
+
+// TestIDlessHeldStartKeepsLaterPostsBehindItsHead holds A's run after its start
+// is published but before its drive goroutine runs the ID-less promotion. The
+// OnStarted callbacks run in exactly that window: Post calls them after
+// prepareStart returns and before startWake launches the drive, so no new test
+// hook is needed. B (ID-less) and C (ID'd) are posted and return inside the
+// hold. A's run must not absorb B; B and C run after A, in FIFO order.
+func TestIDlessHeldStartKeepsLaterPostsBehindItsHead(t *testing.T) {
+	d, prov, probe, _ := idlessHookRuntime(t, false)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var holdOnce sync.Once
+	unwatch := d.OnStarted(func() {
+		holdOnce.Do(func() {
+			close(entered)
+			<-release
+		})
+	})
+	t.Cleanup(unwatch)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
+	posted := make(chan bool, 1)
+	go func() { posted <- d.Post(t.Context(), QueuedMessage{Content: "A", RequestID: "turn-a"}, true) }()
+	<-entered
+	require.True(t, d.Post(t.Context(), QueuedMessage{Content: "B"}, true))
+	require.True(t, d.Post(t.Context(), QueuedMessage{Content: "C", RequestID: "turn-c"}, true))
+	releaseOnce()
+	require.True(t, <-posted)
+	d.Wait()
+
+	prompts, _, _ := probe.snapshot()
+	assert.Equal(t, []string{"A", "B", "C"}, prompts, "A's run must not promote B")
+	inputs, overrun := prov.modelInputs()
+	assert.False(t, overrun)
+	assert.Equal(t, []string{"A", "B", "C"}, inputs)
+	users, _ := idlessCanonical(t, d)
+	assert.Equal(t, []string{"A", "B", "C"}, users)
+}

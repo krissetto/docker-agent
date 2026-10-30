@@ -177,6 +177,7 @@ type sessionDriver struct {
 	// request ID failed ambiguously. Automatic wakes and promotion stop until an
 	// explicit retry is admitted; a write that actually committed may be repeated.
 	unidentifiedUncertain bool
+	startUnidentifiedHead *unidentifiedStartHead // ID-less head reserved by the current generation's start
 	lastFailureKey        string
 	lastActive            time.Time
 	preStart              sessionStartGate
@@ -1836,6 +1837,7 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		}
 	}
 	var next QueuedMessage
+	var startHead *QueuedMessage
 	err = d.ownerCall(ctx, func() error {
 		if d.stopped || !d.starting() {
 			return ErrSessionStopped
@@ -1845,6 +1847,10 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		}
 		if len(d.pending) > 0 {
 			next = d.pending[0]
+			if next.RequestID == "" && !next.guidance() {
+				head := next
+				startHead = &head
+			}
 		}
 		return nil
 	})
@@ -1905,6 +1911,13 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		}
 		d.generation++
 		generation = d.generation
+		// Only a start whose head is ID-less reserves one, and only for its own
+		// generation; an ID'd or empty start binds none, so a later ID-less post
+		// waits for the successor instead of being absorbed by this run.
+		d.startUnidentifiedHead = nil
+		if startHead != nil {
+			d.startUnidentifiedHead = &unidentifiedStartHead{generation: generation, head: *startHead}
+		}
 		// A successor run replaces the lease its predecessor never released;
 		// that lease is released below, outside the owner.
 		previousRunEnv, d.runEnvironment = d.runEnvironment, runEnv
@@ -1953,7 +1966,7 @@ func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uin
 	var runErr string
 	cancelled := false
 	// Promote before the execution snapshot is cloned so the model sees the head.
-	promotedInput, skipModel, err := d.promoteUnidentifiedHead(ctx)
+	promotedInput, skipModel, err := d.promoteUnidentifiedHead(ctx, generation)
 	if err != nil {
 		return d.finishRunContextOpts(d.r.durabilityContext(), generation, err.Error(), false)
 	}
@@ -2008,7 +2021,7 @@ func (d *sessionDriver) driveWake(ctx context.Context, generation uint64) {
 func (d *sessionDriver) driveWakeGeneration(ctx context.Context, generation uint64) (context.Context, uint64, bool) {
 	var runErr string
 	// Promote before the execution snapshot is cloned so the model sees the head.
-	promotedInput, skipModel, err := d.promoteUnidentifiedHead(ctx)
+	promotedInput, skipModel, err := d.promoteUnidentifiedHead(ctx, generation)
 	if err != nil {
 		return d.finishRunContextOpts(d.r.durabilityContext(), generation, err.Error(), false)
 	}
@@ -2090,6 +2103,7 @@ func (d *sessionDriver) finishRunContextOpts(ctx context.Context, generation uin
 		}
 		proceed = true
 		d.lastError, d.completionInFlight = runErr, true
+		d.clearStartUnidentifiedHeadLocked(generation)
 		if !d.settling() {
 			d.canceledOutcome = d.cancelling()
 		}

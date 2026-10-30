@@ -448,16 +448,35 @@ func (r *LocalRuntime) initialTurnInputFor(ctx context.Context, sess *session.Se
 	return msg, -1, ok
 }
 
-// promoteUnidentifiedHead promotes a non-guidance ID-less queue head into the
-// transcript at run start, before the execution snapshot is cloned. It returns
-// the promoted input for the run's hooks, or nil when nothing was appended.
-// skipModel reports a consumed retry marker, which carries no content.
-func (d *sessionDriver) promoteUnidentifiedHead(ctx context.Context) (run *promotedRunInput, skipModel bool, err error) {
+// unidentifiedStartHead is the ID-less head a start reserved for one generation.
+// The entry stays in d.pending, so busy and queued checks still see it, until
+// the generation's promotion commits or the generation ends.
+type unidentifiedStartHead struct {
+	generation uint64
+	head       QueuedMessage
+}
+
+// clearStartUnidentifiedHeadLocked drops the reservation when its generation
+// ends. A reservation for any other generation is left alone.
+func (d *sessionDriver) clearStartUnidentifiedHeadLocked(generation uint64) {
+	if d.startUnidentifiedHead != nil && d.startUnidentifiedHead.generation == generation {
+		d.startUnidentifiedHead = nil
+	}
+}
+
+// promoteUnidentifiedHead promotes the ID-less head reserved for generation at
+// its start into the transcript, before the execution snapshot is cloned. It
+// returns the promoted input for the run's hooks, or nil when nothing was
+// appended. A generation whose start head had an ID, or was empty, promotes
+// nothing. If the reserved head no longer heads the queue, the promotion fails
+// as stale and no other head is consumed. skipModel reports a consumed retry
+// marker, which carries no content.
+func (d *sessionDriver) promoteUnidentifiedHead(ctx context.Context, generation uint64) (run *promotedRunInput, skipModel bool, err error) {
 	var head QueuedMessage
 	found := false
 	if err := d.ownerCall(ctx, func() error {
-		if len(d.pending) > 0 && d.pending[0].RequestID == "" && !d.pending[0].guidance() {
-			head, found = d.pending[0], true
+		if reserved := d.startUnidentifiedHead; reserved != nil && reserved.generation == generation {
+			head, found = reserved.head, true
 		}
 		return nil
 	}); err != nil {
@@ -470,6 +489,12 @@ func (d *sessionDriver) promoteUnidentifiedHead(ctx context.Context) (run *promo
 	if err != nil {
 		return nil, false, err
 	}
+	_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+		if d.generation == generation {
+			d.clearStartUnidentifiedHeadLocked(generation)
+		}
+		return nil
+	})
 	if head.Retry {
 		return nil, true, nil
 	}
