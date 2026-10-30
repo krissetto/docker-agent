@@ -1,6 +1,8 @@
 package tool
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -58,4 +60,50 @@ func TestRegistryInvalidatesCachesOnThemeChange(t *testing.T) {
 	r.RegisterCacheInvalidator(func() { calls += 10 })
 	r.InvalidateCaches()
 	assert.Equal(t, 11, calls)
+}
+
+// Concurrent registration and resolution on separate registries never race or
+// observe each other's renderers (run under -race).
+func TestRegistriesConcurrentRegisterAndResolveAreIsolated(t *testing.T) {
+	t.Parallel()
+
+	first, second := NewRegistry(), NewRegistry()
+	ar := animation.NewRuntime()
+	var wg sync.WaitGroup
+	for i := range 4 {
+		key := fmt.Sprintf("tool_%d", i)
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				first.Register(key, probeBuilder("first"))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				second.Register(key, probeBuilder("second"))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				_ = first.New(ar, weatherMessage(), service.StaticSessionState{}).View()
+				first.InvalidateCaches()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				_ = DefaultRegistry().New(ar, weatherMessage(), service.StaticSessionState{})
+			}
+		}()
+	}
+	wg.Wait()
+
+	for i := range 4 {
+		msg := &types.Message{ToolCall: tools.ToolCall{Function: tools.FunctionCall{Name: fmt.Sprintf("tool_%d", i)}}, ToolDefinition: tools.Tool{Name: fmt.Sprintf("tool_%d", i)}}
+		assert.Equal(t, "first", first.New(ar, msg, service.StaticSessionState{}).View())
+		assert.Equal(t, "second", second.New(ar, msg, service.StaticSessionState{}).View())
+	}
 }
