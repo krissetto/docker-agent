@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -331,15 +332,35 @@ func TestFirstSettlementFailureSchedulesBoundedRecovery(t *testing.T) {
 	require.Eventually(t, func() bool { return child.AwaitTurn(t.Context(), turn.TurnID) == nil }, 3*time.Second, time.Millisecond)
 }
 
+// armedPromotionStore blocks only the first promotion after it is armed. It is
+// installed at construction, so no runtime store field is swapped while the
+// scheduler may read it.
+type armedPromotionStore struct {
+	*session.InMemorySessionStore
+
+	armed     atomic.Bool
+	enterOnce sync.Once
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (s *armedPromotionStore) PromotePendingUserMessage(ctx context.Context, id, turnID string) error {
+	if s.armed.CompareAndSwap(true, false) {
+		s.enterOnce.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	return s.InMemorySessionStore.PromotePendingUserMessage(context.WithoutCancel(ctx), id, turnID)
+}
+
 func TestCancelStartingPromotionIsAcknowledgedOnceAndNeverExecutes(t *testing.T) {
-	base := session.NewInMemorySessionStore()
-	h := pendingRecallHandle(t, base)
+	base := session.NewInMemorySessionStore().(*session.InMemorySessionStore)
+	blocked := &armedPromotionStore{InMemorySessionStore: base, entered: make(chan struct{}), release: make(chan struct{})}
+	h := pendingRecallHandle(t, blocked)
 	turn, err := h.Submit(t.Context(), TurnInput{Content: "cancel before execution"})
 	require.NoError(t, err)
 	d := h.driver
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase = sessionIdle; d.activeRequestID = ""; return nil }))
-	blocked := &promotionBlockedStore{Store: base, entered: make(chan struct{}), release: make(chan struct{})}
-	d.r.sessionStore = blocked
+	blocked.armed.Store(true)
 	started := make(chan error, 1)
 	go func() { _, _, _, err := d.prepareStart(t.Context(), true); started <- err }()
 	<-blocked.entered

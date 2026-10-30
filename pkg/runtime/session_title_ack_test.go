@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,19 +13,26 @@ import (
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 )
 
+// titleAcknowledgementStore blocks only the first title write made after the
+// test arms it. Later writes, such as the persistence observer's title event,
+// pass through without re-closing entered.
 type titleAcknowledgementStore struct {
 	session.Store
 
-	entered chan struct{}
-	release chan struct{}
-	failure error
+	armed     atomic.Bool
+	enterOnce sync.Once
+	entered   chan struct{}
+	release   chan struct{}
+	failure   error
 }
 
 func (s *titleAcknowledgementStore) UpdateSessionTitle(ctx context.Context, id, title string) error {
-	close(s.entered)
-	<-s.release
-	if s.failure != nil {
-		return s.failure
+	if s.armed.CompareAndSwap(true, false) {
+		s.enterOnce.Do(func() { close(s.entered) })
+		<-s.release
+		if s.failure != nil {
+			return s.failure
+		}
 	}
 	return s.Store.UpdateSessionTitle(context.WithoutCancel(ctx), id, title)
 }
@@ -36,11 +45,10 @@ func TestSessionTitleReservedWriteJoinsSuccessAndErrorAfterCancellation(t *testi
 			if failure {
 				store.failure = errors.New("write failed")
 			}
-			h := titleOwnerFixture(t, p)
-			h.runtime.sessionStore = store
+			h := titleOwnerFixture(t, p, WithSessionStore(store))
 			snapshot, err := h.Snapshot(t.Context())
 			require.NoError(t, err)
-			require.NoError(t, store.AddSession(t.Context(), snapshot))
+			store.armed.Store(true)
 			require.NoError(t, h.GenerateSessionTitle(t.Context(), sessiontitle.New(p), []string{"hello"}, false))
 			<-store.entered
 			require.NoError(t, h.driver.ownerCall(t.Context(), func() error { h.driver.invalidateTitleLocked(); return nil }))

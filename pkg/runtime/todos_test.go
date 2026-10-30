@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,19 +160,27 @@ func TestSessionHandleTodoRootSharingAndAgentInvalidation(t *testing.T) {
 	}
 }
 
+// failingTodoStore fails MutateTodos only while armed, so the handle can be
+// built with it from the start rather than swapping the runtime store later.
 type failingTodoStore struct {
 	session.Store
 	session.TodoStore
-	err error
+	armed atomic.Bool
+	err   error
 }
 
-func (s *failingTodoStore) MutateTodos(context.Context, string, func([]session.Todo) ([]session.Todo, error)) ([]session.Todo, error) {
+func (s *failingTodoStore) MutateTodos(ctx context.Context, sessionID string, fn func([]session.Todo) ([]session.Todo, error)) ([]session.Todo, error) {
+	if !s.armed.Load() {
+		return s.TodoStore.MutateTodos(ctx, sessionID, fn)
+	}
 	return []session.Todo{{ID: "misleading-result", Status: "completed"}}, s.err
 }
 
 func TestSessionHandleTodoMutationErrors(t *testing.T) {
 	store := session.NewInMemorySessionStore()
-	r, handle := newTodoHandleFixture(t, store, false)
+	failure := errors.New("todo commit failed")
+	failing := &failingTodoStore{Store: store, TodoStore: store.(session.TodoStore), err: failure}
+	_, handle := newTodoHandleFixture(t, failing, false)
 	initial := []session.Todo{{ID: "todo_1", Status: "pending"}}
 	require.NoError(t, store.(session.TodoStore).SaveTodos(t.Context(), handle.ID(), initial))
 	for _, tc := range []struct {
@@ -199,8 +208,7 @@ func TestSessionHandleTodoMutationErrors(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = handle.SetTodoDescription(ctx, "todo_1", "", "new")
 	require.ErrorIs(t, err, context.Canceled)
-	failure := errors.New("todo commit failed")
-	r.sessionStore = &failingTodoStore{Store: store, TodoStore: store.(session.TodoStore), err: failure}
+	failing.armed.Store(true)
 	items, err := handle.SetTodoStatus(t.Context(), "todo_1", "completed")
 	require.ErrorIs(t, err, failure)
 	require.Nil(t, items)
@@ -210,7 +218,7 @@ func TestSessionHandleTodoMutationErrors(t *testing.T) {
 	items, err = handle.SetTodoDescription(t.Context(), "todo_1", "", "new")
 	require.ErrorIs(t, err, failure)
 	require.Nil(t, items)
-	r.sessionStore = store
+	failing.armed.Store(false)
 	persisted, err := store.(session.TodoStore).LoadTodos(t.Context(), handle.ID())
 	require.NoError(t, err)
 	require.Equal(t, initial, persisted)

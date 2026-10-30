@@ -52,7 +52,7 @@ func titleOwnerFixture(t *testing.T, p *ownedTitleProvider, opts ...Opt) *sessio
 	t.Helper()
 	root := agent.New("root", "", agent.WithModel(&mockProvider{id: "test/main", stream: newStreamBuilder().AddContent("Answer").Build()}), agent.WithTitleModel(p))
 	worker := agent.New("worker", "", agent.WithModel(&mockProvider{id: "test/worker"}))
-	opts = append(opts, WithModelStore(mockModelStore{}), WithSessionStore(session.NewInMemorySessionStore()))
+	opts = append([]Opt{WithModelStore(mockModelStore{}), WithSessionStore(session.NewInMemorySessionStore())}, opts...)
 	r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, worker)), opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, r.Close()) })

@@ -138,11 +138,32 @@ func TestRestoreSessionTreeKeepsSyntheticRootOnFailureAndPublication(t *testing.
 	}
 }
 
+// budgetDeleteFaultStore forwards every capability the runtime probes for, so
+// the durable runtime is unchanged; only DeleteSession for failID fails.
 type budgetDeleteFaultStore struct {
 	session.Store
+	session.CoordinationStore
+	session.ItemAppender
 
-	failID string
+	durability subagent.Durability
+	failID     string
 }
+
+var (
+	_ session.CoordinationStore = (*budgetDeleteFaultStore)(nil)
+	_ session.ItemAppender      = (*budgetDeleteFaultStore)(nil)
+)
+
+func newBudgetDeleteFaultStore(store session.Store) *budgetDeleteFaultStore {
+	return &budgetDeleteFaultStore{
+		Store:             store,
+		CoordinationStore: store.(session.CoordinationStore),
+		ItemAppender:      store.(session.ItemAppender),
+		durability:        store.(interface{ Durability() subagent.Durability }).Durability(),
+	}
+}
+
+func (s *budgetDeleteFaultStore) Durability() subagent.Durability { return s.durability }
 
 func (s *budgetDeleteFaultStore) DeleteSession(ctx context.Context, id string) error {
 	if id == s.failID {
@@ -155,20 +176,19 @@ func TestPublicDeleteSessionReleasesBudgetOnlyAfterSuccessfulDeletion(t *testing
 	for _, failure := range []string{"root", "child", "none"} {
 		t.Run(failure, func(t *testing.T) {
 			store := coordinationSQLite(t)
-			rt, owner := coordinationRuntime(t, store, coordinationReply("root"), coordinationReply("worker"))
+			fault := newBudgetDeleteFaultStore(store)
+			rt, owner := coordinationRuntime(t, fault, coordinationReply("root"), coordinationReply("worker"))
 			root := coordinationCreate(t, owner.Runtime(), "budget-root", "")
 			child := coordinationCreate(t, owner.Runtime(), "budget-child", root.ID())
 			rt.budgetMu.Lock()
 			rt.rootBudgets = map[string]*budgetSet{root.ID(): {}}
 			rt.budgetMu.Unlock()
-			fault := &budgetDeleteFaultStore{Store: store}
 			if failure == "root" {
 				fault.failID = root.ID()
 			}
 			if failure == "child" {
 				fault.failID = child.ID()
 			}
-			rt.sessionStore = fault
 			err := owner.Runtime().DeleteSession(t.Context(), root.ID())
 			if failure != "none" {
 				require.ErrorContains(t, err, "delete failure")
