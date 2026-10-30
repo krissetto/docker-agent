@@ -1457,13 +1457,13 @@ type (
 // added when the runtime drains the message and emits its UserMessageEvent,
 // which is the moment the agent actually sees it.
 func (p *chatPage) steerResolved(input resolvedSend) tea.Cmd {
-	scope, application := p.inputScope, p.app
+	scope, application, target := p.inputScope, p.app, p.app.InputTarget()
 	msg, resolved := input.msg, input.resolved
 	return func() tea.Msg {
 		if !scope.live() {
 			return nil
 		}
-		submission, err := application.SteerMessage(scope.ctx, resolved.Content, msg.Attachments)
+		submission, err := application.SteerMessageTo(scope.ctx, target, resolved.Content, msg.Attachments)
 		if !scope.live() {
 			// An accepted steer stays with the runtime; only this orphan UI result is dropped.
 			return nil
@@ -1480,13 +1480,13 @@ func (p *chatPage) steerResolved(input resolvedSend) tea.Cmd {
 }
 
 func (p *chatPage) followUpResolved(input resolvedSend) tea.Cmd {
-	scope, application := p.inputScope, p.app
+	scope, application, target := p.inputScope, p.app, p.app.InputTarget()
 	msg, resolved := input.msg, input.resolved
 	return func() tea.Msg {
 		if !scope.live() {
 			return nil
 		}
-		_, err := application.FollowUpMessage(scope.ctx, resolved.Content, msg.Attachments)
+		_, err := application.FollowUpMessageTo(scope.ctx, target, resolved.Content, msg.Attachments)
 		if !scope.live() {
 			// An accepted follow-up stays with the runtime; only this orphan UI result is dropped.
 			return nil

@@ -6,6 +6,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/page/chat"
 )
 
 func (m *appModel) routePaneCmd(id string, cmd tea.Cmd) tea.Cmd {
@@ -18,7 +19,7 @@ func (m *appModel) routePaneCmd(id string, cmd tea.Cmd) tea.Cmd {
 func paneOriginCommand(id string, generation uint64, cmd tea.Cmd) tea.Cmd {
 	return core.MapCommand(cmd, func(result tea.Msg) tea.Msg {
 		switch result.(type) {
-		case animation.TickMsg, messages.RoutedMsg:
+		case animation.TickMsg, messages.RoutedMsg, chat.GlobalMsg:
 			return result
 		default:
 			return messages.RoutedMsg{SessionID: id, RouteGeneration: generation, Inner: result}

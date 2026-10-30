@@ -1355,7 +1355,22 @@ func (a *App) deliver(busCtx context.Context, subs []chan any, msg any) bool {
 // message to the session (and emits the matching UserMessageEvent) when the
 // agent loop drains it.
 func (a *App) SteerMessage(ctx context.Context, content string, attachments []messages.Attachment) (runtime.Submission, error) {
-	state := a.state()
+	return a.SteerMessageTo(ctx, a.InputTarget(), content, attachments)
+}
+
+// InputTarget is the session state an asynchronous input was dispatched against.
+// Capturing it at dispatch keeps a later session replacement from retargeting the input.
+type InputTarget struct{ state sessionState }
+
+// InputTarget captures the session state the next input addresses.
+func (a *App) InputTarget() InputTarget { return InputTarget{state: a.state()} }
+
+// Session returns the session snapshot captured by the target.
+func (t InputTarget) Session() *session.Session { return t.state.session }
+
+// SteerMessageTo is SteerMessage addressed to a target captured at dispatch.
+func (a *App) SteerMessageTo(ctx context.Context, target InputTarget, content string, attachments []messages.Attachment) (runtime.Submission, error) {
+	state := target.state
 	if state.handle == nil {
 		return runtime.Submission{}, state.operationError("send")
 	}
@@ -1369,7 +1384,12 @@ func (a *App) SteerMessage(ctx context.Context, content string, attachments []me
 // FollowUpMessage resolves attachments and queues a message for a separate turn
 // after the current agent turn finishes.
 func (a *App) FollowUpMessage(ctx context.Context, content string, attachments []messages.Attachment) (runtime.Submission, error) {
-	state := a.state()
+	return a.FollowUpMessageTo(ctx, a.InputTarget(), content, attachments)
+}
+
+// FollowUpMessageTo is FollowUpMessage addressed to a target captured at dispatch.
+func (a *App) FollowUpMessageTo(ctx context.Context, target InputTarget, content string, attachments []messages.Attachment) (runtime.Submission, error) {
+	state := target.state
 	if state.handle == nil {
 		return runtime.Submission{}, state.operationError("submit")
 	}

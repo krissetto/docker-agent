@@ -3,6 +3,7 @@ package chat
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 )
 
@@ -15,14 +16,17 @@ type Effects struct {
 	Local tea.Cmd
 	// Visible drives chrome, notifications and dialogs. Hidden pages drop it.
 	Visible tea.Cmd
+	// Global is application work owned by this page lifetime, such as exit after
+	// the first response. It runs whether the page is visible or hidden.
+	Global tea.Cmd
 }
 
 // Cmd returns the commands to dispatch for a visible or hidden page.
 func (e Effects) Cmd(visible bool) tea.Cmd {
 	if visible {
-		return tea.Batch(e.Local, e.Visible)
+		return tea.Batch(e.Local, e.Visible, e.Global)
 	}
-	return e.Local
+	return tea.Batch(e.Local, e.Global)
 }
 
 // tabLocal classifies page work produced inside an update as Local. Outside an
@@ -33,6 +37,27 @@ func (p *chatPage) tabLocal(cmd tea.Cmd) tea.Cmd {
 	}
 	p.effects.Local = tea.Batch(p.effects.Local, cmd)
 	return nil
+}
+
+// global classifies application work produced inside an update as Global.
+// Outside an update it returns cmd unchanged.
+//
+//nolint:unused // Used by the exit-after-first-response effect once the runtime_events.go change lands.
+func (p *chatPage) global(cmd tea.Cmd) tea.Cmd {
+	if p.effects == nil {
+		return cmd
+	}
+	p.effects.Global = tea.Batch(p.effects.Global, cmd)
+	return nil
+}
+
+// GlobalMsg is an application effect owned by one page lifetime. The host applies
+// Inner only while Origin is still the page in TabID and Application is still its app.
+type GlobalMsg struct {
+	TabID       string
+	Origin      Page
+	Application *app.App
+	Inner       tea.Msg
 }
 
 // UpdateEffects is Update with the Local/Visible split exposed to routed

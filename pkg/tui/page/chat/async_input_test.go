@@ -1,12 +1,17 @@
 package chat
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -117,4 +122,77 @@ func TestHiddenSendKeepsLocalSubmissionAndDropsVisibleChrome(t *testing.T) {
 	_, effects = p.UpdateEffects(messages.SendMsg{Content: "exit"})
 	assert.Empty(t, flattenCmdMsgs(effects.Cmd(false)), "the immediate exit command is visible-only")
 	assert.NotEmpty(t, flattenCmdMsgs(effects.Cmd(true)), "visible pages still dispatch it")
+}
+
+// perSessionTestRuntime gives every session its own recording handle, so a
+// test can tell which session an input reached.
+type perSessionTestRuntime struct {
+	handles map[string]*sessionTestSession
+}
+
+func (r *perSessionTestRuntime) CreateSession(_ context.Context, sess *session.Session, _ runtime.SessionBinding) (runtime.SessionHandle, error) {
+	if r.handles[sess.ID] == nil {
+		r.handles[sess.ID] = &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning}
+	}
+	return r.handles[sess.ID], nil
+}
+
+func (r *perSessionTestRuntime) SessionByID(id string) (runtime.SessionHandle, error) {
+	if h := r.handles[id]; h != nil {
+		return h, nil
+	}
+	return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "lookup"}
+}
+
+func (*perSessionTestRuntime) DeleteSession(context.Context, string) error { return nil }
+
+// A steer or follow-up with a file attachment, dispatched on one session, must
+// reach that session even when the app's state is replaced before completion.
+func TestAttachedInputStaysOnDispatchSessionAcrossReplacement(t *testing.T) {
+	t.Parallel()
+	for _, followUp := range []bool{false, true} {
+		name := "steer"
+		if followUp {
+			name = "follow-up"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			origin, other := session.New(), session.New()
+			rt := &perSessionTestRuntime{handles: map[string]*sessionTestSession{}}
+			a := app.New(t.Context(), rt, origin, runtime.SessionBinding{}, app.WithRuntimeServices(&queueTestServices{}))
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(origin)).(*chatPage)
+			p.working = true
+			file := filepath.Join(t.TempDir(), "notes.txt")
+			require.NoError(t, os.WriteFile(file, []byte("attached λ"), 0o600))
+			msg := messages.SendMsg{Content: "with file", Steer: !followUp, FollowUp: followUp, Attachments: []messages.Attachment{{Name: "notes.txt", FilePath: file}}}
+
+			_, cmd := p.handleSendMsg(msg)
+			require.NotNil(t, cmd)
+			// The session changes after dispatch, before the async submission runs.
+			a.ReplaceSession(t.Context(), other)
+			msgs := flattenCmdMsgs(cmd)
+			require.Len(t, msgs, 1)
+
+			originHandle, otherHandle := rt.handles[origin.ID], rt.handles[other.ID]
+			require.NotNil(t, originHandle)
+			var inputs []runtime.TurnInput
+			if followUp {
+				require.Len(t, originHandle.submitted(), 1)
+				inputs = originHandle.submitted()
+			} else {
+				require.Len(t, originHandle.sent(), 1)
+				inputs = originHandle.sent()
+			}
+			require.NotEmpty(t, inputs[0].MultiContent, "the file attachment resolves against the dispatch session")
+			var text strings.Builder
+			for _, part := range inputs[0].MultiContent {
+				text.WriteString(part.Text)
+			}
+			assert.Contains(t, text.String(), "attached λ")
+			if otherHandle != nil {
+				assert.Empty(t, otherHandle.sent())
+				assert.Empty(t, otherHandle.submitted())
+			}
+		})
+	}
 }

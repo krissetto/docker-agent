@@ -1358,6 +1358,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.RoutedMsg:
 		return m.handleRoutedMsg(msg)
 
+	case chat.GlobalMsg:
+		return m.handleChatGlobal(msg)
+
 	case animation.TickMsg:
 		accepted, ok := m.ar.Accept(msg)
 		if !ok {
@@ -2317,6 +2320,20 @@ func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 		}
 	}
 	m.applyPauseEvent(m.sessionState, event)
+}
+
+// handleChatGlobal applies a page-owned application effect only while its origin
+// page and application are still the ones bound to the tab. A hidden tab's effect
+// still applies; a retired origin's does not.
+func (m *appModel) handleChatGlobal(msg chat.GlobalMsg) (tea.Model, tea.Cmd) {
+	if msg.Origin == nil || m.chatPages[msg.TabID] != msg.Origin {
+		return m, nil
+	}
+	runner := m.supervisor.GetRunner(msg.TabID)
+	if runner == nil || runner.App != msg.Application {
+		return m, nil
+	}
+	return m.Update(msg.Inner)
 }
 
 // handleRoutedMsg processes messages routed to specific sessions.
