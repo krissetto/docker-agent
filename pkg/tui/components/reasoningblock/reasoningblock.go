@@ -99,6 +99,7 @@ type Model struct {
 	height           int
 	sessionState     service.SessionStateReader
 	subagents        *subagentindex.Index
+	toolRenderers    *tool.Registry
 	reasoningVersion int                    // increments when reasoning content changes
 	cache            *renderCache           // cached rendering results
 	animationSub     animation.Subscription // whether we're registered with animation coordinator
@@ -141,6 +142,22 @@ func (m *Model) fadeStyleForProgress(progress float64) lipgloss.Style {
 }
 
 // New creates a new reasoning block.
+// SetToolRenderers selects the tool renderer registry for nested tool calls.
+// A nil registry keeps the current one.
+func (m *Model) SetToolRenderers(registry *tool.Registry) {
+	if registry != nil {
+		m.toolRenderers = registry
+	}
+}
+
+// renderers returns the registry for nested tool calls, falling back to the shared default.
+func (m *Model) renderers() *tool.Registry {
+	if m.toolRenderers == nil {
+		return tool.DefaultRegistry()
+	}
+	return m.toolRenderers
+}
+
 func New(ar *animation.Runtime, id, agentName string, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) *Model {
 	if ar == nil {
 		panic("reasoningblock: nil animation runtime")
@@ -234,7 +251,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 			continue
 		}
 		m.toolEntries[i].msg = msg
-		next := tool.New(m.ar, msg, m.sessionState, m.subagents)
+		next := m.renderers().New(m.ar, msg, m.sessionState, m.subagents)
 		next.SetSize(m.width, 0)
 		animation.StopView(entry.view)
 		agentmessage.PreserveExpansion(entry.view, next)
@@ -243,7 +260,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 	}
 
 	// New tool call - add to entries and track position in content sequence
-	view := tool.New(m.ar, msg, m.sessionState, m.subagents)
+	view := m.renderers().New(m.ar, msg, m.sessionState, m.subagents)
 	view.SetSize(m.width, 0)
 	toolIndex := len(m.toolEntries)
 	m.toolEntries = append(m.toolEntries, toolEntry{msg: msg, view: view})
@@ -325,7 +342,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		}
 
 		// Recreate view to pick up new state
-		view := tool.New(m.ar, entry.msg, m.sessionState, m.subagents)
+		view := m.renderers().New(m.ar, entry.msg, m.sessionState, m.subagents)
 		view.SetSize(m.width, 0)
 		animation.StopView(entry.view)
 		agentmessage.PreserveExpansion(entry.view, view)

@@ -6,6 +6,7 @@
 package tool
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -80,40 +81,69 @@ var builders = map[string]Builder{
 	plan.ToolNameExportPlanToFile:   plantool.New,
 }
 
-// custom holds renderers registered by embedders via Register. They are
-// consulted before the built-in builders, so an embedder can override a
-// built-in tool's view as well as render tools cagent has no view for.
-var (
-	customMu sync.RWMutex
-	custom   = map[string]Builder{}
-)
+// Registry resolves a tool renderer for a message. Custom renderers registered
+// on an instance take precedence over the built-in table at each tier: exact
+// tool name, then "category:<name>", then the generic fallback. Each
+// application owns its registry, so renderers registered by one embedder never
+// leak into another instance.
+type Registry struct {
+	mu           sync.RWMutex
+	custom       map[string]Builder
+	invalidators []func()
+}
+
+// NewRegistry returns a registry with no custom renderers. Built-in renderers
+// are resolved from the shared builtin table.
+func NewRegistry() *Registry {
+	return &Registry{custom: map[string]Builder{}}
+}
+
+// defaultRegistry serves package-level New for callers that do not own a
+// registry. It is never registered into; embedders use their own instance.
+var defaultRegistry = NewRegistry()
+
+// DefaultRegistry returns the shared registry with no custom renderers. Do not
+// register renderers on it; use NewRegistry for an embedder's own renderers.
+func DefaultRegistry() *Registry {
+	return defaultRegistry
+}
 
 // Register installs a custom renderer for the given key, which is a tool name
 // (e.g. "add") or a "category:<name>" key (e.g. "category:compute"). Registering
 // a key that already exists replaces the previous renderer. Registered renderers
 // take precedence over the built-in ones.
-//
-// Register is safe for concurrent use, but is normally called once at startup
-// (e.g. via tui.WithToolRenderers) before the TUI begins rendering.
-func Register(key string, b Builder) {
-	customMu.Lock()
-	defer customMu.Unlock()
-	custom[key] = b
+func (r *Registry) Register(key string, b Builder) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.custom == nil {
+		r.custom = map[string]Builder{}
+	}
+	r.custom[key] = b
 }
 
-func customBuilder(key string) (Builder, bool) {
-	customMu.RLock()
-	defer customMu.RUnlock()
-	b, ok := custom[key]
-	return b, ok
+// RegisterCacheInvalidator adds a theme-change hook for a renderer's shared caches.
+func (r *Registry) RegisterCacheInvalidator(invalidate func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.invalidators = append(r.invalidators, invalidate)
+}
+
+// InvalidateCaches runs every registered cache invalidator, e.g. on theme change.
+func (r *Registry) InvalidateCaches() {
+	r.mu.RLock()
+	invalidators := slices.Clone(r.invalidators)
+	r.mu.RUnlock()
+	for _, invalidate := range invalidators {
+		invalidate()
+	}
 }
 
 // resolve returns the renderer for key, preferring a registered custom renderer
 // over the built-in one.
-func resolve(key string) (Builder, bool) {
-	customMu.RLock()
-	b, ok := custom[key]
-	customMu.RUnlock()
+func (r *Registry) resolve(key string) (Builder, bool) {
+	r.mu.RLock()
+	b, ok := r.custom[key]
+	r.mu.RUnlock()
 	if ok {
 		return b, true
 	}
@@ -121,10 +151,23 @@ func resolve(key string) (Builder, bool) {
 	return b, ok
 }
 
+// New returns the appropriate tool view for the given message using the shared
+// default registry. Embedders that register renderers call [Registry.New].
+func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) layout.Model {
+	return defaultRegistry.New(ar, msg, sessionState, indexes...)
+}
+
 // New returns the appropriate tool view for the given message.
 // Lookup order: exact tool name, then "category:<category>", then default.
 // At each tier a registered custom renderer wins over the built-in one.
-func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) layout.Model {
+func (r *Registry) customBuilder(key string) (Builder, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	b, ok := r.custom[key]
+	return b, ok
+}
+
+func (r *Registry) New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) layout.Model {
 	var lookup subagenttool.NameLookup
 	var reference subagenttool.ReferenceLookup
 	if len(indexes) > 0 && indexes[0] != nil {
@@ -137,7 +180,7 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 		}
 	}
 	name := msg.ToolCall.Function.Name
-	if b, ok := customBuilder(name); ok {
+	if b, ok := r.customBuilder(name); ok {
 		return withInlineImages(b(ar, msg, sessionState), msg.Images, sessionState)
 	}
 	switch name {
@@ -153,10 +196,10 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 		return withInlineImages(subagenttool.NewList(ar, msg, sessionState, reference), msg.Images, sessionState)
 	}
 	var view layout.Model
-	if b, ok := resolve(msg.ToolCall.Function.Name); ok {
+	if b, ok := r.resolve(msg.ToolCall.Function.Name); ok {
 		view = b(ar, msg, sessionState)
 	} else if cat := msg.ToolDefinition.Category; cat != "" {
-		if b, ok := resolve("category:" + cat); ok {
+		if b, ok := r.resolve("category:" + cat); ok {
 			view = b(ar, msg, sessionState)
 		}
 	}

@@ -33,18 +33,35 @@ import (
 // with New. It is not safe for concurrent use: like every Bubble Tea model,
 // it must only be touched from the program's update loop.
 type Transcript struct {
-	ar    *animation.Runtime
-	state service.SessionStateReader
-	msgs  []*types.Message
-	views []layout.Model
-	width int
+	ar            *animation.Runtime
+	state         service.SessionStateReader
+	toolRenderers *tool.Registry
+	msgs          []*types.Message
+	views         []layout.Model
+	width         int
+}
+
+// Option configures a transcript at construction time.
+type Option func(*Transcript)
+
+// WithToolRenderers supplies the registry used for tool-call views.
+func WithToolRenderers(registry *tool.Registry) Option {
+	return func(t *Transcript) {
+		if registry != nil {
+			t.toolRenderers = registry
+		}
+	}
 }
 
 // New creates an empty transcript. The session state is consulted by the
 // tool views for rendering preferences; embedders without one should pass
 // a service.StaticSessionState.
-func New(ar *animation.Runtime, state service.SessionStateReader) *Transcript {
-	return &Transcript{ar: ar, state: state, width: 80}
+func New(ar *animation.Runtime, state service.SessionStateReader, opts ...Option) *Transcript {
+	t := &Transcript{ar: ar, state: state, width: 80, toolRenderers: tool.DefaultRegistry()}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Append adds a message and returns the new view's Init command (spinner
@@ -61,7 +78,7 @@ func (t *Transcript) Append(msg *types.Message) tea.Cmd {
 func (t *Transcript) newView(msg, prev *types.Message) layout.Model {
 	var v layout.Model
 	if msg.Type == types.MessageTypeToolCall {
-		v = tool.New(t.ar, msg, t.state)
+		v = t.toolRenderers.New(t.ar, msg, t.state)
 	} else {
 		v = message.New(t.ar, msg, prev)
 	}

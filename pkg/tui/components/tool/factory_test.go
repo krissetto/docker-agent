@@ -22,62 +22,49 @@ import (
 // withCleanToolRegistry snapshots the package-global custom renderer registry and
 // restores it when the test finishes, so Register calls don't leak across tests.
 // Tests using it must not run in parallel: they would race on the shared registry.
-func withCleanToolRegistry(t *testing.T) {
-	t.Helper()
-	customMu.Lock()
-	saved := custom
-	custom = map[string]Builder{}
-	customMu.Unlock()
-	t.Cleanup(func() {
-		customMu.Lock()
-		defer customMu.Unlock()
-		custom = saved
-	})
-}
-
 func TestRegisterAndResolve(t *testing.T) {
-	withCleanToolRegistry(t)
+	reg := NewRegistry()
 
 	// Unknown, unregistered key resolves to nothing.
-	_, ok := resolve("add")
+	_, ok := reg.resolve("add")
 	assert.False(t, ok)
 
 	// A new tool name resolves to its registered renderer.
 	customCalled := false
-	Register("add", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+	reg.Register("add", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 		customCalled = true
 		return nil
 	})
-	b, ok := resolve("add")
+	b, ok := reg.resolve("add")
 	assert.True(t, ok)
 	b(animation.NewRuntime(), nil, nil)
 	assert.True(t, customCalled)
 
 	// A custom renderer takes precedence over a built-in one for the same key.
 	overrodeBuiltin := false
-	Register(shelltool.ToolNameShell, func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+	reg.Register(shelltool.ToolNameShell, func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 		overrodeBuiltin = true
 		return nil
 	})
-	b, ok = resolve(shelltool.ToolNameShell)
+	b, ok = reg.resolve(shelltool.ToolNameShell)
 	assert.True(t, ok)
 	b(animation.NewRuntime(), nil, nil)
 	assert.True(t, overrodeBuiltin)
 
 	// A built-in with no custom override still resolves to its built-in renderer.
-	_, ok = resolve(filesystem.ToolNameReadFile)
+	_, ok = reg.resolve(filesystem.ToolNameReadFile)
 	assert.True(t, ok)
 }
 
 func TestCustomSubagentRendererOverridesInjectedBuiltin(t *testing.T) {
-	withCleanToolRegistry(t)
+	reg := NewRegistry()
 	called := false
-	Register(subagent.ToolSpawnSubagent, func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+	reg.Register(subagent.ToolSpawnSubagent, func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 		called = true
 		return nil
 	})
 	msg := &types.Message{ToolCall: tools.ToolCall{Function: tools.FunctionCall{Name: subagent.ToolSpawnSubagent}}}
-	_ = New(animation.NewRuntime(), msg, service.StaticSessionState{})
+	_ = reg.New(animation.NewRuntime(), msg, service.StaticSessionState{})
 	assert.True(t, called)
 }
 
@@ -98,47 +85,47 @@ func TestNew_Dispatch(t *testing.T) {
 	}
 
 	t.Run("by exact tool name", func(t *testing.T) {
-		withCleanToolRegistry(t)
+		reg := NewRegistry()
 		called := false
-		Register("weather_report", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+		reg.Register("weather_report", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 			called = true
 			return nil
 		})
-		New(animation.NewRuntime(), newMsg(), ss)
+		reg.New(animation.NewRuntime(), newMsg(), ss)
 		assert.True(t, called, "renderer registered under the exact tool name should be selected")
 	})
 
 	t.Run("by category", func(t *testing.T) {
-		withCleanToolRegistry(t)
+		reg := NewRegistry()
 		called := false
-		Register("category:external", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+		reg.Register("category:external", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 			called = true
 			return nil
 		})
-		New(animation.NewRuntime(), newMsg(), ss)
+		reg.New(animation.NewRuntime(), newMsg(), ss)
 		assert.True(t, called, "a category renderer should match any tool in that category")
 	})
 
 	t.Run("exact name wins over category", func(t *testing.T) {
-		withCleanToolRegistry(t)
+		reg := NewRegistry()
 		exactCalled, categoryCalled := false, false
-		Register("weather_report", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+		reg.Register("weather_report", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 			exactCalled = true
 			return nil
 		})
-		Register("category:external", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+		reg.Register("category:external", func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
 			categoryCalled = true
 			return nil
 		})
-		New(animation.NewRuntime(), newMsg(), ss)
+		reg.New(animation.NewRuntime(), newMsg(), ss)
 		assert.True(t, exactCalled, "exact-name renderer should take precedence")
 		assert.False(t, categoryCalled, "category renderer should not run when an exact-name match exists")
 	})
 
 	t.Run("unregistered tool falls through to default", func(t *testing.T) {
-		withCleanToolRegistry(t)
-		_, byName := resolve("weather_report")
-		_, byCategory := resolve("category:external")
+		reg := NewRegistry()
+		_, byName := reg.resolve("weather_report")
+		_, byCategory := reg.resolve("category:external")
 		assert.False(t, byName, "no per-tool renderer registered")
 		assert.False(t, byCategory, "no category renderer registered")
 	})
@@ -166,13 +153,13 @@ func TestNewRendersResultImagesWithinToolWidth(t *testing.T) {
 }
 
 func TestShellCategoryUsesExpandableShellRenderer(t *testing.T) {
-	withCleanToolRegistry(t)
-	_, ok := resolve("category:shell")
+	reg := NewRegistry()
+	_, ok := reg.resolve("category:shell")
 	assert.True(t, ok, "script toolsets advertise the shell category")
 
 	msg := types.ToolCallMessage("root", tools.ToolCall{ID: "script", Function: tools.FunctionCall{Name: "inline_script", Arguments: `{"prompt":"long script input"}`}}, tools.Tool{Name: "inline_script", Category: "shell"}, types.ToolStatusRunning)
 	msg.Content = "first output\nsecond output"
-	view := New(animation.NewRuntime(), msg, service.StaticSessionState{})
+	view := reg.New(animation.NewRuntime(), msg, service.StaticSessionState{})
 	view.SetSize(100, 0)
 	collapsed, ok := view.(interface{ CollapsedView() string })
 	assert.True(t, ok)
@@ -186,7 +173,7 @@ func TestShellCategoryUsesExpandableShellRenderer(t *testing.T) {
 }
 
 func TestPlanToolsRouting(t *testing.T) {
-	withCleanToolRegistry(t)
+	reg := NewRegistry()
 
 	for _, name := range []string{
 		plan.ToolNameWritePlan,
@@ -195,22 +182,22 @@ func TestPlanToolsRouting(t *testing.T) {
 		plan.ToolNameUpdatePlanFromFile,
 		plan.ToolNameExportPlanToFile,
 	} {
-		_, ok := resolve(name)
+		_, ok := reg.resolve(name)
 		assert.True(t, ok, "%q should have a dedicated plan renderer", name)
 	}
 
 	for _, name := range []string{plan.ToolNameReadPlan, plan.ToolNameListPlans, plan.ToolNameDeletePlan} {
-		_, ok := resolve(name)
+		_, ok := reg.resolve(name)
 		assert.False(t, ok, "%q should fall through to the default renderer", name)
 	}
 }
 
 func TestNewUsesCompactListAgentsRenderer(t *testing.T) {
-	withCleanToolRegistry(t)
+	reg := NewRegistry()
 	msg := types.ToolCallMessage("root", tools.ToolCall{Function: tools.FunctionCall{Name: subagent.ToolListAgents}}, tools.Tool{Name: subagent.ToolListAgents, Annotations: tools.ToolAnnotations{Title: "List Agents"}}, types.ToolStatusCompleted)
 	msg.Content = `{"current_agent":"root","children":[{"id":"abcde","agent":"coder","name":"implementation","state":"running"}]}`
 
-	view := New(animation.NewRuntime(), msg, service.StaticSessionState{})
+	view := reg.New(animation.NewRuntime(), msg, service.StaticSessionState{})
 	plain := ansi.Strip(view.View())
 	assert.Contains(t, plain, "Listed 1 agent · 1 running")
 	assert.NotContains(t, plain, "children")

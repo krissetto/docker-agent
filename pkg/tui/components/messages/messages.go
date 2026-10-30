@@ -80,6 +80,9 @@ type Model interface {
 	layout.Model
 	layout.Sizeable
 	layout.Focusable
+
+	// SetToolRenderers selects the tool renderer registry. Call it before adding messages.
+	SetToolRenderers(registry *tool.Registry)
 	layout.Help
 	layout.Positionable
 
@@ -295,6 +298,7 @@ type streamedReasoningTail struct {
 }
 
 type model struct {
+	toolRenderers                 *tool.Registry
 	groupStart                    int // Earliest message eligible for same-stream appends.
 	imageClick                    *imageClick
 	attachmentClick               *userAttachmentClick
@@ -427,6 +431,22 @@ type model struct {
 	referencePresentationHidden bool
 }
 
+// Option configures a message list at construction time.
+type Option func(*model)
+
+// WithToolRenderers supplies the registry used for tools, including reasoning blocks.
+func WithToolRenderers(registry *tool.Registry) Option {
+	return func(m *model) { m.SetToolRenderers(registry) }
+}
+
+// SetToolRenderers supplies the registry used for tools, including reasoning blocks.
+// A nil registry keeps the current one.
+func (m *model) SetToolRenderers(registry *tool.Registry) {
+	if registry != nil {
+		m.toolRenderers = registry
+	}
+}
+
 // New creates a new message list component
 func New(ar *animation.Runtime, sessionState SessionState, indexes ...*subagentindex.Index) Model {
 	return newModel(ar, 120, 24, sessionState, indexes...)
@@ -434,8 +454,12 @@ func New(ar *animation.Runtime, sessionState SessionState, indexes ...*subagenti
 
 // NewScrollableView creates a simple scrollable view for displaying messages in dialogs
 // This is a lightweight version that doesn't require app or session state management
-func NewScrollableView(ar *animation.Runtime, width, height int, sessionState SessionState) Model {
-	return newModel(ar, width, height, sessionState)
+func NewScrollableView(ar *animation.Runtime, width, height int, sessionState SessionState, opts ...Option) Model {
+	m := newModel(ar, width, height, sessionState)
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 func newModel(ar *animation.Runtime, width, height int, sessionState SessionState, indexes ...*subagentindex.Index) *model {
@@ -451,6 +475,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 		index = indexes[0]
 	}
 	return &model{
+		toolRenderers:           tool.DefaultRegistry(),
 		ar:                      ar,
 		themeGeneration:         styles.ThemeGeneration(),
 		slackAnimationSub:       ar.Subscribe(),
@@ -615,6 +640,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Theme changed - invalidate all render caches
 		m.invalidateAllItems()
 		editfile.InvalidateCaches()
+		m.toolRenderers.InvalidateCaches()
 		for i, view := range m.views {
 			updatedView, cmd := view.Update(msg)
 			m.views[i] = updatedView
@@ -2861,6 +2887,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			}
 		}
 		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, m.subagents)
+		block.SetToolRenderers(m.toolRenderers)
 		block.SetSize(m.contentWidth(), 0)
 
 		blockMsg := &types.Message{
@@ -3682,6 +3709,7 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	}
 
 	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, m.subagents)
+	block.SetToolRenderers(m.toolRenderers)
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)
 
@@ -3844,7 +3872,7 @@ func (m *model) totalScrollableHeight() int {
 
 // Helper methods
 func (m *model) createToolCallView(msg *types.Message) layout.Model {
-	view := tool.New(m.ar, msg, m.sessionState, m.subagents)
+	view := m.toolRenderers.New(m.ar, msg, m.sessionState, m.subagents)
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }

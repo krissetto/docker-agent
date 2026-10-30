@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
+	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
@@ -207,6 +208,7 @@ type queuedMessage struct {
 //
 //nolint:gocritic // Kept near its supporting queued-message declarations.
 type chatPage struct {
+	toolRenderers *tool.Registry
 	ar            *animation.Runtime
 	width, height int
 
@@ -484,6 +486,9 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 	for _, opt := range opts {
 		opt(p)
 	}
+	if p.toolRenderers != nil {
+		p.messages.SetToolRenderers(p.toolRenderers)
+	}
 	if compact, ok := p.messages.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
 		compact.SetCompactWorkLog(p.compactWorkLog && !p.leanMode)
 	}
@@ -499,6 +504,12 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 
 // PageOption configures a chat page.
 type PageOption func(*chatPage)
+
+// WithToolRenderers selects the application's tool renderer registry for the
+// message list.
+func WithToolRenderers(registry *tool.Registry) PageOption {
+	return func(p *chatPage) { p.toolRenderers = registry }
+}
 
 // WithLeanMode creates a lean chat page with no sidebar.
 func WithLeanMode() PageOption {

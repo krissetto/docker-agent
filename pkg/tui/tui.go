@@ -87,6 +87,8 @@ const (
 
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
+	// toolRenderers is this application's own registry; embedders register into it.
+	toolRenderers      *tool.Registry
 	treeAttention      map[string][]app.TreeAttention // per routed owner; union drives notices and /attention
 	metadataGeneration uint64
 	metadataApp        *app.App
@@ -644,9 +646,12 @@ func WithTranscriber(t Transcriber) Option {
 // See pkg/tui/components/tool for the Builder contract; a renderer is typically
 // a thin wrapper around toolcommon.NewBase.
 func WithToolRenderers(renderers map[string]tool.Builder) Option {
-	return func(*appModel) {
+	return func(m *appModel) {
+		if m.toolRenderers == nil {
+			m.toolRenderers = tool.NewRegistry()
+		}
 		for key, b := range renderers {
-			tool.Register(key, b)
+			m.toolRenderers.Register(key, b)
 		}
 	}
 }
@@ -692,12 +697,13 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	sessID := initialApp.Session().ID
 
 	m := &appModel{
-		ar:           ar,
-		composerGrip: grip.NewReveal(ar),
-		shutdownDone: ctx.Done(),
-		themeCtx:     themeCtx,
-		cancelThemes: cancelThemes,
-		themeChanges: make(chan messages.ThemeFileChangedMsg),
+		ar:            ar,
+		toolRenderers: tool.NewRegistry(),
+		composerGrip:  grip.NewReveal(ar),
+		shutdownDone:  ctx.Done(),
+		themeCtx:      themeCtx,
+		cancelThemes:  cancelThemes,
+		themeChanges:  make(chan messages.ThemeFileChangedMsg),
 		buildCommandCategories: func(ctx context.Context, model tea.Model) []commands.Category {
 			return commands.BuildCommandCategories(ctx, model.(*appModel).application)
 		},
@@ -921,6 +927,7 @@ func (m *appModel) commandCategories() []commands.Category {
 // appModel configuration (e.g. lean mode).
 func (m *appModel) chatPageOpts() []chat.PageOption {
 	opts := []chat.PageOption{
+		chat.WithToolRenderers(m.toolRenderers),
 		chat.WithCommandParser(commands.NewParser(m.commandCategories()...)),
 		chat.WithLayoutSettings(m.layoutSettings),
 		chat.WithInterruptMode(m.interruptMode),
