@@ -3,19 +3,19 @@ package animation
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestSingleGlobalTimingSourceArchitecture(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate animation package")
+	// go test runs in the package directory. runtime.Caller would return an
+	// import path under -trimpath, so it cannot locate the sources.
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal("locate animation package:", err)
 	}
-	root := filepath.Dir(file)
 	forbidden := []string{"SubscribeEvery", "NewSubscriptionEvery", "startEvery", "registerEvery", "unregisterEvery", "ScheduledFor"}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || filepath.Ext(path) != ".go" {
 			return err
 		}
@@ -23,7 +23,7 @@ func TestSingleGlobalTimingSourceArchitecture(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if filepath.Clean(path) == filepath.Clean(file) {
+		if filepath.Base(path) == "architecture_test.go" {
 			return nil
 		}
 		text := string(data)
