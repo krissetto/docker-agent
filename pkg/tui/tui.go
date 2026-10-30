@@ -2966,7 +2966,7 @@ func (m *appModel) dialogCmdForPendingEvent(pendingEvent tea.Msg, sessionState *
 	switch ev := pendingEvent.(type) {
 	case *runtime.ToolCallConfirmationEvent:
 		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewToolConfirmationDialog(m.ar, ev, sessionState),
+			Model:            dialog.NewToolConfirmationDialog(m.ar, ev, sessionState, m.toolRenderers),
 			OriginatingEvent: ev,
 		})
 

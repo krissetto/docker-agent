@@ -265,6 +265,8 @@ func locateInView(d *toolConfirmationDialog, needle string) (y, x int, ok bool) 
 // clickCell probes each hitbox with a fresh decision lifecycle.
 func clickCell(d *toolConfirmationDialog, y, x int) tea.Cmd {
 	probe := NewToolConfirmationDialog(animation.NewRuntime(), d.msg, d.sessionState).(*toolConfirmationDialog)
+	// Share the registered preview so the probe lays out exactly like d.
+	probe.toolView = d.toolView
 	probe.SetSize(d.Width(), d.Height())
 	probe.actionsFocused, probe.focusedAction = d.actionsFocused, d.focusedAction
 	probe.prepareLayout()

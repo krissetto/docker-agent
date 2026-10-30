@@ -14,12 +14,14 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
+	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/components/toolconfirm"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuimessages "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 const toolConfirmDialogWidthPercent = 70
@@ -48,6 +50,9 @@ type toolConfirmationDialog struct {
 	choiceScroll      *scrollview.Model
 	choiceHeight      int
 	decisionQuestion  bool
+	// toolView is the registered renderer's preview for this call, if the
+	// application registered one; otherwise the static text preview is used.
+	toolView layout.Model
 }
 
 func (d *toolConfirmationDialog) dialogDimensions() (dialogWidth, contentWidth int) {
@@ -237,17 +242,33 @@ func (d *toolConfirmationDialog) renderMetadata(contentWidth int) string {
 	)
 }
 
-// NewToolConfirmationDialog creates a new tool confirmation dialog
-func NewToolConfirmationDialog(_ *animation.Runtime, msg *runtime.ToolCallConfirmationEvent, sessionState ConfirmationSessionState) Dialog {
+// NewToolConfirmationDialog creates a new tool confirmation dialog. An optional
+// registry supplies the application's custom tool renderers for the preview.
+func NewToolConfirmationDialog(ar *animation.Runtime, msg *runtime.ToolCallConfirmationEvent, sessionState ConfirmationSessionState, registries ...*tool.Registry) Dialog {
 	// Cache the permission pattern for the tool-specific approval.
 	pattern := toolconfirm.BuildPermissionPattern(msg.ToolCall)
 
-	return &toolConfirmationDialog{
+	d := &toolConfirmationDialog{
 		msg:               msg,
 		sessionState:      sessionState,
 		keyMap:            toolconfirm.DefaultKeyMap(),
 		permissionPattern: pattern,
 	}
+	if len(registries) > 0 && registries[0] != nil {
+		call := types.ToolCallMessage(msg.AgentName, msg.ToolCall, msg.ToolDefinition, types.ToolStatusPending)
+		d.toolView = registries[0].CustomView(ar, call, sessionState)
+	}
+	return d
+}
+
+// renderPreview shows the registered renderer's view when one applies, and the
+// static argument summary otherwise.
+func (d *toolConfirmationDialog) renderPreview(width int) string {
+	if d.toolView != nil {
+		d.toolView.SetSize(width, 0)
+		return d.toolView.View()
+	}
+	return toolconfirm.Preview(d.msg.ToolCall, d.msg.ToolDefinition, width)
 }
 
 // Init initializes the tool confirmation dialog
@@ -446,7 +467,7 @@ func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, hea
 	header = RenderDialogHeader(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
 	footer = d.renderDecisions(contentWidth)
 	var parts []string
-	if arguments := toolconfirm.Preview(d.msg.ToolCall, d.msg.ToolDefinition, bodyWidth); arguments != "" {
+	if arguments := d.renderPreview(bodyWidth); arguments != "" {
 		parts = append(parts, arguments)
 	}
 	if warning := d.renderSafetyWarning(bodyWidth); warning != "" {

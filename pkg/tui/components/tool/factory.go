@@ -121,6 +121,21 @@ func (r *Registry) Register(key string, b Builder) {
 	r.custom[key] = b
 }
 
+// CustomView returns the view of a renderer registered on this registry for the
+// message's tool name or category, or nil when only built-in renderers apply.
+// Confirmation previews use it so built-in tools keep their static summary.
+func (r *Registry) CustomView(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader) layout.Model {
+	if b, ok := r.customBuilder(msg.ToolCall.Function.Name); ok {
+		return b(ar, msg, sessionState)
+	}
+	if cat := msg.ToolDefinition.Category; cat != "" {
+		if b, ok := r.customBuilder("category:" + cat); ok {
+			return b(ar, msg, sessionState)
+		}
+	}
+	return nil
+}
+
 // RegisterCacheInvalidator adds a theme-change hook for a renderer's shared caches.
 func (r *Registry) RegisterCacheInvalidator(invalidate func()) {
 	r.mu.Lock()

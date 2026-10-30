@@ -670,7 +670,7 @@ func (p *chatPage) handleToolCallConfirmation(msg *runtime.ToolCallConfirmationE
 	spinnerCmd := p.setWorking(false)
 	toolCmd := p.messages.AddOrUpdateToolCall(msg.AgentName, msg.ToolCall, msg.ToolDefinition, types.ToolStatusConfirmation)
 	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-		Model:            dialog.NewToolConfirmationDialog(p.ar, msg, p.sessionState),
+		Model:            dialog.NewToolConfirmationDialog(p.ar, msg, p.sessionState, p.toolRenderers),
 		OriginatingEvent: msg,
 	})
 	return tea.Batch(toolCmd, p.messages.ScrollToBottom(), spinnerCmd, dialogCmd)
