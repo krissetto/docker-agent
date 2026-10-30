@@ -296,6 +296,7 @@ func TestHTTPCompatibility_OldRunAndV2ShareSession(t *testing.T) {
 			}
 		case <-ctx.Done():
 			t.Fatal("canonical observer missed legacy interaction resolution")
+			return
 		}
 	}
 }

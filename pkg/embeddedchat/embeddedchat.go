@@ -498,7 +498,7 @@ func (s *Session) Confirm(ctx context.Context, req dagentruntime.ResumeRequest) 
 	})
 }
 
-func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessionHandle dagentruntime.SessionHandle, out chan<- Event, cancel context.CancelFunc, runID int, done chan struct{}) {
+func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessionHandle dagentruntime.SessionHandle, out chan<- Event, cancel context.CancelFunc, runID int, done chan<- struct{}) {
 	defer close(out)
 	defer close(done)
 	defer cancel()

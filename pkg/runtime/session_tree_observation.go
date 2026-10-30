@@ -213,6 +213,8 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 			case snapshot, open := <-topology:
 				if !open {
 					cancelCtx()
+					// A closed topology is always ready; disable it so only obsCtx.Done drives cleanup.
+					topology = nil
 					continue
 				}
 				node, found := subtreeForSession(snapshot, h.sessionID)

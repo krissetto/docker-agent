@@ -105,6 +105,7 @@ func runHTTPInteraction(t *testing.T, maximum int, kind runtime.InteractionKind)
 		case e, ok := <-obs.Events:
 			if !ok {
 				t.Fatal("session event stream closed before expected interaction")
+				return
 			}
 			if e.InteractionID == "" {
 				continue

@@ -78,6 +78,7 @@ func runSessionToStop(t *testing.T, rt *LocalRuntime, sess *session.Session, bin
 			}
 		case <-ctx.Done():
 			t.Fatal("run did not stop within 20s")
+			return
 		}
 	}
 }

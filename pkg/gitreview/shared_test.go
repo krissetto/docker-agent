@@ -62,7 +62,7 @@ func (f *sharedFake) count(op string) int {
 	return f.counts[op]
 }
 
-func (f *sharedFake) enter(ctx context.Context, op string, gate chan struct{}) error {
+func (f *sharedFake) enter(ctx context.Context, op string, gate <-chan struct{}) error {
 	if gate == nil {
 		return ctx.Err()
 	}

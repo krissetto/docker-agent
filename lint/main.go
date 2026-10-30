@@ -37,12 +37,18 @@ var cops = []cop.Cop{
 	ConstructorNetworkIO,
 	WrapErrors,
 	DeferMutexUnlock,
+	rubocops.NewLintNoStdoutInLibraries(cop.WithScope(cop.UnderDir("pkg"))),
 	OTelTracerName,
 }
 
 // programCops lists whole-program, inter-procedural cops. These run once over
 // the entire loaded program rather than once per file.
 var programCops = []prog.Cop{
+	rubocops.NewLintFieldsSeqLookup(),
+	ChannelDirection,
+	rubocops.NewLintCancellationLoop(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintChannelStateCheck(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintClosedChannelLoop(cop.WithScope(outsideFrozenConfig)),
 	rubocops.NewLintContextConnectivity(),
 }
 

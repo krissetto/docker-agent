@@ -1974,13 +1974,13 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 	return runCtx, generation, callbacks, nil
 }
 
-func (d *sessionDriver) driveToOut(ctx context.Context, generation uint64, out chan Event) {
+func (d *sessionDriver) driveToOut(ctx context.Context, generation uint64, out chan<- Event) {
 	defer d.wg.Done()
 	defer close(out)
 	d.driveToOutNoClose(ctx, generation, out)
 }
 
-func (d *sessionDriver) driveToOutNoClose(ctx context.Context, generation uint64, out chan Event) {
+func (d *sessionDriver) driveToOutNoClose(ctx context.Context, generation uint64, out chan<- Event) {
 	for {
 		nextCtx, nextGeneration, again := d.driveToOutGeneration(ctx, generation, out)
 		if !again {
@@ -1990,7 +1990,7 @@ func (d *sessionDriver) driveToOutNoClose(ctx context.Context, generation uint64
 	}
 }
 
-func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uint64, out chan Event) (context.Context, uint64, bool) {
+func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uint64, out chan<- Event) (context.Context, uint64, bool) {
 	var runErr string
 	cancelled := false
 	// Promote before the execution snapshot is cloned so the model sees the head.

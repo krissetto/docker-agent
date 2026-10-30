@@ -68,6 +68,7 @@ func TestCanonicalHTTPRemoteExactTurnWaitCancelAndResolution(t *testing.T) {
 			}
 		case <-ctx.Done():
 			t.Fatal("interaction resolution did not arrive")
+			return
 		}
 	}
 }

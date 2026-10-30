@@ -1124,7 +1124,7 @@ func TestSessionWithoutUserMessage(t *testing.T) {
 
 // --- Tool setup failure handling tests ---
 
-func collectEvents(ch chan Event) []Event {
+func collectEvents(ch <-chan Event) []Event {
 	n := len(ch)
 	evs := make([]Event, 0, n)
 	for range n {
@@ -4903,12 +4903,17 @@ func TestPostToolHookEmitsLifecycleEvents(t *testing.T) {
 
 	var started *HookStartedEvent
 	var finished *HookFinishedEvent
-	for len(events) > 0 {
-		switch ev := (<-events).(type) {
-		case *HookStartedEvent:
-			started = ev
-		case *HookFinishedEvent:
-			finished = ev
+	for drained := false; !drained; {
+		select {
+		case ev := <-events:
+			switch ev := ev.(type) {
+			case *HookStartedEvent:
+				started = ev
+			case *HookFinishedEvent:
+				finished = ev
+			}
+		default:
+			drained = true
 		}
 	}
 

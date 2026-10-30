@@ -1578,6 +1578,7 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 				}
 			case <-ctx.Done():
 				t.Fatal("timed out waiting for the exact turn to stop")
+				return nil
 			}
 		}
 	}
