@@ -112,6 +112,7 @@ func (s *workflowReportStore) PendingReports(ctx context.Context, parent string)
 	}
 	return s.CoordinationStore.PendingReports(ctx, parent)
 }
+
 func (s *workflowReportStore) AcceptReport(ctx context.Context, parent, id string, message *session.Message) (session.ReportAcceptance, error) {
 	accepted, err := s.CoordinationStore.AcceptReport(ctx, parent, id, message)
 	if err == nil && accepted.Created {
@@ -537,7 +538,7 @@ func TestDeferredCompletionIntentBlocksReclaimAndWorkflowSettlement(t *testing.T
 	require.NoError(t, err)
 	require.False(t, quiet, "workflow settlement waits for deferred completion reporting")
 	require.NoError(t, driver.ownerCall(t.Context(), func() error {
-		require.False(t, driver.beginReclaimLocked(), "reclaim cannot pass the post-Close scheduling window")
+		require.NotEqual(t, driverReclaimed, driver.beginReclaimLocked(), "reclaim cannot pass the post-Close scheduling window")
 		return nil
 	}))
 }

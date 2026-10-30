@@ -103,8 +103,9 @@ func TestSessionDormancyProtectsEmptyOwnerFromPruneAndCapacityEviction(t *testin
 		rt.sessionDrivers.mu.Lock()
 		defer rt.sessionDrivers.mu.Unlock()
 		rt.sessionDrivers.pruneIdleLocked(time.Now())
-		assert.False(t, rt.sessionDrivers.evictSettledForCapacityLocked())
+		rt.sessionDrivers.evictSettledForCapacityLocked()
 		assert.Same(t, driver, rt.sessionDrivers.drivers[archived.ID])
+		assert.False(t, driver.registrySnapshot().reclaiming, "dormant driver is never claimed for reclaim")
 	}()
 	_, err = owner.Runtime().CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{AgentName: "root"})
 	require.ErrorIs(t, err, ErrSessionCapacity)
@@ -114,7 +115,11 @@ func TestSessionDormancyProtectsEmptyOwnerFromPruneAndCapacityEviction(t *testin
 	require.Eventually(t, func() bool {
 		rt.sessionDrivers.mu.Lock()
 		defer rt.sessionDrivers.mu.Unlock()
-		return rt.sessionDrivers.evictSettledForCapacityLocked()
+		if _, resident := rt.sessionDrivers.drivers[archived.ID]; !resident {
+			return true
+		}
+		rt.sessionDrivers.evictSettledForCapacityLocked()
+		return false
 	}, time.Second, time.Millisecond, "authorized empty session becomes reclaimable after maintenance drains")
 	_, resident := rt.sessionDrivers.Lookup(archived.ID)
 	assert.False(t, resident)
@@ -144,7 +149,7 @@ func TestSessionDormancyProtectsReportOnlyOwnerAndAncestorPin(t *testing.T) {
 	require.NoError(t, coordination.CommitChild(t.Context(), session.ChildCommit{ExpectedRevision: 1, Record: record, Reports: []session.ChildReport{report}}))
 	r.sessionDrivers.mu.Lock()
 	assert.True(t, r.sessionDrivers.ancestorResidentLocked(root.ID))
-	assert.False(t, r.sessionDrivers.evictSettledForCapacityLocked())
+	assert.Nil(t, r.sessionDrivers.evictSettledForCapacityLocked(), "ancestor-protected driver yields no candidate")
 	assert.Len(t, r.sessionDrivers.drivers, 2)
 	r.sessionDrivers.mu.Unlock()
 	pending, err := coordination.PendingReports(t.Context(), child.ID)

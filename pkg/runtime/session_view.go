@@ -500,14 +500,37 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 	}
 	restore := m.transition("restore:" + p.root.ID)
 	transition := m.transition(p.root.ID)
+	// Ownership: the reserve pass holds both transition locks and this view's
+	// reservations only while it runs. Before any capacity wait, both transition locks
+	// are released and this view's reservations are discarded, so the wait holds no
+	// lock and no reservation; only this root's prepare is delayed.
+	bw := g.newBusyWaiters()
 	for {
 		// Transition locks cover only the reserve pass. A collision is resolved
 		// with no lock held: release this view's reservations, wait for the
-		// in-flight one, then reserve again from the registry.
+		// in-flight one, then reserve again from the registry. A busy oldest
+		// driver is handled the same way within one budget for this prepare.
 		wait, err := p.reserveUnderTransition(ctx, restore, transition, g, candidates, stopped)
 		if err != nil {
-			p.discard()
-			return nil, err
+			busy, ok := errors.AsType[*capacityWaitError](err)
+			if !ok {
+				p.discard()
+				return nil, err
+			}
+			p.discardReservations()
+			w := bw.capacity
+			if busy.superseded {
+				w = bw.superseded
+			}
+			if w.expired() {
+				p.discard()
+				return nil, busy.capacity
+			}
+			if waitErr := w.wait(p.ctx(), busy.busy); waitErr != nil {
+				p.discard()
+				return nil, waitErr
+			}
+			continue
 		}
 		if wait == nil {
 			break
@@ -924,7 +947,29 @@ func (p *preparedSessionView) tryReserveCandidate(g *sessionDriverRegistry, cand
 		projection := existing.registrySnapshot()
 		identityMatches := existing.identityParent == candidate.ParentID && projection.agentName == candidate.AgentName
 		valid := identityMatches && (!projection.stopped || (stopped[candidate.ID] && projection.stoppedView))
-		if !valid && identityMatches && stopped[candidate.ID] && projection.replaceable && driverDrained(existing) {
+		if !valid && identityMatches && stopped[candidate.ID] && (projection.replaceable || projection.reclaiming) {
+			// A generation is replaced only after it has finished retiring: a reclaiming one
+			// keeps its owner and resources until its retirement succeeds. The wait happens
+			// in the caller, outside every lock, with the view's own budget.
+			g.mu.Lock()
+			wait, err := g.generationWaitLocked(candidate.ID, existing)
+			g.mu.Unlock()
+			if err != nil {
+				return nil, err
+			}
+			if wait != nil {
+				return nil, wait
+			}
+			if !driverDrained(existing) {
+				return nil, &capacityWaitError{
+					capacity:   &SessionError{Kind: SessionErrorStopped, SessionID: candidate.ID, Operation: "prepare_view", Detail: "generation is still draining"},
+					busy:       &capacityBusy{driver: existing, id: candidate.ID, done: existing.Done()},
+					superseded: true,
+				}
+			}
+			if !replaceableGeneration(existing) {
+				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: candidate.ID, Operation: "prepare_view"}
+			}
 			replaces = existing
 		} else if !valid {
 			return nil, &SessionError{Kind: SessionErrorConflict, SessionID: candidate.ID, Operation: "prepare_view"}

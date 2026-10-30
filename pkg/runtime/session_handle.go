@@ -501,6 +501,9 @@ func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session,
 		return &sessionHandle{runtime: r, driver: existing, sessionID: sess.ID, agentName: creation}, nil
 	}
 	owned := boundSession.Clone()
+	// Capacity waits happen inside this call. Held across them: the per-ID creation
+	// reservation, this call's pending claim, and the team-environment lease (a
+	// refcount). No shard or transition lock is held, so unrelated sessions proceed.
 	d, err := r.sessionDrivers.publishInitializedWithBindingAndEnvironment(ctx, owned, modelRef, providers, activeAgent, maxIterations, false, true, environmentLease)
 	if err == nil {
 		environmentLease = nil
@@ -984,7 +987,7 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 	if err != nil {
 		return err
 	}
-	var baseOperationCtx = operationCtx
+	baseOperationCtx := operationCtx
 	if err := h.driver.ownerCall(ctx, func() error {
 		if err := h.driver.admitLocked(SessionOperationRunSkill); err != nil {
 			return err

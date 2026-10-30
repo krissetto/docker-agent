@@ -27,8 +27,10 @@ type executionIdentity struct {
 	environment *TeamEnvironmentLease
 }
 
-type executionIdentityKey struct{}
-type executionEventSinkKey struct{}
+type (
+	executionIdentityKey  struct{}
+	executionEventSinkKey struct{}
+)
 
 // ownerCall runs state-only transitions. External I/O and user callbacks belong
 // to workers, whose completion must revalidate its reservation here.
@@ -632,6 +634,13 @@ func (r *LocalRuntime) recordElicitationDecline(ctx context.Context, sessionID, 
 }
 
 // retire keeps failed settlement authoritative and closes the owner only after drain.
+// Contract: the stop wait inside drain (stopAllRetiring, awaitStop) observes the drain
+// context and owner closure, so the retirement gate is released once either occurs.
+// closeOwner still waits on ownerDone, which the owner closes promptly between
+// commands. Cleanup runs on its own goroutine and cannot block the owner. A user stop
+// that ignores its context keeps only its own goroutine and the driver's work group
+// busy. Callers run retirement on a background goroutine and never under a registry,
+// shard, transition, service, or driver lock.
 func (d *sessionDriver) retire(ctx context.Context) error {
 	if err := d.acquireRetirement(ctx); err != nil {
 		return err
@@ -671,7 +680,7 @@ func (d *sessionDriver) drainRetirementOwned(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
 	defer cancel()
-	d.stopAllRetiring()
+	d.stopAllRetiring(ctx)
 	select {
 	case <-d.Done():
 	case <-ctx.Done():

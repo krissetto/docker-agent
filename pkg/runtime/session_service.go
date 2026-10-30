@@ -73,6 +73,11 @@ func (s *SessionService) unregister(r *LocalRuntime) {
 	}
 }
 
+// claim admits id into the service. Ownership: admissionMu is held only while this
+// function runs. A busy oldest candidate returns a capacityWaitError before any wait,
+// so the caller waits with admissionMu released. The caller's pending registry claim
+// is per attempt and is released before the wait; a caller that keeps its own claim
+// across the wait (createSession) pins only its own ID.
 func (s *SessionService) claim(r *LocalRuntime, id string) error {
 	if s == nil {
 		return nil
@@ -81,8 +86,9 @@ func (s *SessionService) claim(r *LocalRuntime, id string) error {
 	// owner lock. Pending registry claims pin identities across this gap.
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
-	if err := s.tryClaim(r, id); !errors.Is(err, ErrSessionCapacity) || s.maxSessions == 0 {
-		return err
+	capacity := s.tryClaim(r, id)
+	if !errors.Is(capacity, ErrSessionCapacity) || s.maxSessions == 0 {
+		return capacity
 	}
 	s.mu.Lock()
 	runtimes := append([]*LocalRuntime(nil), s.runtimes...)
@@ -92,12 +98,11 @@ func (s *SessionService) claim(r *LocalRuntime, id string) error {
 		if g == nil || !g.mu.TryLock() {
 			continue
 		}
-		reclaimed := g.evictSettledForCapacityLocked()
+		busy := g.evictSettledForCapacityLocked()
 		g.mu.Unlock()
-		if reclaimed {
-			if err := s.tryClaim(r, id); !errors.Is(err, ErrSessionCapacity) {
-				return err
-			}
+		if busy != nil {
+			// Release admissionMu and wait outside it; the claim reruns after the wait.
+			return &capacityWaitError{capacity: capacity, busy: busy}
 		}
 	}
 	return s.tryClaim(r, id)

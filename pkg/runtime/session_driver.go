@@ -139,6 +139,16 @@ type sessionDriver struct {
 	reclaiming         bool
 	maintenanceRetired bool // protected by registry.mu; fences worker reservations on removal
 
+	// retirement is the claimed driver's single background retirement. Protected by registry.mu.
+	retirement *driverRetirement
+	// supersession is the single retirement of this stopped generation, run before
+	// a publication of the same ID replaces it. Protected by registry.mu.
+	supersession *driverRetirement
+
+	// lastRetireErr is the most recent failed retirement of this generation, reclaim or
+	// supersession, kept so a later timeout can report its cause. Protected by registry.mu.
+	lastRetireErr error
+
 	retryRunning          bool
 	turnChanged           chan struct{}
 	completedTurns        []string
@@ -979,26 +989,29 @@ type driverObservation struct {
 	backgroundProcesses []tools.BackgroundProcess
 }
 
-func (d *sessionDriver) beginReclaimLocked() bool {
+// beginReclaimLocked returns driverReclaimed once the driver has entered
+// reclaim. Work still being scheduled is transient (driverReclaimBusy); any
+// retained state makes the driver ineligible.
+func (d *sessionDriver) beginReclaimLocked() driverReclaimOutcome {
 	if len(d.withdrawnInputs) != 0 && d.r.sessionStore == nil {
-		return false
+		return driverReclaimIneligible
 	}
 	// Maintenance owns storage/report delivery even when no turn is executing.
 	select {
 	case <-d.wg.DoneChan():
 	default:
-		return false
+		return driverReclaimBusy
 	}
 
 	if d.reclaiming || d.stopped || d.viewDormant || d.reportRetry != nil || d.running() || d.starting() || d.settling() || d.retryRunning || d.skillOperationID != "" || d.backgroundWorks != 0 || d.deferredCompletionReportTurnID != "" || len(d.pending) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
-		return false
+		return driverReclaimIneligible
 	}
 	d.reclaiming = true
 	d.stopped = true
 	d.skillGeneration++
 	d.skillOperationID = ""
 	d.skillCancel = nil
-	return true
+	return driverReclaimed
 }
 
 func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLimits, buffer int) (driverObservation, SessionSnapshot, error) {
@@ -1161,18 +1174,24 @@ func (d *sessionDriver) StopAllForDelete() bool {
 }
 
 // stopAllRetiring stops execution as part of driver removal; its dormancy is not
-// observable (see applyStopLocked).
-func (d *sessionDriver) stopAllRetiring() bool {
+// observable (see applyStopLocked). The wait ends with ctx or with owner closure, so
+// a retirement can never hold the retirement gate past its bound.
+func (d *sessionDriver) stopAllRetiring(ctx context.Context) bool {
 	active := d.requestStopIntent(false, false, false, true)
 	d.cancelAllBackgroundWorks()
-	_ = d.awaitStop(context.WithoutCancel(d.r.lifetime()))
+	_ = d.awaitStop(ctx)
 	return active
 }
 
 func (d *sessionDriver) stopAll(deleting bool) bool {
+	return d.stopAllWithin(context.WithoutCancel(d.r.lifetime()), deleting)
+}
+
+// stopAllWithin requests a stop and waits no longer than ctx or owner closure.
+func (d *sessionDriver) stopAllWithin(ctx context.Context, deleting bool) bool {
 	active := d.requestStop(deleting)
 	d.cancelAllBackgroundWorks()
-	_ = d.awaitStop(context.WithoutCancel(d.r.lifetime()))
+	_ = d.awaitStop(ctx)
 	return active
 }
 

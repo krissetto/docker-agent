@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 type inputAckStore struct {
@@ -30,6 +31,7 @@ func (s *inputAckStore) AddMessage(ctx context.Context, id string, msg *session.
 	}
 	return n, err
 }
+
 func (s *inputAckStore) AppendItem(ctx context.Context, id, key string, item session.Item) (int64, error) {
 	n, err := s.ItemAppender.AppendItem(ctx, id, key, item)
 	if err == nil && s.fail.Swap(false) {
@@ -37,6 +39,7 @@ func (s *inputAckStore) AppendItem(ctx context.Context, id, key string, item ses
 	}
 	return n, err
 }
+
 func (s *inputAckStore) PromotePendingUserMessage(ctx context.Context, id, turn string) error {
 	if id == "blocked" && s.block != nil {
 		s.once.Do(func() { close(s.entered) })
@@ -44,6 +47,7 @@ func (s *inputAckStore) PromotePendingUserMessage(ctx context.Context, id, turn 
 	}
 	return s.Store.PromotePendingUserMessage(ctx, id, turn)
 }
+
 func TestInputAppendAmbiguousAcknowledgment(t *testing.T) {
 	base := coordinationSQLite(t)
 	store := &inputAckStore{Store: base, ItemAppender: base.(session.ItemAppender)}
@@ -64,6 +68,7 @@ func TestInputAppendAmbiguousAcknowledgment(t *testing.T) {
 	require.Len(t, stored.MessagesSnapshot(), 1)
 	require.Len(t, sess.MessagesSnapshot(), 1)
 }
+
 func TestDurablePendingInputsRestoreFIFO(t *testing.T) {
 	base := coordinationSQLite(t)
 	store := &inputAckStore{Store: base, ItemAppender: base.(session.ItemAppender)}
@@ -92,6 +97,7 @@ func TestDurablePendingInputsRestoreFIFO(t *testing.T) {
 	d.finishRun(generation, "")
 	d.wg.Done()
 }
+
 func TestPromotionDoesNotBlockIndependentAdmission(t *testing.T) {
 	base := coordinationSQLite(t)
 	release := make(chan struct{})
@@ -350,7 +356,7 @@ func (s *boundedSettlementStore) AppendItem(ctx context.Context, id, key string,
 	return s.ItemAppender.AppendItem(ctx, id, key, item)
 }
 
-func TestCapacityEvictionOrdersSnapshotAndSkipsBusyDriver(t *testing.T) {
+func TestCapacityEvictionOrdersSnapshotAndWaitsForBusyDriver(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	r.idleRetention = 0
 	var drivers []*sessionDriver
@@ -363,12 +369,25 @@ func TestCapacityEvictionOrdersSnapshotAndSkipsBusyDriver(t *testing.T) {
 		d.mu.Unlock()
 	}
 	drivers[0].mu.Lock()
-	defer drivers[0].mu.Unlock()
+	r.sessionDrivers.mu.Lock()
+	// The oldest settled driver is busy, so eviction waits rather than reclaiming a younger one.
+	busy := r.sessionDrivers.evictSettledForCapacityLocked()
+	require.NotNil(t, busy)
+	require.Same(t, drivers[0], busy.driver)
+	require.Contains(t, r.sessionDrivers.drivers, "busy")
+	require.Contains(t, r.sessionDrivers.drivers, "oldest")
+	require.Contains(t, r.sessionDrivers.drivers, "newest")
+	drivers[0].mu.Unlock()
+	// Released, the oldest is claimed; its background retirement removes it.
+	busy = r.sessionDrivers.evictSettledForCapacityLocked()
+	r.sessionDrivers.mu.Unlock()
+	require.NotNil(t, busy)
+	require.Same(t, drivers[0], busy.driver)
+	<-busy.done
 	r.sessionDrivers.mu.Lock()
 	defer r.sessionDrivers.mu.Unlock()
-	require.True(t, r.sessionDrivers.evictSettledForCapacityLocked())
-	require.NotContains(t, r.sessionDrivers.drivers, "oldest")
-	require.Contains(t, r.sessionDrivers.drivers, "busy")
+	require.NotContains(t, r.sessionDrivers.drivers, "busy")
+	require.Contains(t, r.sessionDrivers.drivers, "oldest")
 	require.Contains(t, r.sessionDrivers.drivers, "newest")
 }
 

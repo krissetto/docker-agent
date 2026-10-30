@@ -427,7 +427,13 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 	return m.admitChildContextForTeam(ctx, parent, parentAgent, child, target, ref, task, autonomous, m.r.teamForContext(ctx, parent))
 }
 
-func (m *subagentManager) admitChildContextForTeam(ctx context.Context, parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool, tm *team.Team) (subagent.NodeID, error) {
+// admitChildContextForTeam admits one child within the shared admission budget.
+// Ownership per pass (see admitChildAttempt): the root transition lock is held only
+// inside an attempt and is released before any capacity wait. The environment lease,
+// the 2s operation deadline, and the budget are shared by all passes.
+// The caller's parentAgent is not used: each attempt resolves the parent's agent from the
+// grantor, so the value is intentionally blank here.
+func (m *subagentManager) admitChildContextForTeam(ctx context.Context, parent *session.Session, _ string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool, tm *team.Team) (subagent.NodeID, error) {
 	opCtx, releaseEnvironment, err := m.r.captureEnvironmentForOperation(ctx, parent)
 	if err != nil {
 		return "", err
@@ -442,6 +448,25 @@ func (m *subagentManager) admitChildContextForTeam(ctx context.Context, parent *
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
 	defer cancel()
+	var id subagent.NodeID
+	err = m.r.sessionDrivers.retryCapacityBusy(ctx, func() error {
+		var attemptErr error
+		id, attemptErr = m.admitChildAttempt(ctx, parent, child, target, ref, task, autonomous, tm)
+		return attemptErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// admitChildAttempt is one admission pass. It holds the root transition lock from
+// its first line until it returns, and waits on nothing. A busy oldest driver
+// surfaces only at PrepareRestore, before any admission state or durable child
+// write, so the caller releases the transition lock, waits, and reruns this pass
+// from the top. Rerun safety: the parent row write tolerates ErrAlreadyExists,
+// attribute stamping is idempotent, and the reservation is rebuilt on each pass.
+func (m *subagentManager) admitChildAttempt(ctx context.Context, parent, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool, tm *team.Team) (subagent.NodeID, error) {
 	transition := m.transition(m.rootSessionLockedSafe(parent.ID))
 	if err := transition.LockContext(ctx); err != nil {
 		return "", err
@@ -454,7 +479,7 @@ func (m *subagentManager) admitChildContextForTeam(ctx context.Context, parent *
 	if grantor == nil {
 		return "", &SessionError{Kind: SessionErrorNotFound, SessionID: parent.ID, Operation: "resolve_parent_agent"}
 	}
-	parentAgent = grantor.Name()
+	parentAgent := grantor.Name()
 	if m.r.sessionStore != nil {
 		if _, err := m.r.sessionStore.GetSession(ctx, parent.ID); errors.Is(err, session.ErrNotFound) {
 			if bound, _ := parent.Attribute(SessionAgentAttribute); bound == "" {
@@ -1149,7 +1174,20 @@ func (m *subagentManager) nodeForSession(sessionID string) (subagent.NodeID, boo
 // ensureChildDriver lazily rebuilds an evicted persistent child's driver. The
 // restore gate serializes rebinds so concurrent send/attach callers cannot
 // publish duplicate driver generations.
+// ensureChildDriver rebinds a stopped or idle child within the shared admission
+// budget. Each pass (ensureChildDriverAttempt) holds restore:<id> only while it
+// runs and releases it before any capacity wait; a busy oldest driver is never
+// recorded as an unreachable child. Only the final typed denial is wrapped.
 func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.NodeID) error {
+	return m.r.sessionDrivers.retryCapacityBusy(ctx, func() error { return m.ensureChildDriverAttempt(ctx, id) })
+}
+
+// ensureChildDriverAttempt is one rebind pass. It holds restore:<id> from its
+// first line until it returns and waits on nothing. Rerun safety: each pass
+// re-reads the child record under m.mu, re-checks Lookup (a concurrent restore
+// makes this a no-op), and reloads or clones the stored session, so no state is
+// carried between passes. fail() only wraps an error; it records nothing.
+func (m *subagentManager) ensureChildDriverAttempt(ctx context.Context, id subagent.NodeID) error {
 	restore := m.transition("restore:" + string(id))
 	if err := restore.LockContext(ctx); err != nil {
 		return err
@@ -1172,13 +1210,27 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 		retained = rec.session.Clone()
 	}
 	m.mu.Unlock()
-	if _, ok := m.r.sessionDrivers.Lookup(sessionID); ok {
-		return nil
-	}
-
 	fail := func(err error) error {
 		return fmt.Errorf("subagent %q is unreachable: restore persistent session: %w", id, err)
 	}
+	if existing, ok := m.r.sessionDrivers.Lookup(sessionID); ok {
+		if !existing.registrySnapshot().reclaiming {
+			return nil
+		}
+		// A reclaiming generation must finish retiring before this child rebinds. The wait
+		// happens after this pass releases the restore lock, on the same-ID budget.
+		m.r.sessionDrivers.mu.Lock()
+		wait, err := m.r.sessionDrivers.generationWaitLocked(sessionID, existing)
+		m.r.sessionDrivers.mu.Unlock()
+		if err != nil {
+			return fail(err)
+		}
+		if wait != nil {
+			return &capacityWaitError{capacity: fail(wait.capacity), busy: wait.busy, superseded: true}
+		}
+		return nil
+	}
+
 	var loaded *session.Session
 	if retained != nil {
 		loaded = retained
@@ -1207,6 +1259,9 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 		return fail(err)
 	}
 	reservation, err := m.r.sessionDrivers.PrepareRestore(ctx, loaded)
+	if busy, ok := errors.AsType[*capacityWaitError](err); ok {
+		return &capacityWaitError{capacity: fail(busy.capacity), busy: busy.busy, superseded: busy.superseded}
+	}
 	if err != nil {
 		return fail(err)
 	}
