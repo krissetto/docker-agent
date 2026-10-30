@@ -33,3 +33,11 @@ func TestPreferencesPanelEquality(t *testing.T) {
 	assert.False(t, Preferences{}.Equal(Preferences{Sound: true}))
 	assert.False(t, (PanelSettings{Elements: []PanelElement{PanelWorkspace, PanelTodos}}).Equal(PanelSettings{Elements: []PanelElement{PanelTodos, PanelWorkspace}}))
 }
+
+func TestPanelPlansIsOptInAndNormalizes(t *testing.T) {
+	t.Parallel()
+	assert.NotContains(t, DefaultPanelSettings().Elements, PanelPlans, "plans is opt-in")
+	assert.Equal(t, []PanelElement{PanelWorkspace, PanelSubagents, PanelTodos, PanelPlans}, AllPanelElements())
+	got := NormalizePanelSettings(PanelSettings{Elements: []PanelElement{PanelPlans, "unknown", PanelTodos}})
+	assert.Equal(t, []PanelElement{PanelPlans, PanelTodos}, got.Elements)
+}

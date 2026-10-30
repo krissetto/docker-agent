@@ -163,7 +163,7 @@ func (m *appModel) planRefreshCmd(notifyWarnings bool) tea.Cmd {
 	}
 	m.planRefreshInFlight = true
 	var sidebarCmd tea.Cmd
-	if m.planSidebarEnabled() {
+	if m.planDataShown() {
 		data := m.planSidebarData
 		data.Loading = true
 		sidebarCmd = m.updatePlanSidebar(data)

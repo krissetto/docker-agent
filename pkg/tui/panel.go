@@ -50,6 +50,7 @@ type panelTodosMsg struct {
 }
 
 func (m *appModel) applyPanelSettings(settings messages.PanelSettings) (tea.Model, tea.Cmd) {
+	wasShown := m.planDataShown()
 	m.panelSettings = messages.NormalizePanelSettings(settings)
 	m.panelFocused = ""
 	var focusCmd tea.Cmd
@@ -58,7 +59,12 @@ func (m *appModel) applyPanelSettings(settings messages.PanelSettings) (tea.Mode
 		focusCmd = m.focusReviewComposer()
 	}
 	m.viewCacheValid = false
-	return m, tea.Batch(focusCmd, m.preparePanel())
+	// Enabling the Plans element starts loading its rows right away.
+	var plansCmd tea.Cmd
+	if !wasShown && m.planDataShown() {
+		plansCmd = m.refreshPlanSidebarCmd()
+	}
+	return m, tea.Batch(focusCmd, plansCmd, m.preparePanel())
 }
 
 func (m *appModel) panelOwnerData(owner string) *panelSessionData {
@@ -300,12 +306,17 @@ func panelCounts(nodes []subagent.NodeSnapshot) (total, active, attention int) {
 
 func (m *appModel) panelElements() []panel.Element {
 	data := m.panelData[m.paneFocus()]
-	if data == nil {
-		return nil
-	}
 	var elements []panel.Element
 	for _, id := range messages.NormalizePanelSettings(m.panelSettings).Elements {
 		label := ""
+		if id == messages.PanelPlans {
+			// Shared plans do not depend on the focused session's subagent data.
+			elements = append(elements, panel.Element{ID: id, Label: m.planPanelLabel()})
+			continue
+		}
+		if data == nil {
+			continue
+		}
 		switch id {
 		case messages.PanelWorkspace:
 			if data.workspace != "" {
@@ -373,6 +384,12 @@ func (m *appModel) panelElementVisible(id messages.PanelElement) bool {
 }
 
 func (m *appModel) openPanelElement(id messages.PanelElement) tea.Cmd {
+	if id == messages.PanelPlans {
+		if !m.panelElementVisible(id) {
+			return nil
+		}
+		return core.CmdHandler(messages.ShowPlanBrowserMsg{})
+	}
 	data := m.panelData[m.paneFocus()]
 	if data == nil || !m.panelElementVisible(id) {
 		return nil

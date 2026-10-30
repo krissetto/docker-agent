@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"slices"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -39,7 +40,11 @@ func TestSettingsPanelAllOffAndReenable(t *testing.T) {
 	t.Parallel()
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	d.tab = tabPanel
-	for row := range d.panelOrder {
+	for row, element := range d.panelOrder {
+		// Opt-in rows such as Plans start disabled; only enabled rows turn off.
+		if !slices.Contains(d.current.Panel.Elements, element) {
+			continue
+		}
 		d.selected[tabPanel] = row
 		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 		require.IsType(t, messages.PreviewSettingsMsg{}, collectMsgs(cmd)[0])
@@ -108,4 +113,18 @@ func TestSettingsPanelMouseReorderAndBounds(t *testing.T) {
 		}
 	}
 	require.True(t, found)
+}
+
+func TestSettingsPanelPlansRowIsOptIn(t *testing.T) {
+	t.Parallel()
+	d := NewSettingsDialog(messages.Preferences{Panel: messages.DefaultPanelSettings()}, false).(*settingsDialog)
+	d.SetSize(100, 40)
+	d.tab = tabPanel
+	require.Equal(t, messages.PanelPlans, d.panelOrder[len(d.panelOrder)-1], "Plans is listed after the defaults")
+	d.selected[tabPanel] = len(d.panelOrder) - 1
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	previews := collectMsgs(cmd)
+	require.Len(t, previews, 1)
+	assert.Equal(t, []messages.PanelElement{messages.PanelWorkspace, messages.PanelSubagents, messages.PanelTodos, messages.PanelPlans},
+		previews[0].(messages.PreviewSettingsMsg).Preferences.Panel.Elements)
 }

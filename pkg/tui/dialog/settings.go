@@ -248,7 +248,7 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool, trans
 	current := preferences
 	current.Panel = messages.NormalizePanelSettings(preferences.Panel)
 	order := slices.Clone(current.Panel.Elements)
-	for _, element := range messages.DefaultPanelSettings().Elements {
+	for _, element := range messages.AllPanelElements() {
 		if !slices.Contains(order, element) {
 			order = append(order, element)
 		}
@@ -797,6 +797,7 @@ var panelElementLabels = map[messages.PanelElement]string{
 	messages.PanelWorkspace: "Workspace",
 	messages.PanelSubagents: "Subagents",
 	messages.PanelTodos:     "Todos",
+	messages.PanelPlans:     "Plans",
 }
 
 func (d *settingsDialog) renderPanelTab(body *settingsBody) {

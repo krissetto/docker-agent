@@ -124,6 +124,7 @@ Plans are shared documents from the same store used by `/plans`, the [plan tools
 - **Single left-click a plan row** to open its content directly in `$VISUAL`/`$EDITOR`, guarded by the displayed revision. A stale revision is rejected rather than overwriting newer content.
 - **All plans** opens the shared plan browser. `/plans` and the <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette remain the keyboard routes.
 - Top/bottom layouts and narrow or collapsed sidebar bands show only a compact `Plans (N) - open /plans` count and browser shortcut, not individual plan rows. Lean mode and `--sidebar=false` never show the section.
+- The bottom panel can show the same shared plans as a count, **N plans**, under **Settings → Panel → Plans** (off by default). Clicking it, or pressing Enter on it, opens the shared plan browser. It needs no sidebar, so it still works with `--sidebar=false`; lean mode never loads plan data.
 - Changes from plan events in the current process and local edits refresh the shared metadata. To pick up changes from another process, use the sidebar's **Refresh plans** action or press <kbd>r</kbd> in the plan browser or detail view. There is no automatic polling or file watcher.
 
 Editing changes only the plan document. It does not approve a plan, execute its steps, or authorize tool writes.

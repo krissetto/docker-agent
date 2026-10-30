@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+	"slices"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -12,17 +15,46 @@ func (m *appModel) planSidebarEnabled() bool {
 	return m.layoutSettings.ShowPlans && !m.leanMode && !m.hideSidebar
 }
 
-// planDataVisible reports whether plan rows are on screen: the sidebar section
-// or an open /plans dialog. Live refreshes run only while this holds.
+// planPanelEnabled reports whether the bottom panel's Plans element is
+// configured. Lean mode hides the panel's plan data as it hides the section.
+func (m *appModel) planPanelEnabled() bool {
+	return !m.leanMode && slices.Contains(messages.NormalizePanelSettings(m.panelSettings).Elements, messages.PanelPlans)
+}
+
+// planDataShown reports whether shared plan rows are on screen outside a
+// dialog: the sidebar section or the bottom panel element. The hidden sidebar
+// does not hide the panel element.
+func (m *appModel) planDataShown() bool {
+	return m.planSidebarEnabled() || m.planPanelEnabled()
+}
+
+// planDataVisible reports whether plan rows are on screen: a shown surface or
+// an open /plans dialog. Live refreshes run only while this holds.
 func (m *appModel) planDataVisible() bool {
-	return m.planSidebarEnabled() || m.planDialogOpen()
+	return m.planDataShown() || m.planDialogOpen()
 }
 
 func (m *appModel) refreshPlanSidebarCmd() tea.Cmd {
-	if !m.planSidebarEnabled() {
+	if !m.planDataShown() {
 		return nil
 	}
 	return m.planRefreshCmd(false)
+}
+
+// planPanelLabel is the bottom panel's Plans element: the same snapshot the
+// sidebar section shows, reduced to a count.
+func (m *appModel) planPanelLabel() string {
+	data := m.planSidebarData
+	switch {
+	case data.Err != nil:
+		return "Plans unavailable"
+	case data.Loading && len(data.Result.Plans) == 0:
+		return "Loading plans"
+	}
+	if n := len(data.Result.Plans); n != 1 {
+		return fmt.Sprintf("%d plans", n)
+	}
+	return "1 plan"
 }
 
 // updatePlanSidebar shares one app-owned plan snapshot with every session page,

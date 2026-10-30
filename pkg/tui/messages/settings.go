@@ -221,7 +221,16 @@ const (
 	PanelWorkspace PanelElement = "workspace"
 	PanelSubagents PanelElement = "subagents"
 	PanelTodos     PanelElement = "todos"
+	// PanelPlans is opt-in: it is absent from the default elements, and its
+	// zone opens the plan browser that the sidebar Plans section links to.
+	PanelPlans PanelElement = "plans"
 )
+
+// AllPanelElements lists every configurable element, defaults first. The
+// settings tab shows all of them, so an opt-in element can be enabled there.
+func AllPanelElements() []PanelElement {
+	return []PanelElement{PanelWorkspace, PanelSubagents, PanelTodos, PanelPlans}
+}
 
 // PanelSettings lists enabled elements in display order. A nil slice uses
 // defaults; a non-nil empty slice explicitly disables the panel.
@@ -243,7 +252,7 @@ func NormalizePanelSettings(settings PanelSettings) PanelSettings {
 	elements := make([]PanelElement, 0, len(settings.Elements))
 	for _, element := range settings.Elements {
 		switch element {
-		case PanelWorkspace, PanelSubagents, PanelTodos:
+		case PanelWorkspace, PanelSubagents, PanelTodos, PanelPlans:
 			if !slices.Contains(elements, element) {
 				elements = append(elements, element)
 			}
