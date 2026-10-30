@@ -1836,7 +1836,9 @@ func (m *model) scrollToBottom() tea.Cmd {
 	if !hadDeferredTail && len(m.views) > 0 {
 		m.refreshRenderedItem(len(m.views) - 1)
 	}
-	m.setScrollOffset(9_999_999) // Will be clamped in View()
+	// Reconcile dirty geometry first so the clamp target is not stale.
+	m.updateScrollState()
+	m.setScrollOffset(m.totalScrollableHeight())
 	return cmd
 }
 
