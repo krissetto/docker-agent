@@ -298,3 +298,22 @@ func TestUserMessageRetryAndAttemptsGetDistinctRows(t *testing.T) {
 		assert.NotEqual(t, id, assistant)
 	}
 }
+
+// Every retry call site (Retry, and Submit with TurnInput{Retry: true} from
+// compaction) passes no request ID, so each repeated retry is a fresh request
+// and a fresh row. An explicit reused request ID is the store's own write
+// identity: a reused write ID with different content is rejected, so it can
+// never create a second row.
+func TestRepeatedRetriesGetDistinctRowsFromFreshRequests(t *testing.T) {
+	t.Parallel()
+	seen := map[string]bool{}
+	for range 3 {
+		requestID, err := sessionInputID("s", "")
+		require.NoError(t, err)
+		id := userMessageIDFor(requestID, "retry")
+		assert.False(t, seen[id], "a repeated retry must not reuse a row identity")
+		seen[id] = true
+	}
+	first := userMessageIDFor("explicit", "retry")
+	assert.Equal(t, first, userMessageIDFor("explicit", "retry"), "an explicit redelivery keeps its identity; the store rejects differing content")
+}
