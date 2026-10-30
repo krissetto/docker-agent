@@ -833,6 +833,10 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 	}
 	switch msg := msg.(type) {
+	case msgtypes.BackgroundAgentStatusMsg:
+		updated, cmd := p.sidebar.Update(msg)
+		p.sidebar = updated.(sidebar.Model)
+		return p, cmd
 	case msgtypes.PlanSidebarDataMsg:
 		updated, cmd := p.sidebar.Update(msg)
 		p.sidebar = updated.(sidebar.Model)

@@ -128,3 +128,12 @@ func TestPlanSidebar_BandClickOpensBrowser(t *testing.T) {
 		})
 	}
 }
+
+func TestBackgroundAgentStatusReachesSidebarCount(t *testing.T) {
+	t.Parallel()
+	p, ar := newPlansLayoutPage(t, msgtypes.SidebarRight)
+	p.SetSize(160, 40)
+	p.Update(msgtypes.BackgroundAgentStatusMsg{ChildSessionID: "child", AgentName: "reviewer", Running: true})
+	settlePlansSidebar(t, p, ar)
+	assert.Contains(t, ansi.Strip(p.sidebar.View()), "Background: 1 running")
+}

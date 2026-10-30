@@ -464,6 +464,8 @@ type model struct {
 	// five newest rows. planZones are relative to the section's first line;
 	// planClickZones is keyed by content line once breathing rows are placed.
 	planData       messages.PlanSidebarDataMsg
+	// backgroundAgents maps running background child sessions to their agent names.
+	backgroundAgents map[string]string
 	recentPlans    []plans.Plan
 	planZones      []planClickZone
 	planClickZones map[int]planClickZone
@@ -1458,6 +1460,9 @@ func (m *model) LoadFromSession(sess *session.Session) {
 	// entries of any previously shown session so repeated loads and session
 	// switches cannot leave stale or doubled totals behind.
 	clear(m.sessionUsage)
+	if m.rootSessionID != sess.ID {
+		clear(m.backgroundAgents)
+	}
 	clear(m.usageOwners)
 	clear(m.sessionOwnCost)
 	clear(m.costParents)
@@ -1759,6 +1764,20 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 	case messages.PlanSidebarDataMsg:
 		m.setPlans(msg)
+		return m, nil
+	case messages.BackgroundAgentStatusMsg:
+		if msg.ChildSessionID == "" {
+			return m, nil
+		}
+		if msg.Running {
+			if m.backgroundAgents == nil {
+				m.backgroundAgents = make(map[string]string)
+			}
+			m.backgroundAgents[msg.ChildSessionID] = msg.AgentName
+		} else {
+			delete(m.backgroundAgents, msg.ChildSessionID)
+		}
+		m.invalidateCache()
 		return m, nil
 	case gitBranchChangedMsg:
 		m.gitBranchName = string(msg)
@@ -2286,6 +2305,14 @@ func (m *model) collapsedInfoLine(contentWidth int) string {
 	return strings.Join(parts, styles.MutedStyle.Render(" · "))
 }
 
+// backgroundAgentsSummary counts running background agents; empty when none run.
+func (m *model) backgroundAgentsSummary() string {
+	if len(m.backgroundAgents) == 0 {
+		return ""
+	}
+	return styles.ActiveStyle.Render(fmt.Sprintf("Background: %d running", len(m.backgroundAgents)))
+}
+
 // agentSummaryCollapsed renders the active identity; model metadata has its own rows.
 func (m *model) agentSummaryCollapsed() string {
 	name := m.sessionState.CurrentAgentName()
@@ -2547,6 +2574,11 @@ func (m *model) renderSections(contentWidth int) []string {
 	}
 	for row, agent := range m.transferAgentLines {
 		m.agentClickZones[subagentSectionStart+row] = agent
+	}
+
+	if summary := m.backgroundAgentsSummary(); summary != "" {
+		markBlock()
+		appendSection(summary)
 	}
 
 	m.backgroundHeader, m.backgroundMoreLine = -1, -1
