@@ -62,11 +62,6 @@ type CurrentAgentInfo struct {
 	Commands    types.Commands
 }
 
-type ModelStore interface {
-	GetModel(ctx context.Context, id modelsdev.ID) (*modelsdev.Model, error)
-	GetDatabase(ctx context.Context) (*modelsdev.Database, error)
-}
-
 const (
 	maxStartupToolSubscribers = 64
 	maxStartupToolEvents      = 128
@@ -84,24 +79,27 @@ type LocalRuntime struct {
 	harnessFactory    *harness.Factory
 	commandEvaluator  *CommandEvaluatorFactory
 
-	ctx                       func() context.Context
-	lifecycleCancel           context.CancelFunc
-	shutdownMu                sync.Mutex
-	shutdownGate              chan struct{}
-	shutdownFence             sync.Once
-	drainMu                   sync.Mutex
-	drainCtx                  context.Context //nolint:containedctx // supervisor shutdown caller owns bounded durability drain
-	lifecycleCtx              context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
-	toolMap                   map[string]ToolHandlerFunc
-	todoToolsets              map[*todotool.ToolSet]*todotool.ToolSet
-	todoStore                 session.TodoStore
-	toolDeferrals             tools.DeferralTracker
-	team                      *team.Team
-	agents                    *agentRouter
-	teamEnvironments          *TeamEnvironmentStore
-	teamEdit                  *teamEditRuntime
-	tracer                    trace.Tracer
-	modelsStore               ModelStore
+	ctx              func() context.Context
+	lifecycleCancel  context.CancelFunc
+	shutdownMu       sync.Mutex
+	shutdownGate     chan struct{}
+	shutdownFence    sync.Once
+	drainMu          sync.Mutex
+	drainCtx         context.Context //nolint:containedctx // supervisor shutdown caller owns bounded durability drain
+	lifecycleCtx     context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
+	toolMap          map[string]ToolHandlerFunc
+	todoToolsets     map[*todotool.ToolSet]*todotool.ToolSet
+	todoStore        session.TodoStore
+	toolDeferrals    tools.DeferralTracker
+	team             *team.Team
+	agents           *agentRouter
+	teamEnvironments *TeamEnvironmentStore
+	teamEdit         *teamEditRuntime
+	tracer           trace.Tracer
+	modelsStore      ModelStore
+	// explicitModelsStore is set only by WithModelStore. It outranks the store
+	// carried on a ModelSwitcherConfig on every model-switching path.
+	explicitModelsStore       ModelStore
 	sessionCompaction         bool
 	managedOAuth              bool
 	unmanagedOAuthRedirectURI string
@@ -416,9 +414,13 @@ func (r *LocalRuntime) applyResourcePolicy() {
 	r.idleRetention = r.policy.IdleRetention
 }
 
+// WithModelStore sets an explicit models.dev store. It takes precedence over
+// [ModelSwitcherConfig.ModelsStore] for model metadata, catalog listing and
+// provider construction.
 func WithModelStore(store ModelStore) Opt {
 	return func(r *LocalRuntime) {
 		r.modelsStore = store
+		r.explicitModelsStore = store
 	}
 }
 
@@ -462,6 +464,7 @@ func WithTeamEditBuildConfig(runConfig *config.RuntimeConfig, options []teamload
 		}
 	}
 }
+
 func WithTeamEditPersistence(persistence *TeamEditPersistence, exportRoot string) Opt {
 	return func(r *LocalRuntime) {
 		if r.teamEdit != nil {

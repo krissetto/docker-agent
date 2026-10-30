@@ -3,12 +3,12 @@ package host
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/docker/docker-agent/pkg/bootstrap"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
@@ -92,13 +92,8 @@ func NewSessionRuntime(ctx context.Context, source config.Source, runConfig *con
 	if err != nil {
 		return fail(fmt.Errorf("resolving default session agent: %w", err))
 	}
-	modelSwitcher := &runtime.ModelSwitcherConfig{Models: loaded.Models, Providers: loaded.Providers, ModelsGateway: cfg.ModelsGateway, EncryptedConfig: loaded.EncryptedConfig, EnvProvider: cfg.EnvProvider(), ProviderRegistry: loaded.ProviderRegistry, AgentDefaultModels: loaded.AgentDefaultModels}
-	if modelsStore, storeErr := cfg.ModelsDevStore(); storeErr == nil {
-		modelSwitcher.ModelsStore = modelsStore
-	} else {
-		slog.WarnContext(ctx, "Failed to obtain shared models.dev store", "error", storeErr)
-	}
-	runtimeOpts := []runtime.Opt{runtime.WithSessionStore(store), runtime.WithCurrentAgent(defaultAgent.Name()), runtime.WithWorkingDir(cfg.WorkingDir), runtime.WithManagedOAuth(options.ManagedOAuth), runtime.WithUnmanagedOAuthRedirectURI(options.UnmanagedOAuthRedirectURI), runtime.WithModelSwitcherConfig(modelSwitcher), runtime.WithBudget(loaded.Budget), runtime.WithNamedBudgets(loaded.Budgets, loaded.AgentBudgets)}
+	runtimeOpts := []runtime.Opt{runtime.WithSessionStore(store), runtime.WithCurrentAgent(defaultAgent.Name()), runtime.WithWorkingDir(cfg.WorkingDir), runtime.WithManagedOAuth(options.ManagedOAuth), runtime.WithUnmanagedOAuthRedirectURI(options.UnmanagedOAuthRedirectURI)}
+	runtimeOpts = append(runtimeOpts, bootstrap.RuntimeOpts(loaded, cfg)...)
 	var environmentStore *runtime.TeamEnvironmentStore
 	if editPool != nil {
 		sourceID := options.TeamEditSourceID

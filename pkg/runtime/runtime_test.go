@@ -310,8 +310,12 @@ type mockModelStore struct {
 	ModelStore
 }
 
-func (m mockModelStore) GetModel(_ context.Context, _ modelsdev.ID) (*modelsdev.Model, error) {
-	return nil, nil
+func (m mockModelStore) GetModel(_ context.Context, id modelsdev.ID) (*modelsdev.Model, error) {
+	return nil, errors.New("model not found: " + id.String())
+}
+
+func (m mockModelStore) GetDatabase(_ context.Context) (*modelsdev.Database, error) {
+	return &modelsdev.Database{}, nil
 }
 
 func runSession(t *testing.T, sess *session.Session, stream *mockStream) []Event {
@@ -1240,6 +1244,8 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 		)
 		require.NoError(t, err)
 		assert.Same(t, explicit, rt.modelsStore)
+		// Model-switching paths select through modelsStoreForConfig; the explicit store must win there too.
+		assert.Same(t, explicit, rt.modelsStoreForConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}))
 	})
 
 	t.Run("ModelSwitcherConfig store is adopted when no explicit store", func(t *testing.T) {
@@ -1250,6 +1256,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 		)
 		require.NoError(t, err)
 		assert.Same(t, cfgStore, rt.modelsStore)
+		assert.Same(t, cfgStore, rt.modelsStoreForConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}))
 	})
 
 	t.Run("falls back to lazy store when neither is set", func(t *testing.T) {

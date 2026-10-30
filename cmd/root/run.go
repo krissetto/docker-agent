@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/app"
 	boardtui "github.com/docker/docker-agent/pkg/board/tui"
+	"github.com/docker/docker-agent/pkg/bootstrap"
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
@@ -1025,24 +1026,6 @@ func (f *runExecFlags) loadAgentFromWithPool(ctx context.Context, req runtime.Lo
 // current agent name are passed in because they're resolved by callers from
 // different sources (e.g. the spawner uses the same store as the parent).
 func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig *config.RuntimeConfig, sessStore session.Store, agentName string) []runtime.Opt {
-	modelSwitcherCfg := &runtime.ModelSwitcherConfig{
-		Models:             loadResult.Models,
-		Providers:          loadResult.Providers,
-		ModelsGateway:      runConfig.ModelsGateway,
-		EncryptedConfig:    loadResult.EncryptedConfig,
-		EnvProvider:        runConfig.EnvProvider(),
-		ProviderRegistry:   loadResult.ProviderRegistry,
-		AgentDefaultModels: loadResult.AgentDefaultModels,
-	}
-	// Share the models.dev store the team loader already warmed (parsing the
-	// multi-MB catalog once) so the runtime doesn't build its own cold store
-	// and re-pay the parse on the first /model open. On error we leave it unset
-	// and the runtime falls back to its lazy default.
-	if store, err := runConfig.ModelsDevStore(); err == nil {
-		modelSwitcherCfg.ModelsStore = store
-	} else {
-		slog.Warn("Failed to obtain shared models.dev store; runtime will use its own", "error", err)
-	}
 	opts := []runtime.Opt{
 		runtime.WithSessionStore(sessStore),
 		runtime.WithCurrentAgent(agentName),
@@ -1050,11 +1033,8 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		runtime.WithUseSubagents(userconfig.Get().GetUseSubagents()),
 		runtime.WithWorkingDir(runConfig.WorkingDir),
 		runtime.WithTracer(otel.Tracer(AppName)),
-		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
-		runtime.WithBudget(loadResult.Budget),
-		runtime.WithNamedBudgets(loadResult.Budgets, loadResult.AgentBudgets),
 	}
-	return opts
+	return append(opts, bootstrap.RuntimeOpts(loadResult, runConfig)...)
 }
 
 // snapshotRuntimeOpts wires the snapshot builtin into a runtime.
