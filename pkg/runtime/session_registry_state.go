@@ -20,8 +20,12 @@ type driverRegistryState struct {
 }
 
 func (d *sessionDriver) publishRegistryStateLocked() {
+	// This publish can consume the one-shot withdraw intent before the stop is
+	// applied; record the explicit stop here too, or the durable withdrawal's
+	// reset of durableStopRequested would erase it.
 	if request := d.stopRequest.Load(); request != nil && request.withdraw.Swap(false) {
 		d.durableStopRequested = true
+		d.explicitStopped = true
 	}
 	state := &driverRegistryState{
 		cancel: d.cancel, compactCancel: d.compactCancel, skillCancel: d.skillCancel,
