@@ -175,8 +175,9 @@ type settingsBody struct {
 	hits  []settingsHit
 }
 
+// add word-wraps prose hints so a line never breaks inside a word.
 func (b *settingsBody) add(text string) {
-	b.lines = append(b.lines, strings.Split(ansi.Hardwrap(text, b.width, true), "\n")...)
+	b.lines = append(b.lines, strings.Split(ansi.Wrap(text, b.width, ""), "\n")...)
 }
 
 func (b *settingsBody) section(title string) {

@@ -1,0 +1,24 @@
+╭──────────────────────────────────────────────────────────────────────╮
+│                                                                    ✕ │
+│                              Settings                                │
+│  ────────────────────────────────────────────────────────────────    │
+│  Appearance   Behavior   Notifications   Panel                       │
+│                                                                      │
+│  Completion                                                       │  │
+│  › Sound on task completion          [ ]                          │  │
+│    Sound threshold                   ‹ 10 seconds ›               │  │
+│  Enable sound to edit its minimum task duration.                  │  │
+│                                                                   │  │
+│  Cache                                                            │  │
+│    Warn when a turn misses the cache  [ ]                         │  │
+│                                                                   │  │
+│                                                                   │  │
+│                                                                   │  │
+│                                                                   │  │
+│                                                                   │  │
+│                                                                   │  │
+│                                                                   │  │
+│                                                                      │
+│  Cancel                                                   Save       │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯

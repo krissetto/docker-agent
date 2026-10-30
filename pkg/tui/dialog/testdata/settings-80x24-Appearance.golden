@@ -1,0 +1,24 @@
+╭──────────────────────────────────────────────────────────────────────╮
+│                                                                    ✕ │
+│                              Settings                                │
+│  ────────────────────────────────────────────────────────────────    │
+│  Appearance   Behavior   Notifications   Panel                       │
+│                                                                      │
+│  › Theme                             docker-next-dark · Choose…   │  │
+│                                                                   │  │
+│  Display                                                          │  │
+│    Transparent background            [ ]                          │  │
+│    Dim inactive panes                [ ]                          │  │
+│    Split diff view                   [x]                          │  │
+│    Git diff layout                   ‹ Unified ›                  │  │
+│    Compact work log                  [ ]                          │  │
+│    Visible replies                   ‹ Last 3 ›                   │  │
+│    Expand thinking by default        [ ]                          │  │
+│    Hide tool results by default      [ ]                          │  │
+│    Render images                     [x]                          │  │
+│    Show startup banner               [x]                          │  │
+│                                                                   │  │
+│                                                                      │
+│  Cancel                                                   Save       │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯

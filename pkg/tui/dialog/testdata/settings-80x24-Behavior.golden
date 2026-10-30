@@ -1,0 +1,24 @@
+╭──────────────────────────────────────────────────────────────────────╮
+│                                                                    ✕ │
+│                              Settings                                │
+│  ────────────────────────────────────────────────────────────────    │
+│  Appearance   Behavior   Notifications   Panel                       │
+│                                                                      │
+│  Interaction                                                      │  │
+│  While working: Enter steers into the active turn; Alt+Enter      │  │
+│  queues for the next turn.                                        │  │
+│  › Interrupt confirmation            ‹ Always (confirm dialog) ›  │  │
+│                                                                   │  │
+│  Automation                                                       │  │
+│    Auto-approve tools by default     [ ]                          │  │
+│  Tools require permission unless approved.                        │  │
+│    Automatic snapshots               [ ]                          │  │
+│    Cache-stable dynamic prompts      [ ]                          │  │
+│                                                                   │  │
+│  Startup and tabs                                                 │  │
+│    Restore tabs on launch            [ ]                          │  │
+│    Lean UI by default                [ ]                          │  │
+│                                                                      │
+│  Cancel                                                   Save       │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯
