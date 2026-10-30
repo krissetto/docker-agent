@@ -50,6 +50,9 @@ type MessageImageURL struct {
 }
 
 type Message struct {
+	// MessageID identifies one assistant message across streaming, persistence
+	// and events. It is set only when the runtime created the message.
+	MessageID    string        `json:"message_id,omitempty"`
 	Role         MessageRole   `json:"role"`
 	Content      string        `json:"content"`
 	MultiContent []MessagePart `json:"multi_content,omitempty"`

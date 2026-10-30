@@ -416,6 +416,19 @@ func assertEventsEqual(t *testing.T, expected, actual []Event) {
 		if added, ok := actual[i].(*MessageAddedEvent); ok {
 			added.ownerMessage = nil
 		}
+		// IDs are random; compare chunk content while requiring identified streams.
+		switch e := actual[i].(type) {
+		case *AgentChoiceEvent:
+			require.NotEmpty(t, e.MessageID)
+			eventCopy := *e
+			eventCopy.MessageID = ""
+			actual[i] = &eventCopy
+		case *AgentChoiceReasoningEvent:
+			require.NotEmpty(t, e.MessageID)
+			eventCopy := *e
+			eventCopy.MessageID = ""
+			actual[i] = &eventCopy
+		}
 		assert.Equal(t, expected[i], actual[i], "event content mismatch at index %d", i)
 	}
 }

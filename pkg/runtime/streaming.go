@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -43,6 +45,9 @@ var errStreamIdle = errors.New("model stream stalled: no data received from upst
 // completion stream: the assistant's textual reply, any tool calls requested,
 // and metadata such as token usage.
 type streamResult struct {
+	// MessageID identifies the assistant message this model call produced.
+	// It is set on every return path, including errors and interruptions.
+	MessageID         string
 	Calls             []tools.ToolCall
 	Content           string
 	ReasoningContent  string
@@ -78,7 +83,10 @@ type streamResult struct {
 // It is intentionally a free function rather than a method on *LocalRuntime
 // so the dependency direction is explicit (the loop calls into the chunker,
 // never the reverse).
-func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, stream chat.MessageStream, a *agent.Agent, agentTools []tools.Tool, sess *session.Session, m *modelsdev.Model, tel Telemetry, events EventSink, idleTimeout time.Duration) (streamResult, error) {
+func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, stream chat.MessageStream, a *agent.Agent, agentTools []tools.Tool, sess *session.Session, m *modelsdev.Model, tel Telemetry, events EventSink, idleTimeout time.Duration) (result streamResult, err error) {
+	// One assistant message per model call. A retry or a later call gets a new ID.
+	messageID := uuid.NewString()
+	defer func() { result.MessageID = messageID }()
 	// done is closed when handleStream exits (for any reason) so the reader
 	// goroutine below can detect it and stop trying to send on recvCh.
 	done := make(chan struct{})
@@ -153,12 +161,12 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 			tagIdx := strings.Index(content, "<tool_call>")
 			if tagIdx < 0 {
 				presentation = presentationText.Append(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content})
-				events.Emit(AgentChoice(a.Name(), sess.ID, content))
+				events.Emit(AgentChoice(a.Name(), sess.ID, content, messageID))
 			} else {
 				xmlToolCallGate = true
 				if tagIdx > 0 {
 					presentation = presentationText.Append(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content[:tagIdx]})
-					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx]))
+					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx], messageID))
 				}
 			}
 		}
@@ -350,7 +358,7 @@ mainLoop:
 
 			if choice.Delta.ReasoningContent != "" {
 				presentation = presentationText.Append(presentation, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: choice.Delta.ReasoningContent})
-				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent))
+				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent, messageID))
 				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
 			}
 

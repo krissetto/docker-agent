@@ -336,15 +336,19 @@ type AgentChoiceEvent struct {
 	Type      string `json:"type"`
 	Content   string `json:"content"`
 	SessionID string `json:"session_id,omitempty"`
+	// MessageID is the assistant message this chunk belongs to. Empty when
+	// the producer did not create one; it is never synthesized.
+	MessageID string `json:"message_id,omitempty"`
 }
 
 func (e *AgentChoiceEvent) GetSessionID() string { return e.SessionID }
 
-func AgentChoice(agentName, sessionID, content string) Event {
+func AgentChoice(agentName, sessionID, content string, messageID ...string) Event {
 	return &AgentChoiceEvent{
 		Type:         "agent_choice",
 		Content:      content,
 		SessionID:    sessionID,
+		MessageID:    firstMessageID(messageID),
 		AgentContext: newAgentContext(agentName),
 	}
 }
@@ -355,17 +359,28 @@ type AgentChoiceReasoningEvent struct {
 	Type      string `json:"type"`
 	Content   string `json:"content"`
 	SessionID string `json:"session_id,omitempty"`
+	// MessageID is the assistant message this chunk belongs to (see AgentChoiceEvent).
+	MessageID string `json:"message_id,omitempty"`
 }
 
 func (e *AgentChoiceReasoningEvent) GetSessionID() string { return e.SessionID }
 
-func AgentChoiceReasoning(agentName, sessionID, content string) Event {
+func AgentChoiceReasoning(agentName, sessionID, content string, messageID ...string) Event {
 	return &AgentChoiceReasoningEvent{
 		Type:         "agent_choice_reasoning",
 		Content:      content,
 		SessionID:    sessionID,
+		MessageID:    firstMessageID(messageID),
 		AgentContext: newAgentContext(agentName),
 	}
+}
+
+// firstMessageID returns the optional message ID argument, or "" when absent.
+func firstMessageID(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }
 
 // ErrorCode constants classify errors so external consumers (boards,

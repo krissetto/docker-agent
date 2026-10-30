@@ -81,8 +81,10 @@ type streamingState struct {
 	text             chat.AssistantTextAppender
 	agentName        string
 	messageID        int64
-	writeID          string
-	toolCommitted    bool
+	// logicalID is the assistant message this row belongs to ("" when the producer had none).
+	logicalID     string
+	writeID       string
+	toolCommitted bool
 	// Chunked persistence (StreamingMessageStore only).
 	buffered    []bufferedChunk
 	nextSeq     int64
@@ -378,13 +380,13 @@ func (p *PersistenceObserver) applyEventLocked(ctx context.Context, id string, j
 	}
 	switch e := event.(type) {
 	case *AgentChoiceEvent:
-		st := j.openStreamLocked()
+		st := p.streamForMessageLocked(id, j, e.MessageID)
 		st.content.WriteString(e.Content)
 		st.presentation = st.text.Append(st.presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
 		st.agentName = e.AgentName
 		p.persistStreamLocked(ctx, id, j, st, session.MessageChunk{Kind: session.MessageChunkContent, Text: e.Content}, len(e.Content))
 	case *AgentChoiceReasoningEvent:
-		st := j.openStreamLocked()
+		st := p.streamForMessageLocked(id, j, e.MessageID)
 		st.reasoningContent.WriteString(e.Content)
 		st.presentation = st.text.Append(st.presentation, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
 		st.agentName = e.AgentName
@@ -434,10 +436,16 @@ func (p *PersistenceObserver) applyEventLocked(ctx context.Context, id string, j
 			break
 		}
 		message := *e.Message
-		if st != nil && st.writeID != "" {
+		switch {
+		case st != nil && st.writeID != "" && (st.logicalID == "" || st.logicalID == message.Message.MessageID):
 			data, _ := json.Marshal(message)
 			p.queueLocked(j, len(data), p.settleWriter(id, st, &message, e.ownerMessage))
-		} else {
+		case st != nil && st.writeID != "":
+			// A different message settled while this row is open. Keep the open row
+			// as its own canonical partial, then append the settled message as a row of its own.
+			p.compactStreamLocked(id, j, st)
+			appendItem(session.NewMessageItem(&message), e.ownerMessage)
+		default:
 			appendItem(session.NewMessageItem(&message), e.ownerMessage)
 		}
 	case *SubSessionCompletedEvent:
@@ -496,6 +504,21 @@ func (j *sessionPersistenceJournal) openStreamLocked() *streamingState {
 	return j.streaming
 }
 
+// streamForMessageLocked returns the stream for a chunk of messageID. A chunk of a
+// different assistant message ends the open stream first, so each message keeps
+// its own row and no row is ever reused by a later message. Producers that give
+// no ID keep joining the open stream, as they always have.
+func (p *PersistenceObserver) streamForMessageLocked(id string, j *sessionPersistenceJournal, messageID string) *streamingState {
+	if st := j.streaming; st != nil && messageID != "" && st.logicalID != messageID && (st.logicalID != "" || st.writeID != "") {
+		p.endStreamLocked(id, j)
+	}
+	st := j.openStreamLocked()
+	if st.logicalID == "" {
+		st.logicalID = messageID
+	}
+	return st
+}
+
 // endStreamLocked forgets the current stream and compacts its open row, if any.
 func (p *PersistenceObserver) endStreamLocked(id string, j *sessionPersistenceJournal) {
 	st := j.streaming
@@ -552,7 +575,7 @@ func (p *PersistenceObserver) persistStreamLocked(ctx context.Context, id string
 		}
 		st.buffered = nil
 		st.nextSeq = int64(len(chunks))
-		start := &session.StreamStart{WriteID: writeID, AgentName: st.agentName}
+		start := &session.StreamStart{WriteID: writeID, AgentName: st.agentName, MessageID: st.logicalID}
 		p.appendChunkLocked(j, &chunkEffect{st: st, sessionID: id, start: start, chunks: chunks}, total)
 		return
 	}
@@ -678,7 +701,7 @@ func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context,
 		return
 	}
 	message := &session.Message{AgentName: st.agentName, Message: chat.Message{
-		Role: chat.MessageRoleAssistant, Content: st.content.String(), ReasoningContent: st.reasoningContent.String(),
+		MessageID: st.logicalID, Role: chat.MessageRoleAssistant, Content: st.content.String(), ReasoningContent: st.reasoningContent.String(),
 		Presentation: cloneAssistantPresentation(st.presentation),
 	}}
 	data, _ := json.Marshal(message)

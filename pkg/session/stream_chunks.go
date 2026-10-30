@@ -35,6 +35,8 @@ type MessageChunk struct {
 type StreamStart struct {
 	WriteID   string
 	AgentName string
+	// MessageID is the assistant message identity kept on the open row and its canonical settle.
+	MessageID string
 }
 
 // ErrStreamClosed reports a chunk append or close against a message whose stream
@@ -93,8 +95,20 @@ func ReconstructStreamingMessage(agentName string, chunks []MessageChunk) Messag
 }
 
 // streamPlaceholderItem is the open row's stored body. Readers ignore it while stream_open=1.
-func streamPlaceholderItem(agentName string) Item {
-	return Item{Message: &Message{AgentName: agentName, Message: chat.Message{Role: chat.MessageRoleAssistant}}}
+func streamPlaceholderItem(agentName, messageID string) Item {
+	return Item{Message: &Message{AgentName: agentName, Message: chat.Message{MessageID: messageID, Role: chat.MessageRoleAssistant}}}
+}
+
+// streamMessageID reads the message identity from a stored message body. It returns
+// "" for an empty or unreadable body, because the identity is never guessed.
+func streamMessageID(messageJSON string) string {
+	var body struct {
+		MessageID string `json:"message_id"`
+	}
+	if json.Unmarshal([]byte(messageJSON), &body) != nil {
+		return ""
+	}
+	return body.MessageID
 }
 
 func validateMessageChunks(chunks []MessageChunk) error {
@@ -254,6 +268,7 @@ func (s *SQLiteSessionStore) reconcileOpenRow(ctx context.Context, q querier, ro
 	row.senderID, row.senderName, row.reportOutcome = fresh.senderID, fresh.senderName, fresh.reportOutcome
 	if row.streamOpen {
 		row.openBody = ReconstructStreamingMessage(row.agentName.String, chunks).Message
+		row.openBody.MessageID = streamMessageID(row.messageJSON.String)
 	}
 	return true, nil
 }
@@ -283,7 +298,7 @@ func (s *SQLiteSessionStore) startStreamingMessage(ctx context.Context, sessionI
 	if start.WriteID == "" {
 		return 0, ErrEmptyID
 	}
-	frozen, _, err := prepareAppend(streamPlaceholderItem(start.AgentName))
+	frozen, _, err := prepareAppend(streamPlaceholderItem(start.AgentName, start.MessageID))
 	if err != nil {
 		return 0, err
 	}
@@ -434,11 +449,18 @@ func closeStreamTx(ctx context.Context, tx *sql.Tx, sessionID string, itemID int
 			return err
 		}
 	} else {
+		// The canonical row keeps the identity of the open row it settles.
+		var storedJSON string
+		if err := tx.QueryRowContext(ctx, `SELECT message_json FROM session_items WHERE id = ?`, itemID).Scan(&storedJSON); err != nil {
+			return err
+		}
+		storedMessageID := streamMessageID(storedJSON)
 		chunks, err := loadStreamChunks(ctx, tx, itemID)
 		if err != nil {
 			return err
 		}
 		rebuilt := ReconstructStreamingMessage(agentName.String, chunks)
+		rebuilt.Message.MessageID = storedMessageID
 		msgJSON, err := json.Marshal(rebuilt.Message)
 		if err != nil {
 			return fmt.Errorf("marshaling message: %w", err)
@@ -508,7 +530,7 @@ func (s *InMemorySessionStore) startStreamLocked(sessionID string, start StreamS
 	if start.WriteID == "" {
 		return 0, ErrEmptyID
 	}
-	frozen, _, err := prepareAppend(streamPlaceholderItem(start.AgentName))
+	frozen, _, err := prepareAppend(streamPlaceholderItem(start.AgentName, start.MessageID))
 	if err != nil {
 		return 0, err
 	}
@@ -626,6 +648,7 @@ func (s *InMemorySessionStore) settleStreamLocked(session *Session, itemID int64
 		} else {
 			updated = cloneMessage(item.Message)
 			updated.Message = cloneChatMessage(ReconstructStreamingMessage(item.Message.AgentName, st.chunks).Message)
+			updated.Message.MessageID = item.Message.Message.MessageID
 		}
 		updated.ID = itemID
 		session.Messages[i].Message = updated
@@ -643,6 +666,7 @@ func (s *InMemorySessionStore) readStreamMessageLocked(sessionID string, msg *Me
 	}
 	out := cloneMessage(msg)
 	out.Message = cloneChatMessage(ReconstructStreamingMessage(msg.AgentName, st.chunks).Message)
+	out.Message.MessageID = msg.Message.MessageID
 	return out
 }
 

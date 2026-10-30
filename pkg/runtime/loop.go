@@ -1334,7 +1334,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 	})
 	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered && !displayOnly && !hasResponseOutput {
 		if res.FinishReason == chat.FinishReasonRefusal {
-			message := chat.Message{Role: chat.MessageRoleAssistant, Content: res.Content, ReasoningContent: res.ReasoningContent, Presentation: res.Presentation, FinishReason: res.FinishReason}
+			message := chat.Message{MessageID: res.MessageID, Role: chat.MessageRoleAssistant, Content: res.Content, ReasoningContent: res.ReasoningContent, Presentation: res.Presentation, FinishReason: res.FinishReason}
 			boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &message), a.Name(), -1).(*MessageAddedEvent)
 			boundary.boundaryOnly = true
 			events.Emit(boundary)
@@ -1398,6 +1398,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 	messageModel := modelID
 
 	assistantMessage := chat.Message{
+		MessageID:         res.MessageID,
 		Role:              chat.MessageRoleAssistant,
 		Content:           res.Content,
 		ReasoningContent:  res.ReasoningContent,
