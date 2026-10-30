@@ -15,6 +15,10 @@ func TestIdleSteerAcceptedEventFollowsDurablePromotion(t *testing.T) {
 	rt, sess := newSessionFixture(t)
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
 	require.NoError(t, err)
+	driver := handle.(*sessionHandle).driver
+	// CreateSession's maintenance pass can wake the parked steer first; wait for
+	// it to drain so this Steer observes its own idle admission.
+	require.Eventually(t, func() bool { return driverDrained(driver) }, time.Second, time.Millisecond)
 	observation, err := handle.Observe(t.Context(), ObserveOptions{Buffer: 32})
 	require.NoError(t, err)
 	defer observation.Cancel()
