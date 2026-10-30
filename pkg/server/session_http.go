@@ -912,7 +912,7 @@ func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 func sessionStatus(status runtime.SessionStatus) sessionStatusDTO {
 	return sessionStatusDTO{
 		InterruptedTurns: status.InterruptedTurns, SessionID: status.SessionID, AgentName: status.AgentName, State: status.State, Pending: status.Pending, TurnID: status.TurnID, LastError: status.LastError,
-		Dormant: status.Dormant, PauseArmed: status.PauseArmed, Paused: status.Paused, PauseGeneration: status.PauseGeneration,
+		Dormant: status.Dormant, Stopped: status.Stopped, PauseArmed: status.PauseArmed, Paused: status.Paused, PauseGeneration: status.PauseGeneration,
 	}
 }
 
