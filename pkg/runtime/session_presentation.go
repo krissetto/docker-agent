@@ -35,7 +35,8 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 		label = agentModelLabel(ctx, a)
 		limit = 0
 	}
-	info := AgentInfo(a.Name(), label, a.Description(), a.WelcomeMessage(), limit)
+	info := AgentInfo(a.Name(), label, a.Description(), a.WelcomeMessage(), limit).(*AgentInfoEvent)
+	info.ExecutionCapabilities = executionCapabilities(a)
 	var details []AgentDetails
 	for _, name := range tm.AgentNames() {
 		member, err := tm.Agent(name)
@@ -63,6 +64,7 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 			detail.ModelID, detail.Model, detail.ModelName = member.HarnessType(), member.HarnessType(), member.HarnessType()
 			h.runtime.harnessThinkingDisplay(ctx, member, &detail)
 		}
+		detail.ExecutionCapabilities = executionCapabilities(member)
 		details = append(details, detail)
 	}
 	return []Event{info, TeamInfo(details, a.Name())}

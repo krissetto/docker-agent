@@ -98,6 +98,23 @@ When building custom UIs on top of Docker Agent's TUI primitives, four packages 
 - **`pkg/tui/animation`** — implement `animation.Stopper` on any view that owns a tick-based animation. Call `StopAnimation` whenever a view is removed from the UI hierarchy to prevent leaked `time.Tick` subscriptions from firing against a dead view.
 - **`pkg/tui/components/transcript`** — embed the transcript view for displaying conversation history. Use the `Messages()` method to read the current slice of transcript messages (treat as read-only — mutations desync renders). This is useful for host-side tests asserting on chat history, and for persistence layers that need to snapshot conversation state.
 
+## Execution Capability Inspection
+
+`(*runtime.LocalRuntime).AgentExecutionCapabilities(name)` returns a static
+native/harness profile without starting tools, constructing drivers or
+initializing budget counters. Unknown agents return nil. The same optional
+profile is available on `runtime.AgentConfigInfo`, `runtime.AgentDetails` in
+`team_info`, and local startup/refresh `runtime.AgentInfoEvent` values.
+See [Execution capabilities](../../features/api-server/index.md#execution-capabilities)
+for field meanings and unknown/remote behavior.
+
+`runtime.Runtime` and existing function signatures are unchanged. The exported
+inspection/event structs have new optional fields: downstream code using
+**unkeyed** composite literals for these structs must switch to keyed literals.
+Existing keyed literals and JSON consumers accepting additional fields remain
+compatible. Capability support is not proof an adapter installed configuration
+or a policy requires approval.
+
 ## Headless Embedded Chat (`pkg/embeddedchat`)
 
 `pkg/embeddedchat` is a thin wrapper around the Docker Agent runtime that lets you drive an agent from your own UI instead of running Docker Agent's Bubble Tea application. It handles runtime construction, event projection, and conversation state, exposing a simple `Send` / `Confirm` / `Restart` / `Close` API.

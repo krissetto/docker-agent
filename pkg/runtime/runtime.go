@@ -1093,6 +1093,8 @@ type AgentConfigInfo struct {
 	Toolsets []ToolsetDetail // per-toolset live state + tools, in declaration order
 
 	IsCurrent bool // true when this is the live current agent
+
+	ExecutionCapabilities *ExecutionCapabilities
 }
 
 // AgentConfigInfo returns the named agent's inspector dataset. It inspects the
@@ -1146,6 +1148,7 @@ func (r *LocalRuntime) AgentConfigInfoForTeam(ctx context.Context, tm *team.Team
 		Options:                 agentOptionFlags(a, cfg, hasCfg),
 		Toolsets:                toolsetDetails(ctx, a, cfg, hasCfg),
 		IsCurrent:               r.agents != nil && r.agents.Name() == agentName,
+		ExecutionCapabilities:   executionCapabilities(a),
 	}
 	if hasCfg {
 		info.Skills = configSkillNames(cfg)
@@ -1686,6 +1689,7 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 		modelName := info.Model
 		var thinking string
 		var display AgentDetails
+		var capabilities *ExecutionCapabilities
 		display.ModelID = modelName
 		display.ModelName = modelName
 		display.ThinkingMode = "unknown"
@@ -1693,6 +1697,7 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 
 		// Get the agent to access fallbacks and the effective thinking level.
 		if a, err := teamView.Agent(info.Name); err == nil && a != nil {
+			capabilities = executionCapabilities(a)
 			models := a.EffectiveModels(ctx)
 			var effective provider.Provider
 			usingFallback := false
@@ -1757,19 +1762,20 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 		}
 
 		details[i] = AgentDetails{
-			Name:             info.Name,
-			Description:      info.Description,
-			Provider:         providerName,
-			Model:            modelName,
-			Thinking:         thinking,
-			ModelID:          display.ModelID,
-			ModelName:        display.ModelName,
-			ThinkingMode:     display.ThinkingMode,
-			ThinkingLevel:    display.ThinkingLevel,
-			ThinkingLevels:   display.ThinkingLevels,
-			CanCycleThinking: display.CanCycleThinking,
-			PrimaryThinking:  display.PrimaryThinking,
-			Commands:         info.Commands,
+			Name:                  info.Name,
+			Description:           info.Description,
+			Provider:              providerName,
+			Model:                 modelName,
+			Thinking:              thinking,
+			ModelID:               display.ModelID,
+			ModelName:             display.ModelName,
+			ThinkingMode:          display.ThinkingMode,
+			ThinkingLevel:         display.ThinkingLevel,
+			ThinkingLevels:        display.ThinkingLevels,
+			CanCycleThinking:      display.CanCycleThinking,
+			PrimaryThinking:       display.PrimaryThinking,
+			Commands:              info.Commands,
+			ExecutionCapabilities: capabilities,
 		}
 	}
 	return details
@@ -2057,6 +2063,7 @@ func (r *LocalRuntime) emitAgentAndTeamInfo(ctx context.Context, a *agent.Agent,
 		compactionModel, primaryLimit = "", 0
 	}
 	info := AgentInfo(a.Name(), modelLabel, a.Description(), a.WelcomeMessage(), contextLimit).(*AgentInfoEvent)
+	info.ExecutionCapabilities = executionCapabilities(a)
 	info.CompactionModel = compactionModel
 	info.PrimaryContextLimit = primaryLimit
 	if !send(info) {
