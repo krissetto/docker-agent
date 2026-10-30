@@ -52,6 +52,16 @@ func TestBuildPermissionPattern(t *testing.T) {
 			want: "shell",
 		},
 		{
+			name: "shell with whitespace-only command falls back to tool name",
+			call: shellCall(`\t\n\u2003`),
+			want: "shell",
+		},
+		{
+			name: "shell with Unicode whitespace",
+			call: shellCall(`\u2003git\u00a0status`),
+			want: "shell:cmd=git*",
+		},
+		{
 			name: "shell with invalid arguments falls back to tool name",
 			call: tools.ToolCall{Function: tools.FunctionCall{Name: "shell", Arguments: "not json"}},
 			want: "shell",

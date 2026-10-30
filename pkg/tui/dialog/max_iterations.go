@@ -172,13 +172,12 @@ func wrapDisplayText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return text
 	}
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return text
-	}
+	words := strings.FieldsSeq(text)
 	var lines []string
 	var current string
-	for _, w := range words {
+	seenWord := false
+	for w := range words {
+		seenWord = true
 		if lipgloss.Width(current) == 0 {
 			current = w
 			continue
@@ -189,6 +188,9 @@ func wrapDisplayText(text string, maxWidth int) string {
 			lines = append(lines, current)
 			current = w
 		}
+	}
+	if !seenWord {
+		return text
 	}
 	if current != "" {
 		lines = append(lines, current)

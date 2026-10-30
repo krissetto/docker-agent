@@ -496,6 +496,42 @@ func TestWrapLinesWords(t *testing.T) {
 			expected: []string{"héllo", "wörld"},
 		},
 		{
+			name:     "over-width whitespace remains unchanged",
+			text:     "      ",
+			width:    2,
+			expected: []string{"      "},
+		},
+		{
+			name:     "over-width unicode whitespace remains unchanged",
+			text:     "\u2003\u2003\u2003",
+			width:    1,
+			expected: []string{"\u2003\u2003\u2003"},
+		},
+		{
+			name:     "unicode whitespace separates words",
+			text:     "alpha\u2003beta\txyz",
+			width:    5,
+			expected: []string{"alpha", "beta", "xyz"},
+		},
+		{
+			name:     "zero-width word is not an empty input",
+			text:     "\u0301      ",
+			width:    1,
+			expected: []string{"\u0301"},
+		},
+		{
+			name:     "ANSI-only word is not an empty input",
+			text:     "\x1b[31m\x1b[0m      ",
+			width:    1,
+			expected: []string{"\x1b[31m\x1b[0m"},
+		},
+		{
+			name:     "whitespace fallback among wrapped lines",
+			text:     "abcd\n     \nxy z",
+			width:    2,
+			expected: []string{"ab", "cd", "     ", "xy", "z"},
+		},
+		{
 			name:     "CJK word exceeds width",
 			text:     "你好世界 test",
 			width:    5,

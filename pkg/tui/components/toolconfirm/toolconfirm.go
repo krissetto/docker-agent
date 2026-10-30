@@ -83,8 +83,8 @@ func BuildPermissionPattern(toolCall tools.ToolCall) string {
 			// only ("ls -la /tmp" -> "ls"); the trailing * matches any
 			// arguments.
 			cmd, _ := safety.CommandArg(args)
-			if fields := strings.Fields(cmd); len(fields) > 0 {
-				return toolName + ":cmd=" + fields[0] + "*"
+			for field := range strings.FieldsSeq(cmd) {
+				return toolName + ":cmd=" + field + "*"
 			}
 		}
 	}
