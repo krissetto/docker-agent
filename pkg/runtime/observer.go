@@ -93,51 +93,148 @@ func (r *LocalRuntime) observeRunStart(ctx context.Context, sess *session.Sessio
 	}
 }
 
+const (
+	// observeBatchMaxEvents and observeBatchMaxBytes bound one group commit. The
+	// bytes are streamEventBytes payloads, far below the persistence journal caps.
+	observeBatchMaxEvents = 64
+	observeBatchMaxBytes  = 1 << 20
+)
+
 // observe forwards events after observeRunStart completes and execution begins.
+//
+// Streamed deltas that are already queued in inner are committed together: one
+// persistence flush, then publication in order. The first other event ends the
+// batch and is handled next, so it is a full flush-and-publish barrier. A batch
+// is never drained by waiting, so an idle stream keeps per-event latency.
 func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner <-chan Event) <-chan Event {
 	out := make(chan Event, cap(inner))
 	go func() {
 		defer close(out)
-		for event := range inner {
+		var lookahead Event
+		hasLookahead := false
+		for {
+			event := lookahead
+			if hasLookahead {
+				hasLookahead, lookahead = false, nil
+			} else {
+				var ok bool
+				event, ok = <-inner
+				if !ok {
+					return
+				}
+			}
 			if fence, ok := event.(*observerDeliveryFence); ok {
 				close(fence.done)
 				continue
 			}
-			if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok {
-				if err := identity.driver.commitExecutionEvent(context.WithoutCancel(ctx), identity.generation, event); err != nil {
-					continue
-				}
+			batch := []Event{event}
+			if isStreamChunkEvent(event) {
+				batch, lookahead, hasLookahead = drainStreamChunks(inner, batch, sess.ID)
 			}
-			for _, obs := range r.observers {
-				if persistence, ok := obs.(*PersistenceObserver); ok {
-					// Storage remains part of the driver's completion barrier.
-					persistence.OnEvent(ctx, sess, event)
-					if err := persistence.pendingError(sess.ID); err != nil {
-						if d, found := r.sessionDrivers.Lookup(sess.ID); found {
-							d.cancelForPersistence(err)
-						}
-					}
-				}
-			}
-			// Detached callbacks must not delay the canonical journal.
-			if d, ok := r.sessionDrivers.Lookup(sess.ID); ok && !interactionOwnerPublished(event) {
-				d.events.Publish(sess.ID, event)
-			}
-			for _, obs := range r.observers {
-				if _, ok := obs.(*PersistenceObserver); ok {
-					continue
-				}
-				snapshot, err := observerEventSnapshot(event)
-				if err != nil {
-					slog.WarnContext(ctx, "Skipping observer event snapshot", "error", err)
-					continue
-				}
-				observeBestEffort(ctx, func() { obs.OnEvent(ctx, sess.Clone(), snapshot) })
-			}
-			out <- event
+			r.observeBatch(ctx, sess, batch, out)
 		}
 	}()
 	return out
+}
+
+// drainStreamChunks takes the already-queued deltas that continue batch's stream.
+// It returns the first event it could not take as lookahead (hasLookahead); it never blocks.
+// A batch stops at any change of session, agent, or stream. Generation is fixed
+// for one observe call, so it needs no comparison here.
+func drainStreamChunks(inner <-chan Event, batch []Event, observed string) ([]Event, Event, bool) {
+	bytes := streamEventBytes(batch[0])
+	boundary := streamChunkBoundaryOf(batch[0], observed)
+	for len(batch) < observeBatchMaxEvents {
+		select {
+		case next, ok := <-inner:
+			if !ok {
+				return batch, nil, false
+			}
+			if !isStreamChunkEvent(next) || streamChunkBoundaryOf(next, observed) != boundary {
+				return batch, next, true
+			}
+			size := streamEventBytes(next)
+			if bytes+size > observeBatchMaxBytes {
+				return batch, next, true
+			}
+			batch = append(batch, next)
+			bytes += size
+		default:
+			return batch, nil, false
+		}
+	}
+	return batch, nil, false
+}
+
+// streamChunkBoundary is the identity a batch must share: the session the delta
+// belongs to, its agent, and (fixed per observe call) its generation.
+type streamChunkBoundary struct {
+	sessionID string
+	agent     string
+}
+
+// streamChunkBoundaryOf keys a delta by its session. Unscoped deltas, such as tool
+// partials that carry no session ID, belong to the observed session; keying them
+// apart would split every tool-heavy batch. A delta scoped to another session
+// never shares a key with the observed one.
+func streamChunkBoundaryOf(event Event, observed string) streamChunkBoundary {
+	boundary := streamChunkBoundary{sessionID: observed}
+	if scoped, ok := event.(SessionScoped); ok {
+		boundary.sessionID = scoped.GetSessionID()
+	}
+	switch e := event.(type) {
+	case *AgentChoiceEvent:
+		boundary.agent = e.AgentName
+	case *AgentChoiceReasoningEvent:
+		boundary.agent = e.AgentName
+	case *PartialToolCallEvent:
+		boundary.agent = e.AgentName
+	}
+	return boundary
+}
+
+// observeBatch commits, persists, and publishes batch in event order. Storage
+// stays ahead of publication by at most this one batch.
+func (r *LocalRuntime) observeBatch(ctx context.Context, sess *session.Session, batch []Event, out chan<- Event) {
+	if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok {
+		kept := batch[:0]
+		for _, event := range batch {
+			if err := identity.driver.commitExecutionEvent(context.WithoutCancel(ctx), identity.generation, event); err != nil {
+				continue
+			}
+			kept = append(kept, event)
+		}
+		batch = kept
+	}
+	for _, obs := range r.observers {
+		if persistence, ok := obs.(*PersistenceObserver); ok {
+			// Storage remains part of the driver's completion barrier.
+			persistence.onEvents(ctx, sess, batch)
+			if err := persistence.pendingError(sess.ID); err != nil {
+				if d, found := r.sessionDrivers.Lookup(sess.ID); found {
+					d.cancelForPersistence(err)
+				}
+			}
+		}
+	}
+	for _, event := range batch {
+		// Detached callbacks must not delay the canonical journal.
+		if d, ok := r.sessionDrivers.Lookup(sess.ID); ok && !interactionOwnerPublished(event) {
+			d.events.Publish(sess.ID, event)
+		}
+		for _, obs := range r.observers {
+			if _, ok := obs.(*PersistenceObserver); ok {
+				continue
+			}
+			snapshot, err := observerEventSnapshot(event)
+			if err != nil {
+				slog.WarnContext(ctx, "Skipping observer event snapshot", "error", err)
+				continue
+			}
+			observeBestEffort(ctx, func() { obs.OnEvent(ctx, sess.Clone(), snapshot) })
+		}
+		out <- event
+	}
 }
 
 func interactionOwnerPublished(event Event) bool {
@@ -245,4 +342,14 @@ func observerEventFromWire(event Event, data []byte) (Event, error) {
 		}
 	}
 	return out, nil
+}
+
+// isStreamChunkEvent reports whether event is a streamed delta that group commit
+// may coalesce. Every other event is a flush and publish barrier.
+func isStreamChunkEvent(event Event) bool {
+	switch event.(type) {
+	case *AgentChoiceEvent, *AgentChoiceReasoningEvent, *PartialToolCallEvent:
+		return true
+	}
+	return false
 }
