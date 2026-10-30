@@ -96,9 +96,13 @@ type sessionTestSession struct {
 	cancelable     map[string]bool
 	withdrawErr    error
 	cancels        []string
+	withdrawals    []string // every CancelPendingMessage call, recorded before any outcome
 }
 
 func (s *sessionTestSession) CancelPendingMessage(_ context.Context, turnID string) (bool, error) {
+	s.mu.Lock()
+	s.withdrawals = append(s.withdrawals, turnID)
+	s.mu.Unlock()
 	if s.withdrawErr != nil {
 		return false, s.withdrawErr
 	}
@@ -200,6 +204,12 @@ func (s *sessionTestSession) submitted() []runtime.TurnInput {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]runtime.TurnInput(nil), s.submits...)
+}
+
+func (s *sessionTestSession) withdrawn() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.withdrawals...)
 }
 
 func (s *sessionTestSession) sent() []runtime.TurnInput {

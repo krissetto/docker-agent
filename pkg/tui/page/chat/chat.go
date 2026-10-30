@@ -266,6 +266,10 @@ type chatPage struct {
 	// addressed to; empty for standalone pages (timers then fire unrouted,
 	// which is correct when this is the only page).
 	routingID string
+	// inputScope owns this page's asynchronous submissions; results are accepted only while it is live.
+	inputScope *inputScope
+	// effects collects the Local work of the update in progress (see UpdateEffects).
+	effects *Effects
 	// pendingTimers holds the routed one-shot commands (presentation timers,
 	// generated-media resolution) armed by the current Update, so they can be
 	// re-collected via TakeRoutedTimers when the regular command is discarded
@@ -469,6 +473,7 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		ar:                   ar,
 		cancel:               cancel,
 		ctx:                  func() context.Context { return context.WithoutCancel(ctx) },
+		inputScope:           newInputScope(context.WithoutCancel(ctx)),
 		sidebar:              sidebar.New(ar, pageCtx, sessionState),
 		messages:             messages.New(ar, sessionState, index),
 		subagents:            index,
@@ -748,6 +753,7 @@ func CancelSidebarPresentation(page Page) {
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
 		animation.StopView(p.sidebar)
+		p.inputScope.close()
 		p.cancel()
 		p.subagents.Clear()
 	}
@@ -755,6 +761,15 @@ func Cleanup(page Page) {
 
 // Update handles messages and updates the page state
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	model, effects := p.UpdateEffects(msg)
+	return model, effects.Cmd(true)
+}
+
+func (p *chatPage) updateVisible(msg tea.Msg) (layout.Model, tea.Cmd) {
+	// Asynchronous submission results are accepted only by the page lifetime that dispatched them.
+	if result, ok := msg.(interface{ inputOrigin() *inputScope }); ok && !p.ownsInputScope(result.inputOrigin()) {
+		return p, nil
+	}
 	switch msg.(type) {
 	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseWheelMsg, msgtypes.WheelCoalescedMsg:
 		p.sidebar.ResetTodoClick()
@@ -1378,7 +1393,7 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	}
 
 	if isBangCommand(msg.Content) {
-		cmd := p.processMessage(msg)
+		cmd := p.tabLocal(p.processMessage(msg))
 		return p, cmd
 	}
 
@@ -1388,13 +1403,13 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	}
 	classified := resolvedSend{msg: msg, resolved: resolved}
 	if resolved.ForkSkill {
-		cmd := p.processResolvedMessage(classified)
+		cmd := p.tabLocal(p.processResolvedMessage(classified))
 		return p, cmd
 	}
 
 	// If not working, process immediately
 	if !p.working {
-		cmd := p.processResolvedMessage(classified)
+		cmd := p.tabLocal(p.processResolvedMessage(classified))
 		return p, cmd
 	}
 
@@ -1404,13 +1419,13 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch {
 	case msg.Queue || msg.FollowUp:
-		cmd = p.followUpResolved(classified)
+		cmd = p.tabLocal(p.followUpResolved(classified))
 	case msg.Steer:
-		cmd = p.steerResolved(classified)
+		cmd = p.tabLocal(p.steerResolved(classified))
 	case msg.Composer && p.sendMode != msgtypes.SendModeQueue:
-		cmd = p.steerResolved(classified)
+		cmd = p.tabLocal(p.steerResolved(classified))
 	default:
-		cmd = p.followUpResolved(classified)
+		cmd = p.tabLocal(p.followUpResolved(classified))
 	}
 	return p, cmd
 }
@@ -1418,10 +1433,22 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 // Command result messages report session admission only. Projection changes
 // arrive separately through canonical accepted/promoted envelopes.
 type (
-	steerSentMsg      struct{}
-	steerFailedMsg    struct{ err error }
-	followUpSentMsg   struct{}
-	followUpFailedMsg struct{ err error }
+	steerSentMsg struct {
+		inputResult
+	}
+	steerFailedMsg struct {
+		inputResult
+
+		err error
+	}
+	followUpSentMsg struct {
+		inputResult
+	}
+	followUpFailedMsg struct {
+		inputResult
+
+		err error
+	}
 )
 
 // steerMessage injects the message into the ongoing stream via the runtime's
@@ -1430,30 +1457,45 @@ type (
 // added when the runtime drains the message and emits its UserMessageEvent,
 // which is the moment the agent actually sees it.
 func (p *chatPage) steerResolved(input resolvedSend) tea.Cmd {
-	ctx := p.ctx()
+	scope, application := p.inputScope, p.app
 	msg, resolved := input.msg, input.resolved
 	return func() tea.Msg {
-		submission, err := p.app.SteerMessage(ctx, resolved.Content, msg.Attachments)
+		if !scope.live() {
+			return nil
+		}
+		submission, err := application.SteerMessage(scope.ctx, resolved.Content, msg.Attachments)
+		if !scope.live() {
+			// An accepted steer stays with the runtime; only this orphan UI result is dropped.
+			return nil
+		}
 		if err != nil {
 			slog.Warn("Failed to steer message", "error", err)
-			return steerFailedMsg{err: err}
+			return steerFailedMsg{inputResult: inputResult{scope}, err: err}
 		}
 		if submission.Disposition == runtime.SubmissionDispositionQueued {
-			return followUpSentMsg{}
+			return followUpSentMsg{inputResult: inputResult{scope}}
 		}
-		return steerSentMsg{}
+		return steerSentMsg{inputResult: inputResult{scope}}
 	}
 }
 
 func (p *chatPage) followUpResolved(input resolvedSend) tea.Cmd {
-	ctx := p.ctx()
+	scope, application := p.inputScope, p.app
 	msg, resolved := input.msg, input.resolved
 	return func() tea.Msg {
-		if _, err := p.app.FollowUpMessage(ctx, resolved.Content, msg.Attachments); err != nil {
-			slog.Warn("Failed to enqueue follow-up", "error", err)
-			return followUpFailedMsg{err: err}
+		if !scope.live() {
+			return nil
 		}
-		return followUpSentMsg{}
+		_, err := application.FollowUpMessage(scope.ctx, resolved.Content, msg.Attachments)
+		if !scope.live() {
+			// An accepted follow-up stays with the runtime; only this orphan UI result is dropped.
+			return nil
+		}
+		if err != nil {
+			slog.Warn("Failed to enqueue follow-up", "error", err)
+			return followUpFailedMsg{inputResult: inputResult{scope}, err: err}
+		}
+		return followUpSentMsg{inputResult: inputResult{scope}}
 	}
 }
 

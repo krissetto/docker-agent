@@ -43,6 +43,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/components/tour"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/internal/editorname"
@@ -2413,11 +2414,13 @@ func (m *appModel) deliverRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd)
 		}
 	}
 
-	// Update the inactive chat page (discard cmds — UI effects aren't needed for hidden pages),
-	// except its routed one-shot timers: presentation deadlines (e.g. the sidebar's transfer box)
-	// must keep running while the tab is hidden, and their expiry lands back here as a RoutedMsg
-	// for this page. Applying such a timer arms no new ones, so this cannot loop.
-	updated, pageCmd := chatPage.Update(msg.Inner)
+	// Update the inactive chat page. Its Local work (session submissions and turns) keeps
+	// running while the tab is hidden and routes back to this page; Visible chrome, dialogs
+	// and notifications are dropped. Its routed one-shot timers are collected separately:
+	// presentation deadlines (e.g. the sidebar's transfer box) must keep running while the
+	// tab is hidden, and their expiry lands back here as a RoutedMsg for this page.
+	// Applying such a timer arms no new ones, so this cannot loop.
+	updated, effects := updatePageEffects(chatPage, msg.Inner)
 	page := updated.(chat.Page)
 	m.chatPages[msg.SessionID] = page
 	_, sending := msg.Inner.(messages.SendMsg)
@@ -2428,16 +2431,28 @@ func (m *appModel) deliverRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd)
 				_ = m.history.Add(send.Content)
 			}
 		}
-		return m, tea.Batch(presentationCmd, m.routePaneCmd(msg.SessionID, pageCmd))
+		return m, tea.Batch(presentationCmd, m.routePaneCmd(msg.SessionID, effects.Cmd(visible)))
 	}
 	presentationCmd = tea.Batch(presentationCmd, setPaneVisible(page, false))
 
 	// Shared plans are scope-global: a mutation from a background tab's agent
 	// must still live-refresh the plan dialogs open on the active tab.
 	if _, isPlanChange := msg.Inner.(*runtime.PlanChangedEvent); isPlanChange && m.planDataVisible() {
-		return m, tea.Batch(presentationCmd, page.TakeRoutedTimers(), m.planRefreshCmd(false))
+		return m, tea.Batch(presentationCmd, page.TakeRoutedTimers(), m.routePaneCmd(msg.SessionID, effects.Cmd(false)), m.planRefreshCmd(false))
 	}
-	return m, tea.Batch(presentationCmd, page.TakeRoutedTimers())
+	return m, tea.Batch(presentationCmd, page.TakeRoutedTimers(), m.routePaneCmd(msg.SessionID, effects.Cmd(false)))
+}
+
+// updatePageEffects applies msg to page and returns the Local/Visible split. Pages
+// without the split (test doubles) report everything as Visible.
+func updatePageEffects(page chat.Page, msg tea.Msg) (layout.Model, chat.Effects) {
+	if split, ok := page.(interface {
+		UpdateEffects(msg tea.Msg) (layout.Model, chat.Effects)
+	}); ok {
+		return split.UpdateEffects(msg)
+	}
+	model, cmd := page.Update(msg)
+	return model, chat.Effects{Visible: cmd}
 }
 
 // applyPauseEvent advances a session's pause indicator in response to runtime
