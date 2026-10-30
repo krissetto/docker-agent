@@ -1,6 +1,7 @@
 package leantui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -240,6 +241,47 @@ type ThemeWatcher interface {
 	Stop()
 }
 
+// themeWatcherAdapter keeps the lean Watch/Stop contract over the context-owned
+// styles.ThemeWatcher.Run. Watch returns once the watcher is attached, or with the
+// startup error; Stop cancels the run and waits for it to finish.
+type themeWatcherAdapter struct {
+	watcher *styles.ThemeWatcher
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+func newThemeWatcherAdapter(changed func(string)) ThemeWatcher {
+	return &themeWatcherAdapter{
+		watcher: styles.NewThemeWatcher(func(_ context.Context, ref string) { changed(ref) }),
+	}
+}
+
+func (a *themeWatcherAdapter) Watch(themeRef string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan struct{}), make(chan struct{})
+	a.cancel, a.done = cancel, done
+	var err error
+	go func() {
+		defer close(done)
+		err = a.watcher.Run(ctx, themeRef, func() { close(ready) })
+	}()
+	select {
+	case <-ready:
+		return nil
+	case <-done:
+		return err
+	}
+}
+
+func (a *themeWatcherAdapter) Stop() {
+	if a.cancel == nil {
+		return
+	}
+	a.cancel()
+	<-a.done
+	a.cancel, a.done = nil, nil
+}
+
 type themeFileChanged struct {
 	ref        string
 	generation uint64
@@ -259,7 +301,7 @@ func (m *model) retargetThemeWatcher(ref string) {
 	host.themeRef = ref
 	factory := host.themeWatcherFactory
 	if factory == nil {
-		factory = func(changed func(string)) ThemeWatcher { return styles.NewThemeWatcher(changed) }
+		factory = newThemeWatcherAdapter
 	}
 	watcher := factory(func(changed string) {
 		select {

@@ -286,12 +286,17 @@ type appModel struct {
 	// perform a full terminal release/restore cycle on focus events.
 	program *tea.Program
 
-	// themeWatcher hot-reloads the active custom theme: it watches the
-	// current theme's backing file and reports edits as ThemeFileChangedMsg.
-	// Created in SetProgram (the callback needs the program to inject
-	// messages into the event loop) and re-targeted after every theme
-	// change via watchCurrentTheme.
-	themeWatcher themeFileWatcher
+	// Theme hot-reload watches the current theme's backing file and reports
+	// edits as ThemeFileChangedMsg. The watcher is created in SetProgram and
+	// re-targeted after every theme change via watchCurrentTheme. themeMu
+	// guards run replacement and joining; themeCtx is immutable.
+	themeMu        sync.Mutex
+	themeCtx       context.Context //nolint:containedctx // Owns theme watching across UI and external shutdown.
+	cancelThemes   context.CancelFunc
+	themeWatcher   themeFileWatcher
+	themeChanges   chan messages.ThemeFileChangedMsg
+	cancelThemeRun context.CancelFunc
+	themeRunDone   <-chan struct{}
 
 	// dockerDesktop is true when running inside Docker Desktop's terminal
 	// (TERM_PROGRAM=docker_desktop). Focus reporting and the terminal
@@ -460,10 +465,9 @@ type appModel struct {
 }
 
 // themeFileWatcher is the subset of *styles.ThemeWatcher the model drives.
-// It is an interface so tests can record Watch/Stop calls.
+// It is an interface so tests can fake Run.
 type themeFileWatcher interface {
-	Watch(themeRef string) error
-	Stop()
+	Run(ctx context.Context, themeRef string, ready func()) error
 }
 
 // Transcriber is the speech-to-text interface used by the TUI. It is an
@@ -657,6 +661,7 @@ func WithSupervisor(owner *supervisor.Supervisor) Option {
 // New creates a new Model.
 func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initialWorkingDir string, cleanup func(), opts ...Option) tea.Model {
 	tuiCtx := func() context.Context { return context.WithoutCancel(ctx) }
+	themeCtx, cancelThemes := context.WithCancel(ctx)
 
 	ar := animation.NewRuntime()
 
@@ -690,6 +695,9 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		ar:           ar,
 		composerGrip: grip.NewReveal(ar),
 		shutdownDone: ctx.Done(),
+		themeCtx:     themeCtx,
+		cancelThemes: cancelThemes,
+		themeChanges: make(chan messages.ThemeFileChangedMsg),
 		buildCommandCategories: func(ctx context.Context, model tea.Model) []commands.Category {
 			return commands.BuildCommandCategories(ctx, model.(*appModel).application)
 		},
@@ -801,18 +809,12 @@ func (m *appModel) Resolve(v any) any {
 }
 
 // SetProgram sets the tea.Program for the supervisor to send routed messages.
-// It also starts the theme file watcher, whose callback needs the program to
-// inject hot-reload messages into the event loop.
+// It also starts watching the active theme.
 func (m *appModel) SetProgram(p *tea.Program) {
 	m.program = p
 	m.supervisor.SetProgram(p)
 
-	if m.themeWatcher != nil {
-		m.themeWatcher.Stop()
-	}
-	m.themeWatcher = styles.NewThemeWatcher(func(themeRef string) {
-		p.Send(messages.ThemeFileChangedMsg{ThemeRef: themeRef})
-	})
+	m.themeWatcher = styles.NewThemeWatcher(m.sendThemeChange)
 	m.watchCurrentTheme()
 }
 
@@ -820,15 +822,60 @@ func (m *appModel) SetProgram(p *tea.Program) {
 // so edits to its backing file hot-reload it. The watcher no-ops for themes
 // without a user theme file (e.g. built-ins).
 func (m *appModel) watchCurrentTheme() {
-	if m.themeWatcher == nil {
+	m.themeMu.Lock()
+	defer m.themeMu.Unlock()
+
+	if m.cancelThemeRun != nil {
+		m.cancelThemeRun()
+		<-m.themeRunDone
+	}
+	if m.themeWatcher == nil || m.themeCtx.Err() != nil {
 		return
 	}
-	theme := styles.CurrentTheme()
-	if theme.Ref == "" {
+	themeRef := styles.CurrentTheme().Ref
+	if themeRef == "" {
 		return
 	}
-	if err := m.themeWatcher.Watch(theme.Ref); err != nil {
-		slog.Warn("Failed to watch theme file", "theme", theme.Ref, "error", err)
+	ctx, cancel := context.WithCancel(m.themeCtx)
+	m.cancelThemeRun = cancel
+	watcher := m.themeWatcher
+	ready, done := make(chan struct{}), make(chan struct{})
+	m.themeRunDone = done
+	go func() {
+		defer close(done)
+		defer cancel()
+		if err := watcher.Run(ctx, themeRef, func() { close(ready) }); err != nil {
+			slog.WarnContext(ctx, "Failed to watch theme file", "theme", themeRef, "error", err)
+		}
+	}()
+	select {
+	case <-ready:
+	case <-done:
+	}
+}
+
+// sendThemeChange never ties filesystem cleanup to the UI consuming a message.
+func (m *appModel) sendThemeChange(ctx context.Context, themeRef string) {
+	select {
+	case m.themeChanges <- messages.ThemeFileChangedMsg{ThemeRef: themeRef}:
+	case <-ctx.Done():
+	}
+}
+
+// waitForThemeChange returns a command that delivers the next theme change.
+// Each handled ThemeFileChangedMsg re-arms it.
+func (m *appModel) waitForThemeChange() tea.Cmd {
+	ctx, changes := m.themeCtx, m.themeChanges
+	if changes == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case msg := <-changes:
+			return msg
+		case <-ctx.Done():
+			return nil
+		}
 	}
 }
 
@@ -949,6 +996,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
 	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.preparePanel(), tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
+	cmd = tea.Batch(cmd, m.waitForThemeChange())
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
@@ -2031,7 +2079,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyThemeChanged()
 
 	case messages.ThemeFileChangedMsg:
-		return m.handleThemeFileChanged(msg.ThemeRef)
+		model, cmd := m.handleThemeFileChanged(msg.ThemeRef)
+		return model, tea.Batch(cmd, m.waitForThemeChange())
 
 	// --- Settings (/settings) ---
 
@@ -4879,9 +4928,14 @@ func (m *appModel) shutdownTimeoutOrDefault() time.Duration {
 func (m *appModel) cleanupManagedResources() {
 	m.cleanupOnce.Do(func() {
 		m.gitReviewScopes.closeAll()
-		if m.themeWatcher != nil {
-			m.themeWatcher.Stop()
+		if m.cancelThemes != nil {
+			m.cancelThemes()
 		}
+		m.themeMu.Lock()
+		if m.themeRunDone != nil {
+			<-m.themeRunDone
+		}
+		m.themeMu.Unlock()
 		if m.tuiStore != nil {
 			_ = m.tuiStore.Close()
 		}
