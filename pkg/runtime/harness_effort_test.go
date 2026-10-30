@@ -60,7 +60,7 @@ func TestHarnessEffortIsSessionScoped(t *testing.T) {
 	assert.Equal(t, effort.High, first.CurrentThinkingLevel(t.Context()))
 
 	assert.Equal(t, effort.Level(""), second.CurrentThinkingLevel(t.Context()), "a sibling session keeps its own effort")
-	assert.Equal(t, "", root.Harness().Effort, "the shared harness configuration is never mutated")
+	assert.Empty(t, root.Harness().Effort, "the shared harness configuration is never mutated")
 }
 
 // TestHarnessEffortReachesTheRunOnlyForItsSession checks the run path: the
@@ -77,10 +77,10 @@ func TestHarnessEffortReachesTheRunOnlyForItsSession(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "max", harnessConfigFor(chosen.driver.scopeModels(t.Context()), root).Effort)
-	assert.Equal(t, "", harnessConfigFor(other.driver.scopeModels(t.Context()), root).Effort)
-	assert.Equal(t, "", harnessConfigFor(t.Context(), root).Effort)
+	assert.Empty(t, harnessConfigFor(other.driver.scopeModels(t.Context()), root).Effort)
+	assert.Empty(t, harnessConfigFor(t.Context(), root).Effort)
 	assert.Equal(t, root.Harness(), harnessConfigFor(t.Context(), root), "without a session override the agent's own config is used")
-	assert.Equal(t, harnessLabel(root.Harness()), "claude-code", "the harness session key ignores the effort")
+	assert.Equal(t, "claude-code", harnessLabel(root.Harness()), "the harness session key ignores the effort")
 }
 
 // TestHarnessEffortRejectsStaleBinding checks the stale guard: a choice made
