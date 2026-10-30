@@ -2144,18 +2144,14 @@ func (m *model) renderInlineEditTextarea() string {
 // configured height; these padding lines contain only whitespace (after
 // stripping ANSI sequences) and appear after the actual content.
 func trimEndOfBufferLines(view string) string {
-	lines := strings.Split(view, "\n")
-
-	// Trim trailing lines that are visually empty (whitespace-only after ANSI strip).
-	// Content lines always contain visible text or cursor escape sequences.
-	// Always keep at least one line so that an empty textarea still renders
-	// the cursor line instead of returning the full padded view.
-	last := len(lines)
-	for last > 1 && strings.TrimSpace(ansi.Strip(lines[last-1])) == "" {
-		last--
+	for {
+		before, last, found := strings.CutLast(view, "\n")
+		// Keep the first line even when it is visually empty so the cursor line still renders.
+		if !found || strings.TrimSpace(ansi.Strip(last)) != "" {
+			return view
+		}
+		view = before
 	}
-
-	return strings.Join(lines[:last], "\n")
 }
 
 func (m *model) needsSeparator(index int) bool {
