@@ -370,6 +370,15 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 			}
 			return controller.StopSubtree(t.Context())
 		}}},
+		"ActiveAgentSwitching": {
+			{sessionOperationSwitchActiveAgent, func() error {
+				switcher, ok := handle.(ActiveAgentSwitcher)
+				if !ok {
+					return UnsupportedSessionOperation(handle.ID(), sessionOperationSwitchActiveAgent)
+				}
+				return switcher.SwitchActiveAgent(t.Context(), "missing")
+			}},
+		},
 		"TodoEditing": {
 			{SessionOperationSetTodoStatus, func() error { _, err := handle.SetTodoStatus(t.Context(), "missing", "completed"); return err }},
 			{SessionOperationSetTodoDescription, func() error { _, err := handle.SetTodoDescription(t.Context(), "missing", "old", "new"); return err }},

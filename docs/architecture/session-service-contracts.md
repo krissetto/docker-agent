@@ -214,7 +214,13 @@ turn FIFO work. The `legacy_run` mode remains a control marker, not queued model
 input. Origin remains provenance for attribution, authorization,
 coordination suppression and user-only edits, never a scheduling exception.
 Guidance interrupts model requests and retry waits, not tool execution, then
-promotes as an accepted-order batch at the next safe boundary. It wakes an idle
+promotes as an accepted-order batch at the next safe boundary. Acceptance is
+durable and asynchronous to consumption: the boundary may be reached before the
+caller's `Steer` returns, so a successful `Steer` does not promise the row is
+still pending. A `queued` disposition means pending at return; an empty
+disposition means already delivered or not queued. Once consumed, the
+identity's `AwaitTurn` succeeds, `CancelPendingMessage` reports `false` without
+error, and an edit fails with a stale error. It wakes an idle
 session; user guidance uses the steering-submit hook. Turns never interrupt or
 jump the FIFO head. Accepted pending inputs retain FIFO order as run starters,
 so guidance does not leap ahead of an older turn when an idle run starts. A

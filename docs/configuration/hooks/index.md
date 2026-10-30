@@ -435,7 +435,7 @@ In addition to the common fields, each event ships its own payload:
 | `notification`              | `notification_level` (`error` or `warning`), `notification_message`                                                   |
 | `on_error`                  | `notification_level` (always `error`), `notification_message`                                                         |
 | `on_max_iterations`         | `notification_level` (always `warning`), `notification_message`                                                       |
-| `on_agent_switch`           | `from_agent`, `to_agent`, `agent_switch_kind` (`transfer_task`, `transfer_task_return`, `handoff`, or `force_handoff`)                 |
+| `on_agent_switch`           | `from_agent`, `to_agent`, `agent_switch_kind` (`transfer_task`, `transfer_task_return`, `handoff`, `force_handoff`, or `user_switch`)                 |
 | `on_session_resume`         | `previous_max_iterations`, `new_max_iterations`                                                                       |
 | `on_tool_approval_decision` | `tool_name`, `tool_use_id`, `tool_input`, `approval_decision`, `approval_source`                                      |
 | `worktree_create`           | `worktree_path`, `worktree_branch`, `worktree_source_dir` (`cwd` is also set to the new worktree)                     |
@@ -960,7 +960,7 @@ The `reason` field classifies the exit:
 
 ### Agent-Switch and Session-Resume: observability for multi-agent and long runs
 
-`on_agent_switch` fires whenever the runtime moves the active agent to a new one — `transfer_task`, `handoff`, `force_handoff`, or the return after a transferred task completes. The cause is in `agent_switch_kind`, the source and destination in `from_agent` and `to_agent`. Use it for audit, transcript, and metrics pipelines that track which agent ran which tools.
+`on_agent_switch` fires whenever the runtime moves the active agent to a new one — `transfer_task`, `handoff`, `force_handoff`, `user_switch` (an idle, user-requested in-place switch), or the return after a transferred task completes. The cause is in `agent_switch_kind`, the source and destination in `from_agent` and `to_agent`. Use it for audit, transcript, and metrics pipelines that track which agent ran which tools.
 
 The built-in [`unload`](#available-built-ins) hooks into this event to release the resources held by the previous agent's models. It's the canonical way to run two heavy local models on a GPU that can only fit one at a time:
 

@@ -710,6 +710,7 @@ func (h *sessionHandle) Metadata() SessionMetadata {
 		AvailableModels: available, Durability: durability,
 		Compaction: true, TargetCompaction: true, ModelSwitching: modelSwitching, ContextInspection: true, LiveSessions: true, SessionEditing: true,
 		ForkSkills: forkSkills, Pause: true, ModelCatalogRefresh: modelStoreCanRefresh(h.runtime.modelsStore), ThinkingLevels: modelSwitching && len(levels) > 1, Todos: true,
+		ActiveAgentSwitching: h.driver.identityParent == "",
 	}}
 }
 
@@ -779,8 +780,16 @@ func (h *sessionHandle) Retry(ctx context.Context) (Submission, error) {
 	return h.submit(ctx, TurnInput{Retry: true}, "retry")
 }
 
-// Steer records guidance immediately and queues it for the active turn's next
-// established safe boundary. It never cancels the turn.
+// Steer durably accepts guidance for the active turn and returns once it is
+// accepted. Consumption happens at the next established safe boundary, which can
+// come right after acceptance: the in-flight model attempt may be interrupted and
+// the guidance promoted before Steer returns. Disposition is
+// SubmissionDispositionQueued only if the guidance was still pending at return;
+// an empty disposition means it was already delivered or was not queued. An
+// accepted row is therefore not a promise that it is still pending: AwaitTurn on
+// its TurnID succeeds once it is consumed, CancelPendingMessage then reports
+// false without error, and an edit fails with a stale SessionError. Steer never
+// cancels the turn.
 func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission, error) {
 	if err := ctx.Err(); err != nil {
 		return Submission{}, err

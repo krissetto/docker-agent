@@ -521,6 +521,9 @@ type SessionCapabilities struct {
 	ModelCatalogRefresh   bool
 	ThinkingLevels        bool
 	Todos                 bool
+	// ActiveAgentSwitching reports whether [ActiveAgentSwitcher] is implemented
+	// for this handle. Only local root sessions set it.
+	ActiveAgentSwitching bool
 }
 
 // TurnInput describes one requested turn.

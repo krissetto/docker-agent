@@ -421,6 +421,7 @@ const (
 	agentSwitchKindTransferTaskReturn = "transfer_task_return"
 	agentSwitchKindHandoff            = "handoff"
 	agentSwitchKindForceHandoff       = "force_handoff"
+	agentSwitchKindUserSwitch         = "user_switch"
 )
 
 // executeOnAgentSwitchHooks fires on_agent_switch when the runtime
