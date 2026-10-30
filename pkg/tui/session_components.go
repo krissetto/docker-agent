@@ -46,6 +46,7 @@ func (m *appModel) disposeSessionComponents(id string) {
 	if editor := m.editors[id]; editor != nil {
 		editor.Cleanup()
 	}
+	m.closeBackgroundStatusFeed(id)
 	delete(m.chatPages, id)
 	delete(m.editors, id)
 	delete(m.sessionStates, id)

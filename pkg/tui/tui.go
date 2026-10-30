@@ -160,7 +160,11 @@ type appModel struct {
 	planRefreshInFlight bool
 	// planSidebarData is the app-owned plan snapshot shared by every session page
 	// for the opt-in Plans section. sidebarPlanEdit* guard one sidebar edit.
-	planSidebarData           messages.PlanSidebarDataMsg
+	planSidebarData messages.PlanSidebarDataMsg
+	// backgroundStatusFeeds holds one root-bound background subscription per tab;
+	// backgroundStatusPending marks tabs whose open is in flight.
+	backgroundStatusFeeds     map[string]*backgroundStatusFeed
+	backgroundStatusPending   map[string]bool
 	sidebarPlanEditGeneration uint64
 	sidebarPlanEditInFlight   bool
 	planRefreshQueued         bool
@@ -1015,6 +1019,7 @@ func (m *appModel) Init() tea.Cmd {
 	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.preparePanel(), tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
 	cmd = tea.Batch(cmd, m.waitForThemeChange())
 	cmd = tea.Batch(cmd, m.initTmuxVisibilityCmd())
+	cmd = tea.Batch(cmd, m.ensureBackgroundStatusFeeds())
 	if m.ar != nil {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
@@ -2042,6 +2047,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case planRefreshedMsg:
 		return m.handlePlanRefreshed(msg)
+	case backgroundStatusOpenedMsg:
+		cmd := m.handleBackgroundStatusOpened(msg)
+		return m, cmd
+	case backgroundStatusEventMsg:
+		cmd := m.handleBackgroundStatusEvent(msg)
+		return m, cmd
 
 	case planDetailLoadedMsg:
 		return m.handlePlanDetailLoaded(msg)
@@ -2900,7 +2911,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	if closeBackgroundDialogCmd != nil {
 		cmds = append(cmds, closeBackgroundDialogCmd)
 	}
-	cmds = append(cmds, m.refreshPlanSidebarCmd())
+	cmds = append(cmds, m.refreshPlanSidebarCmd(), m.ensureBackgroundStatusFeeds())
 
 	return m, tea.Batch(cmds...)
 }
