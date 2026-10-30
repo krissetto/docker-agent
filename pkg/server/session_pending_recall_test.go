@@ -140,6 +140,8 @@ func TestPendingRecallHTTPAttachedChildExactRoutingAndErrors(t *testing.T) {
 	rootOwner := &pendingRecallHTTPHandle{httpSession: httpSession{id: root.ID, agent: "root", snapshot: root}}
 	childOwner := &pendingRecallHTTPHandle{httpSession: httpSession{id: child.ID, agent: "worker", snapshot: child}}
 	srv.sm.runtimeSessions.Store(root.ID, &activeRuntimes{handle: rootOwner, registry: registry})
+	registry.registerLive(root.ID, rootOwner)
+	registry.registerLive(child.ID, childOwner)
 	srv.sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: childOwner, registry: registry})
 	authenticated := NewWithManager(srv.sm, "secret")
 	body := `{"turn_id":"same-turn-id","pending_only":true}`
@@ -162,6 +164,7 @@ func TestPendingRecallHTTPAttachedChildExactRoutingAndErrors(t *testing.T) {
 	rec = sessionRequest(t, authenticated, http.MethodPost, "/api/v2/sessions/child/cancel", body, "secret")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Empty(t, childOwner.cancels)
+	registry.registerLive(child.ID, &childOwner.httpSession)
 	srv.sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: &childOwner.httpSession, registry: registry})
 	rec = sessionRequest(t, authenticated, http.MethodPost, "/api/v2/sessions/child/cancel", body, "secret")
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)

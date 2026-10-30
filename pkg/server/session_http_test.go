@@ -142,6 +142,7 @@ func (a *httpSession) Release(context.Context) error { return nil }
 type httpSessionRegistry struct {
 	mu          sync.Mutex
 	sessions    map[string]*httpSession
+	live        map[string]runtime.SessionHandle
 	binding     runtime.SessionBinding
 	created     *session.Session
 	createCount int
@@ -169,9 +170,24 @@ func (r *httpSessionRegistry) CreateSession(ctx context.Context, s *session.Sess
 	return a, nil
 }
 
+// registerLive makes h the driver this registry reports for id. Fixtures whose
+// handles wrap httpSession with overridden methods register them here, as a
+// real registry would, so cached handles validate against their owner.
+func (r *httpSessionRegistry) registerLive(id string, h runtime.SessionHandle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.live == nil {
+		r.live = map[string]runtime.SessionHandle{}
+	}
+	r.live[id] = h
+}
+
 func (r *httpSessionRegistry) SessionByID(id string) (runtime.SessionHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if h := r.live[id]; h != nil {
+		return h, nil
+	}
 	if a := r.sessions[id]; a != nil {
 		return a, nil
 	}

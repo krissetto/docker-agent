@@ -67,11 +67,16 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 	hasMore := false
 	if active == "true" {
 		// Live browsing is a derived metadata projection; never Snapshot transcripts.
-		s.sm.runtimeSessions.Range(func(id string, live *activeRuntimes) bool {
-			if live.handle == nil || id <= cursor.ID {
+		s.sm.runtimeSessions.Range(func(id string, _ *activeRuntimes) bool {
+			if id <= cursor.ID {
 				return true
 			}
-			m := live.handle.Metadata()
+			// Evicted residents are skipped: only sessions the runtime still registers are listed.
+			live := s.sm.loadedSession(id)
+			if live == nil {
+				return true
+			}
+			m := live.Metadata()
 			entry := runtime.SessionSummaryEntry{SessionID: id, AgentName: m.AgentName, Model: m.Model, Loaded: true, Loadable: true}
 			pos := sort.Search(len(rows), func(i int) bool { return rows[i].SessionID >= id })
 			if pos <= limit {
@@ -131,8 +136,8 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 	}
 	for _, row := range rows {
 		entry := sessionResourceDTO{SessionID: row.SessionID, ParentID: row.ParentID, Title: row.Title, AgentName: row.AgentName, Source: row.Source, CreatedAt: row.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: row.UpdatedAt, Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir, Loaded: row.Loaded, Loadable: row.Loadable, Attachable: row.Loadable, RequiresConfirmation: row.RequiresConfirmation, RouteError: row.RouteError}
-		if live, ok := s.sm.runtimeSessions.Load(row.SessionID); ok && live.handle != nil {
-			if status, err := live.handle.Status(c.Request().Context()); err == nil {
+		if live := s.sm.loadedSession(row.SessionID); live != nil {
+			if status, err := live.Status(c.Request().Context()); err == nil {
 				entry.StateKnown = true
 				entry.State = status.State
 				entry.LastError = status.LastError
@@ -149,8 +154,8 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 func (sm *SessionManager) summaryEntry(row session.Summary) runtime.SessionSummaryEntry {
 	entry := runtime.SessionSummaryEntry{SessionID: row.ID, ParentID: row.ParentID, Title: row.Title, AgentName: row.Attributes[sessionAgentAttribute], Source: row.Attributes[sessionSourceAttribute], CreatedAt: row.CreatedAt, UpdatedAt: row.CreatedAt.UTC().Format(time.RFC3339Nano), Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir}
 	entry.Model = row.AgentModelOverrides[entry.AgentName]
-	if live, ok := sm.runtimeSessions.Load(row.ID); ok && live.handle != nil {
-		metadata := live.handle.Metadata()
+	if live := sm.loadedSession(row.ID); live != nil {
+		metadata := live.Metadata()
 		entry.Loaded, entry.Loadable = true, true
 		entry.AgentName, entry.Model = metadata.AgentName, metadata.Model
 	} else if entry.AgentName == "" {

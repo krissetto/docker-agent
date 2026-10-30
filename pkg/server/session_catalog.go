@@ -556,11 +556,28 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 	return committed.SessionHandle, nil
 }
 
+// loadedSession returns the cached handle only while its registry still
+// registers the session. Capacity and idle eviction reclaim a settled driver
+// without notifying the server, so a NotFound marks the entry stale and the
+// caller reopens from the durable store. Any other lookup error keeps the
+// entry: a transient failure must not turn a live session into a cold reopen.
+// Intentionally stopped sessions remain registered and stay loaded.
 func (sm *SessionManager) loadedSession(id string) runtime.SessionHandle {
-	if active, ok := sm.runtimeSessions.Load(id); ok && active.handle != nil {
+	active, ok := sm.runtimeSessions.Load(id)
+	if !ok || active.handle == nil {
+		return nil
+	}
+	if active.registry == nil {
 		return active.handle
 	}
-	return nil
+	fresh, err := active.registry.SessionByID(id)
+	if err != nil {
+		if sessionErr, ok := errors.AsType[*runtime.SessionError](err); ok && sessionErr.Kind == runtime.SessionErrorNotFound {
+			return nil
+		}
+		return active.handle
+	}
+	return fresh
 }
 
 func (sm *SessionManager) sessionRestoreRoot(ctx context.Context, sess *session.Session) (*session.Session, error) {

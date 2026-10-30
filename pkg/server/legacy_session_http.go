@@ -93,16 +93,18 @@ func (s *Server) legacyListSessions(c echo.Context) error {
 	}
 	if c.QueryParam("active") == "true" {
 		var failure error
-		s.sm.runtimeSessions.Range(func(_ string, rs *activeRuntimes) bool {
-			if rs.handle == nil {
+		s.sm.runtimeSessions.Range(func(id string, _ *activeRuntimes) bool {
+			// Evicted residents are skipped rather than failing the whole listing.
+			handle := s.sm.loadedSession(id)
+			if handle == nil {
 				return true
 			}
-			snapshot, err := rs.handle.Snapshot(ctx)
+			snapshot, err := handle.Snapshot(ctx)
 			if err != nil {
 				failure = err
 				return false
 			}
-			status, err := rs.handle.Status(ctx)
+			status, err := handle.Status(ctx)
 			if err != nil {
 				failure = err
 				return false

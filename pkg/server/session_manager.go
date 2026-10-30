@@ -219,8 +219,8 @@ func (sm *SessionManager) WaitReady(ctx context.Context) error {
 
 // GetSession retrieves a session by ID.
 func (sm *SessionManager) GetSession(ctx context.Context, id string) (*session.Session, error) {
-	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.handle != nil {
-		return rs.handle.Snapshot(ctx)
+	if handle := sm.loadedSession(id); handle != nil {
+		return handle.Snapshot(ctx)
 	}
 	sess, err := sm.sessionStore.GetSession(ctx, id)
 	if err != nil {

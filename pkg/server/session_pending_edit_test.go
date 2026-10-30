@@ -139,6 +139,8 @@ func TestPendingEditHTTPAttachedChildExactRouting(t *testing.T) {
 	rootOwner := &pendingEditHTTPHandle{httpSession: httpSession{id: root.ID, agent: "root", snapshot: root}}
 	childOwner := &pendingEditHTTPHandle{httpSession: httpSession{id: child.ID, agent: "worker", snapshot: child}}
 	srv.sm.runtimeSessions.Store(root.ID, &activeRuntimes{handle: rootOwner, registry: registry})
+	registry.registerLive(root.ID, rootOwner)
+	registry.registerLive(child.ID, childOwner)
 	srv.sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: childOwner, registry: registry})
 	authenticated := NewWithManager(srv.sm, "secret")
 	body := `{"kind":"pending_message","pending_message":{"turn_id":"same-turn-id","content":"child only","expected_content":""}}`
