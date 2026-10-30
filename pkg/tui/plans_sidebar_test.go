@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
@@ -266,4 +267,37 @@ func findPlanEditReady(msgs []tea.Msg) (planEditReadyMsg, bool) {
 		}
 	}
 	return planEditReadyMsg{}, false
+}
+
+// A background tab's usage is accounting: it must not move the selected agent
+// of that inactive tab. A stream event from the same agent does move it, which
+// keeps the usage assertion meaningful.
+func TestInactiveTabUsageKeepsSelectedAgent(t *testing.T) {
+	t.Parallel()
+	m, _ := newPlansTestModel(t)
+	sv := supervisor.New(nil)
+	activeID := addPlanTestSession(t, sv)
+	backgroundID := addPlanTestSession(t, sv)
+	m.supervisor = sv
+	m.chatPages[activeID] = &planSidebarTestPage{}
+	m.chatPages[backgroundID] = &planSidebarTestPage{}
+	m.sessionStates[backgroundID] = service.NewSessionState(session.New())
+	m.sessionStates[backgroundID].SetCurrentAgentName("root")
+
+	usage := &runtime.TokenUsageEvent{
+		AgentContext: runtime.AgentContext{AgentName: "helper"},
+		SessionID:    backgroundID,
+		Usage:        &runtime.Usage{InputTokens: 10, OutputTokens: 2},
+	}
+	m.Update(messages.RoutedMsg{SessionID: backgroundID, Inner: usage})
+	assert.Equal(t, "root", m.sessionStates[backgroundID].CurrentAgentName(),
+		"accounting from a background agent must not switch the inactive tab's agent")
+
+	stream := &runtime.StreamStartedEvent{
+		AgentContext: runtime.AgentContext{AgentName: "helper"},
+		SessionID:    backgroundID,
+	}
+	m.Update(messages.RoutedMsg{SessionID: backgroundID, Inner: stream})
+	assert.Equal(t, "helper", m.sessionStates[backgroundID].CurrentAgentName(),
+		"a non-accounting event still follows the agent")
 }
