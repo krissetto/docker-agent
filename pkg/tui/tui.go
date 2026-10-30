@@ -2456,6 +2456,8 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	activeID := m.supervisor.ActiveID()
+	// Capture the persisted ID before NewSession replaces the runner's session.
+	oldPersistedID := m.persistedSessionID(activeID)
 
 	// Cleanup old editor for the active session.
 	if ed, ok := m.editors[activeID]; ok {
@@ -2481,7 +2483,6 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 	// Update persisted tab to point to the new session.
 	if m.tuiStore != nil {
 		ctx := m.ctx()
-		oldPersistedID := m.persistedSessionID(activeID)
 		if err := m.tuiStore.UpdateTabSessionID(ctx, oldPersistedID, newSess.ID); err != nil {
 			slog.WarnContext(ctx, "Failed to update tab session ID after clear", "error", err)
 		}
