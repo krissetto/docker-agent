@@ -717,7 +717,7 @@ func (h *sessionHandle) Metadata() SessionMetadata {
 func (h *sessionHandle) metadataModelBinding() (string, string, []string, []effort.Level, effort.Level) {
 	for {
 		binding := h.driver.activeBinding()
-		version, model, providers := binding.version, binding.modelRef, binding.models
+		version, model := binding.version, binding.modelRef
 		h.metadataMu.Lock()
 		if h.metadataInitialized && h.metadataVersion == version {
 			cachedModel := h.metadataModel
@@ -738,7 +738,7 @@ func (h *sessionHandle) metadataModelBinding() (string, string, []string, []effo
 			if h.runtime.SupportsModelSwitching() {
 				available = modelChoiceRefs(h.runtime.availableModels(opCtx, binding.agentName))
 			}
-			levels, current, err = h.runtime.resolveThinkingLevelsForModels(opCtx, providers)
+			levels, current, err = h.thinkingStateFor(opCtx, binding)
 			releaseEnvironment()
 		} else {
 			err = captureErr
@@ -1201,13 +1201,12 @@ func (h *sessionHandle) RefreshModelsCatalog(ctx context.Context) error {
 }
 
 func (h *sessionHandle) ThinkingLevels(ctx context.Context) []effort.Level {
-	_, models := h.driver.ModelSnapshot()
 	opCtx, release, err := h.runtime.captureEnvironmentForOperation(ctx, h.driver.session())
 	if err != nil {
 		return nil
 	}
 	defer release()
-	levels, _, err := h.runtime.resolveThinkingLevelsForModels(opCtx, models)
+	levels, _, err := h.thinkingStateFor(opCtx, h.driver.activeBinding())
 	if err != nil {
 		return nil
 	}
@@ -1215,17 +1214,28 @@ func (h *sessionHandle) ThinkingLevels(ctx context.Context) []effort.Level {
 }
 
 func (h *sessionHandle) CurrentThinkingLevel(ctx context.Context) effort.Level {
-	_, models := h.driver.ModelSnapshot()
 	opCtx, release, err := h.runtime.captureEnvironmentForOperation(ctx, h.driver.session())
 	if err != nil {
 		return ""
 	}
 	defer release()
-	_, current, err := h.runtime.resolveThinkingLevelsForModels(opCtx, models)
+	_, current, err := h.thinkingStateFor(opCtx, h.driver.activeBinding())
 	if err != nil {
 		return ""
 	}
 	return current
+}
+
+// thinkingStateFor resolves the levels and current level binding's agent can
+// use. A harness agent's effort is session-scoped; any other agent uses its
+// bound model. The caller holds the environment for ctx.
+func (h *sessionHandle) thinkingStateFor(ctx context.Context, binding activeSessionBinding) ([]effort.Level, effort.Level, error) {
+	if tm := h.runtime.teamForContext(ctx, h.driver.session()); tm != nil {
+		if a, err := tm.Agent(binding.agentName); err == nil && a.HasHarness() {
+			return harnessEffortState(a, binding.harness)
+		}
+	}
+	return h.runtime.resolveThinkingLevelsForModels(ctx, binding.models)
 }
 
 // CycleThinkingLevel changes the active agent through the owning session
@@ -1236,7 +1246,13 @@ func (h *sessionHandle) CycleThinkingLevel(ctx context.Context) (effort.Level, e
 		return "", err
 	}
 	return h.applyThinkingLevel(ctx, func(supported []effort.Level, current effort.Level) (effort.Level, error) {
-		return effort.NextSupportedLevel(supported, effort.Clamp(supported, current)), nil
+		// Clamp first so a configured level the model does not support re-enters
+		// the cycle at the nearest supported tier. An unset level (a harness on
+		// its CLI default) starts the cycle instead.
+		if current != "" {
+			current = effort.Clamp(supported, current)
+		}
+		return effort.NextSupportedLevel(supported, current), nil
 	})
 }
 
@@ -1275,6 +1291,20 @@ func (h *sessionHandle) applyThinkingLevel(ctx context.Context, pick func([]effo
 	}
 	if _, err := tm.Agent(binding.agentName); err != nil {
 		return "", fmt.Errorf("agent not found: %w", err)
+	}
+	if a, err := tm.Agent(binding.agentName); err == nil && a.HasHarness() {
+		supported, current, err := harnessEffortState(a, binding.harness)
+		if err != nil {
+			return "", err
+		}
+		next, err := pick(supported, current)
+		if err != nil {
+			return "", err
+		}
+		if err := h.driver.setHarnessEffort(ctx, binding, next); err != nil {
+			return "", err
+		}
+		return next, nil
 	}
 	ref, models := binding.modelRef, binding.models
 	supported, current, err := h.runtime.resolveThinkingLevelsForModels(opCtx, models)

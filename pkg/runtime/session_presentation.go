@@ -16,6 +16,7 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 	if err != nil || a == nil {
 		return nil
 	}
+	ctx = withHarnessEffortOverride(ctx, observed.harness)
 	ctx = agent.WithContextModels(ctx, observed.status.AgentName, observed.models)
 	modelID := modelsdev.ID{}
 	var limit int64
@@ -59,7 +60,8 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 			detail.Provider, detail.Model = id.Provider, id.Model
 			projectModelDisplay(&detail, cfg, cachedModelDatabase(h.runtime.modelsStore), h.runtime.SupportsModelSwitching())
 		} else if member.HasHarness() {
-			detail.Model, detail.ModelName = member.HarnessType(), member.HarnessType()
+			detail.ModelID, detail.Model, detail.ModelName = member.HarnessType(), member.HarnessType(), member.HarnessType()
+			h.runtime.harnessThinkingDisplay(ctx, member, &detail)
 		}
 		details = append(details, detail)
 	}

@@ -83,7 +83,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/sessions`        | Browse and load past sessions                                                        |
 | `/plans`           | Browse and manage every [shared plan](../../tools/plan/index.md). Filter, open a detail view, refresh, export to a file, set status, edit/create in `$VISUAL`/`$EDITOR`, and delete, all guarded against concurrent edits. Not available in the lean TUI |
 | `/model`           | Change the model for the current session. Refreshing the picker's catalog is a separate server capability; older servers still reload their existing model list. |
-| `/effort`          | Set the current model's reasoning-effort level (`/effort <none\|minimal\|low\|medium\|high\|xhigh\|max>`, or `/effort` alone to pick from the supported levels; reasoning models only). Press <kbd>Tab</kbd> after `/effort` and a space to complete a level the current model supports |
+| `/effort`          | Set the current model's reasoning-effort level (`/effort <none\|minimal\|low\|medium\|high\|xhigh\|max>`, or `/effort` alone to pick from the supported levels; reasoning models and `claude-code` / `command-code` harnesses only). Press <kbd>Tab</kbd> after `/effort` and a space to complete a level the current model supports |
 | `/settings`        | Manage appearance, behavior, and notification preferences                           |
 | `/yolo`            | Toggle automatic tool call approval                                                  |
 | `/title`           | Set or regenerate session title                                                      |
@@ -179,7 +179,7 @@ The thinking state of each model is shown with a gauge + value on the card and a
 
 The **effort gauge** is a fixed-width six-cell indicator (`▰` filled, `▱` empty) so the badge column stays aligned. It maps the six selectable levels one-to-one onto filled-cell counts — `minimal` → `▰▱▱▱▱▱`, `low` → `▰▰▱▱▱▱`, `medium` → `▰▰▰▱▱▱`, `high` → `▰▰▰▰▱▱`, `xhigh` → `▰▰▰▰▰▱`, `max` → `▰▰▰▰▰▰` — so the cell count alone is lossless, with a low→high color ramp as a secondary cue. A capable-but-disabled model shows a dim empty gauge (`▱▱▱▱▱▱` `off`), adaptive budgets show `auto`, and token budgets keep `◉ <count>`. The same gauge + value renders on the focus card, the Agent Inspector, and the row.
 
-Harness-backed agents (e.g. `claude-code`) show the harness type as their model and no thinking gauge. Press **Shift+Tab** to cycle the current model's thinking-effort level; a `✻ Thinking: <level>` toast confirms the change (useful when the sidebar is hidden).
+Harness-backed agents (e.g. `claude-code`) show the harness type as their model. `claude-code` and `command-code` harnesses show their `effort` on the gauge, or `auto` while the CLI picks it; other harnesses show no thinking gauge. Press **Shift+Tab** to cycle the current model's thinking-effort level; a `✻ Thinking: <level>` toast confirms the change (useful when the sidebar is hidden).
 
 ### Agent Delegation Feedback
 

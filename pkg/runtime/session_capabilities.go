@@ -380,7 +380,8 @@ func (h *sessionHandle) SessionAgentInfo(ctx context.Context) (SessionAgentInfo,
 		return SessionAgentInfo{}, err
 	}
 	out := SessionAgentInfo{Commands: maps.Clone(a.Commands())}
-	h.runtime.emitAgentAndTeamInfo(agent.WithContextModels(ctx, binding.agentName, binding.models), a, func(event Event) bool {
+	infoCtx := withHarnessEffortOverride(ctx, binding.harness)
+	h.runtime.emitAgentAndTeamInfo(agent.WithContextModels(infoCtx, binding.agentName, binding.models), a, func(event Event) bool {
 		switch event := event.(type) {
 		case *AgentInfoEvent:
 			out.Agent = event

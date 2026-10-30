@@ -25,7 +25,7 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	ctx, span := r.startSpan(ctx, "runtime.harness", trace.WithAttributes(traceAttributesForHarness(sess, a)...))
 	defer span.End()
 
-	provider, err := r.newHarnessProvider(a.Harness())
+	provider, err := r.newHarnessProvider(harnessConfigFor(ctx, a))
 	if err != nil {
 		msg := fmt.Sprintf("failed to configure harness: %v", err)
 		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, msg))

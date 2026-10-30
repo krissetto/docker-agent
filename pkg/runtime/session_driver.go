@@ -13,6 +13,7 @@ import (
 	"weak"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -176,6 +177,7 @@ type sessionDriver struct {
 	skillGeneration      uint64
 	modelRef             string
 	modelProviders       []provider.Provider
+	harnessEffort        harnessEffortOverride
 	bindingVersion       uint64
 	pauseCh              chan struct{}
 	pauseGeneration      uint64
@@ -811,12 +813,13 @@ type activeSessionBinding struct {
 	agentName string
 	modelRef  string
 	models    []provider.Provider
+	harness   harnessEffortOverride
 }
 
 func (d *sessionDriver) activeBinding() activeSessionBinding {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return activeSessionBinding{d.bindingVersion, d.AgentNameLocked(), d.modelRef, slices.Clone(d.modelProviders)}
+	return activeSessionBinding{d.bindingVersion, d.AgentNameLocked(), d.modelRef, slices.Clone(d.modelProviders), d.harnessEffort}
 }
 
 func (d *sessionDriver) validateBinding(ctx context.Context, binding activeSessionBinding) error {
@@ -843,6 +846,7 @@ func (d *sessionDriver) ModelBindingSnapshot() (uint64, string, []provider.Provi
 func (d *sessionDriver) scopeModels(ctx context.Context) context.Context {
 	ctx = d.scopeTeamEnvironment(ctx)
 	binding := d.activeBinding()
+	ctx = withHarnessEffortOverride(ctx, binding.harness)
 	return agent.WithContextModels(ctx, binding.agentName, binding.models)
 }
 
@@ -850,6 +854,24 @@ func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Pr
 	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
 		d.modelRef = modelRef
 		d.modelProviders = slices.Clone(providers)
+		d.bindingVersion++
+		return nil
+	})
+}
+
+// setHarnessEffort records the session's effort for its bound harness agent. It
+// is a session binding change, not a configuration change: the shared agent
+// stays untouched and the binding version advances so cached projections refresh.
+// The binding guard rejects a choice made against an agent the session no longer runs.
+func (d *sessionDriver) setHarnessEffort(ctx context.Context, binding activeSessionBinding, level effort.Level) error {
+	return d.ownerCall(ctx, func() error {
+		if err := d.validateBindingLocked(binding); err != nil {
+			return err
+		}
+		if d.stopped || d.sess == nil {
+			return ErrSessionStopped
+		}
+		d.harnessEffort = harnessEffortOverride{agentName: binding.agentName, level: level, set: true}
 		d.bindingVersion++
 		return nil
 	})
@@ -985,6 +1007,7 @@ type driverObservation struct {
 	pendingInputs       []PendingInput
 	position            int
 	models              []provider.Provider
+	harness             harnessEffortOverride
 	titleStatus         string
 	backgroundProcesses []tools.BackgroundProcess
 }
@@ -1098,7 +1121,7 @@ func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLi
 	for i, item := range seed {
 		replay[i] = sessionEnvelope(d.sessionIDLocked(), item)
 	}
-	obs := driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: header, status: status, interactions: interactions, pendingInputs: pending, position: position, titleStatus: d.titleStatus, backgroundProcesses: slices.Clone(base.BackgroundProcesses)}
+	obs := driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: header, status: status, interactions: interactions, pendingInputs: pending, position: position, harness: d.harnessEffort, titleStatus: d.titleStatus, backgroundProcesses: slices.Clone(base.BackgroundProcesses)}
 	return obs, snapshot, nil
 }
 
@@ -1138,7 +1161,7 @@ func (d *sessionDriver) observe(since *uint64, buffer int) driverObservation {
 			seed = append(seed, SequencedSessionEvent{Epoch: d.events.epoch, Event: lifecycle})
 		}
 	}
-	return driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: cloned, status: status, interactions: interactions, pendingInputs: pendingInputs, position: position, models: slices.Clone(d.modelProviders), titleStatus: d.titleStatus, backgroundProcesses: processes}
+	return driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: cloned, status: status, interactions: interactions, pendingInputs: pendingInputs, position: position, models: slices.Clone(d.modelProviders), harness: d.harnessEffort, titleStatus: d.titleStatus, backgroundProcesses: processes}
 }
 
 func (d *sessionDriver) Cancel(turnID string) CancelOutcome {

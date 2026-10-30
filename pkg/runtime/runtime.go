@@ -1749,7 +1749,11 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 			}
 			// Preserve the legacy label's primary-model semantics. New display
 			// fields above describe the actual effective (including fallback) model.
-			thinking = r.agentThinkingLabel(ctx, a)
+			if a.HasHarness() {
+				thinking = r.harnessThinkingDisplay(ctx, a, &display)
+			} else {
+				thinking = r.agentThinkingLabel(ctx, a)
+			}
 		}
 
 		details[i] = AgentDetails{

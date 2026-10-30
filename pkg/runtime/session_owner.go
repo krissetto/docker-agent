@@ -135,7 +135,9 @@ func (d *sessionDriver) executionContext(ctx context.Context, generation uint64)
 	ctx = context.WithValue(tools.WithResourceOwner(ctx, d.resourceOwner), executionIdentityKey{}, identity)
 	if environment != nil {
 		ctx = context.WithValue(ctx, teamEnvironmentContextKey{}, environment.Environment())
-		ctx = agent.WithContextModels(ctx, snapshot.AgentName, identity.driver.activeBinding().models)
+		binding := identity.driver.activeBinding()
+		ctx = withHarnessEffortOverride(ctx, binding.harness)
+		ctx = agent.WithContextModels(ctx, snapshot.AgentName, binding.models)
 	}
 	return ctx, snapshot, err
 }
