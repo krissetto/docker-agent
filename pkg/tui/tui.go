@@ -157,7 +157,12 @@ type appModel struct {
 	// wanted listing warnings notified) so a single follow-up reload is
 	// launched when the in-flight result lands. All three fields are touched
 	// exclusively from Update.
-	planRefreshInFlight       bool
+	planRefreshInFlight bool
+	// planSidebarData is the app-owned plan snapshot shared by every session page
+	// for the opt-in Plans section. sidebarPlanEdit* guard one sidebar edit.
+	planSidebarData           messages.PlanSidebarDataMsg
+	sidebarPlanEditGeneration uint64
+	sidebarPlanEditInFlight   bool
 	planRefreshQueued         bool
 	planRefreshQueuedWarnings bool
 
@@ -981,6 +986,7 @@ func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *sessi
 	m.disposeSessionComponents(tabID)
 	ss := service.NewSessionState(sess)
 	cp := chat.New(m.ar, m.ctx(), a, ss, m.chatPageOpts()...)
+	cp.Update(m.planSidebarData)
 	cp.SetRoutingID(tabID)
 	opts := []editor.Option{editor.WithAnimationRuntime(m.ar), editor.WithCompletions(completions.NewCommandCompletion(m.commandCategories()), completions.NewFileCompletion(m.ctx()))}
 	if a.IsReadOnly() {
@@ -1086,6 +1092,7 @@ func (m *appModel) init() tea.Cmd {
 		chat.WatchGitBranch(m.chatPage),
 		m.editor.Init(),
 		m.editor.Focus(),
+		m.refreshPlanSidebarCmd(),
 		tea.Sequence(teaInitialCommands...),
 	)
 }
@@ -1705,6 +1712,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Dialog lifecycle ---
 
 	case dialog.OpenDialogMsg:
+		m.cancelSidebarPlanEdit()
 		if state, ok := msg.Model.(interface{ Disposed() bool }); ok && state.Disposed() {
 			return m, nil
 		}
@@ -1989,6 +1997,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.EditPlanMsg:
 		return m.handleEditPlan(msg)
+	case messages.EditSidebarPlanMsg:
+		return m.handleEditSidebarPlan(msg)
 
 	case planEditorClosedMsg:
 		return m.handlePlanEditorClosed(msg)
@@ -2387,7 +2397,7 @@ func (m *appModel) deliverRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd)
 
 	// Shared plans are scope-global: a mutation from a background tab's agent
 	// must still live-refresh the plan dialogs open on the active tab.
-	if _, isPlanChange := msg.Inner.(*runtime.PlanChangedEvent); isPlanChange && m.planDialogOpen() {
+	if _, isPlanChange := msg.Inner.(*runtime.PlanChangedEvent); isPlanChange && m.planDataVisible() {
 		return m, tea.Batch(presentationCmd, page.TakeRoutedTimers(), m.planRefreshCmd(false))
 	}
 	return m, tea.Batch(presentationCmd, page.TakeRoutedTimers())
@@ -2867,6 +2877,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	if closeBackgroundDialogCmd != nil {
 		cmds = append(cmds, closeBackgroundDialogCmd)
 	}
+	cmds = append(cmds, m.refreshPlanSidebarCmd())
 
 	return m, tea.Batch(cmds...)
 }
@@ -3120,6 +3131,9 @@ func (m *appModel) requestExitConfirmation() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
+	if sessionID == m.supervisor.ActiveID() {
+		m.cancelSidebarPlanEdit()
+	}
 	if cmd, ok := m.prepareReviewInputTransition(); !ok {
 		return m, cmd
 	}
@@ -3585,6 +3599,10 @@ func (m *appModel) Bindings() []key.Binding {
 
 // handleKeyPress handles all keyboard input with proper priority routing.
 func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea.Cmd) {
+	if m.sidebarPlanEditInFlight && key.Matches(msg, core.UIKeys.Cancel) {
+		m.cancelSidebarPlanEdit()
+		return m, nil
+	}
 	if input, ok := m.editor.(reviewCommentEditor); ok && input.CommentInputActive() {
 		if handled, inputCmd := m.updateReviewCommentKey(msg); handled {
 			return m, inputCmd

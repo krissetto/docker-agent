@@ -155,6 +155,11 @@ func (m *model) targetRows() []placedRow {
 			row.payload = string(id)
 			row.identity = m.preparedTrees[width].rows[y-m.treeSectionStart].identity
 		}
+		if zone, ok := m.planClickZones[y]; ok && m.sectionVisibility.ShowPlans {
+			row.id = fmt.Sprintf("plan:%d", y-m.planStart)
+			row.action = zone.kind
+			row.payload = zone.name
+		}
 		if name, ok := m.agentClickZones[y]; ok {
 			row.id = "agent:" + name
 			row.action = ClickAgent

@@ -11,6 +11,20 @@ import "github.com/docker/docker-agent/pkg/plans"
 // and a concurrent change surfaces as an actionable conflict instead of a
 // silent overwrite.
 type (
+	// PlanSidebarDataMsg shares the app-owned metadata snapshot with chat pages.
+	PlanSidebarDataMsg struct {
+		Result  plans.ListResult
+		Loading bool
+		Err     error
+	}
+
+	// EditSidebarPlanMsg preserves the revision displayed by the clicked row.
+	EditSidebarPlanMsg struct {
+		TabID           string
+		Ref             plans.Ref
+		ExpectedVersion int
+	}
+
 	// ShowPlanBrowserMsg opens the /plans browser dialog.
 	ShowPlanBrowserMsg struct{}
 

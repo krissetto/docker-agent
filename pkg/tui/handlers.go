@@ -1006,7 +1006,11 @@ func (m *appModel) applyLayoutSettings(settings messages.LayoutSettings) (tea.Mo
 	settings.SidebarPosition = messages.ParseSidebarPosition(string(settings.SidebarPosition))
 	settings.SectionSpacing = messages.ParseSectionSpacing(string(settings.SectionSpacing))
 	settings.SidebarInfoMode = messages.ParseSidebarInfoMode(string(settings.SidebarInfoMode))
+	wasEnabled := m.planSidebarEnabled()
 	m.layoutSettings = settings
+	if !m.planSidebarEnabled() {
+		m.cancelSidebarPlanEdit()
+	}
 
 	var cmds []tea.Cmd
 	for _, page := range m.chatPages {
@@ -1015,6 +1019,9 @@ func (m *appModel) applyLayoutSettings(settings messages.LayoutSettings) (tea.Mo
 		}
 	}
 	cmds = append(cmds, m.resizeAll())
+	if !wasEnabled && m.planSidebarEnabled() {
+		cmds = append(cmds, m.refreshPlanSidebarCmd())
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -1030,6 +1037,7 @@ func layoutSettingsFromConfig(l userconfig.LayoutSettings) messages.LayoutSettin
 		HideUsage:              l.HideUsage,
 		HideAgents:             l.HideAgents,
 		HideTools:              l.HideTools,
+		ShowPlans:              l.ShowPlans,
 		HideTodos:              l.HideTodos,
 		AlignInputWithMessages: l.AlignInputWithMessages,
 	}
@@ -1140,6 +1148,7 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 		ActiveAgentsOnly: layout.ActiveAgentsOnly,
 		HideSessionPath:  layout.HideSessionPath, HideUsage: layout.HideUsage,
 		HideAgents: layout.HideAgents, HideTools: layout.HideTools, HideTodos: layout.HideTodos,
+		ShowPlans:              layout.ShowPlans,
 		AlignInputWithMessages: layout.AlignInputWithMessages,
 	}
 	return nil

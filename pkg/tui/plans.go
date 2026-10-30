@@ -162,10 +162,16 @@ func (m *appModel) planRefreshCmd(notifyWarnings bool) tea.Cmd {
 		return nil
 	}
 	m.planRefreshInFlight = true
+	var sidebarCmd tea.Cmd
+	if m.planSidebarEnabled() {
+		data := m.planSidebarData
+		data.Loading = true
+		sidebarCmd = m.updatePlanSidebar(data)
+	}
 	svc, ctx := m.plansService(), m.ctx()
 	timeout := m.planReadTimeoutOrDefault()
 	refs := m.openPlanDetailRefs()
-	return func() tea.Msg {
+	read := func() tea.Msg {
 		// One shared deadline for the whole reload: however wedged storage
 		// is, the result always lands and clears the in-flight flag, so the
 		// refresh pipeline can never get stuck.
@@ -179,6 +185,7 @@ func (m *appModel) planRefreshCmd(notifyWarnings bool) tea.Cmd {
 		}
 		return msg
 	}
+	return tea.Batch(sidebarCmd, read)
 }
 
 // appendPlanRefreshCmd appends a coalesced refresh (without warning
@@ -208,16 +215,26 @@ func (m *appModel) appendPlanRefreshCmd(cmds []tea.Cmd) []tea.Cmd {
 func (m *appModel) handlePlanRefreshed(msg planRefreshedMsg) (tea.Model, tea.Cmd) {
 	m.planRefreshInFlight = false
 
-	if !m.planDialogOpen() {
+	if !m.planDataVisible() {
 		m.planRefreshQueued = false
 		m.planRefreshQueuedWarnings = false
+		m.planSidebarData.Loading = false
 		return m, nil
 	}
 
 	var cmds []tea.Cmd
+	data := m.planSidebarData
+	data.Loading = false
+	data.Err = msg.listErr
+	if msg.listErr == nil {
+		data.Result = msg.list
+	}
+	cmds = append(cmds, m.updatePlanSidebar(data))
 	if msg.listErr != nil {
-		cmds = append(cmds, m.planReadFailureCmd(msg.listErr))
-	} else {
+		if m.planDialogOpen() || msg.notifyWarnings {
+			cmds = append(cmds, m.planReadFailureCmd(msg.listErr))
+		}
+	} else if m.planDialogOpen() {
 		cmds = append(cmds, core.CmdHandler(dialog.PlanBrowserDataMsg{Result: msg.list}))
 		if msg.notifyWarnings {
 			cmds = append(cmds, planWarningsCmds(msg.list.Warnings)...)
@@ -543,10 +560,17 @@ func (m *appModel) handleCreatePlan(name string) (tea.Model, tea.Cmd) {
 // command — wedged storage or a slow disk must never stall Update — and the
 // outcome reports back as a planEditReadyMsg.
 func (m *appModel) handleEditPlan(msg messages.EditPlanMsg) (tea.Model, tea.Cmd) {
+	cmd := m.preparePlanEdit(msg, 0)
+	return m, cmd
+}
+
+// preparePlanEdit reads the plan and, for sidebar requests, tags the result
+// with sidebarRequest so a stale click can be told apart from a dialog edit.
+func (m *appModel) preparePlanEdit(msg messages.EditPlanMsg, sidebarRequest uint64) tea.Cmd {
 	svc, ctx := m.plansService(), m.ctx()
 	timeout := m.planReadTimeoutOrDefault()
-	return m, func() tea.Msg {
-		ready := planEditReadyMsg{ref: msg.Ref, expectedVersion: msg.ExpectedVersion}
+	return func() tea.Msg {
+		ready := planEditReadyMsg{ref: msg.Ref, expectedVersion: msg.ExpectedVersion, sidebarRequest: sidebarRequest}
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		p, err := svc.Get(ctx, msg.Ref)
@@ -569,6 +593,7 @@ func (m *appModel) handleEditPlan(msg messages.EditPlanMsg) (tea.Model, tea.Cmd)
 // the plan's current version and, when it still matches the version the
 // user saw, the draft file seeded with the plan's content.
 type planEditReadyMsg struct {
+	sidebarRequest  uint64
 	ref             plans.Ref
 	expectedVersion int
 	// currentVersion is the version read from storage. When it differs from
@@ -586,16 +611,37 @@ type planEditReadyMsg struct {
 // handlePlanEditReady launches the external editor over the prepared draft,
 // or surfaces why there is nothing to edit.
 func (m *appModel) handlePlanEditReady(msg planEditReadyMsg) (tea.Model, tea.Cmd) {
+	fromSidebar := msg.sidebarRequest != 0
+	if fromSidebar {
+		if msg.sidebarRequest != m.sidebarPlanEditGeneration || !m.sidebarPlanEditInFlight ||
+			!m.planSidebarEnabled() || m.dialogMgr.Open() {
+			if msg.draftPath != "" {
+				_ = os.Remove(msg.draftPath)
+			}
+			return m, nil
+		}
+		if msg.err != nil || msg.draftErr != nil || msg.currentVersion != msg.expectedVersion {
+			m.sidebarPlanEditInFlight = false
+		}
+	}
 	if msg.err != nil {
 		cmd := m.planReadFailureCmd(msg.err)
+		var missing *plans.NotFoundError
+		if fromSidebar && errors.As(msg.err, &missing) {
+			cmd = tea.Batch(cmd, m.refreshPlanSidebarCmd())
+		}
 		return m, cmd
 	}
 	// The plan moved on since the version on screen: refresh instead of
 	// editing a base the user has not seen.
 	if msg.currentVersion != msg.expectedVersion {
+		retry := "press e again"
+		if fromSidebar {
+			retry = "click the plan again"
+		}
 		cmds := []tea.Cmd{notification.WarningCmd(fmt.Sprintf(
-			"Plan %q is at v%d now (you read v%d). Data refreshed — review and press e again.",
-			msg.ref.Name, msg.currentVersion, msg.expectedVersion,
+			"Plan %q is at v%d now (you read v%d). Data refreshed — review and %s.",
+			msg.ref.Name, msg.currentVersion, msg.expectedVersion, retry,
 		))}
 		cmds = m.appendPlanRefreshCmd(cmds)
 		return m, tea.Sequence(cmds...)
@@ -606,17 +652,18 @@ func (m *appModel) handlePlanEditReady(msg planEditReadyMsg) (tea.Model, tea.Cmd
 	// The user closed the plan dialogs while the edit was being prepared:
 	// taking over the terminal with an editor now would be disruptive. The
 	// draft holds only the stored content, so removing it loses nothing.
-	if !m.planDialogOpen() {
+	if !fromSidebar && !m.planDialogOpen() {
 		_ = os.Remove(msg.draftPath)
 		return m, nil
 	}
-	cmd := m.execPlanEditor(planEditorClosedMsg{ref: msg.ref, expectedVersion: msg.expectedVersion, path: msg.draftPath})
+	cmd := m.execPlanEditor(planEditorClosedMsg{ref: msg.ref, expectedVersion: msg.expectedVersion, path: msg.draftPath, sidebarRequest: msg.sidebarRequest})
 	return m, cmd
 }
 
 // planEditorClosedMsg reports that the external editor for a plan draft has
 // exited; the app model then reads the draft and performs the guarded write.
 type planEditorClosedMsg struct {
+	sidebarRequest  uint64
 	ref             plans.Ref
 	expectedVersion int
 	create          bool
@@ -661,6 +708,9 @@ func (m *appModel) execPlanEditor(result planEditorClosedMsg) tea.Cmd {
 }
 
 func (m *appModel) handlePlanEditorClosed(msg planEditorClosedMsg) (tea.Model, tea.Cmd) {
+	if msg.sidebarRequest != 0 && msg.sidebarRequest == m.sidebarPlanEditGeneration {
+		m.sidebarPlanEditInFlight = false
+	}
 	if msg.err != nil {
 		// The editor may have failed after the user saved content (e.g. it
 		// exited non-zero); the draft is kept so no edit is ever lost.
@@ -893,7 +943,7 @@ func (m *appModel) handlePlanChangedEvent(msg *runtime.PlanChangedEvent) (tea.Mo
 	}
 	chatCmd := m.updateChatCmd(msg)
 	var refresh tea.Cmd
-	if m.planDialogOpen() {
+	if m.planDataVisible() {
 		refresh = m.planRefreshCmd(false)
 	}
 	return m, tea.Batch(chatCmd, refresh)

@@ -221,6 +221,19 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			return p, cmd
 		}
 
+	case TargetSidebarPlan:
+		if msg.Button == tea.MouseLeft {
+			return p, p.sidebar.EditPlan(hit.PlanName, p.routingID)
+		}
+	case TargetSidebarPlanBrowser:
+		if msg.Button == tea.MouseLeft {
+			return p, core.CmdHandler(msgtypes.ShowPlanBrowserMsg{})
+		}
+	case TargetSidebarPlanRefresh:
+		if msg.Button == tea.MouseLeft {
+			return p, core.CmdHandler(msgtypes.RefreshPlansMsg{})
+		}
+
 	case TargetSidebarUsageContext:
 		if msg.Button == tea.MouseLeft {
 			return p, core.CmdHandler(msgtypes.ShowContextDialogMsg{})

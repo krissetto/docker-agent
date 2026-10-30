@@ -59,6 +59,7 @@ func TestLayoutSettingsFromConfig(t *testing.T) {
 		HideUsage:        true,
 		HideAgents:       true,
 		HideTools:        true,
+		ShowPlans:        true,
 		HideTodos:        true,
 	})
 	assert.Equal(t, messages.LayoutSettings{
@@ -70,6 +71,7 @@ func TestLayoutSettingsFromConfig(t *testing.T) {
 		HideUsage:        true,
 		HideAgents:       true,
 		HideTools:        true,
+		ShowPlans:        true,
 		HideTodos:        true,
 	}, got)
 }
@@ -83,6 +85,7 @@ func TestSaveSettingsToUserConfig_RoundTrip(t *testing.T) {
 		SidebarInfoMode: messages.InfoModeCompact,
 		HideSessionPath: true,
 		HideTools:       true,
+		ShowPlans:       true,
 	}
 	require.NoError(t, saveTestSettings(saved, messages.SendModeQueue))
 
@@ -140,6 +143,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 			SidebarInfoMode:  messages.InfoModeDetailed,
 			ActiveAgentsOnly: true,
 			HideAgents:       true,
+			ShowPlans:        true,
 		},
 		SendMode:           messages.SendModeQueue,
 		SplitDiffView:      false,
@@ -183,7 +187,7 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 	setupSettingsConfigTest(t)
 
 	require.NoError(t, savePreferences(messages.Preferences{
-		Layout:             messages.LayoutSettings{SidebarPosition: messages.SidebarLeft},
+		Layout:             messages.LayoutSettings{SidebarPosition: messages.SidebarLeft, ShowPlans: true},
 		SendMode:           messages.SendModeSteer,
 		SplitDiffView:      false,
 		ExpandThinking:     true,
@@ -218,6 +222,55 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 	assert.Nil(t, settings.WarnOnCacheMiss)
 	assert.Zero(t, settings.TabTitleMaxLength)
 	assert.Zero(t, settings.SoundThreshold)
+}
+
+func TestSavePreferences_ShowPlansRoundTripAndPreservation(t *testing.T) {
+	setupSettingsConfigTest(t)
+
+	require.NoError(t, userconfig.Update(func(cfg *userconfig.Config) error {
+		cfg.Settings = &userconfig.Settings{
+			Theme: "light",
+			Extra: map[string]any{"future_setting": "kept"},
+		}
+		return cfg.SetAlias("dev", &userconfig.Alias{Path: "./dev.yaml"})
+	}))
+
+	saved := messages.LayoutSettings{
+		SidebarPosition: messages.SidebarRight,
+		SectionSpacing:  messages.SpacingNormal,
+		SidebarInfoMode: messages.InfoModeCompact,
+		ShowPlans:       true,
+	}
+	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeSteer))
+
+	cfg, err := userconfig.Load()
+	require.NoError(t, err)
+	layout := cfg.GetSettings().Layout
+	require.NotNil(t, layout, "show_plans alone must keep the layout entry")
+	assert.True(t, layout.ShowPlans)
+	assert.Empty(t, layout.SidebarPosition)
+	assert.Empty(t, layout.SectionSpacing)
+	assert.Empty(t, layout.SidebarInfoMode)
+	assert.Equal(t, saved, layoutSettingsFromConfig(*layout))
+
+	require.NoError(t, saveSettingsToUserConfig(layoutSettingsFromConfig(*layout), messages.SendModeQueue))
+	cfg, err = userconfig.Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.GetSettings().GetLayout().ShowPlans,
+		"changing another preference must preserve Plans")
+	assert.Equal(t, "light", cfg.GetSettings().Theme)
+	assert.Equal(t, "kept", cfg.GetSettings().Extra["future_setting"])
+	require.Contains(t, cfg.Aliases, "dev")
+	assert.Equal(t, "./dev.yaml", cfg.Aliases["dev"].Path)
+
+	saved.ShowPlans = false
+	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeSteer))
+	cfg, err = userconfig.Load()
+	require.NoError(t, err)
+	assert.Nil(t, cfg.GetSettings().Layout, "disabling Plans clears an otherwise-default layout")
+	assert.Equal(t, "light", cfg.GetSettings().Theme)
+	assert.Equal(t, "kept", cfg.GetSettings().Extra["future_setting"])
+	require.Contains(t, cfg.Aliases, "dev")
 }
 
 func TestSaveSettingsToUserConfig_HideSessionPathKeepsEntry(t *testing.T) {
@@ -411,4 +464,10 @@ func TestGitDiffLayoutPersistenceDefaultsAndRoundTrip(t *testing.T) {
 	cfg, err = userconfig.Load()
 	require.NoError(t, err)
 	assert.Empty(t, cfg.GetSettings().GitDiffLayout, "the default is omitted")
+}
+
+// saveSettingsToUserConfig persists only the layout and send mode, the two
+// preferences the Plans round-trip test varies.
+func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.SendMode) error {
+	return savePreferences(messages.Preferences{Layout: layout, SendMode: mode})
 }

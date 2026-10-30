@@ -56,6 +56,7 @@ const (
 	rowAgents
 	rowActiveAgents
 	rowTools
+	rowPlans
 	rowTodos
 	appearanceRowCount
 )
@@ -547,6 +548,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			}
 		case rowTools:
 			d.current.Layout.HideTools = !d.current.Layout.HideTools
+		case rowPlans:
+			d.current.Layout.ShowPlans = !d.current.Layout.ShowPlans
 		case rowTodos:
 			d.current.Layout.HideTodos = !d.current.Layout.HideTodos
 		case rowTransparentBackground:
@@ -783,6 +786,7 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 			body.add(styles.MutedStyle.Render("    Enable Agents to edit its filter."))
 		}
 		d.addToggle(body, rowTools, "Tools", !d.current.Layout.HideTools)
+		d.addToggle(body, rowPlans, "Plans", d.current.Layout.ShowPlans)
 		d.addToggle(body, rowTodos, "Todos", !d.current.Layout.HideTodos)
 		body.section("Layout preview")
 		body.add(renderLayoutPreview(d.current.Layout, body.width))
@@ -972,6 +976,9 @@ func visibleSectionLabels(s messages.LayoutSettings) []string {
 	}
 	if !s.HideTodos {
 		labels = append(labels, "todos")
+	}
+	if s.ShowPlans {
+		labels = append(labels, "plans")
 	}
 	return labels
 }

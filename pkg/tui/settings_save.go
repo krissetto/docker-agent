@@ -105,6 +105,9 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		if original.Layout.HideTools != draft.Layout.HideTools {
 			latest.Layout.HideTools = draft.Layout.HideTools
 		}
+		if original.Layout.ShowPlans != draft.Layout.ShowPlans {
+			latest.Layout.ShowPlans = draft.Layout.ShowPlans
+		}
 		if original.Layout.HideTodos != draft.Layout.HideTodos {
 			latest.Layout.HideTodos = draft.Layout.HideTodos
 		}

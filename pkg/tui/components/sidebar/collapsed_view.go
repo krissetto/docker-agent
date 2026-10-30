@@ -21,6 +21,9 @@ type CollapsedViewModel struct {
 	UsageSummary      string
 	InfoLine          string
 	BackgroundSummary string
+	// PlansSummary is the collapsed Plans link. It shares the info row, so the
+	// bounded two-row band keeps its geometry.
+	PlansSummary string
 
 	TitleAndIndicatorOnOneLine bool
 	WdAndUsageOnOneLine        bool
@@ -100,6 +103,7 @@ func (vm CollapsedViewModel) spans() []collapsedSpan {
 		{vm.WorkingDir, ClickWorkingDir},
 		{vm.Branch, ClickNone},
 		{vm.BackgroundSummary, ClickNone},
+		{vm.PlansSummary, ClickPlanBrowser},
 	} {
 		if part.text == "" || x >= leftBudget {
 			continue

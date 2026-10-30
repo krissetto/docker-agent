@@ -21,6 +21,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/gitbranch"
+	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -65,6 +66,9 @@ const (
 // SectionVisibility controls which optional sidebar sections are rendered.
 // The zero value shows everything.
 type SectionVisibility struct {
+	// ShowPlans is opt-in: the shared plans section and its collapsed link stay
+	// hidden unless the user enables them.
+	ShowPlans       bool
 	HideSessionPath bool
 	HideUsage       bool
 	HideAgents      bool
@@ -184,6 +188,8 @@ type Model interface {
 	SetSubagentContext(root subagent.NodeID, parentAgent, parentSessionID string)
 	// WorkingDirectory returns the working directory path displayed in the sidebar.
 	WorkingDirectory() string
+	// EditPlan starts a guarded edit of a recent plan row shown in the sidebar.
+	EditPlan(name, tabID string) tea.Cmd
 }
 
 type gitBranchChangedMsg string
@@ -443,6 +449,16 @@ type model struct {
 
 	// Agent click zones: maps content line index to agent name for click detection
 	agentClickZones map[int]string // content line -> agent name
+
+	// Plans section: planData is the app-shared snapshot, recentPlans the
+	// five newest rows. planZones are relative to the section's first line;
+	// planClickZones is keyed by content line once breathing rows are placed.
+	planData       messages.PlanSidebarDataMsg
+	recentPlans    []plans.Plan
+	planZones      []planClickZone
+	planClickZones map[int]planClickZone
+	planStart      int
+	planEnd        int
 	// Token Usage click zone: the content-line index of the reading line
 	// (glyph/tokens/context/cost/sub-sessions), and the half-open range of any
 	// budget lines below it, recorded while rendering. usageReadingLine is -1
@@ -1245,6 +1261,9 @@ const (
 	ClickSubagentParent      // Click on the "parent: <agent>" line of an attached tab (payload: parent session id)
 	ClickGit                 // Click in the Git changes section (payload: section line)
 	ClickBackgroundProcess   // Click on an adopted process row (payload: ToolCallID)
+	ClickPlan                // Click on a recent plan row (payload: canonical plan name)
+	ClickPlanBrowser         // Click on the Plans browser link or the collapsed Plans entry
+	ClickPlanRefresh         // Click on the Plans refresh row
 )
 
 // HandleClick checks if click is on the star or title and returns true if it was
@@ -1357,6 +1376,11 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	// Check if click is on an agent name
 	if agentName, ok := m.agentClickZones[contentY]; ok {
 		return ClickAgent, agentName
+	}
+	if m.sectionVisibility.ShowPlans {
+		if zone, ok := m.planClickZones[contentY]; ok {
+			return zone.kind, zone.name
+		}
 	}
 
 	// The "parent: <agent>" line of an attached subagent tab links back to
@@ -1722,6 +1746,9 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			m.todoScope = msg.Scope
 			_ = m.SetTodos(&tools.ToolCallResult{Meta: msg.Todos})
 		}
+		return m, nil
+	case messages.PlanSidebarDataMsg:
+		m.setPlans(msg)
 		return m, nil
 	case gitBranchChangedMsg:
 		m.gitBranchName = string(msg)
@@ -2193,6 +2220,7 @@ func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 		CanCycleThinking:  m.activeModelDetails().ThinkingControl().CanCycle,
 		InfoLine:          m.collapsedInfoLine(contentWidth),
 		BackgroundSummary: m.backgroundSummaryCollapsed(),
+		PlansSummary:      toolcommon.TruncateText(m.plansSummary(), contentWidth),
 		ContentWidth:      contentWidth,
 	}
 	if !m.sectionVisibility.HideUsage && m.usageReady {
@@ -2551,7 +2579,20 @@ func (m *model) renderSections(contentWidth int) []string {
 		m.todoEnd = len(lines)
 	}
 
+	m.planStart, m.planEnd, m.planZones = 0, 0, nil
+	if m.sectionVisibility.ShowPlans {
+		section, zones := m.plansSection(contentWidth)
+		if len(lines) > 0 {
+			markBlock()
+		}
+		m.planStart = len(lines)
+		appendSection(section)
+		m.planEnd = len(lines)
+		m.planZones = zones
+	}
+
 	lines = m.addBreathingRows(lines, breathingBefore)
+	m.rebuildPlanClickZones()
 	m.decoratePane(lines, contentWidth)
 	return lines
 }

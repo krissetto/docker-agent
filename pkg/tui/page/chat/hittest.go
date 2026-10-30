@@ -23,6 +23,9 @@ const (
 	TargetSidebarEditQueuedMessage
 	TargetSidebarRemoveQueuedMessage
 	TargetSidebarAgent
+	TargetSidebarPlan
+	TargetSidebarPlanBrowser
+	TargetSidebarPlanRefresh
 	TargetSidebarUsageContext
 	TargetSidebarUsage
 	TargetSidebarSubagent
@@ -39,6 +42,7 @@ const (
 type HitTest struct {
 	page      *chatPage
 	AgentName string // populated when At() returns TargetSidebarAgent
+	PlanName  string // populated when At() returns TargetSidebarPlan
 	// SubagentID is the subagent node id when At() returns
 	// TargetSidebarSubagent; ParentSessionID is the parent tab's session id
 	// when it returns TargetSidebarParent.
@@ -173,6 +177,13 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 	case sidebar.ClickAgent:
 		h.AgentName = agentName
 		return TargetSidebarAgent
+	case sidebar.ClickPlan:
+		h.PlanName = agentName
+		return TargetSidebarPlan
+	case sidebar.ClickPlanBrowser:
+		return TargetSidebarPlanBrowser
+	case sidebar.ClickPlanRefresh:
+		return TargetSidebarPlanRefresh
 	case sidebar.ClickUsageContext:
 		return TargetSidebarUsageContext
 	case sidebar.ClickUsage:

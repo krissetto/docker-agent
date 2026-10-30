@@ -108,6 +108,26 @@ Selecting another top-level agent creates a fresh session identity bound to that
 
 Agent-defined commands (prompts, URL links, agent-switching shortcuts) are configured under `commands:` in the agent YAML — see [Custom Commands](../../configuration/commands/index.md) for the full reference, including how to hide commands with `--disable-commands`.
 
+### Plans Sidebar
+
+The optional **Plans** section is off by default. Enable it under `/settings` → **Appearance** → **Sidebar sections**, or in your global [user settings](../../configuration/user-settings/index.md):
+
+```yaml
+# ~/.config/cagent/config.yaml
+settings:
+  layout:
+    show_plans: true
+```
+
+Plans are shared documents from the same store used by `/plans`, the [plan tools](../../tools/plan/index.md), and `docker agent plans` — not plans attached to the current session. A full left/right sidebar shows up to **five** plans, ordered by last update (newest first, unknown timestamps last, with name as the tie-breaker). Status is shown as free-form text; there is no active/completed classification or status filter.
+
+- **Single left-click a plan row** to open its content directly in `$VISUAL`/`$EDITOR`, guarded by the displayed revision. A stale revision is rejected rather than overwriting newer content.
+- **All plans** opens the shared plan browser. `/plans` and the <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette remain the keyboard routes.
+- Top/bottom layouts and narrow or collapsed sidebar bands show only a compact `Plans (N) - open /plans` count and browser shortcut, not individual plan rows. Lean mode and `--sidebar=false` never show the section.
+- Changes from plan events in the current process and local edits refresh the shared metadata. To pick up changes from another process, use the sidebar's **Refresh plans** action or press <kbd>r</kbd> in the plan browser or detail view. There is no automatic polling or file watcher.
+
+Editing changes only the plan document. It does not approve a plan, execute its steps, or authorize tool writes.
+
 ### Agents Panel
 
 The sidebar's **Agents** section lists every agent in the team and has two display modes selectable via **Sidebar info mode** in `/settings`:
@@ -600,7 +620,7 @@ The **Appearance** tab selects the theme and customizes the layout. Layout chang
 - **Align input with messages**: off by default. Turn it on to align the entire input dock—tabs, editor, and context-usage bar—with the messages column. These child components share one dock’s bounds, while a left/right sidebar extends uninterrupted beside the whole dock, down to the full-width global footer. With a hidden or top/bottom sidebar, the dock remains full width. This setting does not affect the lean TUI.
 - **Sidebar info mode**: `Compact` (default) or `Detailed`. Controls how the Agents panel renders agent rows — see [Agents Panel](#agents-panel) for details. Persisted as `settings.layout.sidebar_info_mode: detailed`; compact is the default and omitted from the config.
 - **Section spacing**: `Compact`, `Normal` (default), or `Relaxed`, the number of blank lines between the sidebar sections (1, 2, or 3).
-- **Sidebar sections**: toggle the visibility of the **Session path** (the working directory line, including its git branch) and the **Token usage**, **Agents**, **Tools**, and **Todos** sections. The session title is always shown.
+- **Sidebar sections**: toggle the visibility of the **Session path** (the working directory line, including its git branch) and the **Token usage**, **Agents**, **Tools**, **Plans**, and **Todos** sections. All are visible by default except [Plans](#plans-sidebar), which is opt-in. The session title is always shown.
 
 Appearance also controls **Compact work log**, **Visible replies**, split-diff rendering, expanded thinking, whether tool results are hidden by default, and **Show startup banner** — the ASCII-art banner drawn on an empty conversation (persisted as `settings.show_banner: false` when turned off, and honored by the lean TUI too). Select **Theme** to open the theme picker.
 

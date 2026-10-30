@@ -82,7 +82,7 @@ Remote servers do **not** support this client-side control. A `--remote` launch 
 
 ## Layout Settings
 
-`layout` customizes the full TUI's sidebar and input alignment. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, full-width input, every section visible, normal spacing.
+`layout` customizes the full TUI's sidebar and input alignment. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, full-width input, every section except **Plans** visible, normal spacing.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -94,6 +94,7 @@ Remote servers do **not** support this client-side control. A `--remote` launch 
 | `hide_agents` | boolean | `false` | Hide the Agents section. |
 | `active_agents_only` | boolean | `false` | Show only agents active in the current session in the Agents section (and the top/bottom band), instead of the whole configured team. Ignored while the Agents section is hidden. |
 | `hide_tools` | boolean | `false` | Hide the Tools section. |
+| `show_plans` | boolean | `false` | Show the [Plans sidebar section](../../features/tui/index.md#plans-sidebar) for shared plans. Full left/right sidebars list the five most recently updated plans; compact layouts show a count and browser shortcut. |
 | `hide_todos` | boolean | `false` | Hide the Todos section. |
 
 ```yaml
@@ -103,7 +104,10 @@ settings:
     align_input_with_messages: true
     section_spacing: compact
     hide_usage: true
+    show_plans: true
 ```
+
+Enable **Plans** under `/settings` → **Appearance** → **Sidebar sections**, or set `settings.layout.show_plans: true` as above. This is a global user preference, not an agent configuration field or a per-session plan. It displays the same shared plan store as `/plans` and `docker agent plans`, without classifying free-form statuses as active or completed. The section remains hidden in lean mode and with `--sidebar=false`.
 
 ## Complete Example
 

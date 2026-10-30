@@ -132,7 +132,7 @@ func ParseGitDiffLayout(raw string) GitDiffLayout {
 // sidebar sits, which of its optional sections are rendered, how much
 // space separates them, and how the Agents section renders each agent.
 // The zero value is the default layout (sidebar on the right, everything
-// visible, normal spacing, compact agent info, full team roster).
+// visible except Plans, normal spacing, compact agent info, full team roster).
 type LayoutSettings struct {
 	SidebarPosition SidebarPosition
 	SectionSpacing  SectionSpacing
@@ -145,6 +145,7 @@ type LayoutSettings struct {
 	HideUsage              bool
 	HideAgents             bool
 	HideTools              bool
+	ShowPlans              bool
 	HideTodos              bool
 	AlignInputWithMessages bool
 }

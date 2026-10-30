@@ -194,6 +194,10 @@ func (m *model) addBreathingRows(lines []string, boundaries []int) []string {
 		m.todoSummaryLine = shifted[m.todoSummaryLine]
 		m.todoEnd = shiftEnd(m.todoEnd)
 	}
+	if m.planEnd > m.planStart {
+		m.planStart = shifted[m.planStart]
+		m.planEnd = shiftEnd(m.planEnd)
+	}
 	if m.gitStart >= 0 {
 		m.gitStart = shifted[m.gitStart]
 		m.gitEnd = shiftEnd(m.gitEnd)

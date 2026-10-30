@@ -243,6 +243,7 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 				ActiveAgentsOnly:       true,
 				HideSessionPath:        true,
 				HideUsage:              true,
+				ShowPlans:              true,
 				HideTodos:              true,
 				AlignInputWithMessages: true,
 			},
@@ -257,6 +258,7 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 	assert.Contains(t, string(data), "sidebar_info_mode: detailed")
 	assert.Contains(t, string(data), "active_agents_only: true")
 	assert.Contains(t, string(data), "align_input_with_messages: true")
+	assert.Contains(t, string(data), "show_plans: true")
 	assert.Contains(t, string(data), "visible_replies: \"5\"")
 
 	loaded, err := loadFrom(configFile, "")
@@ -271,6 +273,7 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 	assert.True(t, layout.HideUsage)
 	assert.False(t, layout.HideAgents)
 	assert.False(t, layout.HideTools)
+	assert.True(t, layout.ShowPlans)
 	assert.True(t, layout.HideTodos)
 	assert.True(t, layout.AlignInputWithMessages)
 	assert.Equal(t, "5", loaded.GetSettings().GetVisibleReplies())
@@ -282,6 +285,32 @@ func TestSettings_GetLayoutDefaults(t *testing.T) {
 	var nilSettings *Settings
 	assert.Equal(t, LayoutSettings{}, nilSettings.GetLayout())
 	assert.Equal(t, LayoutSettings{}, (&Settings{}).GetLayout())
+}
+
+func TestSettings_ShowPlansDefaults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "no settings", input: "{}"},
+		{name: "no layout", input: "settings: {}"},
+		{name: "empty layout", input: "settings:\n  layout: {}"},
+		{name: "existing layout", input: "settings:\n  layout:\n    sidebar_position: left"},
+		{name: "explicit false", input: "settings:\n  layout:\n    show_plans: false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg Config
+			require.NoError(t, yaml.Unmarshal([]byte(tt.input), &cfg))
+			assert.False(t, cfg.GetSettings().GetLayout().ShowPlans)
+
+			data, err := yaml.Marshal(&cfg)
+			require.NoError(t, err)
+			assert.NotContains(t, string(data), "show_plans:", "the default-off value is omitted")
+		})
+	}
 }
 
 func TestSettings_GetVisibleRepliesDefaultsAndNormalizes(t *testing.T) {
