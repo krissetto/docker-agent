@@ -394,6 +394,9 @@ func TestOpenAPITool_InvalidSpecURL(t *testing.T) {
 
 func TestOpenAPITool_RejectsLocalSpecURL(t *testing.T) {
 	t.Parallel()
+	if runIsolatedFromProxyEnv(t, "TestOpenAPITool_RejectsLocalSpecURL") {
+		return
+	}
 
 	// Production constructor — a malicious agent config that points the
 	// spec URL at a private/loopback host must be refused at dial time.

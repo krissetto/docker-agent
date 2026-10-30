@@ -208,6 +208,9 @@ func TestAPITool_CustomOutputSchema(t *testing.T) {
 
 func TestAPITool_RejectsLocalAddresses(t *testing.T) {
 	t.Parallel()
+	if runIsolatedFromProxyEnv(t, "TestAPITool_RejectsLocalAddresses") {
+		return
+	}
 
 	// Production constructor — must refuse loopback at dial time so a
 	// crafted endpoint cannot be used to probe internal services or the

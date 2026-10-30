@@ -462,7 +462,12 @@ func TestURLSource_Read_LocalhostRejectsNonLocalhostRedirect(t *testing.T) {
 }
 
 func TestURLSource_Read_RejectsLocalAddresses(t *testing.T) {
-	t.Parallel()
+	// Proxy env is captured when the transport is built, and Read builds it per
+	// call, so blanking it here makes the dial-time guard decide. t.Setenv needs
+	// a non-parallel test; the subtests below remain parallel.
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
+		t.Setenv(name, "")
+	}
 
 	// Hosts whose only resolution is a non-public IP must be refused at
 	// dial time. We test the SSRF dialer via the HTTPS code path even

@@ -907,6 +907,9 @@ func TestFetch_Headers_StrippedOnRobotsCrossHostRedirect(t *testing.T) {
 // IP would also be refused (DNS rebinding defence).
 func TestFetch_DefaultRefusesNonPublicAddresses(t *testing.T) {
 	t.Parallel()
+	if runIsolatedFromProxyEnv(t, "TestFetch_DefaultRefusesNonPublicAddresses") {
+		return
+	}
 
 	tests := []string{
 		"http://127.0.0.1/",
