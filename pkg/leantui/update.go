@@ -753,6 +753,7 @@ func (m *model) loadSessionTranscript(sess *session.Session) {
 		case chat.MessageRoleUser:
 			m.addInputEcho(msg.InputOrigin, msg.InputMode, msg.SenderName, msg.SenderID, content, msg.ReportOutcome)
 		case chat.MessageRoleAssistant:
+			content = chat.VisibleAssistantContent(content)
 			if msg.Message.ReasoningContent != "" {
 				reasoning := msg.Message.ReasoningContent
 				m.screen.Transcript.AddBlock(func(w int) []string { return ui.RenderReasoningLines(reasoning, w) })
