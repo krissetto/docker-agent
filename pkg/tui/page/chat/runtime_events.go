@@ -470,6 +470,9 @@ func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed boo
 	p.ownedSkillStream = p.ownedSkillOperation != ""
 
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
+	if p.contentSessionID == p.contentSession(msg.SessionID) {
+		p.messages.BreakMessageGroup()
+	}
 	p.streamCancelled = false
 	p.applyLifecycle(msg)
 	if wasRootIdle {
@@ -494,10 +497,30 @@ func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed boo
 	return tea.Batch(pendingCmd, spinnerCmd, sidebarCmd, workCmd)
 }
 
+func (p *chatPage) contentSession(sessionID string) string {
+	if sessionID == "" && p.app != nil {
+		if sess := p.app.Session(); sess != nil {
+			sessionID = sess.ID
+		}
+	}
+	return sessionID
+}
+
+// Content can interleave between parallel forks even when they use the same agent.
+func (p *chatPage) trackContentSession(sessionID string) {
+	sessionID = p.contentSession(sessionID)
+	// The first session seen adopts an already-open group (attached replay never runs Init).
+	if p.contentSessionID != "" && sessionID != p.contentSessionID {
+		p.messages.BreakMessageGroup()
+	}
+	p.contentSessionID = sessionID
+}
+
 func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 	if p.streamCancelled {
 		return nil
 	}
+	p.trackContentSession(msg.SessionID)
 	// Track that we've received assistant content
 	p.hasReceivedAssistantContent = true
 	// Clear pending response indicator - first chunk has arrived
@@ -512,6 +535,7 @@ func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningE
 	if p.streamCancelled {
 		return nil
 	}
+	p.trackContentSession(msg.SessionID)
 	p.setPendingResponse(false)
 	activityCmd := p.sidebar.SetAgentActivity(msg.AgentName)
 	return tea.Batch(activityCmd, p.messages.AppendReasoning(msg.AgentName, msg.Content))
@@ -557,6 +581,9 @@ func (p *chatPage) finishSkillOperation() tea.Cmd {
 }
 
 func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd {
+	if p.contentSessionID == p.contentSession(msg.SessionID) {
+		p.messages.BreakMessageGroup()
+	}
 	slog.Debug("handleStreamStopped called",
 		"agent", msg.AgentName,
 		"session_id", msg.SessionID,

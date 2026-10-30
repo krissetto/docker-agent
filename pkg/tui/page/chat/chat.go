@@ -256,6 +256,7 @@ type chatPage struct {
 	ownedSkillStream    bool
 	teamAgentNames      []string // last team roster; a change re-renders cached messages with fresh agent colors
 	streamStartTime     time.Time
+	contentSessionID    string
 
 	// routingID is the tab identity this page's routed UI timers are
 	// addressed to; empty for standalone pages (timers then fire unrouted,
@@ -596,6 +597,7 @@ func agentInfoMode(mode msgtypes.SidebarInfoMode) sidebar.AgentInfoMode {
 
 // Init initializes the chat page
 func (p *chatPage) Init() tea.Cmd {
+	p.contentSessionID = ""
 	if p.asyncReplay && p.app.Session() != nil {
 		return tea.Batch(p.messages.Init(), p.beginReplay(runtime.SessionSnapshot{Session: p.app.Session(), TranscriptPosition: p.app.Session().ItemCount()}))
 	}
