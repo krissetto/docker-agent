@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/stretchr/testify/require"
+
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSettingsMergeIndependentLayoutFieldsAndPreservesExtras(t *testing.T) {
@@ -47,6 +48,7 @@ func settingsPicker(t *testing.T, root *appModel) dialog.Dialog {
 	root.updateDialogCmd(open)
 	return open.Model
 }
+
 func settingsThemeInput(t *testing.T, root *appModel, picker dialog.Dialog, msg tea.Msg) []tea.Msg {
 	t.Helper()
 	_, cmd := picker.Update(msg)
@@ -59,6 +61,7 @@ func settingsThemeInput(t *testing.T, root *appModel, picker dialog.Dialog, msg 
 	}
 	return events
 }
+
 func chooseSettingsTheme(t *testing.T, root *appModel, picker dialog.Dialog, ref string) {
 	t.Helper()
 	settingsThemeInput(t, root, picker, tea.PasteMsg{Content: ref})

@@ -27,8 +27,10 @@ func (s *Session) MetadataSnapshot() *Session {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return &Session{ID: s.ID, ParentID: s.ParentID, Title: s.Title, AgentName: s.AgentName, AgentID: s.AgentID, WorkingDir: s.WorkingDir,
-		Attributes: maps.Clone(s.Attributes), AgentModelOverrides: maps.Clone(s.AgentModelOverrides), AsyncSubagent: s.AsyncSubagent}
+	return &Session{
+		ID: s.ID, ParentID: s.ParentID, Title: s.Title, AgentName: s.AgentName, AgentID: s.AgentID, WorkingDir: s.WorkingDir,
+		Attributes: maps.Clone(s.Attributes), AgentModelOverrides: maps.Clone(s.AgentModelOverrides), AsyncSubagent: s.AsyncSubagent,
+	}
 }
 
 func (s *InMemorySessionStore) GetSessionMetadata(ctx context.Context, id string) (*Session, error) {

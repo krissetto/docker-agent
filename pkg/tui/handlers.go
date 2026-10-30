@@ -814,6 +814,7 @@ func (m *appModel) handleChangeModel(modelRef string) (tea.Model, tea.Cmd) {
 // --- Theme picker ---
 
 func (m *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) { return m.openThemePicker(0) }
+
 func (m *appModel) openThemePicker(settingsID uint64) (tea.Model, tea.Cmd) {
 	if settingsID != 0 && !m.settingsActive(settingsID) {
 		return m, nil

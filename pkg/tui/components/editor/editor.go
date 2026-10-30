@@ -1291,6 +1291,7 @@ func (e *editor) HoverBanner(x, y int) {
 		e.banner.hover(x, y)
 	}
 }
+
 func (e *editor) CancelBannerHover() bool {
 	if e.banner != nil && len(e.banner.hoverValues) > 0 {
 		e.banner.cancelHover()
@@ -1299,6 +1300,7 @@ func (e *editor) CancelBannerHover() bool {
 	}
 	return false
 }
+
 func (e *editor) TickBannerHover(tick animation.TickMsg) {
 	if e.banner != nil {
 		e.banner.tickHover(tick)

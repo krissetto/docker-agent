@@ -265,12 +265,14 @@ func (d *settingsDialog) SaveFailed(err error) {
 	d.prepareBody()
 	d.MarkVisualDirty()
 }
+
 func (d *settingsDialog) SetTheme(ref string) {
 	d.current.Theme = ref
 	d.revision++
 	d.prepareBody()
 	d.MarkVisualDirty()
 }
+
 func (d *settingsDialog) preview() tea.Cmd {
 	d.revision++
 	p := d.current
@@ -784,7 +786,6 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 		body.section("Layout preview")
 		body.add(renderLayoutPreview(d.current.Layout, body.width))
 	}
-
 }
 
 var panelElementLabels = map[messages.PanelElement]string{

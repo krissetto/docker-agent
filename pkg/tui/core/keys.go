@@ -9,7 +9,6 @@ import (
 	"unicode"
 
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 

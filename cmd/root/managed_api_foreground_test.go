@@ -30,7 +30,7 @@ func TestForegroundManagedAPIAndAttach(t *testing.T) {
 	require.NoError(t, err)
 	base := filepath.Join(t.TempDir(), "private")
 	team := filepath.Join(workspace, "team.yaml")
-	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: original\n  worker:\n    model: anthropic/offline-test\n"), 0600))
+	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: original\n  worker:\n    model: anthropic/offline-test\n"), 0o600))
 	dir, err := managedStateDir(base, workspace)
 	require.NoError(t, err)
 	start := func() (context.CancelFunc, <-chan error) {
@@ -126,7 +126,7 @@ func TestForegroundManagedAPIAndAttach(t *testing.T) {
 	assert.Equal(t, token, nextToken)
 	stop2()
 	require.NoError(t, <-result2)
-	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/changed\n"), 0600))
+	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/changed\n"), 0o600))
 	changed := &apiFlags{managedAPI: true, managedAPIStateDir: base, modelOverrides: []string{"openai/creation-model"}, runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}
 	require.ErrorContains(t, changed.prepareForegroundManagedAPI(ctx, team), "configuration differs")
 	saved, err := managedReadManifest(dir)
@@ -203,7 +203,7 @@ func TestManagedAttachCLIRejectsServerChanges(t *testing.T) {
 func TestForegroundManagedAPIPrivateState(t *testing.T) {
 	home := isolateSessionsList(t)
 	workspace := filepath.Join(home, "workspace")
-	require.NoError(t, os.Mkdir(workspace, 0700))
+	require.NoError(t, os.Mkdir(workspace, 0o700))
 	f := &apiFlags{managedAPI: true, managedAPIStateDir: filepath.Join(workspace, "state"), runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}
 	require.ErrorContains(t, f.prepareForegroundManagedAPI(t.Context(), "default"), "outside the mounted workspace")
 	assert.NoDirExists(t, filepath.Join(workspace, "state"))

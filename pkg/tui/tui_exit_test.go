@@ -11,8 +11,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/docker/docker-agent/pkg/tui/widgets/help"
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,6 +27,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/tui/widgets/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // mockChatPage implements chat.Page for testing.

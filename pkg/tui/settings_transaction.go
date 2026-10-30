@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -18,11 +19,14 @@ import (
 
 var nextSettingsID atomic.Uint64
 
-type sessionDisplaySettings struct{ split, thinking, results bool }
-type settingsThemeSnapshot struct {
-	theme *styles.Theme
-	auto  bool
-}
+type (
+	sessionDisplaySettings struct{ split, thinking, results bool }
+	settingsThemeSnapshot  struct {
+		theme *styles.Theme
+		auto  bool
+	}
+)
+
 type settingsThemePicker struct {
 	id, revision uint64
 	model        dialog.Dialog
@@ -41,9 +45,11 @@ type settingsTransaction struct {
 func currentSettingsTheme() settingsThemeSnapshot {
 	return settingsThemeSnapshot{styles.CurrentTheme(), styles.AutoThemeEnabled()}
 }
+
 func (m *appModel) settingsActive(id uint64) bool {
 	return id != 0 && m.settingsTransaction != nil && m.settingsTransaction.id == id && !m.settingsTransaction.editor.Disposed()
 }
+
 func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	var old dialog.Dialog
 	if tx := m.settingsTransaction; tx != nil {
@@ -265,6 +271,7 @@ func (m *appModel) rollbackSettings() tea.Cmd {
 	}
 	return tea.Batch(cmds...)
 }
+
 func (m *appModel) reconcileSettings() tea.Cmd {
 	tx := m.settingsTransaction
 	if tx == nil {
@@ -289,6 +296,7 @@ func (m *appModel) restoreSettingsTheme(snapshot settingsThemeSnapshot) tea.Cmd 
 	_, cmd := m.applyThemeChanged()
 	return tea.Batch(cmd, m.syncSettingsThemeMode())
 }
+
 func (m *appModel) syncSettingsThemeMode() tea.Cmd {
 	enabled := styles.AutoThemeEnabled()
 	if enabled == m.lightDarkModeSet {
@@ -300,6 +308,7 @@ func (m *appModel) syncSettingsThemeMode() tea.Cmd {
 	}
 	return tea.Raw(ansi.ResetModeLightDark)
 }
+
 func (m *appModel) openSettingsThemePicker(choices []dialog.ThemeChoice, ref string) (tea.Model, tea.Cmd) {
 	tx := m.settingsTransaction
 	if tx.picker != nil {
@@ -310,6 +319,7 @@ func (m *appModel) openSettingsThemePicker(choices []dialog.ThemeChoice, ref str
 	tx.picker = &settingsThemePicker{id: id, model: picker, original: currentSettingsTheme()}
 	return m, core.CmdHandler(dialog.OpenDialogMsg{Model: picker})
 }
+
 func (m *appModel) handleSettingsTheme(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var settingsID, pickerID, revision uint64
 	var ref string

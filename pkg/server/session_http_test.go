@@ -1513,9 +1513,11 @@ func (a *httpSession) StopSubtree(context.Context) error { a.stops++; return nil
 func (r *httpSessionRegistry) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
 	return prepareHTTPFixture(ctx, r, nil, id)
 }
+
 func (r *httpTreeRegistry) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
 	return prepareHTTPFixture(ctx, r.httpSessionRegistry, r, id)
 }
+
 func prepareHTTPFixture(ctx context.Context, r *httpSessionRegistry, tree *httpTreeRegistry, id string) (runtime.PreparedSessionView, error) {
 	if r.store == nil {
 		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
@@ -1586,9 +1588,11 @@ func (h *tailHTTPHandle) Observe(_ context.Context, options runtime.ObserveOptio
 	}
 	return runtime.Observation{Initial: []runtime.SessionSnapshot{h.tail}, Events: make(chan runtime.SessionEvent), Cancel: func() {}}, nil
 }
+
 func (h *tailHTTPHandle) ReadHistoryPage(context.Context, string, string, runtime.SessionHistoryLimits) (runtime.SessionSnapshot, error) {
 	return h.page, nil
 }
+
 func (h *tailHTTPHandle) ReadHistoryPageBounded(_ context.Context, _, _ string, _ runtime.SessionHistoryLimits, accept func(runtime.SessionSnapshot) bool) error {
 	if !accept(h.page) {
 		return runtime.ErrHistoryMetadataTooLarge

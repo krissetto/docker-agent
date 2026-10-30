@@ -15,11 +15,11 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // User-facing strings of the confirmation prompt.
