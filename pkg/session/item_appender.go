@@ -122,8 +122,18 @@ func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
+	id, err = s.insertReceiptedItemTx(ctx, tx, sessionID, writeID, frozen, hash)
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+// insertReceiptedItemTx inserts item and its append receipt inside tx. The caller
+// must already have checked for an existing receipt and hold the write transaction.
+func (s *SQLiteSessionStore) insertReceiptedItemTx(ctx context.Context, tx *sql.Tx, sessionID, writeID string, frozen Item, hash string) (int64, error) {
 	var exists int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists)
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -137,6 +147,7 @@ func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID 
 	if err := s.addItemTx(ctx, tx, sessionID, position, frozen); err != nil {
 		return 0, err
 	}
+	var id int64
 	if err := tx.QueryRowContext(ctx, `SELECT last_insert_rowid()`).Scan(&id); err != nil {
 		return 0, err
 	}
@@ -146,7 +157,7 @@ func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO session_append_receipts(session_id, write_id, item_id, content_hash) VALUES (?, ?, ?, ?)`, sessionID, writeID, id, hash); err != nil {
 		return 0, err
 	}
-	return id, tx.Commit()
+	return id, nil
 }
 
 var (

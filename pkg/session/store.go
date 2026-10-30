@@ -234,6 +234,7 @@ type InMemorySessionStore struct {
 	generatedFiles  *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
 	generatedBlobs  *concurrent.Map[string, []byte]        // keyed by generatedFileKey
 	messageID       atomic.Int64                           // counter for message IDs, incremented via Add(1)
+	streams         map[int64]*inMemoryStream              // open streaming rows keyed by item ID
 	todos           *concurrent.Map[string, []Todo]
 	todosMu         sync.Mutex
 }
@@ -393,6 +394,11 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 			delete(s.appendReceipts, key)
 		}
 	}
+	for itemID, stream := range s.streams {
+		if stream.sessionID == id {
+			delete(s.streams, itemID)
+		}
+	}
 	s.sessions.Delete(id)
 	delete(s.teamRevisions, id)
 	s.deleteGeneratedFiles(id)
@@ -512,6 +518,10 @@ func (s *InMemorySessionStore) UpdateMessage(_ context.Context, sessionID string
 	for i := range session.Messages {
 		if session.Messages[i].Message == nil || session.Messages[i].Message.ID != messageID {
 			continue
+		}
+		// An edit canonicalizes the row, so later chunks are rejected with ErrStreamClosed.
+		if stream := s.streams[messageID]; stream != nil && stream.sessionID == sessionID {
+			delete(s.streams, messageID)
 		}
 		session.Messages[i].Message = updated
 		session.historyRevision++
@@ -985,12 +995,15 @@ func (s *SQLiteSessionStore) GetSession(ctx context.Context, id string) (*Sessio
 
 // sessionItemRow holds the raw data from a session_items row
 type sessionItemRow struct {
-	id             int64
-	position       int
-	itemType       string
-	agentName      sql.NullString
-	messageJSON    sql.NullString
-	implicit       bool
+	id          int64
+	position    int
+	itemType    string
+	agentName   sql.NullString
+	messageJSON sql.NullString
+	implicit    bool
+	streamOpen  bool
+	// openBody is the reconstructed body of an open row once reconcileOpenRow has resolved it.
+	openBody       chat.Message
 	actorPending   bool
 	actorAccepted  bool
 	actorTurnID    string
@@ -1016,7 +1029,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 
 func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier, sessionID string, recurseChildren bool) ([]Item, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
+		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, ''), stream_open
 		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
 	if err != nil {
 		return nil, classifySQLiteContextError(ctx, err)
@@ -1028,7 +1041,7 @@ func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier
 	var rawRows []sessionItemRow
 	for rows.Next() {
 		var row sessionItemRow
-		if err := rows.Scan(&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.reportOutcome, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON); err != nil {
+		if err := rows.Scan(&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.reportOutcome, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON, &row.streamOpen); err != nil {
 			return nil, classifySQLiteContextError(ctx, err)
 		}
 		rawRows = append(rawRows, row)
@@ -1047,7 +1060,21 @@ func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier
 		switch row.itemType {
 		case "message":
 			var chatMsg chat.Message
-			if err := json.Unmarshal([]byte(row.messageJSON.String), &chatMsg); err != nil {
+			if row.streamOpen {
+				// The scan and the chunk read are separate statements, so a settle may land
+				// in between. reconcileOpenRow re-checks the row and returns the canonical
+				// body when it has closed; a vanished row is skipped.
+				found, err := s.reconcileOpenRow(ctx, q, &row, nil, nil)
+				if err != nil {
+					return nil, fmt.Errorf("loading streaming message at position %d: %w", row.position, err)
+				}
+				if !found {
+					continue
+				}
+			}
+			if row.streamOpen {
+				chatMsg = row.openBody
+			} else if err := json.Unmarshal([]byte(row.messageJSON.String), &chatMsg); err != nil {
 				return nil, fmt.Errorf("unmarshaling message at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
 			}
 			items = append(items, Item{
@@ -1527,8 +1554,16 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 		return fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 	}
 
-	result, err := execSQLiteWrite(ctx, s.db,
-		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ?, report_outcome = ? WHERE session_id = ? AND id = ? AND item_type = 'message'`,
+	// The same transaction closes any open stream and drops its chunks, so an
+	// edit can never be overlaid by stale streamed deltas.
+	tx, err := beginSQLiteWrite(ctx, s.db)
+	if err != nil {
+		return fmt.Errorf("updating message: %w", classifySQLiteContextError(ctx, err))
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ?, report_outcome = ?, stream_open = 0 WHERE session_id = ? AND id = ? AND item_type = 'message'`,
 		string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName, msg.ReportOutcome, sessionID, messageID)
 	if err != nil {
 		return fmt.Errorf("updating message: %w", classifySQLiteContextError(ctx, err))
@@ -1543,6 +1578,12 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 		return ErrNotFound
 	}
 
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_message_chunks WHERE item_id = ?`, messageID); err != nil {
+		return fmt.Errorf("deleting message chunks: %w", classifySQLiteContextError(ctx, err))
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("updating message: %w", classifySQLiteContextError(ctx, err))
+	}
 	return nil
 }
 

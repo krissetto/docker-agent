@@ -185,6 +185,7 @@ func (s *InMemorySessionStore) ReadRecentChatItems(ctx context.Context, id strin
 		if role != chat.MessageRoleUser && role != chat.MessageRoleAssistant && role != chat.MessageRoleTool {
 			continue
 		}
+		message = s.readStreamMessageLocked(id, message)
 		text, wasTruncated := recentChatDisplayText(message.Message, maxTextBytes)
 		text, clipped := truncateRecentChatText(text, maxTextBytes)
 		wasTruncated = wasTruncated || clipped
@@ -230,7 +231,8 @@ func (s *SQLiteSessionStore) ReadRecentChatItems(ctx context.Context, id string,
 		`CAST(substr(CAST(COALESCE(agent_name, '') AS BLOB), 1, ?) AS BLOB), ` +
 		`CASE WHEN item_type = 'message' AND COALESCE(implicit, 0) = 0 AND COALESCE(actor_pending, 0) = 0 THEN CAST(substr(CAST(COALESCE(json_extract(message_json, '$.role'), '') AS BLOB), 1, 33) AS BLOB) END, ` +
 		`CASE WHEN item_type = 'message' AND COALESCE(implicit, 0) = 0 AND COALESCE(actor_pending, 0) = 0 AND json_extract(message_json, '$.role') IN ('user', 'assistant', 'tool') THEN CAST(substr(CAST(` + displayText + ` AS BLOB), 1, ?) AS BLOB) END, ` +
-		`CASE WHEN json_extract(message_json, '$.role') = 'assistant' AND COALESCE(json_array_length(json_extract(message_json, '$.presentation')), 0) > 16 THEN 1 ELSE 0 END ` +
+		`CASE WHEN json_extract(message_json, '$.role') = 'assistant' AND COALESCE(json_array_length(json_extract(message_json, '$.presentation')), 0) > 16 THEN 1 ELSE 0 END, ` +
+		`stream_open ` +
 		`FROM session_items WHERE session_id = ? AND (? = 0 OR position < COALESCE((SELECT position FROM session_items WHERE session_id = ? AND id = ?), ?)) ORDER BY position DESC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, query, recentChatAgentFieldLimit+1, maxTextBytes+1, maxTextBytes+1, id, beforeItemID, id, beforeItemID, beforePosition, maxScanned+1)
 	if err != nil {
@@ -247,17 +249,45 @@ func (s *SQLiteSessionStore) ReadRecentChatItems(ctx context.Context, id string,
 		role           []byte
 		text           []byte
 		partsTruncated bool
+		streamOpen     bool
 	}
 	raw := make([]rawItem, 0, maxScanned+1)
 	for rows.Next() {
 		var item rawItem
-		if err := rows.Scan(&item.id, &item.position, &item.itemType, &item.implicit, &item.pending, &item.agent, &item.role, &item.text, &item.partsTruncated); err != nil {
+		if err := rows.Scan(&item.id, &item.position, &item.itemType, &item.implicit, &item.pending, &item.agent, &item.role, &item.text, &item.partsTruncated, &item.streamOpen); err != nil {
 			return RecentChatItems{}, classifySQLiteContextError(ctx, err)
 		}
 		raw = append(raw, item)
 	}
 	if err := rows.Err(); err != nil {
 		return RecentChatItems{}, classifySQLiteContextError(ctx, err)
+	}
+	// Open rows still hold the placeholder body, so their display text is replayed
+	// from chunks. Completed rows keep the SQL display text and cost no extra query.
+	for i := range min(len(raw), maxScanned) {
+		if !raw[i].streamOpen {
+			continue
+		}
+		row := sessionItemRow{id: raw[i].id, agentName: sql.NullString{String: string(raw[i].agent), Valid: true}, streamOpen: true}
+		found, err := s.reconcileOpenRow(ctx, s.db, &row, nil, nil)
+		if err != nil {
+			return RecentChatItems{}, err
+		}
+		if !found {
+			raw[i].itemType = ""
+			continue
+		}
+		raw[i].implicit, raw[i].pending = row.implicit, row.actorPending
+		if !row.streamOpen {
+			// Settled between the scan and the re-read: display the canonical body.
+			var message chat.Message
+			if err := json.Unmarshal([]byte(row.messageJSON.String), &message); err != nil {
+				return RecentChatItems{}, fmt.Errorf("unmarshaling settled message %d: %w", raw[i].id, classifySQLiteContextError(ctx, err))
+			}
+			raw[i].text, raw[i].partsTruncated = recentChatStreamingDisplayText(message, maxTextBytes)
+			continue
+		}
+		raw[i].text, raw[i].partsTruncated = recentChatStreamingDisplayText(row.openBody, maxTextBytes)
 	}
 
 	result := RecentChatItems{}
@@ -288,6 +318,29 @@ func (s *SQLiteSessionStore) ReadRecentChatItems(ctx context.Context, id string,
 		result.NextBeforePosition, result.NextBeforeItemID = raw[maxScanned-1].position, raw[maxScanned-1].id
 	}
 	return result, nil
+}
+
+// recentChatStreamingDisplayText matches the SQL displayText of a completed row: content
+// parts only, the first 16 of them, cut to maxBytes+1 bytes. The flag reports more than
+// 16 presentation parts, as the SQL reader does.
+func recentChatStreamingDisplayText(message chat.Message, maxBytes int) ([]byte, bool) {
+	limit := maxBytes + 1
+	if message.Role == chat.MessageRoleAssistant && len(message.Presentation) > 0 {
+		var text []byte
+		contentParts := 0
+		for _, part := range message.Presentation {
+			if part.Type != chat.AssistantPartContent {
+				continue
+			}
+			contentParts++
+			if contentParts > 16 || len(text) >= limit {
+				break
+			}
+			text = append(text, part.Text...)
+		}
+		return text[:min(len(text), limit)], len(message.Presentation) > 16
+	}
+	return []byte(message.Content[:min(len(message.Content), limit)]), false
 }
 
 func validateRecentChatRead(ctx context.Context, id string, beforePosition int, beforeItemID int64, maxMessages, maxScanned, maxTextBytes int) error {

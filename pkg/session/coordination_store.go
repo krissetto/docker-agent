@@ -411,6 +411,9 @@ var (
 func (s *InMemorySessionStore) materializeSession(stored *Session) *Session {
 	snapshot := stored.OwnSnapshot()
 	for i, item := range snapshot.Messages {
+		if item.Message != nil {
+			snapshot.Messages[i].Message = s.readStreamMessageLocked(stored.ID, item.Message)
+		}
 		if item.SubSession == nil {
 			continue
 		}

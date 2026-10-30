@@ -108,7 +108,13 @@ func (s *InMemorySessionStore) GetSessionOwnHistory(ctx context.Context, id stri
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return stored.OwnSnapshot(), nil
+	snapshot := stored.OwnSnapshot()
+	for i, item := range snapshot.Messages {
+		if item.Message != nil {
+			snapshot.Messages[i].Message = s.readStreamMessageLocked(id, item.Message)
+		}
+	}
+	return snapshot, nil
 }
 
 func (s *SQLiteSessionStore) GetSessionOwnHistory(ctx context.Context, id string) (*Session, error) {

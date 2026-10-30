@@ -701,6 +701,36 @@ func getAllMigrations() []Migration {
 				DROP TABLE IF EXISTS session_team_revisions;
 				DROP TABLE IF EXISTS team_definition_entries;`,
 		},
+		// 042 stores in-progress assistant messages as append-only chunks instead of
+		// rewriting message_json on every delta. An open row (stream_open=1) carries the
+		// placeholder {"role":"assistant","content":""}; readers reconstruct its body from
+		// session_message_chunks. stream_open is deliberately NOT in the 040 trigger column
+		// lists, so toggling it never re-parses message JSON.
+		//
+		// Raw-SQL limitation: a direct SELECT over session_items outside the store's
+		// loaders (GetSession, GetSessionByOrigin, GetSessionOwnHistory, ReadRecentChatItems)
+		// sees the placeholder for an open row, not the partial text. Such readers must
+		// filter stream_open=1 or ignore open rows.
+		{
+			ID:          42,
+			Name:        "042_streaming_message_chunks",
+			Description: "Persist in-progress assistant messages as ordered chunks with an open-stream flag",
+			UpSQL: `
+				ALTER TABLE session_items ADD COLUMN stream_open INTEGER NOT NULL DEFAULT 0;
+				CREATE TABLE session_message_chunks (
+					item_id INTEGER NOT NULL REFERENCES session_items(id) ON DELETE CASCADE,
+					seq INTEGER NOT NULL,
+					kind TEXT NOT NULL CHECK(kind IN ('content', 'reasoning', 'tool')),
+					text TEXT NOT NULL DEFAULT '',
+					op_json TEXT,
+					PRIMARY KEY (item_id, seq)
+				) WITHOUT ROWID;
+				CREATE INDEX idx_session_items_stream_open ON session_items(session_id) WHERE stream_open = 1;
+			`,
+			DownSQL: `DROP INDEX IF EXISTS idx_session_items_stream_open;
+				DROP TABLE IF EXISTS session_message_chunks;
+				ALTER TABLE session_items DROP COLUMN stream_open;`,
+		},
 	}
 }
 
