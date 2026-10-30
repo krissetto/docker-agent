@@ -523,8 +523,13 @@ func (m *shellModel) detailsLines() []string {
 		command = strings.ReplaceAll(command, "\r\n", "\n")
 		command = strings.ReplaceAll(command, "\r", "\n")
 		commandText := strings.ReplaceAll(command, "\t", "    ")
-		commandLines := toolcommon.WrapTextWithIndent("$ "+commandText, max(width-4, 1), max(width-4, 1))
-		sections = append(sections, styleCommandLines(commandLines))
+		if highlighted, ok := highlightedCommand(commandText); ok {
+			// Embedded scripts keep their highlighting; the prompt stays muted.
+			sections = append(sections, ansi.Hardwrap(styles.MutedStyle.Render("$ ")+highlighted, max(width-4, 1), true))
+		} else {
+			commandLines := toolcommon.WrapTextWithIndent("$ "+commandText, max(width-4, 1), max(width-4, 1))
+			sections = append(sections, styleCommandLines(commandLines))
+		}
 	}
 	if output != "" && !hideResults {
 		outputStyle := styles.ToolMessageStyle
