@@ -41,6 +41,10 @@ func TestSubagentTranscriptSurvivesReload(t *testing.T) {
 		))
 		rt, err := NewLocalRuntime(t.Context(), tm, WithSessionStore(store))
 		require.NoError(t, err)
+		// Registered after the store cleanup, so LIFO closes the runtime before its store.
+		// Neither test closes rt itself (restarts close subagents and drivers only), so
+		// this is the first full shutdown and any error is unexpected.
+		t.Cleanup(func() { assert.NoError(t, rt.Close(), "runtime shutdown") })
 		return rt, store
 	}
 
@@ -135,6 +139,10 @@ func TestStoppedSubagentAttachSurvivesReload(t *testing.T) {
 		))
 		rt, err := NewLocalRuntime(t.Context(), tm, WithSessionStore(store))
 		require.NoError(t, err)
+		// Registered after the store cleanup, so LIFO closes the runtime before its store.
+		// Neither test closes rt itself (restarts close subagents and drivers only), so
+		// this is the first full shutdown and any error is unexpected.
+		t.Cleanup(func() { assert.NoError(t, rt.Close(), "runtime shutdown") })
 		return rt, store
 	}
 
