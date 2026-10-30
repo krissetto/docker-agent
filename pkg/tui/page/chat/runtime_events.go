@@ -644,9 +644,16 @@ func (p *chatPage) finishTurnPresentation() tea.Cmd {
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
 		slog.Debug("Exit after first response triggered, scheduling delayed exit")
-		exitCmd = tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
-			return msgtypes.ExitAfterFirstResponseMsg{}
-		})
+		// The exit is application work owned by this page lifetime: it runs even
+		// when the tab is hidden, and the host applies it only while this page
+		// and its app are still bound (see GlobalMsg).
+		routingID, application := p.routingID, p.app
+		exitCmd = p.global(tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+			if routingID == "" {
+				return msgtypes.ExitAfterFirstResponseMsg{}
+			}
+			return GlobalMsg{TabID: routingID, Origin: p, Application: application, Inner: msgtypes.ExitAfterFirstResponseMsg{}}
+		}))
 	}
 
 	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, exitCmd)

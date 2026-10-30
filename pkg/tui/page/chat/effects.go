@@ -41,8 +41,6 @@ func (p *chatPage) tabLocal(cmd tea.Cmd) tea.Cmd {
 
 // global classifies application work produced inside an update as Global.
 // Outside an update it returns cmd unchanged.
-//
-//nolint:unused // Used by the exit-after-first-response effect once the runtime_events.go change lands.
 func (p *chatPage) global(cmd tea.Cmd) tea.Cmd {
 	if p.effects == nil {
 		return cmd
