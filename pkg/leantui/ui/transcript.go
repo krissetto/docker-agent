@@ -158,13 +158,13 @@ func (t *Transcript) Tool(id string) *ToolView { return t.toolz.Get(id) }
 // RemoveTool removes an in-flight tool call by id.
 func (t *Transcript) RemoveTool(id string) { t.toolz.Remove(id) }
 
-// FinishTool commits a completed tool call as an immutable block.
+// FinishTool commits completed calls in invocation order, keeping later results
+// in the live region until earlier calls finish.
 func (t *Transcript) FinishTool(id string, result ToolResult, sessionState service.SessionStateReader) {
-	view := t.toolz.Finish(id, result)
-	if view == nil {
-		return
+	t.toolz.Complete(id, result)
+	for _, view := range t.toolz.DrainCompleted() {
+		t.AddBlock(func(w int) []string { return RenderToolWithState(view, w, 0, sessionState) })
 	}
-	t.AddBlock(func(w int) []string { return RenderToolWithState(view, w, 0, sessionState) })
 }
 
 // Lines renders everything that scrolls: finalized blocks, the in-progress

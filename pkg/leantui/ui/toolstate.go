@@ -141,6 +141,37 @@ func (t *ToolTracker) Finish(id string, result ToolResult) *ToolView {
 	return snapshot
 }
 
+// Complete stores a finished result but keeps the call in invocation order, so
+// a nested result cannot appear before the parent call that started it.
+func (t *ToolTracker) Complete(id string, result ToolResult) {
+	order := slices.Clone(t.order)
+	if !slices.Contains(order, id) {
+		order = append(order, id)
+	}
+	view := t.Finish(id, result)
+	if view == nil {
+		return
+	}
+	t.byID[id] = view
+	t.order = order
+}
+
+// DrainCompleted removes and returns the completed prefix of the call order.
+// Completed calls behind a still-running call wait in the live region.
+func (t *ToolTracker) DrainCompleted() []*ToolView {
+	var views []*ToolView
+	for len(t.order) > 0 {
+		id := t.order[0]
+		view := t.byID[id]
+		if view == nil || view.message == nil || view.message.ToolStatus != tuitypes.ToolStatusCompleted && view.message.ToolStatus != tuitypes.ToolStatusError {
+			break
+		}
+		views = append(views, view)
+		t.Remove(id)
+	}
+	return views
+}
+
 // ToolViewID returns a stable id for a tool call view.
 func ToolViewID(toolCall tools.ToolCall) string {
 	if toolCall.ID != "" {

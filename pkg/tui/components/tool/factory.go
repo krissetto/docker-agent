@@ -20,6 +20,7 @@ import (
 	userpromptool "github.com/docker/docker-agent/pkg/tools/builtin/userprompt"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/api"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/codemode"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/defaulttool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/directorytree"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
@@ -50,6 +51,7 @@ type Builder = func(ar *animation.Runtime, msg *types.Message, sessionState serv
 var builders = map[string]Builder{
 	transfertasktool.ToolNameTransferTask: transfertask.New,
 	handofftool.ToolNameHandoff:           handoff.New,
+	"run_tools_with_javascript":           codemode.New,
 	filesystem.ToolNameEditFile:           editfile.New,
 	filesystem.ToolNameWriteFile:          writefile.New,
 	filesystem.ToolNameReadFile:           readfile.New,
