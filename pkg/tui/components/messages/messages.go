@@ -3533,11 +3533,14 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	// Append to an existing post-snapshot assistant message from the same agent.
 	if lastIdx >= max(m.loadedMessageCount, m.committedMessageCount) && lastIdx >= m.groupStart && lastMsg.Type == types.MessageTypeAssistant && lastMsg.InputOrigin != session.InputOriginAgent && lastMsg.Sender == agentName {
 		if m.userHasScrolled {
-			if len(m.deferredTail) == 0 {
+			var materializeCmd tea.Cmd
+			if len(m.deferredTail) == 0 || m.deferredTailIndex != lastIdx {
+				// Flush the previous owner before buffering a different message.
+				materializeCmd = m.materializeDeferredTail()
 				m.deferredTailIndex = lastIdx
 			}
 			m.deferredTail = append(m.deferredTail, content)
-			return nil
+			return materializeCmd
 		}
 		materializeCmd := m.materializeDeferredTail()
 		wasProse := strings.TrimSpace(lastMsg.Content) != ""
