@@ -141,3 +141,80 @@ func TestExecutionCapabilitiesJSONCompatibility(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "execution_capabilities", "model-only updates must not guess capabilities")
 }
+
+// newCapabilitySessionRuntime builds a native and a harness agent so each
+// session-bound projection can be checked against the profile of its own agent.
+func newCapabilitySessionRuntime(t *testing.T) *LocalRuntime {
+	t.Helper()
+	native := agent.New("native", "", agent.WithModel(&mockProvider{id: "test/model"}))
+	external := agent.New("external", "", agent.WithHarness(&latest.HarnessConfig{Type: "codex"}))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(native, external)),
+		WithModelStore(mockModelStore{}), WithSessionCompaction(false))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+	return rt
+}
+
+// TestExecutionCapabilitiesPinnedSessionInfo checks the per-session projection:
+// the session's own agent reports its profile in AgentInfo, and the roster
+// carries each agent's profile.
+func TestExecutionCapabilitiesPinnedSessionInfo(t *testing.T) {
+	t.Parallel()
+	rt := newCapabilitySessionRuntime(t)
+
+	for _, tc := range []struct {
+		agentName string
+		want      *ExecutionCapabilities
+	}{
+		{"external", harnessExecutionProfile()},
+		{"native", nativeExecutionProfile()},
+	} {
+		handle, err := rt.CreateSession(t.Context(), session.New(session.WithAgentName(tc.agentName)), SessionBinding{AgentName: tc.agentName})
+		require.NoError(t, err)
+		info, roster := collectAgentInfo(func(sink EventSink) { handle.(*sessionHandle).EmitPinnedAgentInfo(t.Context(), sink) })
+		require.NotNil(t, info)
+		require.NotNil(t, roster)
+		assert.Equal(t, tc.want, info.ExecutionCapabilities, "AgentInfo for %s", tc.agentName)
+		require.Len(t, roster.AvailableAgents, 2)
+		byName := map[string]*ExecutionCapabilities{}
+		for _, detail := range roster.AvailableAgents {
+			byName[detail.Name] = detail.ExecutionCapabilities
+		}
+		assert.Equal(t, nativeExecutionProfile(), byName["native"])
+		assert.Equal(t, harnessExecutionProfile(), byName["external"])
+	}
+}
+
+// TestExecutionCapabilitiesObservationPresentation checks the observed snapshot,
+// which is what the TUI renders: its presentation carries the same profiles.
+func TestExecutionCapabilitiesObservationPresentation(t *testing.T) {
+	t.Parallel()
+	rt := newCapabilitySessionRuntime(t)
+	handle, err := rt.CreateSession(t.Context(), session.New(session.WithAgentName("external")), SessionBinding{AgentName: "external"})
+	require.NoError(t, err)
+	obs, err := handle.Observe(t.Context(), ObserveOptions{})
+	require.NoError(t, err)
+	t.Cleanup(obs.Cancel)
+	require.NotEmpty(t, obs.Initial)
+
+	var info *AgentInfoEvent
+	var roster *TeamInfoEvent
+	for _, event := range obs.Initial[0].Presentation {
+		switch event := event.(type) {
+		case *AgentInfoEvent:
+			info = event
+		case *TeamInfoEvent:
+			roster = event
+		}
+	}
+	require.NotNil(t, info, "observed presentation must describe the bound agent")
+	require.NotNil(t, roster)
+	assert.Equal(t, harnessExecutionProfile(), info.ExecutionCapabilities)
+	require.Len(t, roster.AvailableAgents, 2)
+	byName := map[string]*ExecutionCapabilities{}
+	for _, detail := range roster.AvailableAgents {
+		byName[detail.Name] = detail.ExecutionCapabilities
+	}
+	assert.Equal(t, nativeExecutionProfile(), byName["native"])
+	assert.Equal(t, harnessExecutionProfile(), byName["external"])
+}

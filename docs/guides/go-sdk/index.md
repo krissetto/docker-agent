@@ -101,19 +101,18 @@ When building custom UIs on top of Docker Agent's TUI primitives, four packages 
 ## Execution Capability Inspection
 
 `(*runtime.LocalRuntime).AgentExecutionCapabilities(name)` returns a static
-native/harness profile without starting tools, constructing drivers or
-initializing budget counters. Unknown agents return nil. The same optional
-profile is available on `runtime.AgentConfigInfo`, `runtime.AgentDetails` in
-`team_info`, and local startup/refresh `runtime.AgentInfoEvent` values.
-See [Execution capabilities](../../features/api-server/index.md#execution-capabilities)
-for field meanings and unknown/remote behavior.
+native or harness profile. It starts no tools, constructs no harness driver and
+initializes no budget counters. Unknown agents return nil. The same optional
+profile is present on `runtime.AgentConfigInfo`, on each `runtime.AgentDetails`
+in `team_info`, and on local startup and refresh `runtime.AgentInfoEvent`
+values. See [Execution capabilities](../../features/api-server/index.md#execution-capabilities)
+for field meanings and for what an absent profile means.
 
-`runtime.Runtime` and existing function signatures are unchanged. The exported
-inspection/event structs have new optional fields: downstream code using
-**unkeyed** composite literals for these structs must switch to keyed literals.
-Existing keyed literals and JSON consumers accepting additional fields remain
-compatible. Capability support is not proof an adapter installed configuration
-or a policy requires approval.
+The new fields are optional. Code that builds these structs with unkeyed
+composite literals must switch to keyed literals. Keyed literals and JSON
+consumers that ignore unknown fields are unaffected. A capability profile
+describes the integration; it does not show that a budget is configured or that
+a policy requires approval.
 
 ## Headless Embedded Chat (`pkg/embeddedchat`)
 

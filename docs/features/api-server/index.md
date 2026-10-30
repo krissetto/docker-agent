@@ -402,9 +402,9 @@ for these separate boundaries.
 
 ### Execution capabilities
 
-`team_info.available_agents` entries carry optional `execution_capabilities`.
-Local startup/refresh `agent_info` events include the same profile. The
-Agent Inspector displays it without starting tools or harness drivers.
+`team_info.available_agents` entries carry an optional `execution_capabilities`
+object. Local startup and refresh `agent_info` events carry the profile of the
+agent they describe. Reading a profile starts no toolset and no harness driver.
 
 ```json
 {
@@ -418,26 +418,30 @@ Agent Inspector displays it without starting tools or harness drivers.
 }
 ```
 
-These are integration capabilities, **not enabled settings or security
-attestations**. Native approval can allow a call without prompting. Budget
-support requires the caller to install budget configuration; CLI and HTTP API
-currently do so, while ACP, MCP and A2A do not forward manifest wallets.
-Compaction support does not mean automatic compaction is enabled. Profiles
-refer to each agent's own execution: a native orchestrator's controls do not
-cover delegated external harness actions.
+These describe what the integration can do. They are **not enabled settings or
+security attestations**. `docker-agent-policy` means calls go through
+docker-agent's tool approval policy, not that a prompt is shown. Budget support
+means the runtime can enforce a budget that the manifest configures; the profile
+does not turn a budget on. Compaction support does not mean automatic compaction
+is enabled. Profiles refer to each agent's own execution: a native orchestrator's
+controls do not cover delegated external harness actions.
+
+Budgets are installed by the CLI run path and by the HTTP API's native sessions.
+The ACP runtime sets no budget option, and the MCP and A2A packages configure no
+budget.
 
 Harness profiles use `mode: harness`, `tool_execution: harness-reported` and
 `tool_approval: external`, with the four support flags false. Reported harness
-tools have already run outside docker-agent's approval pipeline; `external`
-does not guarantee the harness prompts or enforces approvals. Harness lifecycle
-and before-LLM hooks still run, but native transient prompt-hook context is not
-forwarded into the harness's conversation.
+tools have already run outside docker-agent's approval pipeline. `external`
+means the harness owns approval; docker-agent does not know whether the CLI
+prompts. Harness lifecycle and before-LLM hooks still run, but transient
+prompt-hook context from native hooks is not forwarded into the harness
+conversation.
 
-An absent profile means **unknown**, including on older servers and
-manifest-only remote inspection. Use `team_info` as the roster authority;
-model-only `agent_info` updates may omit the profile and must not clear a
-previously received one. Remote clients forward server metadata without
-inferring capabilities from model names or manifests.
+An absent profile means **unknown**, not native and not unsupported. Older
+servers send no profile, and model-only `agent_info` updates omit it, so such an
+update does not replace a profile received earlier. Clients must not infer a
+profile from a model name, a harness type or a manifest.
 
 ### Health
 

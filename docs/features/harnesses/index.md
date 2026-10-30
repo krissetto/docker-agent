@@ -181,7 +181,7 @@ compact the harness's retained conversation. Usage reports remain available,
 but they are not native budget counters. Profiles describe each agent's own
 execution; native orchestration does not extend these controls to a delegated
 harness. A missing capability profile, such as
-from an older remote server, means unknown—not native or unsupported. See
+one from an older server, means unknown—not native or unsupported. See
 [Execution capabilities](../api-server/index.md#execution-capabilities) for the
 wire fields.
 
