@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -83,11 +84,40 @@ func (m *model) SetWorkStatus(active bool, elapsed time.Duration) tea.Cmd {
 			}
 		}
 	}
+	if !m.workEnabled {
+		// Status only feeds Work headers, which do not exist with compact Work off.
+		// Keeping the item cache avoids re-rendering all history markdown.
+		cmd := tea.Batch(m.workCommands...)
+		m.workCommands = nil
+		return cmd
+	}
+	previousMembership := maps.Clone(m.workSourceToHeader)
 	m.workProjectionDirty = true
 	m.syncWorkProjection()
 	cmd := tea.Batch(m.workCommands...)
 	m.workCommands = nil
-	m.invalidateAllItems()
+	// Only header text changes. Plain rows keep their cached lines unless their
+	// Work membership or anchor moved; the rebuild reuses every other entry.
+	for _, block := range m.workBlocks {
+		m.invalidateWorkBlock(block)
+	}
+	for source, anchor := range previousMembership {
+		if current, ok := m.workSourceToHeader[source]; !ok || current != anchor {
+			m.renderedItems.Delete(source)
+		}
+	}
+	for source := range m.workSourceToHeader {
+		if _, ok := previousMembership[source]; !ok {
+			m.renderedItems.Delete(source)
+		}
+	}
+	// Like invalidateHistoryStep, drop the last row: it may be the streaming suffix.
+	if last := len(m.views) - 1; last >= 0 {
+		m.renderedItems.Delete(last)
+	}
+	m.renderDirty = true
+	m.invalidateFrameContent()
+	m.invalidateView()
 	// A handoff in flight keeps frozen header text; repaint it with the new status.
 	if m.replyHandoff.Active() {
 		m.repaintHandoffHeaders()
