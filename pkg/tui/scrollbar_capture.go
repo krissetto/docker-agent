@@ -62,7 +62,7 @@ func (m *appModel) validateMessagesScrollbar() {
 	if capture == nil || capture.canceled {
 		return
 	}
-	if m.tickPaused || m.dialogMgr.Open() || m.err != nil ||
+	if m.paneHidden || m.blurred || m.dialogMgr.Open() || m.err != nil ||
 		m.chatPages[capture.sessionID] != capture.page || !m.paneVisible(capture.sessionID) ||
 		m.width != capture.width || m.height != capture.height || m.contentHeight != capture.content ||
 		m.leanMode != capture.lean || m.paneGeometry.Panes[capture.sessionID] != capture.pane || m.paneShell != capture.shell ||

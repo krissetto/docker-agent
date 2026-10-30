@@ -250,7 +250,7 @@ func (m *appModel) preparePanel() tea.Cmd {
 		return todoCmd
 	}
 	_, active, _ := panelCounts(data.nodes)
-	animate := active > 0 && !m.tickPaused && !m.contextClosed && m.opening == nil && !m.dialogMgr.Open() && m.panelElementVisible(messages.PanelSubagents)
+	animate := active > 0 && !m.paneHidden && !m.contextClosed && m.opening == nil && !m.dialogMgr.Open() && m.panelElementVisible(messages.PanelSubagents)
 	if animate && !m.panelAnimation.IsActive() {
 		m.panelAnimation.SetRuntime(m.ar)
 		m.panelAnimation.Start()

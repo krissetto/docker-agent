@@ -10,7 +10,7 @@ func (m *appModel) syncReviewAnimations() {
 		return
 	}
 	visible := make(map[*view.Model]struct{})
-	if !m.leanMode && !m.tickPaused && m.err == nil && !m.dialogMgr.Open() {
+	if !m.leanMode && !m.paneHidden && m.err == nil && !m.dialogMgr.Open() {
 		if surface := m.reviewSurface(); surface != nil {
 			visible[surface] = struct{}{}
 		}

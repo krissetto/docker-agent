@@ -78,6 +78,7 @@ type Runtime struct {
 	generation      int
 
 	tickScheduled   bool
+	paused          bool
 	lastDeliveredAt time.Time
 	acceptedTicks   uint64
 	scheduler       Scheduler
@@ -193,6 +194,48 @@ func (r *Runtime) Now() time.Duration {
 	return r.elapsed
 }
 
+// Pause freezes the animation clock and invalidates queued ticks without
+// releasing subscriptions. New animations can register but cannot schedule work
+// until Resume.
+func (r *Runtime) Pause() {
+	r.mustExist()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.paused = true
+	r.abandonLeaseLocked()
+	r.lastDeliveredAt = time.Time{}
+}
+
+// Resume restarts at most one tick chain, excluding time spent paused.
+func (r *Runtime) Resume() tea.Cmd {
+	r.mustExist()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.paused {
+		return nil
+	}
+	r.paused = false
+	if r.active == 0 {
+		return nil
+	}
+	return r.tickLocked()
+}
+
+// EnsureRunning replaces a potentially lost outstanding tick command.
+func (r *Runtime) EnsureRunning() tea.Cmd {
+	r.mustExist()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active == 0 {
+		r.abandonLeaseLocked()
+		r.lastDeliveredAt = time.Time{}
+		return nil
+	}
+	r.generation++
+	r.tickScheduled = false
+	return r.tickLocked()
+}
+
 // Stop invalidates all queued ticks and releases every registration owned by
 // this program. Program teardown calls it after component cleanup as a final
 // ownership boundary; a late queued TickMsg can then never revive the chain.
@@ -230,7 +273,7 @@ func (r *Runtime) abandonLeaseLocked() {
 }
 
 func (r *Runtime) tickLocked() tea.Cmd {
-	if r.tickScheduled {
+	if r.paused || r.tickScheduled {
 		return nil
 	}
 	// Each allocation gets its own token: replaying an accepted tick must not

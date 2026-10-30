@@ -37,7 +37,7 @@ func (m *appModel) syncScrollbarPointer(msg tea.Msg) {
 		SetScrollbarActive(active bool) bool
 		SetScrollbarPointer(x, y int) bool
 	}); ok {
-		dialogActive := !m.tickPaused && m.err == nil && m.dialogMgr.Open()
+		dialogActive := !m.paneHidden && !m.blurred && m.err == nil && m.dialogMgr.Open()
 		changed := owner.SetScrollbarActive(dialogActive)
 		dialogX, dialogY := -1, -1
 		if dialogActive {
@@ -47,7 +47,7 @@ func (m *appModel) syncScrollbarPointer(msg tea.Msg) {
 			m.viewCacheValid = false
 		}
 	}
-	occluded := m.tickPaused || m.dialogMgr.Open() || m.err != nil
+	occluded := m.paneHidden || m.blurred || m.dialogMgr.Open() || m.err != nil
 	chatX, chatY := x, y
 	if occluded || m.reviewOwnsPointer(x, y) || m.isDragging || m.paneGesture != nil {
 		chatX, chatY = -1, -1

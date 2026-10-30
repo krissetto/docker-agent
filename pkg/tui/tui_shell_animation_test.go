@@ -61,7 +61,7 @@ func (m *shellProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s := shellSnapshot{
 			editorHeight: m.root.editorHeight, editorTarget: m.root.editorHeightTarget, heightMoving: m.root.editorHeightMotion.Running(), ticks: m.ticks, compositions: m.compositions,
 			tickTimes: append([]time.Time(nil), m.tickTimes...), overlayTimes: append([]time.Time(nil), m.overlayTimes...),
-			resizeDragging: m.root.isDragging, focus: m.root.focusedPanel, open: m.root.dialogMgr.Open(), closing: m.root.dialogMgr.Closing(), paused: m.root.tickPaused, active: m.root.ar.ActiveCount(), editor: m.root.editor.Value(), content: m.root.View().Content,
+			resizeDragging: m.root.isDragging, focus: m.root.focusedPanel, open: m.root.dialogMgr.Open(), closing: m.root.dialogMgr.Closing(), paused: m.root.paneHidden, active: m.root.ar.ActiveCount(), editor: m.root.editor.Value(), content: m.root.View().Content,
 			tabView: m.root.tabBar.View(), tabY: m.root.contentHeight + 1, tabHeight: m.root.tabBar.Height(), holdMessages: m.holdMessages, delayMessages: m.delayMessages, overlayFrames: m.overlayFrames,
 		}
 		if m.root.contextBar != nil {
@@ -168,7 +168,11 @@ func TestActualProgramDialogFadeInputAndIdleQuiescence(t *testing.T) {
 	program.Send(tea.MouseReleaseMsg{X: 1, Y: 1, Button: tea.MouseLeft})
 	require.NotEqual(t, before, snapshot().content, "release flushes effective wheel before boundary")
 	program.Send(tea.BlurMsg{})
+	require.False(t, snapshot().paused, "blur alone does not pause animation")
+	program.Send(tmuxVisibilityMsg{hidden: true})
 	require.True(t, snapshot().paused)
+	program.Send(tmuxVisibilityMsg{})
+	require.False(t, snapshot().paused)
 	program.Send(tea.FocusMsg{})
 	require.False(t, snapshot().paused)
 	program.Send(tea.WindowSizeMsg{Width: 83, Height: 29})

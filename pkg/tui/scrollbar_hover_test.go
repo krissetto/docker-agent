@@ -80,7 +80,7 @@ func TestScrollbarPointerClearsOnOcclusionWithoutMouseMotion(t *testing.T) {
 			case "modal":
 				root.updateDialogCmd(dialog.OpenDialogMsg{Model: &stubDialog{id: "hover-occlusion"}})
 			case "blur":
-				root.tickPaused = true
+				root.blurred = true
 				event = tea.BlurMsg{}
 			case "resize-drag":
 				root.isDragging = true
@@ -106,9 +106,7 @@ func TestScrollbarPointerSurvivesNonPointerUpdates(t *testing.T) {
 	root.syncScrollbarPointer(messages.WheelCoalescedMsg{X: 17, Y: 8, Delta: 1})
 	root.syncScrollbarPointer(tea.KeyPressMsg{Code: 'x'})
 	require.Equal(t, [2]int{17, 8}, [2]int{p.x, p.y})
-	root.tickPaused = true
 	root.syncScrollbarPointer(tea.BlurMsg{})
-	root.tickPaused = false
 	root.syncScrollbarPointer(tea.FocusMsg{})
 	require.Equal(t, [2]int{-1, -1}, [2]int{p.x, p.y}, "focus does not revive stale pointer proximity")
 }

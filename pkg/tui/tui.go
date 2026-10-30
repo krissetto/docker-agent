@@ -227,6 +227,7 @@ type appModel struct {
 	// preserving metadata and function fields as well as content.
 	viewCache                tea.View
 	viewCacheValid           bool
+	viewCacheInitialized     bool
 	viewThemeGeneration      uint64
 	viewPaneStatuses         map[string]runtime.SessionStatus
 	composingPaneStatuses    map[string]runtime.SessionStatus
@@ -319,12 +320,15 @@ type appModel struct {
 	// cycle which re-emits terminal mode escape sequences.
 	focused bool
 
-	// tickPaused is true while we should drop animation.TickMsg events
-	// (and let the tick chain die). Set on BlurMsg and cleared on the
-	// next real FocusMsg. Tracked separately from `focused` so that ticks
-	// keep flowing at startup even before any focus event arrives — some
-	// terminals never send FocusMsg.
-	tickPaused bool
+	// paneHidden is true while tmux reports this pane hidden. It pauses the
+	// animation clock and defers composition; blur alone never pauses work.
+	paneHidden           bool
+	tmuxVisibilityProbe  func(context.Context) bool
+	visibilityGeneration uint64
+
+	// blurred is true between BlurMsg and the next FocusMsg. It occludes
+	// scrollbar hover and capture, but never pauses animation.
+	blurred bool
 
 	scrollbarPointer scrollbarPointerState
 
@@ -1010,7 +1014,8 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 func (m *appModel) Init() tea.Cmd {
 	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.preparePanel(), tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
 	cmd = tea.Batch(cmd, m.waitForThemeChange())
-	if m.ar != nil && !m.tickPaused {
+	cmd = tea.Batch(cmd, m.initTmuxVisibilityCmd())
+	if m.ar != nil {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
 	return core.MapCommand(cmd, nil)
@@ -1032,6 +1037,10 @@ func (m *appModel) autoThemeInitCmd() tea.Cmd {
 // theme enabled it, so the terminal stops sending color-scheme reports
 // after exit.
 func (m *appModel) quitCmd() tea.Cmd {
+	// Bubble Tea leaves the final frame in scrollback in lean mode.
+	m.paneHidden, m.viewCacheValid = false, false
+	m.tmuxVisibilityProbe = nil
+	m.visibilityGeneration++
 	if !m.lightDarkModeSet {
 		return tea.Quit
 	}
@@ -1106,7 +1115,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.updateWithLifecycle(msg)
 	cmd = tea.Batch(cmd, m.preparePanel(), m.prepareCommandMetadata())
 	m.syncNotificationAvoidance()
-	if m.ar != nil && !m.tickPaused {
+	if m.ar != nil {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
 	if m.imageWriter != nil {
@@ -1181,7 +1190,7 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	cmd = tea.Batch(cmd, m.syncGitReview())
-	if previousEditor != m.editor || m.dialogMgr.Open() || m.tickPaused {
+	if previousEditor != m.editor || m.dialogMgr.Open() || m.paneHidden {
 		if hover, ok := previousEditor.(editor.BannerHover); ok {
 			if hover.CancelBannerHover() {
 				m.viewCacheValid = false
@@ -1231,6 +1240,15 @@ func tabVisualGeneration(tabBar *tabbar.TabBar) uint64 {
 }
 
 func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Unchanged visibility polls must not invalidate an idle frame.
+	switch msg := msg.(type) {
+	case tmuxVisibilityPollMsg:
+		cmd := m.checkTmuxVisibilityCmd()
+		return m, cmd
+	case tmuxVisibilityMsg:
+		cmd := m.handleTmuxVisibility(msg)
+		return m, cmd
+	}
 	beforeVisual := m.chatPage.VisualGeneration()
 	beforePanesValid := m.visiblePaneCacheValid()
 	beforeSidebarVisual := sidebarVisualGeneration(m.chatPage)
@@ -1337,12 +1355,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		msg = accepted
-		if hover, ok := m.editor.(editor.BannerHover); ok && !m.tickPaused {
+		if hover, ok := m.editor.(editor.BannerHover); ok && !m.paneHidden {
 			hover.TickBannerHover(msg)
 		}
-		// Consume but do not fan out or continue ticks while blurred. The
-		// Update epilogue re-arms on focus, or keeps a still-outstanding lease.
-		if m.tickPaused {
+		// Consume but do not fan out or continue ticks while hidden. The
+		// Update epilogue re-arms on visibility, or keeps a still-outstanding lease.
+		if m.paneHidden {
 			return m, nil
 		}
 		m.tickReviewAnimation(msg)
@@ -1592,6 +1610,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.imageWriter.Invalidate()
 		}
 		m.wWidth, m.wHeight = msg.Width, msg.Height
+		// Old geometry can push stale lean-mode lines into scrollback.
+		m.viewCacheInitialized = false
 		cmd := m.handleWindowResize(msg.Width, msg.Height)
 		return m, tea.Batch(cmd, tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
 
@@ -1599,7 +1619,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reviewHoldC = false
 		m.cancelPaneGesture()
 		m.focused = false
-		m.tickPaused = true
+		m.blurred = true
 		m.isDragging, m.isHoveringHandle = false, false
 		m.resetComposerGrip()
 		var barCmd tea.Cmd
@@ -1609,15 +1629,18 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.tabBar.Update(msg), barCmd)
 
 	case tea.FocusMsg:
+		m.blurred = false
+		// Focus proves visibility and supersedes any in-flight tmux snapshot.
+		m.visibilityGeneration++
+		resume := m.setPaneHidden(false)
 		// Filter spurious FocusMsg: RestoreTerminal re-enables focus
 		// reporting which delivers a FocusMsg even when we never blurred.
 		if m.focused {
-			return m, nil
+			return m, resume
 		}
 		m.focused = true
 
-		m.tickPaused = false
-		var cmds []tea.Cmd
+		cmds := []tea.Cmd{resume}
 		if styles.AutoThemeEnabled() {
 			// Terminals without mode 2031 can still flip their appearance
 			// while we're in the background; re-query on focus so the auto
@@ -4613,7 +4636,7 @@ func lineWithSuffix(line, suffix string, width int) string {
 // acquires its animation lease synchronously in SetNotice, before its first
 // tick command is returned, so queued entry commands cannot appear settled.
 func (m *appModel) SettledPresentation() bool {
-	if !m.ready || m.tickPaused || m.paneGesture != nil || m.paneHydration != nil || m.paneSource != nil ||
+	if !m.ready || m.paneHidden || m.paneGesture != nil || m.paneHydration != nil || m.paneSource != nil ||
 		m.isDragging || m.editorHeightMotion.Running() || m.dialogMgr.Closing() || m.ar.ActiveCount() != 0 {
 		return false
 	}
@@ -4640,6 +4663,16 @@ func (m *appModel) View() tea.View {
 		}
 		return m.viewCache
 	}
+	if m.paneHidden && m.viewCacheInitialized && m.err == nil {
+		// Keep completion signals live without composing the hidden transcript.
+		view := m.viewCache
+		view.WindowTitle = m.windowTitle()
+		view.ProgressBar = nil
+		if m.chatPage.IsWorking() {
+			view.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
+		}
+		return view
+	}
 	statuses := m.visiblePaneStatuses()
 	m.composingPaneStatuses = statuses
 	view := m.composeView()
@@ -4656,6 +4689,7 @@ func (m *appModel) View() tea.View {
 	m.viewPaneStatuses = statuses
 	m.viewCache = view
 	m.viewCacheValid = true
+	m.viewCacheInitialized = true
 	return view
 }
 
@@ -5164,6 +5198,7 @@ func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.V
 	// Preserve terminal-default cells; OSC 11 still follows the selected theme.
 	view.BackgroundColor = styles.Background
 	view.WindowTitle = windowTitle
+	view.ReportFocus = true
 	if working {
 		view.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
 	}
