@@ -61,6 +61,20 @@ func TestCommunicationGuidanceWakesIdleParentBeforeChildCompletion(t *testing.T)
 	releaseOnce.Do(func() { close(childRelease) })
 	coordinationAwait(t, child, turn.TurnID)
 	reportID := "report:" + childReportID(child.ID(), turn.TurnID)
+	// The child commits its report before the parent's scheduler admits it, and
+	// AwaitTurn reports not-yet-admitted IDs as not_found, so wait for admission.
+	require.Eventually(t, func() bool {
+		snapshot, err := parent.Snapshot(t.Context())
+		if err != nil {
+			return false
+		}
+		for _, item := range snapshot.MessagesSnapshot() {
+			if item.Message != nil && item.Message.Accepted && item.Message.TurnID == reportID {
+				return true
+			}
+		}
+		return false
+	}, completionIdentityTimeout, completionIdentityPoll)
 	coordinationAwait(t, parent, reportID)
 	coordinationSettled(t, parent)
 	snapshot, err := parent.Snapshot(t.Context())
