@@ -391,7 +391,7 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 	for _, content := range []string{"hello", "again"} {
 		submission, err := h.Submit(t.Context(), TurnInput{Content: content})
 		require.NoError(t, err)
-		var terminal, started bool
+		var terminal bool
 		var stopped int
 		for !terminal {
 			select {
@@ -399,14 +399,7 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 				require.True(t, ok, "observation closed after a settled turn")
 				assert.Greater(t, envelope.Sequence, previous)
 				previous = envelope.Sequence
-				if envelope.TurnID == "" {
-					// Only a session-scoped tree snapshot may precede the turn's first envelope.
-					_, sessionScoped := envelope.Event.(*SubagentTreeEvent)
-					assert.True(t, sessionScoped && !started, "turn-less envelope must be a pre-turn SubagentTreeEvent")
-				} else {
-					started = true
-					assert.Equal(t, submission.TurnID, envelope.TurnID)
-				}
+				assert.True(t, turnEnvelopeAdmissible(envelope, submission.TurnID, h.ID()), "envelope must belong to the turn or be a session-scoped SubagentTreeEvent")
 				switch event := envelope.Event.(type) {
 				case *StreamStoppedEvent:
 					stopped++
@@ -421,6 +414,63 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 				t.Fatalf("timed out waiting for %q turn settlement", content)
 			}
 		}
+	}
+}
+
+// isTurnlessSessionTree admits a turn-less envelope only when it is exactly a
+// journaled, session-scoped SubagentTreeEvent. Topology snapshots are journaled
+// independently of runs (event.go), so one may be published between a turn's
+// Accepted/Promoted and its StreamStarted and carry no TurnID. Gap, seed
+// (sequence zero), foreign-session, and nil-payload envelopes are never admitted.
+func isTurnlessSessionTree(envelope SessionEvent, sessionID string) bool {
+	tree, ok := envelope.Event.(*SubagentTreeEvent)
+	return ok && tree != nil && envelope.TurnID == "" && envelope.Sequence > 0 && !envelope.Gap && envelope.SessionID == sessionID
+}
+
+// turnEnvelopeAdmissible is the correlation rule for one observed envelope of a
+// submitted turn: turn-owned envelopes must carry that turn's ID, and the only
+// turn-less envelope is a session-scoped SubagentTreeEvent.
+func turnEnvelopeAdmissible(envelope SessionEvent, turnID, sessionID string) bool {
+	if envelope.TurnID == "" {
+		return isTurnlessSessionTree(envelope, sessionID)
+	}
+	return envelope.TurnID == turnID
+}
+
+func TestObservationTurnlessClassification(t *testing.T) {
+	const sessionID, turnID, otherTurn = "classification-session", "turn-1", "turn-2"
+	tree := &SubagentTreeEvent{Type: "subagent_tree"}
+	envelope := func(turn string, sequence uint64, event Event) SessionEvent {
+		return SessionEvent{SessionID: sessionID, TurnID: turn, Sequence: sequence, Event: event}
+	}
+	// Interleaving: a turn-less tree snapshot between Accepted/Promoted and StreamStarted.
+	interleaved := []SessionEvent{
+		envelope(turnID, 1, PendingUserMessageAccepted(sessionID, turnID, "hello", nil, 0)),
+		envelope("", 2, tree),
+		envelope(turnID, 3, PendingUserMessagePromoted(sessionID, turnID, "hello", nil, 0)),
+		envelope(turnID, 4, StreamStarted(sessionID, "root")),
+	}
+	for _, item := range interleaved {
+		assert.True(t, turnEnvelopeAdmissible(item, turnID, sessionID), "interleaved envelope %T must be admitted", item.Event)
+	}
+	cases := []struct {
+		name     string
+		envelope SessionEvent
+		want     bool
+	}{
+		{"turnless tree between turn events", envelope("", 2, tree), true},
+		{"tree carrying the active turn ID", envelope(turnID, 2, tree), true},
+		{"tree carrying a different turn ID", envelope(otherTurn, 2, tree), false},
+		{"turnless started event", envelope("", 4, StreamStarted(sessionID, "root")), false},
+		{"turnless agent choice", envelope("", 5, AgentChoice("root", sessionID, "text")), false},
+		{"turnless tree at sequence zero", envelope("", 0, tree), false},
+		{"turnless tree gap marker", SessionEvent{SessionID: sessionID, Sequence: 2, Gap: true, Event: tree}, false},
+		{"turnless tree from another session", SessionEvent{SessionID: "other-session", Sequence: 2, Event: tree}, false},
+		{"turnless nil tree payload", envelope("", 2, (*SubagentTreeEvent)(nil)), false},
+		{"turn event for a different turn", envelope(otherTurn, 3, StreamStarted(sessionID, "root")), false},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, turnEnvelopeAdmissible(tc.envelope, turnID, sessionID), tc.name)
 	}
 }
 
