@@ -484,14 +484,55 @@ func TestDeniedIdleWakeDoesNotStrandMessageOrMarkRunning(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	sess := session.New(session.WithID("child"), session.WithParentID("root"))
 	d := r.sessionDrivers.Get(sess)
-	d.SetPreStartGate(func() bool { return false }, nil)
+	// Gate call 1 is the posting caller's denied wake, synchronous in Post.
+	// Gate call 2 is the first asynchronous scheduler retry; only it parks.
+	var gates, denials atomic.Int64
+	retryEntered := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	retryDenied := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRetry) }) }
+	// Unblocks a parked retry even when an assertion fails first, so teardown can drain.
+	t.Cleanup(release)
+	d.SetPreStartGate(func() bool {
+		if gates.Add(1) == 2 {
+			close(retryEntered)
+			<-releaseRetry
+		}
+		return false
+	}, func() {
+		// abort runs after the denied start has rolled back to idle.
+		if denials.Add(1) == 2 {
+			close(retryDenied)
+		}
+	})
 
 	assert.True(t, d.Post(t.Context(), QueuedMessage{Content: "denied", RequestID: "accepted-b"}, true), "accepted B remains a successful submission when waking A fails")
 	assert.True(t, d.HasPending(), "accepted input remains queued for a later wake")
+
+	// The scheduler retry legitimately holds the start handshake while parked;
+	// starting is transient and running is never reached.
+	waitClosed(t, retryEntered, "scheduler retry reached the pre-start gate")
+	d.mu.Lock()
+	assert.True(t, d.starting(), "the in-flight scheduler retry holds the start handshake")
+	assert.False(t, d.running())
+	d.mu.Unlock()
+
+	release()
+	waitClosed(t, retryDenied, "parked scheduler retry was denied and rolled back")
+	// Retries recur on a backoff timer. Retire scheduler authority, then drain
+	// reservations already taken so the final snapshot is stable.
+	r.sessionDrivers.mu.Lock()
+	d.maintenanceRetired = true
+	r.sessionDrivers.mu.Unlock()
+	waitClosed(t, d.Done(), "scheduler maintenance drained")
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	assert.False(t, d.running())
 	assert.False(t, d.starting())
+	assert.True(t, d.retryRunning, "denied wake keeps a retry armed rather than stranding input")
+	assert.Len(t, d.pending, 1, "accepted input remains queued for a later wake")
 }
 
 func TestDeniedIdleWakePreservesUnrelatedQueuedMessages(t *testing.T) {
