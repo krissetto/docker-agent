@@ -23,9 +23,9 @@ import (
 func TestResolveManagedSourcePath(t *testing.T) {
 	workspace := t.TempDir()
 	connection := filepath.Join(workspace, "sub dir")
-	require.NoError(t, os.Mkdir(connection, 0700))
+	require.NoError(t, os.Mkdir(connection, 0o700))
 	team := filepath.Join(connection, "my agent.yaml")
-	require.NoError(t, os.WriteFile(team, []byte("agents: {}"), 0600))
+	require.NoError(t, os.WriteFile(team, []byte("agents: {}"), 0o600))
 	resolved, relative, err := resolveManagedSourcePath(workspace, "sub dir", "./my agent.yaml")
 	require.NoError(t, err)
 	canonicalWorkspace, err := filepath.EvalSymlinks(workspace)
@@ -37,14 +37,14 @@ func TestResolveManagedSourcePath(t *testing.T) {
 	assert.Equal(t, filepath.Join("sub dir", "my agent.yaml"), relative)
 
 	outside := filepath.Join(t.TempDir(), "outside.yaml")
-	require.NoError(t, os.WriteFile(outside, []byte("agents: {}"), 0600))
+	require.NoError(t, os.WriteFile(outside, []byte("agents: {}"), 0o600))
 	require.NoError(t, os.Symlink(outside, filepath.Join(connection, "escape.yaml")))
 	_, _, err = resolveManagedSourcePath(workspace, "sub dir", "escape.yaml")
 	require.ErrorContains(t, err, "outside the sandbox workspace")
 	_, _, err = resolveManagedSourcePath(workspace, "sub dir", "missing.yaml")
 	require.ErrorContains(t, err, "team file not found")
 	notes := filepath.Join(connection, "notes.txt")
-	require.NoError(t, os.WriteFile(notes, []byte("text"), 0600))
+	require.NoError(t, os.WriteFile(notes, []byte("text"), 0o600))
 	_, _, err = resolveManagedSourcePath(workspace, "sub dir", "notes.txt")
 	require.ErrorContains(t, err, "workspace YAML file")
 }
@@ -52,16 +52,16 @@ func TestResolveManagedSourcePath(t *testing.T) {
 func TestManagedSourceRegistrationPersistsAndAdvancesImmutableRevision(t *testing.T) {
 	workspace := t.TempDir()
 	customDir := filepath.Join(workspace, "team files")
-	require.NoError(t, os.Mkdir(customDir, 0700))
+	require.NoError(t, os.Mkdir(customDir, 0o700))
 	teamPath := filepath.Join(customDir, "my agent.yaml")
 	writeTeam := func(instruction string) {
 		t.Helper()
 		yaml := "agents:\n  root:\n    model: openai/offline-test\n    instruction: " + instruction + "\n"
-		require.NoError(t, os.WriteFile(teamPath, []byte(yaml), 0600))
+		require.NoError(t, os.WriteFile(teamPath, []byte(yaml), 0o600))
 	}
 	writeTeam("first")
 	defaultPath := filepath.Join(workspace, "default.yaml")
-	require.NoError(t, os.WriteFile(defaultPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: default\n"), 0600))
+	require.NoError(t, os.WriteFile(defaultPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: default\n"), 0o600))
 	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}).managedSnapshot(t.Context(), defaultPath, workspace)
 	require.NoError(t, err)
 	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}
@@ -120,7 +120,7 @@ func TestManagedSourceRegistrationPersistsAndAdvancesImmutableRevision(t *testin
 	assert.Equal(t, defaultRegistration.Revision, restored[defaultRegistration.SourceID])
 
 	invalid := filepath.Join(customDir, "invalid.yaml")
-	require.NoError(t, os.WriteFile(invalid, []byte("not: [valid"), 0600))
+	require.NoError(t, os.WriteFile(invalid, []byte("not: [valid"), 0o600))
 	_, _, err = register("invalid.yaml", "team files")
 	require.Error(t, err)
 	_, _, err = register("missing.yaml", "team files")
@@ -130,7 +130,7 @@ func TestManagedSourceRegistrationPersistsAndAdvancesImmutableRevision(t *testin
 func TestManagedSnapshotPreservesCreationBoundTeamEditGrant(t *testing.T) {
 	workspace := t.TempDir()
 	team := filepath.Join(workspace, "team.yaml")
-	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: test\n"), 0600))
+	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: test\n"), 0o600))
 	flags := &runExecFlags{runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace, TeamEditMode: "restricted", TeamEditAllowedAgentIDs: []string{"root"}}}}
 	manifest, err := flags.managedSnapshot(t.Context(), team, workspace)
 	require.NoError(t, err)
@@ -143,11 +143,11 @@ func TestManagedTeamEditPersistencePublishesCASAndRestoresSavedRevision(t *testi
 	workspace := t.TempDir()
 	teamPath := filepath.Join(workspace, "team.yaml")
 	physical := []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n")
-	require.NoError(t, os.WriteFile(teamPath, physical, 0600))
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}
-	manifest, err := (&runExecFlags{runConfig: runConfig}).managedSnapshot(t.Context(), teamPath, workspace)
+	require.NoError(t, os.WriteFile(teamPath, physical, 0o600))
+	runtimeCfg := config.Config{WorkingDir: workspace}
+	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: runtimeCfg}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
-	f := &apiFlags{manifest: manifest, runConfig: runConfig}
+	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: runtimeCfg}}
 	store := session.NewInMemorySessionStore()
 	manager := newManagedSourceTestManager(t, f, manifest, store)
 	state := filepath.Join(t.TempDir(), "managed")
@@ -269,13 +269,13 @@ func TestManagedInputDigestTracksInstructionFiles(t *testing.T) {
 	teamPath := filepath.Join(workspace, "team.yaml")
 	promptPath := filepath.Join(workspace, "prompt.md")
 	team := []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction_file: prompt.md\n")
-	require.NoError(t, os.WriteFile(teamPath, team, 0600))
-	require.NoError(t, os.WriteFile(promptPath, []byte("first"), 0600))
+	require.NoError(t, os.WriteFile(teamPath, team, 0o600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("first"), 0o600))
 	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
 	first, err := inputDigest(t.Context(), manifest, workspace)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(promptPath, []byte("second"), 0600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("second"), 0o600))
 	second, err := inputDigest(t.Context(), manifest, workspace)
 	require.NoError(t, err)
 	assert.NotEqual(t, first, second, "inlined local instruction dependencies remain covered by the source input fingerprint")
@@ -285,12 +285,12 @@ func TestManagedPersistenceRejectsChangedLocalDependencyWithoutPublishing(t *tes
 	workspace := t.TempDir()
 	teamPath := filepath.Join(workspace, "team.yaml")
 	promptPath := filepath.Join(workspace, "prompt.md")
-	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction_file: prompt.md\n"), 0600))
-	require.NoError(t, os.WriteFile(promptPath, []byte("baseline prompt"), 0600))
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}
-	manifest, err := (&runExecFlags{runConfig: runConfig}).managedSnapshot(t.Context(), teamPath, workspace)
+	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction_file: prompt.md\n"), 0o600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("baseline prompt"), 0o600))
+	runtimeCfg := config.Config{WorkingDir: workspace}
+	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: runtimeCfg}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
-	f := &apiFlags{manifest: manifest, runConfig: runConfig}
+	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: runtimeCfg}}
 	state := filepath.Join(t.TempDir(), "managed")
 	manager := newManagedSourceTestManager(t, f, manifest, session.NewInMemorySessionStore())
 	registrar := f.managedSourceRegistrar(state, workspace, manager)
@@ -306,7 +306,7 @@ func TestManagedPersistenceRejectsChangedLocalDependencyWithoutPublishing(t *tes
 	loader, ok := manager.Source(registration.SourceID)
 	require.True(t, ok)
 	generation := loader.(interface{ Generation() uint64 }).Generation()
-	require.NoError(t, os.WriteFile(promptPath, []byte("manually changed prompt"), 0600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("manually changed prompt"), 0o600))
 	_, err = persistence.Persist(t.Context(), registration.Revision, managedTestSource{name: teamPath, parentDir: workspace, data: []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: edit\n")})
 	require.ErrorContains(t, err, "workspace source inputs changed")
 	afterHead, readErr := managedRead(filepath.Join(managedSourceDir(state), sourceStorageKey(registration.SourceID), "current"))
@@ -318,11 +318,11 @@ func TestManagedPersistenceRejectsChangedLocalDependencyWithoutPublishing(t *tes
 func TestManagedPersistenceConcurrentCASHasSingleWinner(t *testing.T) {
 	workspace := t.TempDir()
 	teamPath := filepath.Join(workspace, "team.yaml")
-	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0600))
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}
-	manifest, err := (&runExecFlags{runConfig: runConfig}).managedSnapshot(t.Context(), teamPath, workspace)
+	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0o600))
+	runtimeCfg := config.Config{WorkingDir: workspace}
+	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: runtimeCfg}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
-	f := &apiFlags{manifest: manifest, runConfig: runConfig}
+	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: runtimeCfg}}
 	manager := newManagedSourceTestManager(t, f, manifest, session.NewInMemorySessionStore())
 	state := filepath.Join(t.TempDir(), "managed")
 	registrar := f.managedSourceRegistrar(state, workspace, manager)
@@ -362,12 +362,12 @@ func TestManagedDependencyChangeCreatesRevisionAndStaleStageCannotPublish(t *tes
 	workspace := t.TempDir()
 	teamPath := filepath.Join(workspace, "team.yaml")
 	promptPath := filepath.Join(workspace, "prompt.md")
-	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction_file: prompt.md\n"), 0600))
-	require.NoError(t, os.WriteFile(promptPath, []byte("one"), 0600))
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}
-	manifest, err := (&runExecFlags{runConfig: runConfig}).managedSnapshot(t.Context(), teamPath, workspace)
+	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction_file: prompt.md\n"), 0o600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("one"), 0o600))
+	runtimeCfg := config.Config{WorkingDir: workspace}
+	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: runtimeCfg}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
-	f := &apiFlags{manifest: manifest, runConfig: runConfig}
+	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: runtimeCfg}}
 	manager := newManagedSourceTestManager(t, f, manifest, session.NewInMemorySessionStore())
 	state := filepath.Join(t.TempDir(), "managed")
 	registrar := f.managedSourceRegistrar(state, workspace, manager)
@@ -381,7 +381,7 @@ func TestManagedDependencyChangeCreatesRevisionAndStaleStageCannotPublish(t *tes
 	first, _ := register()
 	firstManifest, err := managedRead(sourceRevisionPath(state, first.SourceID, first.Revision))
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(promptPath, []byte("two"), 0600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("two"), 0o600))
 	second, _ := register()
 	require.NotEqual(t, first.Revision, second.Revision, "changing a referenced local instruction file creates a new source revision")
 	afterFirstManifest, err := managedRead(sourceRevisionPath(state, first.SourceID, first.Revision))
@@ -390,10 +390,10 @@ func TestManagedDependencyChangeCreatesRevisionAndStaleStageCannotPublish(t *tes
 
 	// Prepare two staged candidates against the same head. The newer request wins;
 	// the stale one must not move disk or publish a loader generation.
-	require.NoError(t, os.WriteFile(promptPath, []byte("three"), 0600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("three"), 0o600))
 	staleRegistration, staleSource, err := registrar(t.Context(), "team.yaml", "")
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(promptPath, []byte("four"), 0600))
+	require.NoError(t, os.WriteFile(promptPath, []byte("four"), 0o600))
 	winnerRegistration, winnerSource, err := registrar(t.Context(), "team.yaml", "")
 	require.NoError(t, err)
 	winnerStage := winnerSource.(interface{ CommitSource() error })
@@ -415,11 +415,11 @@ func TestManagedDependencyChangeCreatesRevisionAndStaleStageCannotPublish(t *tes
 func TestManagedRegistrationAndPersistenceSerializeTogether(t *testing.T) {
 	workspace := t.TempDir()
 	teamPath := filepath.Join(workspace, "team.yaml")
-	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0600))
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}
-	manifest, err := (&runExecFlags{runConfig: runConfig}).managedSnapshot(t.Context(), teamPath, workspace)
+	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0o600))
+	runtimeCfg := config.Config{WorkingDir: workspace}
+	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: runtimeCfg}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
-	f := &apiFlags{manifest: manifest, runConfig: runConfig}
+	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: runtimeCfg}}
 	manager := newManagedSourceTestManager(t, f, manifest, session.NewInMemorySessionStore())
 	state := filepath.Join(t.TempDir(), "managed")
 	registrar := f.managedSourceRegistrar(state, workspace, manager)
@@ -480,11 +480,11 @@ func TestManagedRegistrationAndPersistenceSerializeTogether(t *testing.T) {
 func TestManagedPersistenceRejectsNewExternalReference(t *testing.T) {
 	workspace := t.TempDir()
 	teamPath := filepath.Join(workspace, "team.yaml")
-	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0600))
-	runConfig := config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}
-	manifest, err := (&runExecFlags{runConfig: runConfig}).managedSnapshot(t.Context(), teamPath, workspace)
+	require.NoError(t, os.WriteFile(teamPath, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0o600))
+	runtimeCfg := config.Config{WorkingDir: workspace}
+	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: runtimeCfg}}).managedSnapshot(t.Context(), teamPath, workspace)
 	require.NoError(t, err)
-	f := &apiFlags{manifest: manifest, runConfig: runConfig}
+	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: runtimeCfg}}
 	manager := newManagedSourceTestManager(t, f, manifest, session.NewInMemorySessionStore())
 	state := filepath.Join(t.TempDir(), "managed")
 	registrar := f.managedSourceRegistrar(state, workspace, manager)
@@ -507,7 +507,7 @@ func TestManagedPersistenceRejectsNewExternalReference(t *testing.T) {
 func TestManagedInputDigestAllowsTrustedStartupSourceOutsideWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "startup.yaml")
-	require.NoError(t, os.WriteFile(outside, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: startup\n"), 0600))
+	require.NoError(t, os.WriteFile(outside, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: startup\n"), 0o600))
 	manifest, err := snapshot.Snapshot(t.Context(), config.NewFileSource(outside), snapshot.Options{Startup: snapshot.Startup{Workspace: workspace, SourceKey: "trusted-startup"}})
 	require.NoError(t, err)
 	_, err = inputDigest(t.Context(), manifest, workspace)
@@ -517,7 +517,7 @@ func TestManagedInputDigestAllowsTrustedStartupSourceOutsideWorkspace(t *testing
 func TestManagedStartupSourceOutsideWorkspaceUsesTrustedInternalSentinel(t *testing.T) {
 	workspace := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "startup.yaml")
-	require.NoError(t, os.WriteFile(outside, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: startup\n"), 0600))
+	require.NoError(t, os.WriteFile(outside, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: startup\n"), 0o600))
 	manifest, err := (&runExecFlags{runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}).managedSnapshot(t.Context(), outside, workspace)
 	require.NoError(t, err)
 	f := &apiFlags{manifest: manifest, runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: workspace}}}
@@ -545,4 +545,27 @@ func TestManagedStartupSourceOutsideWorkspaceUsesTrustedInternalSentinel(t *test
 	})
 	require.True(t, ok)
 	require.NotNil(t, persistence.TeamEditPersistence())
+}
+
+func TestManagedSnapshotForPreservesStartupFlagsAndEnvNormalization(t *testing.T) {
+	workspace := t.TempDir()
+	team := filepath.Join(workspace, "team.yaml")
+	require.NoError(t, os.WriteFile(team, []byte("agents:\n  root:\n    model: openai/offline-test\n    instruction: baseline\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "team.env"), []byte("TEAM_VALUE=1\n"), 0o600))
+	runConfig := &config.RuntimeConfig{Config: config.Config{WorkingDir: workspace, EnvFiles: []string{"team.env"}}}
+
+	manifest, err := managedSnapshotFor(t.Context(), runConfig, []string{"openai/override-model"}, true, team, workspace)
+	require.NoError(t, err)
+	startup := manifest.Startup()
+	assert.True(t, startup.Snapshots)
+	assert.Equal(t, []string{"openai/override-model"}, startup.ModelOverrides)
+	assert.Equal(t, workspace, startup.Runtime.WorkingDir)
+	// The env-file normalization happens on the caller's config, not a copy, and the snapshot records it.
+	assert.Equal(t, []string{filepath.Join(workspace, "team.env")}, runConfig.EnvFiles)
+	assert.Equal(t, []string{filepath.Join(workspace, "team.env")}, startup.Runtime.EnvFiles)
+
+	disabled, err := managedSnapshotFor(t.Context(), runConfig, nil, false, team, workspace)
+	require.NoError(t, err)
+	assert.False(t, disabled.Startup().Snapshots)
+	assert.Empty(t, disabled.Startup().ModelOverrides)
 }

@@ -59,7 +59,7 @@ func (f *apiFlags) prepareForegroundManagedAPI(ctx context.Context, source strin
 		return err
 	}
 	f.runConfig.GlobalHooks = config.MergeHooks(userCfg.GetSettings().GlobalHooks(), config.LoadHookDropIns())
-	candidate, err := (&runExecFlags{runConfig: f.runConfig, modelOverrides: f.modelOverrides, snapshotsEnabled: userCfg.GetSettings().SnapshotsEnabled()}).managedSnapshot(ctx, source, workspace)
+	candidate, err := managedSnapshotFor(ctx, &f.runConfig, f.modelOverrides, userCfg.GetSettings().SnapshotsEnabled(), source, workspace)
 	if err != nil {
 		return err
 	}

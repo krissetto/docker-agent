@@ -268,13 +268,19 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 }
 
 func (f *runExecFlags) managedSnapshot(ctx context.Context, sourceKey, workspace string) (*snapshot.Manifest, error) {
-	source, err := sources.Resolve(sourceKey, f.runConfig.EnvProvider())
+	return managedSnapshotFor(ctx, &f.runConfig, f.modelOverrides, f.snapshotsEnabled, sourceKey, workspace)
+}
+
+// managedSnapshotFor takes the runtime config by pointer: RuntimeConfig embeds
+// sync.Once caches, so a value copy forks that cache state and trips copylocks.
+func managedSnapshotFor(ctx context.Context, runConfig *config.RuntimeConfig, modelOverrides []string, snapshotsEnabled bool, sourceKey, workspace string) (*snapshot.Manifest, error) {
+	source, err := sources.Resolve(sourceKey, runConfig.EnvProvider())
 	if err != nil {
 		return nil, err
 	}
-	startup := snapshot.Startup{Snapshots: f.snapshotsEnabled, Workspace: workspace, SourceKey: sourceKey, ModelOverrides: f.modelOverrides, Runtime: f.runConfig.Config}
+	startup := snapshot.Startup{Snapshots: snapshotsEnabled, Workspace: workspace, SourceKey: sourceKey, ModelOverrides: modelOverrides, Runtime: runConfig.Config}
 	startup.Runtime.WorkingDir = workspace
-	return snapshot.Snapshot(ctx, source, snapshot.Options{Startup: startup, Environment: f.runConfig.EnvProvider(), Resolve: func(ref string, env environment.Provider) (config.Source, error) { return sources.Resolve(ref, env) }})
+	return snapshot.Snapshot(ctx, source, snapshot.Options{Startup: startup, Environment: runConfig.EnvProvider(), Resolve: func(ref string, env environment.Provider) (config.Source, error) { return sources.Resolve(ref, env) }})
 }
 
 // Attach never starts a process, commits configuration, or opens SQLite.
