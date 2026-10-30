@@ -463,14 +463,14 @@ type model struct {
 	// Plans section: planData is the app-shared snapshot, recentPlans the
 	// five newest rows. planZones are relative to the section's first line;
 	// planClickZones is keyed by content line once breathing rows are placed.
-	planData       messages.PlanSidebarDataMsg
+	planData messages.PlanSidebarDataMsg
 	// backgroundAgents maps running background child sessions to their agent names.
 	backgroundAgents map[string]string
-	recentPlans    []plans.Plan
-	planZones      []planClickZone
-	planClickZones map[int]planClickZone
-	planStart      int
-	planEnd        int
+	recentPlans      []plans.Plan
+	planZones        []planClickZone
+	planClickZones   map[int]planClickZone
+	planStart        int
+	planEnd          int
 	// Token Usage click zone: the content-line index of the reading line
 	// (glyph/tokens/context/cost/sub-sessions), and the half-open range of any
 	// budget lines below it, recorded while rendering. usageReadingLine is -1
