@@ -33,6 +33,7 @@ func TestReplaceSessionAcrossAgentsUsesTargetBindingAndOverride(t *testing.T) {
 		EnvProvider:      environment.NewMapEnvProvider(nil),
 	}))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 	workerSession := session.New(session.WithID("worker-session"), session.WithAgentName("worker"))
 	a := New(t.Context(), sessions, workerSession, runtime.SessionBinding{Durability: subagent.DurabilityVolatile}, WithRuntimeServices(sessions))
 	require.NoError(t, a.state().err)
@@ -72,6 +73,7 @@ func TestReplaceSessionReconcilesSameAgentModelOverride(t *testing.T) {
 		EnvProvider:      environment.NewMapEnvProvider(nil),
 	}))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 
 	makeSession := func(id, ref string) *session.Session {
 		sess := session.New(session.WithID(id), session.WithAgentName("worker"))
@@ -130,6 +132,7 @@ func injectionModelSwitcher(models map[string]latest.ModelConfig) *runtime.Model
 func TestNewUsesInjectedSharedSessionRuntimeAndImmutableBinding(t *testing.T) {
 	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(replyProvider{})))), runtime.WithModelSwitcherConfig(injectionModelSwitcher(map[string]latest.ModelConfig{"provider/model": {Provider: "test", Model: "model"}})))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 
 	sess := session.New(session.WithID("shared-session"), session.WithAgentName("worker"))
 	a := New(t.Context(), sessions, sess, runtime.SessionBinding{AgentName: "worker", Model: "provider/model"}, WithRuntimeServices(&mockRuntime{}))
@@ -151,6 +154,7 @@ func TestNewUsesInjectedSharedSessionRuntimeAndImmutableBinding(t *testing.T) {
 func TestNewDerivesBindingModelFromPinnedAgentOverride(t *testing.T) {
 	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(stubProvider{})))), runtime.WithModelSwitcherConfig(injectionModelSwitcher(map[string]latest.ModelConfig{"provider/derived": {Provider: "test", Model: "derived"}})))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 	sess := session.New(session.WithID("derived-binding"), session.WithAgentName("worker"))
 	sess.AgentModelOverrides = map[string]string{"worker": "provider/derived"}
 
@@ -163,6 +167,7 @@ func TestNewDerivesBindingModelFromPinnedAgentOverride(t *testing.T) {
 func TestReplaceSessionReusesPersistedSessionHandleAndCanSend(t *testing.T) {
 	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(replyProvider{})))))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 	original := session.New(session.WithID("reloaded"), session.WithAgentName("worker"))
 	a := New(t.Context(), sessions, original, runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{}))
 	require.NoError(t, a.state().err)
@@ -181,6 +186,7 @@ func TestReplaceSessionReusesPersistedSessionHandleAndCanSend(t *testing.T) {
 func TestReplaceSessionAfterReleasedSessionBindsNewGeneration(t *testing.T) {
 	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(stubProvider{})))))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 	sess := session.New(session.WithID("stopped-reload"), session.WithAgentName("worker"))
 	a := New(t.Context(), sessions, sess, runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{}))
 	require.NoError(t, a.state().err)
@@ -195,6 +201,7 @@ func TestReplaceSessionAfterReleasedSessionBindsNewGeneration(t *testing.T) {
 func TestCancelRunDoesNotStopIdleSessionLifetime(t *testing.T) {
 	sessions, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("worker", "prompt", agent.WithModel(stubProvider{})))))
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, sessions)
 	sess := session.New(session.WithID("idle-wake-stop"), session.WithAgentName("worker"))
 	a := New(t.Context(), sessions, sess, runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{}))
 	require.NoError(t, a.state().err)

@@ -138,6 +138,15 @@ func newAttachFixture(t *testing.T, parentID, childID string) (*runtime.LocalRun
 	return rt, owner, admitAttachFixtureTree(t, rt, parentID, childID)
 }
 
+// closeRuntimeAfterTest shuts rt's sessions down when the test ends. Session
+// claims are process-wide, so a runtime left open keeps its IDs claimed for
+// every later test in the package, including a repeated run in one process.
+func closeRuntimeAfterTest(t *testing.T, rt *runtime.LocalRuntime) {
+	t.Helper()
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+}
+
 func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
 	t.Parallel()
 
@@ -220,6 +229,7 @@ func TestWakeRunRendersOnAppBus(t *testing.T) {
 	tm := team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(replyProvider{}))))
 	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, rt)
 
 	sess := session.New(session.WithID("viewer-sess"))
 	a := New(t.Context(), rt, sess, runtime.SessionBinding{}, WithRuntimeServices(rt))
@@ -290,6 +300,7 @@ func TestBridgedRetryDoesNotDuplicateEvents(t *testing.T) {
 	tm := team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(replyProvider{}))))
 	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
+	closeRuntimeAfterTest(t, rt)
 
 	sess := session.New(session.WithID("retry-sess"))
 	sess.AddMessage(session.UserMessage("hello"))
