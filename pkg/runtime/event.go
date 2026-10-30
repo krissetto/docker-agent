@@ -169,6 +169,9 @@ func (e *PendingUserMessagePromotedEvent) GetSessionID() string { return e.Sessi
 type UserMessageEvent struct {
 	AgentContext
 
+	// MessageID is the persisted identity of this user message ("" when the input had none).
+	MessageID string `json:"message_id,omitempty"`
+
 	ownerAppend  bool
 	ownerMessage *session.Message
 

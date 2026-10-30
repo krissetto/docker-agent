@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,8 +40,10 @@ func TestPersistentMessageIDsSeparateStreamAttempts(t *testing.T) {
 	sess := session.New()
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	obs := newPersistenceObserver(store)
+	userEvent := UserMessage("user", sess.ID, nil, 0).(*UserMessageEvent)
+	userEvent.MessageID = "user-id"
 	for _, event := range []Event{
-		UserMessage("user", sess.ID, nil, 0),
+		userEvent,
 		AgentChoice("root", sess.ID, "partial", "attempt-one"),
 		AgentChoiceReasoning("root", sess.ID, "think", "attempt-two"),
 		AgentChoice("root", sess.ID, "answer", "attempt-two"),
@@ -53,6 +56,7 @@ func TestPersistentMessageIDsSeparateStreamAttempts(t *testing.T) {
 	msgs := persistedMessages(t, store, sess.ID)
 	require.Len(t, msgs, 5)
 	assert.Equal(t, chat.MessageRoleUser, msgs[0].Message.Role)
+	assert.Equal(t, "user-id", msgs[0].Message.MessageID)
 	assert.Equal(t, "attempt-one", msgs[1].Message.MessageID)
 	assert.Equal(t, "partial", msgs[1].Message.Content)
 	assert.Equal(t, "attempt-two", msgs[2].Message.MessageID)
@@ -231,4 +235,66 @@ func TestLateSubscriberSeedCarriesStreamIdentity(t *testing.T) {
 	}
 	require.Len(t, ids, 2)
 	assert.Equal(t, []string{"seed-id", "seed-id"}, ids)
+}
+
+// A queued user input carries its identity into the event, the session message
+// and the persisted row, so all three match.
+func TestUserMessageIdentityFromQueuedInputIsPersisted(t *testing.T) {
+	t.Parallel()
+	store := newIdentityStore(t)
+	sess := session.New()
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	queued := QueuedMessage{MessageID: "queued-user-id", Content: "hello", InputOrigin: session.InputOriginUser}
+	event := inputEventMetadata(UserMessage("hello", sess.ID, nil, 0), queued).(*UserMessageEvent)
+	assert.Equal(t, "queued-user-id", event.MessageID)
+	assert.Equal(t, "queued-user-id", queued.sessionMessage().Message.MessageID)
+	newPersistenceObserver(store).OnEvent(t.Context(), sess, event)
+	msgs := persistedMessages(t, store, sess.ID)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "queued-user-id", msgs[0].Message.MessageID)
+	assert.Equal(t, "hello", msgs[0].Message.Content)
+}
+
+// A user message identity follows the submission identity. The same explicit
+// request redelivered maps to the same ID, which the store then sees as the
+// same write. A distinct submission, including a retry without a request ID,
+// gets a distinct ID and a distinct persisted row.
+func TestUserMessageIDsFollowSubmissionIdentity(t *testing.T) {
+	t.Parallel()
+	first, err := sessionInputID("s", "req-1")
+	require.NoError(t, err)
+	again, err := sessionInputID("s", "req-1")
+	require.NoError(t, err)
+	other, err := sessionInputID("s", "req-2")
+	require.NoError(t, err)
+	otherSession, err := sessionInputID("s2", "req-1")
+	require.NoError(t, err)
+	assert.Equal(t, userMessageIDFor(first, "submit"), userMessageIDFor(again, "submit"), "a redelivered submission keeps its identity")
+	assert.NotEqual(t, userMessageIDFor(first, "submit"), userMessageIDFor(other, "submit"), "a distinct request gets a distinct identity")
+	assert.NotEqual(t, userMessageIDFor(first, "submit"), userMessageIDFor(otherSession, "submit"), "identity is scoped to the session")
+
+	retryA, err := sessionInputID("s", "")
+	require.NoError(t, err)
+	retryB, err := sessionInputID("s", "")
+	require.NoError(t, err)
+	assert.NotEqual(t, retryA, retryB, "a retry without a request ID is a new submission")
+	assert.NotEqual(t, userMessageIDFor(retryA, "submit"), userMessageIDFor(retryB, "submit"))
+}
+
+// A retry of an already-submitted request is a new row, even with the same
+// request ID. Steer and submit of one request are distinct rows too. Assistant
+// rows use random identities, so no user or assistant row can collide.
+func TestUserMessageRetryAndAttemptsGetDistinctRows(t *testing.T) {
+	t.Parallel()
+	const requestID = "same-request"
+	submit := userMessageIDFor(requestID, "submit")
+	retry := userMessageIDFor(requestID, "retry")
+	steer := userMessageIDFor(requestID, "steer")
+	assert.NotEqual(t, submit, retry, "a retry is a second row for the same request")
+	assert.NotEqual(t, submit, steer)
+	assert.NotEqual(t, retry, steer)
+	assistant := uuid.NewString()
+	for _, id := range []string{submit, retry, steer} {
+		assert.NotEqual(t, id, assistant)
+	}
 }

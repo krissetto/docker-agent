@@ -798,7 +798,7 @@ func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission,
 	if err != nil {
 		return Submission{}, err
 	}
-	msg := QueuedMessage{InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, RequestID: turnID, InputMode: "steer"}
+	msg := QueuedMessage{MessageID: userMessageIDFor(turnID, "steer"), InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, RequestID: turnID, InputMode: "steer"}
 	queued, err := h.driver.postManualSteer(ctx, msg)
 	if err != nil {
 		return Submission{}, h.inputError(err, SessionOperationSteer, turnID)
@@ -820,6 +820,11 @@ func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation s
 		return Submission{}, err
 	}
 	msg.RequestID = requestID
+	attempt := "submit"
+	if input.Retry {
+		attempt = "retry"
+	}
+	msg.MessageID = userMessageIDFor(requestID, attempt)
 	if operation == "submit" && !input.Retry {
 		if handled, err := h.reactivateStoppedView(ctx, msg); handled {
 			if err != nil {

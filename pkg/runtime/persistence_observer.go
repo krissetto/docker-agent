@@ -413,7 +413,7 @@ func (p *PersistenceObserver) applyEventLocked(ctx context.Context, id string, j
 		}
 	case *UserMessageEvent:
 		p.endStreamLocked(id, j)
-		msg := QueuedMessage{Content: e.Message, MultiContent: e.MultiContent, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, ReportOutcome: e.ReportOutcome, InputMode: e.InputMode}
+		msg := QueuedMessage{MessageID: e.MessageID, Content: e.Message, MultiContent: e.MultiContent, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, ReportOutcome: e.ReportOutcome, InputMode: e.InputMode}
 		message := msg.sessionMessage()
 		message.TurnID = e.TurnID
 		appendItem(session.NewMessageItem(message), e.ownerMessage)

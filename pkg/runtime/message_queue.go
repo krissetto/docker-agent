@@ -10,6 +10,9 @@ import (
 // QueuedMessage is an input waiting to be injected into the agent loop,
 // at the next safe boundary (guidance) or the next turn start (turn FIFO).
 type QueuedMessage struct {
+	// MessageID identifies the user message once it is persisted. It is set
+	// where the input is created and never synthesized later.
+	MessageID     string
 	InputOrigin   session.InputOrigin
 	SenderID      string
 	SenderName    string

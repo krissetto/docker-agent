@@ -3,6 +3,8 @@ package runtime
 import (
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -40,6 +42,7 @@ func inputMode(mode string) string {
 
 func (msg QueuedMessage) sessionMessage() *session.Message {
 	message := session.UserMessage(msg.Content, msg.MultiContent...)
+	message.Message.MessageID = msg.MessageID
 	message.InputOrigin, message.SenderID, message.SenderName = msg.InputOrigin, msg.SenderID, msg.SenderName
 	message.ReportOutcome = msg.ReportOutcome
 	message.InputMode = msg.InputMode
@@ -72,6 +75,7 @@ func inputEventMetadata(event Event, msg QueuedMessage) Event {
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
 		event.ReportOutcome = msg.ReportOutcome
 	case *UserMessageEvent:
+		event.MessageID = msg.MessageID
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
 		event.ReportOutcome = msg.ReportOutcome
 		event.TurnID = msg.RequestID
@@ -90,4 +94,13 @@ func projectModelInput(message *session.Message) {
 	case session.InputOriginRuntime:
 		message.Message.Content = systemInfo(message.Message.Content)
 	}
+}
+
+// userMessageIDFor derives the identity of a user message row from its request
+// ID and its attempt kind ("submit", "retry" or "steer"). A redelivered
+// submission keeps its identity, so the store sees identical content. A retry
+// of the same request is a different attempt and therefore a different row.
+// The ID never comes from content or position.
+func userMessageIDFor(requestID, attempt string) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("docker-agent/user-message/"+attempt+"/"+requestID)).String()
 }
