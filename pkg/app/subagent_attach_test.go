@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,6 +25,9 @@ func TestNewAppReceivesPinnedStartupInfoFromSharedRuntime(t *testing.T) {
 	))
 	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
+	// Session claims are process-wide; release them when this test ends.
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 
 	root := New(t.Context(), rt, session.New(session.WithID("root-tab"), session.WithAgentName("root")), runtime.SessionBinding{}, WithRuntimeServices(rt))
 	root.Start(t.Context())
@@ -84,7 +88,8 @@ func TestAttachedAppStartupEventsDescribeChildAgent(t *testing.T) {
 
 	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "s.db"))
 	require.NoError(t, err)
-	defer store.(*session.SQLiteSessionStore).Close()
+	// Cleanups run last-in-first-out: the runtime shuts down before the store closes.
+	t.Cleanup(func() { require.NoError(t, store.(*session.SQLiteSessionStore).Close()) })
 
 	tm := team.New(team.WithAgents(
 		agent.New("root", "prompt", agent.WithModel(stubProvider{})),
@@ -92,6 +97,9 @@ func TestAttachedAppStartupEventsDescribeChildAgent(t *testing.T) {
 	))
 	rt, err := runtime.NewLocalRuntime(t.Context(), tm, runtime.WithSessionStore(store))
 	require.NoError(t, err)
+	// Session claims are process-wide; release them when this test ends.
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 
 	// Let the parent's startup stream finish first, as in reality where the
 	// parent tab started long before the user attaches.

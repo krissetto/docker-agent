@@ -26,12 +26,6 @@ func runSessionHandle(ctx context.Context, rt runtime.SessionRuntime, sess *sess
 	return runSessionHandleAs(ctx, rt, sess, runtime.SessionBinding{AgentName: sess.AgentName})
 }
 
-// runAdmittedChildHandle creates the child through its parent binding, so the
-// runtime admits a child record that the attached view can validate.
-func runAdmittedChildHandle(ctx context.Context, rt runtime.SessionRuntime, sess *session.Session) <-chan runtime.SessionEvent {
-	return runSessionHandleAs(ctx, rt, sess, runtime.SessionBinding{AgentName: sess.AgentName, ParentSessionID: sess.ParentID})
-}
-
 func runSessionHandleAs(ctx context.Context, rt runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding) <-chan runtime.SessionEvent {
 	events := make(chan runtime.SessionEvent, 64)
 	go func() {
@@ -89,34 +83,68 @@ func (replyProvider) CreateChatCompletionStream(context.Context, []chat.Message,
 	return &replyStream{}, nil
 }
 
-func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
-	t.Parallel()
-
-	tm := team.New(team.WithAgents(
+// attachTeam is the parent/planner team shared by the attach fixtures.
+func attachTeam() *team.Team {
+	return team.New(team.WithAgents(
 		agent.New("root", "prompt", agent.WithModel(replyProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "planner"})),
 		agent.New("planner", "prompt", agent.WithModel(replyProvider{})),
 	))
-	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
-	require.NoError(t, err)
-	// The child's ancestry must resolve in the runtime: create its parent first.
-	parent := session.New(session.WithID("parent"), session.WithAgentName("root"))
-	for range runSessionHandle(t.Context(), rt, parent) {
-	}
+}
+
+// admitAttachFixtureTree runs a parent and its admitted planner child on rt.
+// Every admission step is required: a refused fixture must fail the test, not
+// leave it to pass or fail on other tests' session claims.
+func admitAttachFixtureTree(t *testing.T, rt runtime.SessionRuntime, parentID, childID string) *session.Session {
+	t.Helper()
+	admitAttachFixtureSession(t, rt, session.New(session.WithID(parentID), session.WithAgentName("root")), runtime.SessionBinding{AgentName: "root"})
 	child := session.New(
-		session.WithID("child"),
-		session.WithParentID("parent"),
+		session.WithID(childID),
+		session.WithParentID(parentID),
 		session.WithAgentName("planner"),
 		session.WithNonInteractive(true),
 	)
-	// Run once to register the child with the session driver.
-	for range runAdmittedChildHandle(t.Context(), rt, child) {
-	}
+	admitAttachFixtureSession(t, rt, child, runtime.SessionBinding{AgentName: "planner", ParentSessionID: parentID})
+	return child
+}
 
+// admitAttachFixtureSession creates sess and runs one turn to its stream stop.
+func admitAttachFixtureSession(t *testing.T, rt runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding) {
+	t.Helper()
+	ctx := t.Context()
+	handle, err := rt.CreateSession(ctx, sess, binding)
+	require.NoError(t, err, "create fixture session %s", sess.ID)
+	observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+	require.NoError(t, err, "observe fixture session %s", sess.ID)
+	defer observation.Cancel()
+	_, err = handle.Submit(ctx, runtime.TurnInput{})
+	require.NoError(t, err, "submit fixture session %s", sess.ID)
+	for event := range observation.Events {
+		if _, stopped := event.Event.(*runtime.StreamStoppedEvent); stopped {
+			return
+		}
+	}
+	t.Fatalf("fixture session %s ended without a stream stop", sess.ID)
+}
+
+// newAttachFixture starts a runtime holding the parent and child under the given
+// IDs and shuts it down when the test ends. Without that shutdown the IDs stay
+// claimed process-wide and every later test that reuses them conflicts.
+func newAttachFixture(t *testing.T, parentID, childID string) (*runtime.LocalRuntime, runtime.SessionRuntimeSupervisor, *session.Session) {
+	t.Helper()
+	rt, err := runtime.NewLocalRuntime(t.Context(), attachTeam())
+	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
-	info := runtime.SubagentAttachInfo{NodeID: "abcde", Session: child, ParentSessionID: "parent"}
+	return rt, owner, admitAttachFixtureTree(t, rt, parentID, childID)
+}
+
+func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
+	t.Parallel()
+
+	rt, owner, child := newAttachFixture(t, "steer-parent", "steer-child")
+	info := runtime.SubagentAttachInfo{NodeID: "abcde", Session: child, ParentSessionID: "steer-parent"}
 	a := New(t.Context(), owner.Runtime(), child, runtime.SessionBinding{}, WithRuntimeServices(rt), WithSubagentAttach(info))
-	_, err = a.FollowUpMessage(t.Context(), "target child", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
+	_, err := a.FollowUpMessage(t.Context(), "target child", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		handle := a.SessionHandle()
@@ -140,30 +168,24 @@ func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
 	assert.Equal(t, 0, rt.QueueStatus().SteerDepth)
 }
 
+// Not parallel: top-level sequential tests finish before any parallel test
+// starts, so no parallel fixture can hold these IDs while this test runs.
+func TestAttachFixtureReleasesSessionClaimsOnCleanup(t *testing.T) {
+	t.Run("fixture", func(t *testing.T) {
+		newAttachFixture(t, "steer-parent", "steer-child")
+	})
+	// t.Run returns after the subtest's cleanups, so the fixture has shut down.
+	second, err := runtime.NewLocalRuntime(t.Context(), attachTeam())
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(second)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	admitAttachFixtureTree(t, second, "steer-parent", "steer-child")
+}
+
 func TestIdleAttachedAppRunPreservesAttachments(t *testing.T) {
 	t.Parallel()
 
-	tm := team.New(team.WithAgents(
-		agent.New("root", "prompt", agent.WithModel(replyProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "planner"})),
-		agent.New("planner", "prompt", agent.WithModel(replyProvider{})),
-	))
-	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
-	require.NoError(t, err)
-	// The child's ancestry must resolve in the runtime: create its parent first.
-	parent := session.New(session.WithID("parent"), session.WithAgentName("root"))
-	for range runSessionHandle(t.Context(), rt, parent) {
-	}
-	child := session.New(
-		session.WithID("idle-child"),
-		session.WithParentID("parent"),
-		session.WithAgentName("planner"),
-		session.WithNonInteractive(true),
-	)
-	for range runAdmittedChildHandle(t.Context(), rt, child) {
-	}
-
-	owner := runtime.NewSessionRuntimeSupervisor(rt)
-	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	rt, owner, child := newAttachFixture(t, "idle-parent", "idle-child")
 	a := New(t.Context(), owner.Runtime(), child, runtime.SessionBinding{}, WithRuntimeServices(rt), WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "abcde", Session: child}))
 	ctx, cancel := context.WithCancel(t.Context())
 	a.Run(ctx, cancel, "idle message", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
