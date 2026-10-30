@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -127,7 +128,9 @@ func TestSessionHandleConformance(t *testing.T) {
 				first, err := handle.Submit(t.Context(), TurnInput{Content: "replay"})
 				require.NoError(t, err)
 				zero := uint64(0)
-				replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
+				epoch := sessionObservationEpoch(t, handle)
+				awaitTurnJournaled(t, handle, epoch, first.TurnID)
+				replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: epoch})
 				require.NoError(t, err)
 				require.NotEmpty(t, replayed.Replay)
 				assertReplayTurnBoundary(t, replayed.Replay, first.TurnID, replayed.Primary().Epoch, fixture.replayAuthority)
@@ -190,6 +193,90 @@ func assertReplayTurnBoundary(t *testing.T, replay []SessionEvent, turnID, epoch
 	assert.Equal(t, epoch, trailing[0].Epoch)
 	_, ok := trailing[0].Event.(*BackgroundProcessesEvent)
 	assert.True(t, ok, "trailing replay envelope must be the background-process replacement")
+}
+
+// awaitTurnJournaled returns once turnID has a journaled, sequenced envelope.
+// Submit may return a queued disposition before its turn publishes anything:
+// the input is accepted into the mailbox, and its events are published when a
+// start promotes it. The barrier uses its own observation and cancels it, so
+// the caller's replay is never consumed or altered.
+func awaitTurnJournaled(t *testing.T, handle SessionHandle, epoch, turnID string) {
+	t.Helper()
+	zero := uint64(0)
+	observation, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: epoch})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	owned := func(envelope SessionEvent) bool { return envelope.Sequence > 0 && envelope.TurnID == turnID }
+	if slices.ContainsFunc(observation.Replay, owned) {
+		return
+	}
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case envelope, ok := <-observation.Events:
+			require.True(t, ok, "observation closed before turn %s was journaled", turnID)
+			if owned(envelope) {
+				return
+			}
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for turn %s to be journaled", turnID)
+		}
+	}
+}
+
+// TestSubmitQueuedBeforePublicationIsReplayedAfterBarrier is the deterministic
+// control for the replay precondition. A concurrent start holds the driver in
+// sessionStarting between Submit's admission and its own start check, so Submit
+// returns queued with nothing journaled. Only the turn-owned barrier observes
+// the publication after the held start is released.
+func TestSubmitQueuedBeforePublicationIsReplayedAfterBarrier(t *testing.T) {
+	fixture := newLocalSessionContractFixture(t)
+	defer fixture.close()
+	handle := fixture.handle
+	driver := handle.(*sessionHandle).driver
+	gateEntered := make(chan struct{})
+	releaseGate := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(releaseGate) })
+	defer releaseOnce()
+	var enter sync.Once
+	driver.SetPreStartErrorGate(func() error {
+		enter.Do(func() { close(gateEntered) })
+		<-releaseGate
+		return nil
+	}, nil)
+	// Admitted input is pending and the driver is idle, so whichever start runs
+	// first enters the gate. That is this goroutine or a scheduler wake, and
+	// either way Submit's own start is skipped while the start is held.
+	wakeDone := make(chan error, 1)
+	var hold sync.Once
+	driver.beforePrepareStart = func() {
+		hold.Do(func() {
+			go func() { wakeDone <- driver.wakePending() }()
+			waitClosed(t, gateEntered, "held start to enter the pre-start gate")
+		})
+	}
+
+	submission, err := handle.Submit(t.Context(), TurnInput{Content: "queued-first"})
+	require.NoError(t, err)
+	require.Equal(t, SubmissionDispositionQueued, submission.Disposition, "submit returns queued while the concurrent start is held")
+	zero := uint64(0)
+	epoch := sessionObservationEpoch(t, handle)
+	before, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: epoch})
+	require.NoError(t, err)
+	before.Cancel()
+	for _, envelope := range before.Replay {
+		require.Zero(t, envelope.Sequence, "nothing is journaled before the held start publishes")
+	}
+
+	releaseOnce()
+	// The goroutine's result is either its own start or an invalid wake that lost to a scheduler start.
+	<-wakeDone
+	awaitTurnJournaled(t, handle, epoch, submission.TurnID)
+	replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: epoch})
+	require.NoError(t, err)
+	defer replayed.Cancel()
+	assertReplayTurnBoundary(t, replayed.Replay, submission.TurnID, replayed.Primary().Epoch, fixture.replayAuthority)
 }
 
 func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []string) {
@@ -329,13 +416,16 @@ func newLocalSessionContractFixture(t *testing.T) sessionContractFixture {
 		},
 	}
 	tm := team.New(team.WithAgents(agent.New("contract", "prompt", agent.WithModel(provider))))
-	runtime, err := NewLocalRuntime(t.Context(), tm)
+	// The bounded replay hub is created with the driver, before any journal
+	// publication, so the fixture never swaps a hub that a driver goroutine may use.
+	policy := DefaultSessionResourcePolicy()
+	policy.ReplayEvents, policy.ReplayBytes = 64, 8<<20
+	runtime, err := NewLocalRuntime(t.Context(), tm, WithSessionResourcePolicy(policy))
 	require.NoError(t, err)
 	sess := session.New(session.WithID("contract-session"))
 	handle, err := runtime.CreateSession(t.Context(), sess, SessionBinding{AgentName: "contract"})
 	require.NoError(t, err)
 	local := handle.(*sessionHandle)
-	local.driver.events = newSessionEventHubWithLimits(64, 8<<20)
 	return sessionContractFixture{
 		handle: handle,
 		injectGap: func() {
