@@ -10,6 +10,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // echoModel is a tiny model used to unit-test the harness without pulling in
@@ -227,11 +229,14 @@ func TestDebugFramesDump(t *testing.T) {
 	*liveFrames = false
 	*dumpFrames = true
 
-	dir := filepath.Join(goldenDir, "frames", safeTestName(t.Name()))
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
 	d := New(t, &echoModel{}, 80, 24)
 	d.Type("x").WaitFor(Contains("later"))
+	d.stop()
+
+	sink, ok := d.sink.(*debugSink)
+	require.True(t, ok)
+	dir := sink.dumpDir
+	assert.Equal(t, t.ArtifactDir(), filepath.Dir(dir))
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -280,16 +285,41 @@ func TestDebugLiveFrames(t *testing.T) {
 	}
 }
 
-func TestSafeTestName(t *testing.T) {
-	t.Parallel()
+func TestDebugFrameDumpsAreIsolated(t *testing.T) {
+	origLive := *liveFrames
+	origDump := *dumpFrames
+	t.Cleanup(func() {
+		*liveFrames = origLive
+		*dumpFrames = origDump
+	})
+	*liveFrames = false
+	*dumpFrames = true
 
-	got := safeTestName(`TestFoo/bar baz:*`)
-	want := "TestFoo_bar_baz__"
-	if got != want {
-		t.Errorf("safeTestName = %q, want %q", got, want)
+	otherArtifact := filepath.Join(t.ArtifactDir(), "other.txt")
+	require.NoError(t, os.WriteFile(otherArtifact, []byte("keep"), 0o600))
+
+	first, ok := newDebugSink(t).(*debugSink)
+	require.True(t, ok)
+	first.frame("first frame")
+	require.NoError(t, first.err())
+
+	second, ok := newDebugSink(t).(*debugSink)
+	require.True(t, ok)
+	second.frame("second frame")
+	require.NoError(t, second.err())
+
+	assert.NotEqual(t, first.dumpDir, second.dumpDir)
+	for _, sink := range []*debugSink{first, second} {
+		assert.Equal(t, t.ArtifactDir(), filepath.Dir(sink.dumpDir))
 	}
-	if got := safeTestName(".."); got != "__" {
-		t.Errorf("safeTestName for dots = %q, want __", got)
+	for path, want := range map[string]string{
+		otherArtifact:                             "keep",
+		filepath.Join(first.dumpDir, "0001.txt"):  "first frame",
+		filepath.Join(second.dumpDir, "0001.txt"): "second frame",
+	} {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, want, string(got))
 	}
 }
 
