@@ -215,6 +215,8 @@ type chatPage struct {
 	messages  messages.Model
 	subagents *subagentindex.Index
 
+	chatPaneCache chatPaneCache
+
 	sessionState *service.SessionState
 
 	lastSidebarClick sidebarClick
@@ -922,6 +924,7 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return p, p.messages.UpdateAssistantMedia(msg.media)
 
 	case msgtypes.ThemeChangedMsg:
+		p.chatPaneCache = chatPaneCache{}
 		// Theme changed - forward to all child components to invalidate caches
 		var cmds []tea.Cmd
 
@@ -1055,10 +1058,7 @@ func (p *chatPage) View() string {
 
 	switch sl.mode {
 	case sidebarVertical:
-		chatView := styles.ChatStyle.
-			Height(sl.chatHeight).
-			Width(sl.chatWidth).
-			Render(messagesView)
+		chatView := p.renderChatPane(messagesView, sl.chatWidth, sl.chatHeight)
 
 		toggleCol := p.renderSidebarHandle(sl.chatHeight)
 
