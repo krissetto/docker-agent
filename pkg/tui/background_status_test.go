@@ -3,13 +3,17 @@ package tui
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/facade"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
 func subagentEvent(sessionID string, status facade.SubagentStatus) facade.Event {
@@ -95,4 +99,76 @@ func TestBackgroundStatusOpenedWithoutTabIsReleased(t *testing.T) {
 	assert.Nil(t, cmd)
 	assert.Equal(t, 1, closes, "a feed for a tab that no longer exists is released")
 	assert.Empty(t, m.backgroundStatusFeeds)
+}
+
+// lazyRestoreFixture builds n tabs with loaded sessions. pending marks tabs
+// whose session is still lazy, as restored tabs are until their first switch.
+func lazyRestoreFixture(t *testing.T, n int, pending []string) (*appModel, []string, *int) {
+	t.Helper()
+	m, _ := newPlansTestModel(t)
+	sv := supervisor.New(nil)
+	var tabs []string
+	m.supervisor = sv
+	m.pendingRestores = map[string]string{}
+	for range n {
+		sess := session.New()
+		tabID, err := sv.AddSession(t.Context(), app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), sess, "", nil)
+		require.NoError(t, err)
+		tabs = append(tabs, tabID)
+		m.chatPages[tabID] = &planSidebarTestPage{}
+	}
+	for _, tab := range pending {
+		m.pendingRestores[tab] = "saved-" + tab
+	}
+	var opens int
+	m.backgroundStatusOpen = func(string) tea.Cmd {
+		opens++
+		return func() tea.Msg { return nil }
+	}
+	return m, tabs, &opens
+}
+
+func TestBackgroundStatusOpensNoLazyRestoredTabs(t *testing.T) {
+	t.Parallel()
+	m, tabs, opens := lazyRestoreFixture(t, 5, nil)
+	for _, tab := range tabs {
+		m.pendingRestores[tab] = "saved-" + tab
+	}
+	cmd := m.ensureBackgroundStatusFeeds()
+	assert.Nil(t, cmd, "no restored tab subscribes before its first activation")
+	assert.Zero(t, *opens, "opening many restored tabs subscribes none")
+	assert.Empty(t, m.backgroundStatusPending)
+}
+
+func TestBackgroundStatusFirstActivationSubscribesOnce(t *testing.T) {
+	t.Parallel()
+	m, tabs, opens := lazyRestoreFixture(t, 3, nil)
+	for _, tab := range tabs {
+		m.pendingRestores[tab] = "saved-" + tab
+	}
+	m.ensureBackgroundStatusFeeds()
+	require.Zero(t, *opens)
+
+	// The first activation finishes loading the session and clears its marker.
+	first := tabs[1]
+	delete(m.pendingRestores, first)
+	m.ensureBackgroundStatusFeeds()
+	assert.Equal(t, 1, *opens, "the activated tab subscribes")
+	m.ensureBackgroundStatusFeeds()
+	assert.Equal(t, 1, *opens, "a repeated ensure does not subscribe again while the open is pending")
+	assert.True(t, m.backgroundStatusPending[first])
+	assert.False(t, m.backgroundStatusPending[tabs[0]], "the other lazy tabs stay unopened")
+}
+
+func TestBackgroundStatusDisposalClosesFeedOnly(t *testing.T) {
+	t.Parallel()
+	m, tabs, _ := lazyRestoreFixture(t, 2, nil)
+	var closes int
+	feed := fakeBackgroundFeed(&closes)
+	m.backgroundStatusFeeds = map[string]*backgroundStatusFeed{tabs[0]: feed}
+
+	m.disposeSessionComponents(tabs[0])
+	assert.Equal(t, 1, closes, "disposal closes the subscription")
+	assert.Empty(t, m.backgroundStatusFeeds)
+	assert.NotNil(t, m.supervisor.GetRunner(tabs[0]), "disposing the components leaves the runtime session supervised")
 }

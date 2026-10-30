@@ -163,8 +163,11 @@ type appModel struct {
 	planSidebarData messages.PlanSidebarDataMsg
 	// backgroundStatusFeeds holds one root-bound background subscription per tab;
 	// backgroundStatusPending marks tabs whose open is in flight.
-	backgroundStatusFeeds     map[string]*backgroundStatusFeed
-	backgroundStatusPending   map[string]bool
+	backgroundStatusFeeds   map[string]*backgroundStatusFeed
+	backgroundStatusPending map[string]bool
+	// backgroundStatusOpen overrides how a tab's feed is opened; tests use it to
+	// observe which tabs open. Nil uses the facade subscription.
+	backgroundStatusOpen      func(tabID string) tea.Cmd
 	sidebarPlanEditGeneration uint64
 	sidebarPlanEditInFlight   bool
 	planRefreshQueued         bool

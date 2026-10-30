@@ -124,8 +124,21 @@ func readBackgroundStatusCmd(tabID string, feed *backgroundStatusFeed) tea.Cmd {
 	}
 }
 
-// ensureBackgroundStatusFeeds opens a feed for every session tab that lacks
-// one. Opening is idempotent per tab while its open is pending.
+// backgroundStatusLive reports whether a tab's session is already loaded. A
+// restored tab stays lazy (pendingRestores set) until its first activation
+// loads it; subscribing to it earlier would restore the session, so it waits.
+func (m *appModel) backgroundStatusLive(tabID string) bool {
+	if m.pendingRestores[tabID] != "" {
+		return false
+	}
+	runner := m.supervisor.GetRunner(tabID)
+	return runner != nil && runner.App != nil && runner.App.Session() != nil
+}
+
+// ensureBackgroundStatusFeeds opens a feed for every loaded session tab that
+// lacks one. Opening is idempotent per tab while its open is pending. Lazy
+// restored tabs open when their first activation finishes loading, through the
+// switch that follows it.
 func (m *appModel) ensureBackgroundStatusFeeds() tea.Cmd {
 	if m.backgroundStatusFeeds == nil {
 		m.backgroundStatusFeeds = make(map[string]*backgroundStatusFeed)
@@ -133,12 +146,16 @@ func (m *appModel) ensureBackgroundStatusFeeds() tea.Cmd {
 	if m.backgroundStatusPending == nil {
 		m.backgroundStatusPending = make(map[string]bool)
 	}
+	open := m.backgroundStatusOpen
+	if open == nil {
+		open = m.openBackgroundStatusCmd
+	}
 	var cmds []tea.Cmd
 	for tabID := range m.chatPages {
-		if m.backgroundStatusFeeds[tabID] != nil || m.backgroundStatusPending[tabID] {
+		if m.backgroundStatusFeeds[tabID] != nil || m.backgroundStatusPending[tabID] || !m.backgroundStatusLive(tabID) {
 			continue
 		}
-		if cmd := m.openBackgroundStatusCmd(tabID); cmd != nil {
+		if cmd := open(tabID); cmd != nil {
 			m.backgroundStatusPending[tabID] = true
 			cmds = append(cmds, cmd)
 		}
