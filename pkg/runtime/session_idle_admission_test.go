@@ -16,9 +16,14 @@ func TestIdleSteerAcceptedEventFollowsDurablePromotion(t *testing.T) {
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
 	require.NoError(t, err)
 	driver := handle.(*sessionHandle).driver
-	// CreateSession's maintenance pass can wake the parked steer first; wait for
-	// it to drain so this Steer observes its own idle admission.
-	require.Eventually(t, func() bool { return driverDrained(driver) }, time.Second, time.Millisecond)
+	// CreateSession queues a scheduler scan asynchronously, and a point-in-time drain
+	// check cannot fence a scan that has not reserved yet. Retiring scheduler authority
+	// under registry.mu, as reclaim does, stops any later reservation from waking the
+	// parked steer; Done then covers a reservation made before retirement.
+	rt.sessionDrivers.mu.Lock()
+	driver.maintenanceRetired = true
+	rt.sessionDrivers.mu.Unlock()
+	waitClosed(t, driver.Done(), "create-time maintenance drained")
 	observation, err := handle.Observe(t.Context(), ObserveOptions{Buffer: 32})
 	require.NoError(t, err)
 	defer observation.Cancel()
