@@ -94,3 +94,17 @@ func TestPendingSpinnerDoesNotMergeDistinctMessageIDs(t *testing.T) {
 	require.Contains(t, ansi.Strip(p.messages.View()), "FINAL-ANSWER")
 	require.Equal(t, 2, p.messages.MessageTypeCount(types.MessageTypeAssistant))
 }
+
+func TestRestoredRuntimeIdentityReplayDoesNotDuplicateText(t *testing.T) {
+	t.Parallel()
+	p, sess := newContentTestPage(t)
+	msg := session.NewAgentMessage("root", &chatapi.Message{Role: chatapi.MessageRoleAssistant, MessageID: "answer", Content: "RESTORED-ANSWER"})
+	sess.AddMessage(msg)
+	p.messages.LoadFromSession(sess, nil)
+	before := p.messages.MessageTypeCount(types.MessageTypeAssistant)
+	for range 2 {
+		_, _ = p.handleRuntimeEvent(runtime.MessageAdded(sess.ID, msg, "root"))
+	}
+	require.Equal(t, before, p.messages.MessageTypeCount(types.MessageTypeAssistant))
+	require.Equal(t, 1, strings.Count(ansi.Strip(p.messages.View()), "RESTORED-ANSWER"))
+}
