@@ -3064,7 +3064,9 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			}
 			// Legacy aggregates cannot recover the original interleaving.
 			hasReasoning := smsg.Message.ReasoningContent != ""
-			hasContent := smsg.Message.Content != ""
+			// Tool-call XML is hidden exactly as the live stream hides it.
+			visibleContent := chat.VisibleAssistantContent(smsg.Message.Content)
+			hasContent := visibleContent != ""
 			hasToolCalls := len(smsg.Message.ToolCalls) > 0
 			var reasoningBlock *reasoningblock.Model
 
@@ -3091,7 +3093,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			// live behavior.
 			restoredMedia := generatedMedia[pos]
 			if hasContent || len(restoredMedia) > 0 {
-				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, smsg.Message.Content)
+				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, visibleContent)
 				m.responseGroups[msg] = replayResponseGroup
 				msg.AssistantMedia = restoredMedia
 				appendSessionMessage(msg, m.createMessageView(msg))
@@ -3439,7 +3441,7 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 			}
 		}
 	} else if event.Message != nil && event.Message.Message.Presentation == nil && len(event.Message.Message.ToolCalls) == 0 {
-		cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(event.GetAgentName(), event.Message.Message.Content, event.Message.Message.ReasoningContent, false))
+		cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(event.GetAgentName(), chat.VisibleAssistantContent(event.Message.Message.Content), event.Message.Message.ReasoningContent, false))
 	}
 	m.committedMessageCount = len(m.messages)
 	return cmd

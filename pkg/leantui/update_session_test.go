@@ -375,6 +375,25 @@ func TestLeanLoadClearsAndHydratesTranscript(t *testing.T) {
 	assert.Contains(t, lines, "loaded answer")
 }
 
+// A reloaded lean transcript hides tool-call XML just as the live stream does.
+func TestLeanLoadHidesToolCallXML(t *testing.T) {
+	m, handle := sessionModel(t)
+	loaded := session.New(session.WithID("loaded-xml"), session.WithAgentName("agent"), session.WithUserMessage("loaded user"))
+	loaded.AddMessage(session.NewAgentMessage("agent", &chat.Message{
+		Role:    chat.MessageRoleAssistant,
+		Content: `loaded answer <tool_call>{"name":"shell","arguments":{"cmd":"ls"}}</tool_call>`,
+	}))
+	handle.snapshot = loaded
+	sessions := m.app.SessionRuntime().(*leanSessions)
+	sessions.sessions = []runtime.SessionCatalogEntry{{SessionID: loaded.ID, WorkingDir: loaded.WorkingDir, Loadable: true}}
+
+	m.handleLoadSession(t.Context(), loaded.ID)
+
+	lines := strings.Join(m.screen.Transcript.Lines(80, 0, false, m.sessionState, nil), "\n")
+	assert.Contains(t, lines, "loaded answer")
+	assert.NotContains(t, lines, "<tool_call>")
+}
+
 func TestLeanModelCommandUsesActorCapability(t *testing.T) {
 	m, handle := sessionModel(t)
 
