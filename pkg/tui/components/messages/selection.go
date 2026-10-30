@@ -197,7 +197,7 @@ func (m *model) autoScroll() tea.Cmd {
 // selectWordAt selects the word at the given line and column position.
 // It reports whether a word was actually selected.
 func (m *model) selectWordAt(line, col int) bool {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 	if line < 0 || line >= m.totalHeight {
 		return false
 	}
@@ -248,7 +248,7 @@ func (m *model) selectWordAt(line, col int) bool {
 // selectLineAt selects the entire line at the given line position.
 // It reports whether a non-blank line was actually selected.
 func (m *model) selectLineAt(line int) bool {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 	if line < 0 || line >= m.totalHeight {
 		return false
 	}

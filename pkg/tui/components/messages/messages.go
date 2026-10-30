@@ -715,12 +715,16 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 	if msg.X == m.scrollview.ScrollbarX() && msg.Y >= m.yPos && msg.Y < m.yPos+m.height {
 		materializeCmd = m.materializeDeferredTailForInteraction()
 	}
-	if m.isMouseOnScrollbar(msg.X, msg.Y) {
-		return m.handleScrollviewUpdate(msg)
-	}
-
+	// Only the primary button drives scrollbar or text interactions; other
+	// buttons must not scroll the transcript through the scrollbar.
 	if msg.Button != tea.MouseLeft {
 		return m, nil
+	}
+	if m.isMouseOnScrollbar(msg.X, msg.Y) {
+		// Grabbing the thumb interrupts any text selection still held down.
+		// A selection begun after the grab is untouched by its release.
+		m.selection.end()
+		return m.handleScrollviewUpdate(msg)
 	}
 
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
@@ -861,7 +865,7 @@ func (m *model) globalLineToMessageLine(globalLine int) (msgIdx, localLine int, 
 // visual-only operation: it may restyle an already materialized line, but it
 // must not make offscreen content become geometry.
 func (m *model) globalLineToMessageLineCached(globalLine int) (msgIdx, localLine int) {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 	if m.replyHandoff.Active() {
 		start, end := m.replyHandoffBounds()
 		if globalLine >= start && globalLine < end {
@@ -1993,7 +1997,7 @@ func (m *model) scrollToSelectedMessage() {
 	}
 
 	// Ensure all items are rendered so lineOffsets and totalHeight are accurate
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 
 	if m.selectedMessageIndex >= len(m.lineOffsets) {
 		return
@@ -4145,6 +4149,7 @@ func (m *model) copyMessageToClipboard(msgIdx int) tea.Cmd {
 }
 
 func (m *model) mouseToLineCol(x, y int) (line, col int) {
+	m.updateScrollState()
 	adjustedX := max(0, x-m.xPos)
 	adjustedY := max(0, y-m.yPos)
 	return m.scrollOffset + adjustedY, adjustedX
@@ -4206,6 +4211,10 @@ func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if m.scrollview.IsDragging() {
 		materializeCmd = m.materializeDeferredTailForInteraction()
 	}
+	// Streaming can advance geometry without View, so hand the current
+	// transcript to the scrollview before the thumb geometry is read.
+	m.updateScrollState()
+	m.syncScrollviewContent()
 	_, cmd := m.scrollview.UpdateMouse(msg)
 	m.scrollOffset = m.scrollview.ScrollOffset()
 	if m.isAtBottom() {

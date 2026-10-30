@@ -233,7 +233,7 @@ func balanceParens(url string) string {
 
 // urlAt returns the URL at the given global line and display column, or empty string.
 func (m *model) urlAt(line, col int) string {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 	if line < 0 || line >= m.totalHeight {
 		return ""
 	}
@@ -251,7 +251,7 @@ func (m *model) urlAt(line, col int) string {
 
 // updateHoveredURL updates the hovered URL state based on mouse position.
 func (m *model) updateHoveredURL(line, col int) {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 
 	if line >= 0 && line < m.totalHeight {
 		rendered := m.renderedLine(line)
