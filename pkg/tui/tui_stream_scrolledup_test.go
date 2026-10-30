@@ -2,13 +2,16 @@ package tui
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	agentruntime "github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -22,7 +25,13 @@ func rootFrameWidths(frame string) []int {
 }
 
 func TestActualProgramScrolledUpStreamDefersOffscreenTail(t *testing.T) {
-	root, _, _ := wallClockRoot(t, 120, 40)
+	// The fixture's first start message begins a reply handoff whose fade is
+	// driven by animation ticks. The fixture discards command results, so the
+	// wall-clock tick scheduled by that first Continue is never delivered and a
+	// wall-clock runtime would stay at t=0 forever. A test-owned scheduler keeps
+	// the lease and lets the test deliver it.
+	sched := &manualTickScheduler{now: time.Unix(1, 0)}
+	root, _, _ := harnessRoot(t, 120, 40, animation.NewRuntimeWithScheduler(sched))
 	sess, _, _ := mixedHistorySession(1000)
 	root.application.Session().Messages = sess.Messages
 	_ = root.chatPage.Init()
@@ -36,7 +45,10 @@ func TestActualProgramScrolledUpStreamDefersOffscreenTail(t *testing.T) {
 
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
 	writer := &wallClockCountingWriter{}
-	program := startStreamingMotionProgram(t, model, tea.WithOutput(writer))
+	wrapped := &scrolledUpStreamModel{streamingMotionModel: model}
+	program := startTestProgram(t, root, wrapped, tea.WithOutput(writer))
+	<-model.ready
+	driveReplyHandoffToIdle(t, program, sched)
 	waitForProgramQuiescence(t, model, writer)
 	baselineWrites := writer.writes.Load()
 	baselineCompositions := model.compositions.Load()
@@ -82,4 +94,79 @@ func TestActualProgramScrolledUpStreamDefersOffscreenTail(t *testing.T) {
 	content = make(chan string)
 	program.Send(streamingMotionRead{content: content})
 	require.Contains(t, <-content, "offscreen", "End must reveal exact content finalized at stream stop")
+}
+
+// manualTickScheduler delivers animation ticks only when the test asks, one
+// frame at a time, so the reply handoff advances deterministically.
+type manualTickScheduler struct {
+	mu      sync.Mutex
+	now     time.Time
+	pending func(time.Time) tea.Msg
+}
+
+func (s *manualTickScheduler) Now() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.now
+}
+
+func (s *manualTickScheduler) Tick(_ time.Duration, createMsg func(time.Time) tea.Msg) tea.Cmd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending = createMsg
+	return nil
+}
+
+// deliverNext returns the outstanding tick lease as a message, or nil when the
+// runtime holds no lease.
+func (s *manualTickScheduler) deliverNext() tea.Msg {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		return nil
+	}
+	s.now = s.now.Add(animation.TickRate)
+	create := s.pending
+	s.pending = nil
+	return create(s.now)
+}
+
+// handoffIdleRead asks the program goroutine whether the reply handoff is idle.
+type handoffIdleRead struct{ idle chan bool }
+
+type scrolledUpStreamModel struct{ *streamingMotionModel }
+
+func (d *scrolledUpStreamModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if read, ok := msg.(handoffIdleRead); ok {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		idle := false
+		if owner, ok := d.root.chatPage.(interface{ ReplyHandoffActive() bool }); ok {
+			idle = !owner.ReplyHandoffActive()
+		}
+		read.idle <- idle
+		return d, nil
+	}
+	_, cmd := d.streamingMotionModel.Update(msg)
+	return d, cmd
+}
+
+// driveReplyHandoffToIdle delivers one tick at a time and waits for the program
+// to process each one before checking the handoff. Each delivery is followed by
+// a request/reply on the program goroutine, so the check is ordered after the
+// tick's Update.
+func driveReplyHandoffToIdle(t *testing.T, program *tea.Program, sched *manualTickScheduler) {
+	t.Helper()
+	const maxFrames = 1000
+	for frame := 0; frame <= maxFrames; frame++ {
+		idle := make(chan bool, 1)
+		program.Send(handoffIdleRead{idle: idle})
+		if <-idle {
+			return
+		}
+		tick := sched.deliverNext()
+		require.NotNil(t, tick, "reply handoff is active but the animation runtime holds no tick lease")
+		program.Send(tick)
+	}
+	t.Fatalf("reply handoff did not reach idle within %d frames", maxFrames)
 }
