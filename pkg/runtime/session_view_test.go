@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 )
@@ -152,7 +153,19 @@ func TestSessionViewLegacyNestedBatchDormancyAndResumeAddressedOnly(t *testing.T
 	child.AddMessage(input)
 	require.NoError(t, store.AddSession(t.Context(), root))
 	require.NoError(t, store.AddSession(t.Context(), child))
-	rt, owner := coordinationRuntime(t, store, coordinationReply("received"), coordinationReply("done"))
+	worker := coordinationReply("done")
+	workerEntered, releaseWorker := make(chan struct{}), make(chan struct{})
+	var enterOnce sync.Once
+	worker.call = func(ctx context.Context, _ []chat.Message) (chat.MessageStream, error) {
+		enterOnce.Do(func() { close(workerEntered) })
+		select {
+		case <-releaseWorker:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return newStreamBuilder().AddContent("done").AddStopWithUsage(1, 1).Build(), nil
+	}
+	rt, owner := coordinationRuntime(t, store, coordinationReply("received"), worker)
 	rootNode := subagent.SessionRootID(root.ID)
 	tree := subagent.Snapshot{Version: subagent.SnapshotVersion, Root: rootNode, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootNode, Agent: "root"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", SessionID: child.ID, Parent: rootNode, Agent: "worker", State: subagent.NodeIdle}}}}}}
 	require.NoError(t, rt.subagentStore.SaveTree(t.Context(), root.ID, tree))
@@ -173,18 +186,21 @@ func TestSessionViewLegacyNestedBatchDormancyAndResumeAddressedOnly(t *testing.T
 	assert.True(t, committed.SessionHandle.(*sessionHandle).driver.Status().Dormant)
 	_, err = committed.SessionHandle.Edit(t.Context(), SessionEdit{Kind: SessionEditResume})
 	require.NoError(t, err)
+	// Hold the child's model call so the parent is observed before the child
+	// turn completes. Completion is what authorizes the parent's one-report wake.
+	coordinationWait(t, workerEntered)
+	parentDriver := parent.(*sessionHandle).driver
+	parentStatus := parentDriver.Status()
+	assert.True(t, parentStatus.Dormant, "a running child turn does not wake the dormant parent")
+	assert.Zero(t, parentStatus.Pending)
+	assert.Empty(t, parentStatus.TurnID, "the parent starts no turn before the child completes")
+	close(releaseWorker)
 	coordinationAwait(t, committed.SessionHandle, "child-pending")
-	assert.True(t, parent.(*sessionHandle).driver.Status().Dormant)
-	reports, err := store.(session.CoordinationStore).PendingReports(t.Context(), root.ID)
-	require.NoError(t, err)
-	require.Len(t, reports, 1, "dormant parent leaves completion report unacknowledged")
-	_, err = parent.Edit(t.Context(), SessionEdit{Kind: SessionEditResume})
-	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		remaining, err := store.(session.CoordinationStore).PendingReports(t.Context(), root.ID)
-		return err == nil && len(remaining) == 0
-	}, time.Second, time.Millisecond)
-	coordinationAwait(t, parent, "report:"+reports[0].ID)
+		return err == nil && len(remaining) == 0 && !parentDriver.Status().Dormant
+	}, 5*time.Second, time.Millisecond, "the authorized completion report wakes the parent without an explicit resume")
+	coordinationAwait(t, parent, "report:"+childReportID(child.ID, "child-pending"))
 }
 
 func TestSessionViewConcurrentCommittedOwnerReuse(t *testing.T) {
