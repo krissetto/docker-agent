@@ -290,6 +290,13 @@ func (d *toolConfirmationDialog) response(request runtime.ResumeRequest) tuimess
 	}
 }
 
+// closeCmd closes this confirmation by instance. A bare CloseDialogMsg would
+// close whatever is on top when it is delivered, which can be a newer
+// confirmation that opened after this one was answered.
+func (d *toolConfirmationDialog) closeCmd() tea.Cmd {
+	return core.CmdHandler(CloseDialogByModelMsg{Model: d})
+}
+
 // OutsideClickDismissCmd keeps this mandatory decision open on outside clicks.
 func (d *toolConfirmationDialog) OutsideClickDismissCmd() tea.Cmd { return nil }
 
@@ -300,7 +307,7 @@ func (d *toolConfirmationDialog) CancelDialogCmd() tea.Cmd {
 		return nil
 	}
 	return tea.Sequence(
-		core.CmdHandler(CloseDialogMsg{}),
+		d.closeCmd(),
 		core.CmdHandler(d.response(toolconfirm.Reject.Resume("", ""))),
 	)
 }
@@ -317,12 +324,12 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 	switch decision {
 	case toolconfirm.Approve:
 		return d, tea.Sequence(
-			core.CmdHandler(CloseDialogMsg{}),
+			d.closeCmd(),
 			core.CmdHandler(d.response(toolconfirm.Approve.Resume("", ""))),
 		)
 	case toolconfirm.ApproveTool:
 		return d, tea.Sequence(
-			core.CmdHandler(CloseDialogMsg{}),
+			d.closeCmd(),
 			core.CmdHandler(d.response(toolconfirm.ApproveTool.Resume(d.permissionPattern, ""))),
 		)
 	case toolconfirm.ApproveBalanced:
@@ -333,13 +340,13 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 		// Mirrors ApproveSession setting it true below.
 		d.sessionState.SetYoloMode(false)
 		return d, tea.Sequence(
-			core.CmdHandler(CloseDialogMsg{}),
+			d.closeCmd(),
 			core.CmdHandler(d.response(toolconfirm.ApproveBalanced.Resume("", ""))),
 		)
 	case toolconfirm.ApproveSession:
 		d.sessionState.SetYoloMode(true)
 		return d, tea.Sequence(
-			core.CmdHandler(CloseDialogMsg{}),
+			d.closeCmd(),
 			core.CmdHandler(d.response(toolconfirm.ApproveSession.Resume("", ""))),
 		)
 	}
