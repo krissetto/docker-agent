@@ -196,7 +196,7 @@ func startServer(t *testing.T, ctx context.Context, agentsDir string) string {
 	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
-	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")
+	socketPath := unixSocketURL(t)
 	ln, err := Listen(ctx, socketPath)
 	require.NoError(t, err)
 	go func() {
@@ -277,9 +277,6 @@ func unmarshal(t *testing.T, buf []byte, v any) {
 // the whole duration of the HTTP reads. Every update stores an (n, 2n)
 // token pair, so the single-snapshot invariant output == 2*input holds in
 // every response regardless of scheduling.
-//
-// The name is kept short: it feeds t.TempDir(), which becomes a unix socket
-// path bounded by sun_path (104 bytes on macOS).
 func TestServer_GetSessionsRace(t *testing.T) {
 	t.Parallel()
 
@@ -424,6 +421,14 @@ func httpRaw(t *testing.T, ctx context.Context, method, socketPath, path string,
 	}{StatusCode: resp.StatusCode, body: string(buf)}
 }
 
+// unixSocketURL returns a unix:// listen address whose socket lives under
+// shortTempDir. t.TempDir() embeds the test name and $GOTMPDIR, which can push
+// the path past the unix sun_path limit (104 bytes on macOS, 108 on Linux).
+func unixSocketURL(t *testing.T) string {
+	t.Helper()
+	return "unix://" + filepath.Join(shortTempDir(t), "sock")
+}
+
 func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, store session.Store) string {
 	t.Helper()
 
@@ -434,7 +439,7 @@ func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, s
 	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
-	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")
+	socketPath := unixSocketURL(t)
 	ln, err := Listen(ctx, socketPath)
 	require.NoError(t, err)
 	go func() {

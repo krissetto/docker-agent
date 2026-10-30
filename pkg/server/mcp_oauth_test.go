@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,7 +47,7 @@ func startServerBare(t *testing.T, ctx context.Context) string {
 	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
-	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")
+	socketPath := unixSocketURL(t)
 	ln, err := Listen(ctx, socketPath)
 	require.NoError(t, err)
 	go func() { <-ctx.Done(); _ = ln.Close() }()
@@ -61,9 +60,6 @@ func startServerBare(t *testing.T, ctx context.Context) string {
 // pkg/tools/mcp. The server-side tests here focus on the input
 // validation and the 404 response shape so the embedder's HTTP client
 // can rely on it.
-
-// Short test names because the macOS unix-socket path limit (104 bytes)
-// includes t.TempDir() which embeds the test name.
 
 func TestMcpOAuthCb_Unknown(t *testing.T) {
 	t.Parallel()
