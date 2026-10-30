@@ -84,7 +84,9 @@ type sequencedSessionEventSubscriber struct {
 }
 
 type inflightAssistant struct {
-	agentName     string
+	agentName string
+	// messageID is the identity of the assistant message being streamed ("" when unknown).
+	messageID     string
 	parts         []chat.AssistantPart
 	text          chat.AssistantTextAppender
 	resolvedBytes int
@@ -356,9 +358,9 @@ func (h *sessionEventHub) liveSeedWithCloneLocked(sessionID string, clone bool) 
 	for _, part := range parts {
 		switch part.Type {
 		case chat.AssistantPartReasoning:
-			seed = append(seed, AgentChoiceReasoning(h.inflight[sessionID].agentName, sessionID, part.Text))
+			seed = append(seed, AgentChoiceReasoning(h.inflight[sessionID].agentName, sessionID, part.Text, h.inflight[sessionID].messageID))
 		case chat.AssistantPartContent:
-			seed = append(seed, AgentChoice(h.inflight[sessionID].agentName, sessionID, part.Text))
+			seed = append(seed, AgentChoice(h.inflight[sessionID].agentName, sessionID, part.Text, h.inflight[sessionID].messageID))
 		case chat.AssistantPartToolCall:
 			if part.Tool != nil {
 				definition := part.Tool.Definition
@@ -626,12 +628,18 @@ func (h *sessionEventHub) trackInflightLocked(sessionID string, event Event) {
 		if e.Content != "" {
 			st := h.inflightLocked(sessionID)
 			st.agentName = e.AgentName
+			if e.MessageID != "" {
+				st.messageID = e.MessageID
+			}
 			st.parts = st.text.Append(st.parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
 		}
 	case *AgentChoiceReasoningEvent:
 		if e.Content != "" {
 			st := h.inflightLocked(sessionID)
 			st.agentName = e.AgentName
+			if e.MessageID != "" {
+				st.messageID = e.MessageID
+			}
 			st.parts = st.text.Append(st.parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
 		}
 	case *MessageAddedEvent:

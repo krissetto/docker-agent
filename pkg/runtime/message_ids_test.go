@@ -209,3 +209,26 @@ func TestPersistentMessageIDsHarnessFinalization(t *testing.T) {
 	assert.Equal(t, "harness-id", msgs[0].Message.MessageID)
 	assert.Equal(t, "answer", msgs[0].Message.Content)
 }
+
+// A subscriber that joins mid-stream receives the in-flight chunks with the
+// identity of the message they belong to.
+func TestLateSubscriberSeedCarriesStreamIdentity(t *testing.T) {
+	t.Parallel()
+	h := newSessionEventHubWithLimits(64, 1<<20)
+	h.Publish("late", StreamStarted("late", "root"))
+	h.Publish("late", AgentChoiceReasoning("root", "late", "why", "seed-id"))
+	h.Publish("late", AgentChoice("root", "late", "hi", "seed-id"))
+	seed, _, cancel := h.Subscribe("late", 8)
+	t.Cleanup(cancel)
+	var ids []string
+	for _, ev := range seed {
+		switch e := ev.(type) {
+		case *AgentChoiceEvent:
+			ids = append(ids, e.MessageID)
+		case *AgentChoiceReasoningEvent:
+			ids = append(ids, e.MessageID)
+		}
+	}
+	require.Len(t, ids, 2)
+	assert.Equal(t, []string{"seed-id", "seed-id"}, ids)
+}
