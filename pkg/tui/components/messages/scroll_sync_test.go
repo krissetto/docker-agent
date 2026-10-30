@@ -120,42 +120,6 @@ func TestScrollbarUsesCurrentGeometryBeforeView(t *testing.T) {
 	}
 }
 
-func TestScrollToBottomReconcilesDirtyGeometry(t *testing.T) {
-	t.Parallel()
-	// Blocked on B3 (blurred View deferral): the setup assumes the blurred view
-	// invalidates totalHeight on append. Branch-equivalent coverage that passes
-	// is TestScrollToBottomReconcilesInvalidatedGeometry.
-	t.Skip("depends on B3 blurred-view deferral; see TestScrollToBottomReconcilesInvalidatedGeometry")
-
-	for _, hover := range []bool{false, true} {
-		t.Run(map[bool]string{false: "without hover", true: "with hover"}[hover], func(t *testing.T) {
-			m := NewScrollableView(animation.NewRuntime(), 80, 12, &service.SessionState{}).(*model)
-			t.Cleanup(m.ar.Stop)
-			m.AppendToLastMessage("root", "START-OF-CONVERSATION\n\n"+strings.Repeat("history paragraph\n\n", 40))
-			m.AddAssistantMessage("root", "")
-			m.View()
-			require.Positive(t, m.scrollOffset)
-
-			// Replacing the spinner invalidates geometry while blurred View is deferred.
-			m.AppendToLastMessage("root", "LATEST-RESPONSE\n\n")
-			require.Zero(t, m.totalHeight)
-			_, _ = m.Update(m.ScrollToBottom()())
-			require.Positive(t, m.scrollOffset, "bottom-scroll must not clamp against invalidated height")
-			if hover {
-				_, _ = m.Update(tea.MouseMotionMsg{X: 20, Y: 6})
-			}
-			frame := m.View()
-			require.Contains(t, frame, "LATEST-RESPONSE")
-			require.NotContains(t, frame, "START-OF-CONVERSATION")
-			require.False(t, m.userHasScrolled)
-			require.Equal(t, m.totalScrollableHeight()-m.height, m.scrollOffset)
-
-			m.AppendToLastMessage("root", strings.Repeat("new paragraph\n\n", 20)+"STILL-FOLLOWING\n\n")
-			require.Contains(t, m.View(), "STILL-FOLLOWING")
-		})
-	}
-}
-
 func TestInteractionReconcilesDirtyGeometryWithoutScrollCommand(t *testing.T) {
 	t.Parallel()
 

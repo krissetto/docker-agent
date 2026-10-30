@@ -15,7 +15,7 @@ import (
 // Branch-adapted form of upstream TestScrollToBottomReconcilesDirtyGeometry.
 // The branch invalidates geometry through SessionToggleChangedMsg, not
 // upstream's blurred-view deferral (B3). Every upstream assertion is kept.
-func TestScrollToBottomReconcilesDirtyGeometryBranch(t *testing.T) {
+func TestScrollToBottomReconcilesDirtyGeometry(t *testing.T) {
 	t.Parallel()
 
 	for _, hover := range []bool{false, true} {
