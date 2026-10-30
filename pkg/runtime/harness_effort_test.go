@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -132,4 +133,66 @@ func TestHarnessAgentInfoShowsSessionEffort(t *testing.T) {
 	_, teamInfo = collectAgentInfo(func(sink EventSink) { h.EmitPinnedAgentInfo(t.Context(), sink) })
 	require.NotNil(t, teamInfo)
 	assert.Equal(t, "max", teamInfo.AvailableAgents[0].Thinking)
+}
+
+// TestHarnessEffortConcurrentSessionsStayIsolated drives two sessions of the
+// same harness agent from concurrent goroutines. Each keeps its own choice, and
+// the shared configuration is never written, so -race stays quiet.
+func TestHarnessEffortConcurrentSessionsStayIsolated(t *testing.T) {
+	t.Parallel()
+
+	r, root := newClaudeCodeEffortRuntime(t)
+	first := claudeCodeSession(t, r)
+	second := claudeCodeSession(t, r)
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := first.SetThinkingLevel(t.Context(), effort.High)
+			assertStaleOrNil(t, err)
+			_ = first.CurrentThinkingLevel(t.Context())
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := second.CycleThinkingLevel(t.Context())
+			assertStaleOrNil(t, err)
+			_ = harnessConfigFor(second.driver.scopeModels(t.Context()), root)
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, effort.High, first.CurrentThinkingLevel(t.Context()))
+	assert.Contains(t, harnessEffortLevels, second.CurrentThinkingLevel(t.Context()), "twenty cycles leave the second session on a harness level")
+	assert.Empty(t, root.Harness().Effort, "the shared configuration stays untouched under concurrent sessions")
+}
+
+// assertStaleOrNil accepts a concurrent mutation that lost the binding race:
+// the stale guard rejects it, as it does for a concurrent model override.
+func assertStaleOrNil(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	var sessionErr *SessionError
+	if assert.ErrorAs(t, err, &sessionErr) {
+		assert.Equal(t, SessionErrorStale, sessionErr.Kind)
+	}
+}
+
+// TestHarnessEffortRunConfigIsACopy checks that the run configuration is a copy:
+// editing it never reaches the agent's own configuration.
+func TestHarnessEffortRunConfigIsACopy(t *testing.T) {
+	t.Parallel()
+
+	r, root := newClaudeCodeEffortRuntime(t)
+	h := claudeCodeSession(t, r)
+	_, err := h.SetThinkingLevel(t.Context(), effort.Max)
+	require.NoError(t, err)
+
+	scoped := harnessConfigFor(h.driver.scopeModels(t.Context()), root)
+	assert.NotSame(t, root.Harness(), scoped)
+	scoped.Effort = "low"
+	assert.Empty(t, root.Harness().Effort)
 }
