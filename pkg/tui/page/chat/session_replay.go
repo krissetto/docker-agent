@@ -27,8 +27,10 @@ type replayPreparedMsg struct {
 	media       map[int][]types.AssistantMedia
 	requests    []generatedMediaRequest
 }
-type replayContinueMsg struct{ generation uint64 }
-type historyContinueMsg struct{ generation uint64 }
+type (
+	replayContinueMsg  struct{ generation uint64 }
+	historyContinueMsg struct{ generation uint64 }
+)
 
 type pageReplay struct {
 	metadataApplied bool
