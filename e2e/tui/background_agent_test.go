@@ -25,6 +25,7 @@ import (
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	"github.com/docker/docker-agent/pkg/tui"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // This file covers the background-agent journey end to end through the real
@@ -128,6 +129,7 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) (*tuitest.Driver, *r
 	t.Helper()
 
 	isolateState(t)
+	enableAgentContextReadings(t)
 
 	rootProv := &scriptedProvider{
 		id:          "test/fake-root",
@@ -224,6 +226,15 @@ func TestBackgroundAgent_InspectorShowsWorkerContext(t *testing.T) {
 		WaitFor(tuitest.Contains("Context: 450 of 1.0K tokens (45%)"))
 }
 
+// enableAgentContextReadings persists show_agent_context, which is off by
+// default, so the sidebar renders each agent's context fill. The config dir is
+// already isolated by isolateState, and tui.New reads the setting at startup.
+func enableAgentContextReadings(t *testing.T) {
+	t.Helper()
+	cfg := &userconfig.Config{Settings: &userconfig.Settings{ShowAgentContext: true}}
+	require.NoError(t, cfg.Save())
+}
+
 // expandSettledWorkerTree explicitly opens the subagent tree once it has
 // auto-collapsed after the worker settled. The tree is never open beforehand
 // (fresh fixture, no user toggle), so the test waits for the collapsed header
@@ -233,7 +244,7 @@ func expandSettledWorkerTree(t *testing.T, d *tuitest.Driver) *tuitest.Driver {
 	d.WaitFor(tuitest.Matches(`1 subagents\s+›`))
 	d.ClickText("1 subagents")
 	return d.WaitFor(tuitest.Matches(`1 subagents\s+⌄`)).
-		WaitFor(tuitest.Matches(`worker\s+(idle|completed)`))
+		WaitFor(tuitest.Matches(`worker\s+(\d+%\s+)?(idle|completed)`))
 }
 
 // requireWorkerSettled waits on the canonical subagent tree, not a frame, so the
