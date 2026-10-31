@@ -24,8 +24,10 @@ import (
 	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
 )
 
-type SessionToolsInfo = api.SessionToolsInfo
-type SessionToolsetStatus = api.SessionToolsetStatus
+type (
+	SessionToolsInfo     = api.SessionToolsInfo
+	SessionToolsetStatus = api.SessionToolsetStatus
+)
 
 type SessionToolInspector interface {
 	InspectTools(context.Context) (SessionToolsInfo, error)
@@ -126,10 +128,12 @@ type SessionMCPPrompts interface {
 	MCPPrompts(context.Context) (map[string]tools.PromptInfo, error)
 	ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error)
 }
-type BranchOptions = api.SessionBranchRequest
-type SessionBrancher interface {
-	BranchSession(context.Context, string, BranchOptions) (SessionHandle, *session.Session, error)
-}
+type (
+	BranchOptions   = api.SessionBranchRequest
+	SessionBrancher interface {
+		BranchSession(context.Context, string, BranchOptions) (SessionHandle, *session.Session, error)
+	}
+)
 
 // SnapshotProof proves a positional cut refers to exactly the displayed item
 // sequence, including summaries and embedded sub-sessions. Safety and other
@@ -181,6 +185,7 @@ func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, err
 	}
 	return out, nil
 }
+
 func (h *sessionHandle) RestartToolset(ctx context.Context, name string) error {
 	binding := h.driver.activeBinding()
 	a, err := h.runtime.teamForSession(h.driver.session()).Agent(binding.agentName)
@@ -202,6 +207,7 @@ func (h *sessionHandle) RestartToolset(ctx context.Context, name string) error {
 	}
 	return sessionUnsupported(h.ID(), "restart_toolset")
 }
+
 func (h *sessionHandle) EffectivePermissions(ctx context.Context) (SessionPermissionsInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return SessionPermissionsInfo{}, err
@@ -242,6 +248,7 @@ func (h *sessionHandle) boundPrompts(ctx context.Context) (map[string]boundPromp
 	}
 	return result, h.driver.validateBinding(ctx, binding)
 }
+
 func (h *sessionHandle) MCPPrompts(ctx context.Context) (map[string]tools.PromptInfo, error) {
 	prompts, err := h.boundPrompts(ctx)
 	if err != nil {
@@ -253,6 +260,7 @@ func (h *sessionHandle) MCPPrompts(ctx context.Context) (map[string]tools.Prompt
 	}
 	return out, nil
 }
+
 func (h *sessionHandle) ExecuteMCPPrompt(ctx context.Context, key string, args map[string]string) (string, error) {
 	prompts, err := h.boundPrompts(ctx)
 	if err != nil {
@@ -322,6 +330,7 @@ func (v *localSessionRuntimeView) BranchSession(ctx context.Context, id string, 
 	handle, err := v.CreateSession(ctx, branched, SessionBinding{AgentName: branched.AgentName, Model: model})
 	return handle, branched, err
 }
+
 func (r *LocalRuntime) BranchSession(ctx context.Context, id string, options BranchOptions) (SessionHandle, *session.Session, error) {
 	return (&localSessionRuntimeView{runtime: r}).BranchSession(ctx, id, options)
 }
