@@ -206,6 +206,7 @@ func (r *LocalRuntime) runLiveCompactionRequest(ctx context.Context, sess *sessi
 		}
 		req.events.Emit(event)
 	})
+	ctx = r.withManualCompactionScope(ctx, sess, sink)
 	r.compactWithReason(ctx, sess, req.additionalPrompt, compactionReasonManual, sink)
 	if !completed {
 		req.events.Emit(SessionCompactionCompleted(sess.ID, CompactionOutcomeSkipped, r.sessionAgentName(sess)))

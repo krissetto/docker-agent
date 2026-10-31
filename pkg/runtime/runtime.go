@@ -2616,7 +2616,36 @@ func (r *LocalRuntime) startSpan(ctx context.Context, name string, opts ...trace
 // Internal callers (proactive threshold, overflow recovery) use
 // [LocalRuntime.compactWithReason] directly to forward a more specific reason.
 func (r *LocalRuntime) Summarize(ctx context.Context, sess *session.Session, additionalPrompt string, events EventSink) {
+	ctx = r.withManualCompactionScope(ctx, sess, events)
 	r.compactWithReason(ctx, sess, additionalPrompt, compactionReasonManual, events)
+}
+
+// withManualCompactionScope gives a manual compaction the tool callback scope
+// a turn has: it bypasses runStreamLoop, yet its hooks and native compaction
+// may start tools that elicit, sample or complete OAuth. A compaction already
+// running inside a turn keeps that turn's scope.
+func (r *LocalRuntime) withManualCompactionScope(ctx context.Context, sess *session.Session, events EventSink) context.Context {
+	if tools.HasHandlerScope(ctx) {
+		return ctx
+	}
+	ctx = genai.WithConversationID(ctx, sess.ID)
+	a := r.resolveSessionAgentContext(ctx, sess)
+	ctx = tools.WithHandlerScope(ctx, tools.HandlerScope{
+		Elicitation:               r.elicitationHandler,
+		Sampling:                  r.samplingHandler,
+		SamplingWithTools:         r.samplingWithToolsHandler,
+		ManagedOAuth:              r.managedOAuth,
+		UnmanagedOAuthRedirectURI: r.unmanagedOAuthRedirectURI,
+		OAuthSuccess: func() {
+			if a != nil {
+				nonBlocking(events).Emit(Authorization(tools.ElicitationActionAccept, a.Name()))
+			}
+		},
+	})
+	if a != nil {
+		r.configureToolsetHandlers(a)
+	}
+	return ctx
 }
 
 // compactWithReason runs a session compaction with the supplied reason and
