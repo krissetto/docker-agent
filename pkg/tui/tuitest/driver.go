@@ -68,6 +68,20 @@ type Driver struct {
 type frameStore struct {
 	mu     sync.Mutex
 	frames []string
+	raw    string // latest frame with ANSI styling preserved
+}
+
+// setRaw must run before push: push is what WaitFor and sendSync observe.
+func (s *frameStore) setRaw(raw string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.raw = raw
+}
+
+func (s *frameStore) latestRaw() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.raw
 }
 
 func (s *frameStore) push(frame string) {
@@ -266,6 +280,12 @@ func (d *Driver) Frame() string {
 	return d.frames.latest()
 }
 
+// RawFrame returns the latest frame with ANSI styling preserved. Use it only
+// to assert styling, such as hover colors; text assertions belong on Frame.
+func (d *Driver) RawFrame() string {
+	return d.frames.latestRaw()
+}
+
 // WaitFor polls the latest frame until m passes or the timeout elapses. On
 // timeout it fails the test with the last frame for context.
 func (d *Driver) WaitFor(m Matcher) *Driver {
@@ -329,13 +349,15 @@ type captureModel struct {
 }
 
 func (c *captureModel) recordFrame() {
-	frame := stripFrame(c.inner.View())
+	view := c.inner.View()
+	frame := stripFrame(view)
 	// Feed the sink before the store: the store push is what sendSync/WaitFor
 	// synchronize on, so any sink side effect (dump file, live output) must be
 	// complete by the time a test observes the frame and inspects that output.
 	if c.sink != nil {
 		c.sink.frame(frame)
 	}
+	c.frames.setRaw(view.Content)
 	c.frames.push(frame)
 }
 
