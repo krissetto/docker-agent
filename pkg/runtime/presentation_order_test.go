@@ -39,9 +39,12 @@ func TestAssistantPresentationStreamAndPersistence(t *testing.T) {
 			res, err := handleStream(t.Context(), nil, builder.Build(), a, []tools.Tool{{Name: "read"}}, sess, nil, defaultTelemetry{}, sink, time.Second)
 			require.NoError(t, err)
 			expected := []chat.AssistantPart{
-				{Type: chat.AssistantPartContent, Text: "before"}, {Type: chat.AssistantPartReasoning, Text: "think"},
-				{Type: chat.AssistantPartToolCall, ToolCallID: "call"}, {Type: chat.AssistantPartContent, Text: "between"},
-				{Type: chat.AssistantPartReasoning, Text: "again"}, {Type: chat.AssistantPartContent, Text: "after"},
+				{Type: chat.AssistantPartContent, Text: "before"},
+				{Type: chat.AssistantPartReasoning, Text: "think"},
+				{Type: chat.AssistantPartToolCall, ToolCallID: "call"},
+				{Type: chat.AssistantPartContent, Text: "between"},
+				{Type: chat.AssistantPartReasoning, Text: "again"},
+				{Type: chat.AssistantPartContent, Text: "after"},
 			}
 			got, err := store.GetSession(t.Context(), sess.ID)
 			require.NoError(t, err)
@@ -133,16 +136,20 @@ func (p presentationHarness) Run(_ context.Context, _ string, emit func(harness.
 	}
 	return nil
 }
-func (p presentationHarness) Resume(ctx context.Context, _ string, prompt string, emit func(harness.Event)) error {
+
+func (p presentationHarness) Resume(ctx context.Context, _, prompt string, emit func(harness.Event)) error {
 	return p.Run(ctx, prompt, emit)
 }
 
 func TestAssistantPresentationHarness(t *testing.T) {
 	t.Parallel()
 	provider := presentationHarness{events: []harness.Event{
-		{Type: harness.EventText, Text: "before"}, {Type: harness.EventReasoning, Reasoning: "think"},
-		{Type: harness.EventToolCallStart, ToolID: "a", ToolName: "read"}, {Type: harness.EventText, Text: "after"},
-		{Type: harness.EventToolCallDelta, ToolID: "a", ToolArgs: "{}"}, {Type: harness.EventToolCall, ToolID: "a", ToolName: "read", ToolArgs: "{}"},
+		{Type: harness.EventText, Text: "before"},
+		{Type: harness.EventReasoning, Reasoning: "think"},
+		{Type: harness.EventToolCallStart, ToolID: "a", ToolName: "read"},
+		{Type: harness.EventText, Text: "after"},
+		{Type: harness.EventToolCallDelta, ToolID: "a", ToolArgs: "{}"},
+		{Type: harness.EventToolCall, ToolID: "a", ToolName: "read", ToolArgs: "{}"},
 		{Type: harness.EventToolResult, ToolID: "a", ToolOutput: "result", ToolError: true},
 	}}
 	a := agent.New("root", "test", agent.WithHarness(&latest.HarnessConfig{Type: "test"}))
