@@ -37,7 +37,18 @@ type routedModel struct {
 	cfg latest.ModelConfig
 }
 
-func (r routedModel) BaseConfig() base.Config { return base.Config{ModelConfig: r.cfg} }
+// BaseConfig gives the fixture the rebuild path a production provider has, so
+// compaction can clone it. The clone is another routedModel over the same
+// scripted Model, so queued scripts (and the summary a compaction consumes)
+// stay shared with the original.
+func (r routedModel) BaseConfig() base.Config {
+	return base.Config{
+		ModelConfig: r.cfg,
+		RebuildProvider: func(_ context.Context, cfg *latest.ModelConfig, _ ...options.Opt) (provider.Provider, error) {
+			return routedModel{Model: r.Model, cfg: *cfg}, nil
+		},
+	}
+}
 
 // emptyStore is a model catalog with no network lookup. Every model resolves to a
 // fixed definition with a context window, which compaction requires.
