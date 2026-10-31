@@ -14,6 +14,7 @@ import (
 // cleanupCountingEditor records Cleanup calls and forwards them to the real editor.
 type cleanupCountingEditor struct {
 	editor.Editor
+
 	cleanups *int
 }
 
