@@ -84,6 +84,10 @@ type App struct {
 	titleGen               *sessiontitle.Generator     // Title generator for local runtime (nil for remote)
 	snapshotController     builtins.SnapshotController // Drives /undo, /snapshots, /reset; nil for runtimes that don't capture snapshots
 
+	// descendantSeedBudget bounds each descendant-usage seeding call; zero selects
+	// defaultDescendantSeedTimeout.
+	descendantSeedBudget time.Duration
+
 	// stopBridge tears down the session-event bridge (the hub subscription
 	// feeding the App bus); re-set whenever the session changes. hubBridged
 	// reports whether a bridge is active: the bus is then the single event

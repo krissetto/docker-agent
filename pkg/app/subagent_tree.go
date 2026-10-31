@@ -708,10 +708,19 @@ func retryTreeObservation(err error) bool {
 }
 
 // Each seeding call (one baseline batch, or one live addition) is bounded by these.
-var (
-	descendantSeedTimeout = 10 * time.Second
-	maxDescendantSeeds    = 32
-)
+// The time budget is per App rather than a package variable: observation goroutines
+// can outlive the test that started them and must not share a mutable knob.
+const defaultDescendantSeedTimeout = 10 * time.Second
+
+var maxDescendantSeeds = 32
+
+// descendantSeedLimit is the per-call lookup budget for this App.
+func (a *App) descendantSeedLimit() time.Duration {
+	if a.descendantSeedBudget > 0 {
+		return a.descendantSeedBudget
+	}
+	return defaultDescendantSeedTimeout
+}
 
 // watchDescendantUsage forwards descendant usage for in-process roots, whose
 // topology the live runtime tree already publishes. A closed observation is
@@ -787,13 +796,13 @@ func (a *App) consumeDescendantUsage(ctx context.Context, watch *treeWatch, obse
 
 // seedDescendantUsages seeds descendant usage for one baseline or one live
 // addition. Each call gets its own budget: at most maxDescendantSeeds lookups,
-// and no new lookup once descendantSeedTimeout has elapsed within the call.
+// and no new lookup once the descendant seed budget has elapsed within the call.
 // Calls do not share a lifetime budget, so a late child is always seeded.
 func (a *App) seedDescendantUsages(ctx context.Context, watch *treeWatch, snapshots []runtime.SessionSnapshot, epoch uint64) {
 	started := time.Now()
 	lookups := 0
 	for _, snapshot := range snapshots {
-		if lookups == maxDescendantSeeds || time.Since(started) >= descendantSeedTimeout {
+		if lookups == maxDescendantSeeds || time.Since(started) >= a.descendantSeedLimit() {
 			return
 		}
 		if a.seedDescendantUsage(ctx, watch, snapshot, epoch) {
@@ -823,7 +832,7 @@ func (a *App) seedDescendantUsage(ctx context.Context, watch *treeWatch, snapsho
 	if !ok {
 		return false
 	}
-	lookupCtx, cancel := context.WithTimeout(ctx, descendantSeedTimeout)
+	lookupCtx, cancel := context.WithTimeout(ctx, a.descendantSeedLimit())
 	defer cancel()
 	info, err := provider.SessionAgentInfo(lookupCtx)
 	if err != nil || info.Agent == nil || epoch != a.bridgeEpoch.Load() {

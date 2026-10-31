@@ -159,12 +159,9 @@ func TestSeedDescendantUsageDropsStaleEpochAfterLookup(t *testing.T) {
 }
 
 func TestSeedDescendantUsageLookupTimesOut(t *testing.T) {
-	previous := descendantSeedTimeout
-	descendantSeedTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { descendantSeedTimeout = previous })
 	child := session.New(session.WithID("child"))
 	child.SetUsage(300, 150)
-	a := &App{events: make(chan any, 1), sessions: &seedSessionsFake{handles: map[string]runtime.SessionHandle{"child": &blockingInfoHandle{}}}}
+	a := &App{events: make(chan any, 1), descendantSeedBudget: 20 * time.Millisecond, sessions: &seedSessionsFake{handles: map[string]runtime.SessionHandle{"child": &blockingInfoHandle{}}}}
 	a.bridgeEpoch.Store(7)
 	a.seedDescendantUsage(t.Context(), newSeedWatch(), runtime.SessionSnapshot{Session: child}, 7)
 	assert.Empty(t, a.events)
@@ -241,9 +238,6 @@ func newSeedWatch() *treeWatch {
 // A child whose lookup exhausts the batch budget must not starve a later live add:
 // each live addition gets its own budget, with no lifetime cap.
 func TestLateLiveAddIsSeededAfterBatchBudgetElapsed(t *testing.T) {
-	previous := descendantSeedTimeout
-	descendantSeedTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { descendantSeedTimeout = previous })
 	usedChild := func(id string) *session.Session {
 		sess := session.New(session.WithID(id))
 		sess.SetUsage(300, 150)
@@ -254,7 +248,7 @@ func TestLateLiveAddIsSeededAfterBatchBudgetElapsed(t *testing.T) {
 		"child-2":    &agentInfoHandle{info: runtime.SessionAgentInfo{Agent: &runtime.AgentInfoEvent{AgentName: "worker", ContextLimit: 1000}}},
 		"child-late": &agentInfoHandle{info: runtime.SessionAgentInfo{Agent: &runtime.AgentInfoEvent{AgentName: "worker", ContextLimit: 1000}}},
 	}}
-	a := &App{events: make(chan any, 8), sessions: sessions}
+	a := &App{events: make(chan any, 8), descendantSeedBudget: 20 * time.Millisecond, sessions: sessions}
 	a.bridgeEpoch.Store(7)
 	watch := newSeedWatch()
 
