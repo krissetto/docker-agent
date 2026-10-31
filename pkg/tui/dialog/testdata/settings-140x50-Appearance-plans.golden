@@ -1,0 +1,34 @@
+╭──────────────────────────────────────────────────────────────────────────╮
+│                                                                        ✕ │
+│                                Settings                                  │
+│  ────────────────────────────────────────────────────────────────────    │
+│  Appearance   Behavior   Notifications   Panel                           │
+│                                                                          │
+│    Dim inactive panes                [ ]                              │  │
+│    Split diff view                   [x]                              │  │
+│    Git diff layout                   ‹ Unified ›                      │  │
+│    Compact work log                  [ ]                              │  │
+│    Visible replies                   ‹ Last 3 ›                       │  │
+│    Expand thinking by default        [ ]                              │  │
+│    Hide tool results by default      [ ]                              │  │
+│    Render images                     [x]                              │  │
+│    Show startup banner               [x]                              │  │
+│                                                                       │  │
+│  Sidebar layout                                                       │  │
+│    Sidebar position                  ‹ Right ›                        │  │
+│    Section spacing                   ‹ Normal ›                       │  │
+│    Sidebar info mode                 ‹ Compact ›                      │  │
+│    Align input with messages         [ ]                              │  │
+│    Agent context %                   [ ]                              │  │
+│                                                                       │  │
+│  Sidebar sections                                                     │  │
+│    Session path                      [x]                              │  │
+│    Token usage                       [x]                              │  │
+│    Agents                            [x]                              │  │
+│      Active agents only              [ ]                              │  │
+│    Tools                             [x]                              │  │
+│  › Plans                             [ ]                              │  │
+│                                                                          │
+│  Cancel                                                       Save       │
+│                                                                          │
+╰──────────────────────────────────────────────────────────────────────────╯

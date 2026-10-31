@@ -1,0 +1,24 @@
+╭──────────────────────────────────────────────────────────────────────╮
+│                                                                    ✕ │
+│                              Settings                                │
+│  ────────────────────────────────────────────────────────────────    │
+│  Appearance   Behavior   Notifications   Panel                       │
+│                                                                      │
+│  Sidebar layout                                                   │  │
+│    Sidebar position                  ‹ Right ›                    │  │
+│    Section spacing                   ‹ Normal ›                   │  │
+│    Sidebar info mode                 ‹ Compact ›                  │  │
+│    Align input with messages         [ ]                          │  │
+│    Agent context %                   [ ]                          │  │
+│                                                                   │  │
+│  Sidebar sections                                                 │  │
+│    Session path                      [x]                          │  │
+│    Token usage                       [x]                          │  │
+│    Agents                            [x]                          │  │
+│      Active agents only              [ ]                          │  │
+│    Tools                             [x]                          │  │
+│  › Plans                             [ ]                          │  │
+│                                                                      │
+│  Cancel                                                   Save       │
+│                                                                      │
+╰──────────────────────────────────────────────────────────────────────╯
