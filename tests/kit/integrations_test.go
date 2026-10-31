@@ -152,9 +152,13 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	assert.Nil(t, out)
 	assert.Empty(t, skills.Load(t.Context(), root.Skills.Sources))
 	// Omitting the optional host integrations leaves project guidance usable.
+	// The prompt-file lookup walks every ancestor of the workspace, so the real
+	// profile name would resolve to a copy outside the test whenever the temp
+	// dir sits under a developer checkout (e.g. GOTMPDIR under ~/dev/ai-dev).
+	// A name no ancestor holds exercises the same missing-file path.
 	require.NoError(t, os.Remove(profilePath))
 	require.NoError(t, os.Remove(skillPath))
-	out, err = loadPromptFiles(t.Context(), &hooks.Input{Cwd: workspace}, []string{"AGENTS.md", "ASYNC_AGENT_KIT.md"})
+	out, err = loadPromptFiles(t.Context(), &hooks.Input{Cwd: workspace}, []string{"AGENTS.md", "kit-profile-absent.md"})
 	require.NoError(t, err)
 	require.Len(t, out.HookSpecificOutput.InstructionContext, 1)
 	assert.Empty(t, skills.Load(t.Context(), []string{"local"}))
