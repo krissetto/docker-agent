@@ -850,6 +850,14 @@ func ConvertParametersToSchema(params any) (anthropic.ToolInputSchemaParam, erro
 		return anthropic.ToolInputSchemaParam{}, err
 	}
 
+	// The SDK unmarshals Properties into a plain map, which loses declaration
+	// order. Keep the ordered encoder so the wire lists arguments as declared.
+	m, err := tools.SchemaToMap(params)
+	if err != nil {
+		return anthropic.ToolInputSchemaParam{}, err
+	}
+	tools.OrderedSchemaProperties(m)
+	schema.Properties = m["properties"]
 	return schema, nil
 }
 
