@@ -131,7 +131,7 @@ type SessionMCPPrompts interface {
 type (
 	BranchOptions   = api.SessionBranchRequest
 	SessionBrancher interface {
-		BranchSession(context.Context, string, BranchOptions) (SessionHandle, *session.Session, error)
+		BranchSession(ctx context.Context, id string, options BranchOptions) (SessionHandle, *session.Session, error)
 	}
 )
 
