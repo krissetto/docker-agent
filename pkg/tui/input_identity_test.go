@@ -80,6 +80,9 @@ func TestInputIdentityFullTUIPointerAttachesChildAndSelectsParent(t *testing.T) 
 	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
 	// The chevron follows the target state before the closing animation ends.
 	driver.WaitFor(tuitest.Absent("private runtime payload"))
+	// The collapsed header keeps its surface for a few frames after the body is gone.
+	// Snapshot the identity row only once that closing animation has settled.
+	driver.WaitFor(tuitest.Absent("┏ · From worker (a1b2c)"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
 	click("worker (a1b2c)")
 	driver.WaitFor(tuitest.Contains("director (root:) sent a message v"))
@@ -90,6 +93,8 @@ func TestInputIdentityFullTUIPointerAttachesChildAndSelectsParent(t *testing.T) 
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
 	click("v")
 	driver.WaitFor(tuitest.Absent("CHILD-DELEGATION-BODY"))
+	// Same closing surface as above: wait for the reply header to settle before the next hover snapshot.
+	driver.WaitFor(tuitest.Absent("┏ ✓ From director (root:)"))
 	click(">")
 	driver.WaitFor(tuitest.Contains("CHILD-DELEGATION-BODY"))
 	assert.Equal(t, 1, strings.Count(ansi.Strip(driver.Frame()), "CHILD-DELEGATION-BODY"), "re-expanded attached body renders exactly once")
