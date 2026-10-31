@@ -122,7 +122,7 @@ func (m *shellModel) ExpandedView() string { return m.View() }
 func (m *shellModel) IsExpanded() bool     { return m.disclosure.Expanded() }
 func (m *shellModel) PreserveBodyScrollFrom(previous any) {
 	view, ok := previous.(interface {
-		BodyScrollState() (offset int, atBottom bool, ok bool)
+		BodyScrollState() (offset int, atBottom, ok bool)
 	})
 	if !ok {
 		return
@@ -134,7 +134,7 @@ func (m *shellModel) PreserveBodyScrollFrom(previous any) {
 	m.preservedScroll, m.preservedAtBottom, m.preservedScrollSet = offset, atBottom, true
 }
 
-func (m *shellModel) BodyScrollState() (offset int, atBottom bool, ok bool) {
+func (m *shellModel) BodyScrollState() (offset int, atBottom, ok bool) {
 	if !m.disclosure.Expanded() {
 		return 0, false, false
 	}
