@@ -413,6 +413,12 @@ func (m *subagentManager) spawnContext(ctx context.Context, parent *session.Sess
 	if err != nil {
 		return "", err
 	}
+	// Admission queued a tree view with the child idle. Each owner keeps only its
+	// newest view, so publish this one before the child can start: otherwise the
+	// running view can replace it and observers never see the child created idle.
+	if err := m.applyTreeProjections(ctx, parent.ID); err != nil {
+		slog.DebugContext(ctx, "Publishing the admitted child's tree view failed", "session_id", child.ID, "error", err)
+	}
 	if d, ok := m.r.sessionDrivers.Lookup(child.ID); ok {
 		d.WakePending()
 	}
@@ -1058,10 +1064,31 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 	m.persistSnapshot()
 	// Stop's receipt includes its own root and descendant journals, never
 	// unrelated dirty owners. Each acknowledgement applies the newest view.
-	rootID := m.rootSessionLockedSafe(parentID)
+	descendants := make([]string, 0, len(stopped))
+	for _, child := range stopped {
+		descendants = append(descendants, child.sessionID)
+	}
+	if err := m.applyTreeProjections(ctx, parentID, descendants...); err != nil {
+		return "", errors.Join(append(cleanupErrs, err)...)
+	}
+	return name, errors.Join(cleanupErrs...)
+}
+
+// applyTreeProjections applies the newest queued tree view on the journals of
+// sessionID's root and ancestors, then on the extra sessions, and returns once
+// each owner has published it. Each owner runs applyTreeProjectionLocked, a
+// state-only command (swap the queued view, SetSubagentTree, Publish) that
+// never spawns, admits or stops a subagent.
+//
+// It blocks on those owners, so it must not be called from inside an owner
+// command. Its callers, spawn and stop, are tool handlers that run on a turn's
+// goroutine; spawn also takes the parent driver lock on entry, so re-entering
+// it from an owner command is unsupported (decided, not just untested).
+func (m *subagentManager) applyTreeProjections(ctx context.Context, sessionID string, extra ...string) error {
+	rootID := m.rootSessionLockedSafe(sessionID)
 	ids := []string{rootID}
 	m.mu.Lock()
-	for current := parentID; current != "" && current != rootID; {
+	for current := sessionID; current != "" && current != rootID; {
 		ids = append(ids, current)
 		tracked := m.sessions[current]
 		if tracked == nil {
@@ -1074,17 +1101,15 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 		current = ancestor.parentSession
 	}
 	m.mu.Unlock()
-	for _, child := range stopped {
-		ids = append(ids, child.sessionID)
-	}
-	for _, sessionID := range ids {
-		if d, ok := m.r.sessionDrivers.Lookup(sessionID); ok {
+	ids = append(ids, extra...)
+	for _, id := range ids {
+		if d, ok := m.r.sessionDrivers.Lookup(id); ok {
 			if err := d.ownerCall(ctx, d.applyTreeProjectionLocked); err != nil {
-				return "", errors.Join(append(cleanupErrs, err)...)
+				return err
 			}
 		}
 	}
-	return name, errors.Join(cleanupErrs...)
+	return nil
 }
 
 // commitChildren requires atomic storage for subtree changes. An ambiguous

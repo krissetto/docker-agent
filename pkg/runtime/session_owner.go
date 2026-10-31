@@ -33,7 +33,9 @@ type (
 )
 
 // ownerCall runs state-only transitions. External I/O and user callbacks belong
-// to workers, whose completion must revalidate its reservation here.
+// to workers, whose completion must revalidate its reservation here. Commands
+// must never spawn or admit subagents: spawn waits on owners to publish the
+// admitted child's tree view (see applyTreeProjections).
 func (d *sessionDriver) ownerCall(ctx context.Context, apply func() error) error {
 	select {
 	case <-d.ownerDone:
