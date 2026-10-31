@@ -219,13 +219,13 @@ func openBehaviorSettings(d *tuitest.Driver) *tuitest.Driver {
 		WaitFor(tuitest.Contains("Appearance")).
 		Send(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}).
 		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("Enter queues; Alt+Enter steers")).
+		WaitFor(tuitest.Contains("Enter steers into the active turn; Alt+Enter queues")).
 		Enter()
 }
 
 func saveSettingsAndWait(d *tuitest.Driver) {
 	d.Press(tea.KeyTab).Enter().
 		WaitFor(tuitest.Contains("Settings saved")).
-		WaitFor(tuitest.Absent("Enter queues; Alt+Enter steers")).
+		WaitFor(tuitest.Absent("Enter steers into the active turn; Alt+Enter queues")).
 		WaitForStable(200 * time.Millisecond)
 }
