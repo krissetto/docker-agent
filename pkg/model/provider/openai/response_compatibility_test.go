@@ -31,9 +31,9 @@ func TestResponseFeaturesAreOptIn(t *testing.T) {
 		{name: "defaults"},
 		{name: "explicitly disabled", opts: map[string]any{"preserve_reasoning": false, "native_tool_search": false, "cache_diagnostics": false}},
 		{name: "invalid values", opts: map[string]any{"preserve_reasoning": "true", "native_tool_search": "true", "cache_diagnostics": "true"}},
-		{name: "cache diagnostics does not opt in", opts: map[string]any{"cache_diagnostics": true}},
+		{name: "cache diagnostics only", opts: map[string]any{"cache_diagnostics": true}, metadata: true},
 		{name: "preserve reasoning", opts: map[string]any{"preserve_reasoning": true}, metadata: true, output: true},
-		{name: "native search does not opt in", opts: map[string]any{"native_tool_search": true}},
+		{name: "native search", opts: map[string]any{"native_tool_search": true}, metadata: true, output: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -41,7 +41,7 @@ func TestResponseFeaturesAreOptIn(t *testing.T) {
 			client.ModelConfig.ProviderOpts = tc.opts
 			var params responses.ResponseNewParams
 			ctx := httpclient.ContextWithSessionID(t.Context(), "session_1")
-			client.configureResponseState(&params)
+			client.configureResponseState(ctx, &params, []chat.Message{responseStateMessage()})
 			assert.Equal(t, tc.output, len(params.Include) > 0)
 			assert.True(t, param.IsOmitted(params.PreviousResponseID), "SSE parameters must not acquire state chaining")
 			assert.Equal(t, tc.output, len(client.replayResponse(responseStateMessage())) > 0)
@@ -79,7 +79,7 @@ func TestDefaultResponsesWireIgnoresStoredReplayMetadata(t *testing.T) {
 	client := responseStateClient()
 	client.ModelConfig.ProviderOpts = nil
 	client.clientFn = func(context.Context) (*openai.Client, error) { return &sdk, nil }
-	stream, err := client.CreateResponseStream(t.Context(), []chat.Message{responseStateMessage(), {Role: chat.MessageRoleTool, ToolCallID: "call_1", Content: "ok"}, {Role: chat.MessageRoleAssistant, OpenAIResponse: &chat.OpenAIResponse{Source: "openai/gpt-5.6", Output: responseStateOutput()[:1]}}}, nil)
+	stream, err := client.CreateResponseStream(t.Context(), []chat.Message{responseStateMessage(), {Role: chat.MessageRoleTool, ToolCallID: "call_1", Content: "ok"}}, nil)
 	require.NoError(t, err)
 	defer stream.Close()
 	drainReasoningTestStream(t, stream)
@@ -216,9 +216,13 @@ func TestReplayPreservesToolResultAttachments(t *testing.T) {
 		Role: chat.MessageRoleTool, ToolCallID: "call_1", Content: "ok",
 		MultiContent: []chat.MessagePart{{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "https://fixture.invalid/image.png"}}},
 	}})
-	require.Len(t, items, 5)
-	assert.Equal(t, "call_1", items[3].OfFunctionCallOutput.CallID.Value)
-	require.NotNil(t, items[4].OfInputMessage)
-	require.Len(t, items[4].OfInputMessage.Content, 2)
-	assert.Equal(t, "https://fixture.invalid/image.png", items[4].OfInputMessage.Content[1].OfInputImage.ImageURL.Value)
+	// The client preserves reasoning, so the assistant turn replays its five
+	// stored items first. Responses carries the image inside the function call
+	// output (native multimodal output), so no follow-up user message is injected.
+	require.Len(t, items, 6)
+	require.NotNil(t, items[5].OfFunctionCallOutput)
+	assert.Equal(t, "call_1", items[5].OfFunctionCallOutput.CallID.Value)
+	output := items[5].OfFunctionCallOutput.Output.OfResponseFunctionCallOutputItemArray
+	require.Len(t, output, 2)
+	assert.Equal(t, "https://fixture.invalid/image.png", output[1].OfInputImage.ImageURL.Value)
 }

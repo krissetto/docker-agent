@@ -16,6 +16,8 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -29,8 +31,15 @@ type pendingCompactionHTTPProvider struct {
 	calls [][]chat.Message
 }
 
-func (*pendingCompactionHTTPProvider) BaseConfig() base.Config {
-	return base.Config{ModelConfig: latest.ModelConfig{ProviderOpts: map[string]any{"context_size": 100_000}}}
+// The rebuilder returns the same fake so compaction clones record their
+// requests on this double.
+func (p *pendingCompactionHTTPProvider) BaseConfig() base.Config {
+	return base.Config{
+		ModelConfig: latest.ModelConfig{ProviderOpts: map[string]any{"context_size": 100_000}},
+		RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+			return p, nil
+		},
+	}
 }
 
 func (p *pendingCompactionHTTPProvider) CreateChatCompletionStream(_ context.Context, messages []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/docker/docker-agent/pkg/input"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 )
 
 func pullDockerModelIfNeeded(ctx context.Context, model string) error {
@@ -64,9 +64,14 @@ func pullWithRecovery(ctx context.Context, model string, stdout, stderr io.Write
 	// remote object, so the resume Range is unsatisfiable and the pull loops on
 	// the same error forever. Offer to remove the exact file (parsed from the
 	// failure) and retry once.
-	var pfe *PullFailedError
-	if !errors.As(err, &pfe) {
+	pfe, ok := errors.AsType[*PullFailedError](err)
+	if !ok {
 		return err
+	}
+	// An injected connection may use a remote runner or another config directory;
+	// its content store cannot safely be inferred from the local environment.
+	if dmrmodels.HasDockerConnection(ctx) {
+		return pfe
 	}
 	if path, size, ok := corruptPartial(pfe.Detail); ok {
 		pfe.CorruptPartial = path
@@ -90,7 +95,7 @@ func runModelPull(ctx context.Context, model string, stdout, stderr io.Writer) e
 	slog.InfoContext(ctx, "Pulling DMR model", "model", model)
 	fmt.Fprintf(stdout, "Pulling model %s...\n", model)
 
-	cmd := exec.CommandContext(ctx, "docker", "model", "pull", model)
+	cmd := dmrmodels.DockerCommand(ctx, "model", "pull", model)
 	cmd.Stdout = stdout
 	// Tee stderr so the live pull output still reaches the terminal while we
 	// also capture it, otherwise the real cause (e.g. a registry error) is lost
@@ -131,7 +136,7 @@ func confirmModelPull(ctx context.Context, model string, out io.Writer) error {
 }
 
 func modelExists(ctx context.Context, model string) bool {
-	cmd := exec.CommandContext(ctx, "docker", "model", "inspect", model)
+	cmd := dmrmodels.DockerCommand(ctx, "model", "inspect", model)
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr

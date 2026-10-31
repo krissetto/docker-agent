@@ -989,11 +989,12 @@ func (s *Session) AddMessage(msg *Message) int {
 	defer s.mu.Unlock()
 	if msg != nil {
 		capToolResultContent(&msg.Message, s.MaxToolResultTokens)
-		// Transcripts never carry cache checkpoint marks: CacheControl is
-		// request-assembly state (see chat.Message.CacheControl); a mark
-		// slipping in here (e.g. echoed back by an API client) would
-		// resurface on every future prompt assembly.
+		// Transcripts never carry request-assembly marks (see
+		// chat.Message.CacheControl and TurnScoped); one slipping in here
+		// (e.g. echoed back by an API client) would resurface on every
+		// future prompt assembly.
 		msg.Message.CacheControl = false
+		msg.Message.TurnScoped = false
 	}
 	s.Messages = append(s.Messages, NewMessageItem(msg))
 	return len(s.Messages) - 1

@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -102,6 +103,8 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 			case dmrmodels.IsNotInstalledError(err):
 				slog.DebugContext(ctx, "docker model status query failed", "error", err)
 				return nil, ErrNotInstalled
+			case dmrmodels.HasDockerConnection(ctx):
+				return nil, err
 			default:
 				// The `docker model` CLI is unusable (broken plugin, docker not on
 				// PATH, ...) but the DMR endpoint may still be up: check model
@@ -199,6 +202,11 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	caps := c.attachmentCaps
 	if override := c.CapsOverride(); override != nil {
 		caps = modelinfo.CapsWith(override.Image, override.PDF, override.Audio, override.Video)
+	}
+	// Chat Completions reasoning replay defaults on;
+	// provider_opts.replay_reasoning: false opts out.
+	if !oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts) {
+		messages = oaistream.WithoutReplayedReasoning(messages)
 	}
 	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, caps)
 	return oaistream.MergeConsecutiveMessages(openaiMessages)
@@ -311,6 +319,9 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 		}
 	}
 
+	if err := providerutil.MergeExtraBody(extraFields, c.ModelConfig.ProviderOpts); err != nil {
+		return nil, err
+	}
 	if len(extraFields) > 0 {
 		params.SetExtraFields(extraFields)
 		slog.DebugContext(ctx, "DMR extra request fields applied", "fields", extraFields)

@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -48,12 +48,9 @@ func TestCountAnthropicTokensBeta_Success(t *testing.T) {
 	defer server.Close()
 
 	messages := []anthropic.BetaMessageParam{
-		{
-			Role: anthropic.BetaMessageParamRoleUser,
-			Content: []anthropic.BetaContentBlockParamUnion{
-				{OfText: &anthropic.BetaTextBlockParam{Text: "Hello"}},
-			},
-		},
+		betaUserMessage([]anthropic.BetaContentBlockParamUnion{
+			{OfText: &anthropic.BetaTextBlockParam{Text: "Hello"}},
+		}),
 	}
 	system := []anthropic.BetaTextBlockParam{
 		{Text: "You are helpful"},
@@ -61,6 +58,8 @@ func TestCountAnthropicTokensBeta_Success(t *testing.T) {
 
 	client := anthropic.NewClient(
 		option.WithAPIKey("test-key"),
+		option.WithHeaderDel("Authorization"),
+		option.WithHeader("X-Api-Key", "test-key"),
 		option.WithBaseURL(server.URL),
 	)
 
@@ -330,8 +329,8 @@ func TestConvertBetaMessages_UserMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, converted, 1)
-	assert.Equal(t, anthropic.BetaMessageParamRoleUser, converted[0].Role)
-	require.Len(t, converted[0].Content, 1)
+	assert.NotNil(t, converted[0].OfUser)
+	require.Len(t, betaMessageContent(converted[0]), 1)
 }
 
 // TestConvertBetaMessages_SkipsSystemMessages tests that system messages are skipped
@@ -352,7 +351,7 @@ func TestConvertBetaMessages_SkipsSystemMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, converted, 1)
-	assert.Equal(t, anthropic.BetaMessageParamRoleUser, converted[0].Role)
+	assert.NotNil(t, converted[0].OfUser)
 }
 
 // TestConvertBetaMessages_AssistantMessage tests converting assistant messages
@@ -369,5 +368,5 @@ func TestConvertBetaMessages_AssistantMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, converted, 1)
-	assert.Equal(t, anthropic.BetaMessageParamRoleAssistant, converted[0].Role)
+	assert.True(t, isBetaAssistantMessage(converted[0]))
 }

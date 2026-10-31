@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -39,6 +40,30 @@ func TestNewClientFromFactory_RequiresArguments(t *testing.T) {
 
 	_, err = NewClientFromFactory(t.Context(), cfg, env, nil)
 	require.ErrorContains(t, err, "client factory is required")
+
+	_, err = NewClientFromFactoryWithOptions(t.Context(), cfg, env, nil)
+	require.ErrorContains(t, err, "client factory is required")
+}
+
+// Options are applied exactly once, before the factory runs, and the factory
+// sees the same ModelOptions the Client keeps.
+func TestNewClientFromFactoryWithOptions_AppliesOptionsOnce(t *testing.T) {
+	t.Parallel()
+	cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-4-6"}
+	env := environment.NewMapEnvProvider(nil)
+
+	applied := 0
+	var seen options.ModelOptions
+	client, err := NewClientFromFactoryWithOptions(t.Context(), cfg, env, func(_ context.Context, m options.ModelOptions) (anthropic.Client, error) {
+		assert.Equal(t, 1, applied, "options are applied before the factory runs")
+		seen = m
+		return anthropic.Client{}, nil
+	}, func(*options.ModelOptions) { applied++ }, options.WithMaxTokens(42))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, applied)
+	assert.Equal(t, int64(42), seen.MaxTokens())
+	assert.Equal(t, int64(42), client.ModelOptions.MaxTokens())
 }
 
 func TestCreateChatCompletionStream_ErrorOnEmptyMessages(t *testing.T) {
@@ -334,12 +359,11 @@ func TestCountAnthropicTokens_Success(t *testing.T) {
 	defer server.Close()
 
 	messages := []anthropic.MessageParam{
-		{
-			Role: anthropic.MessageParamRoleUser,
+		{OfUser: &anthropic.UserMessageParam{
 			Content: []anthropic.ContentBlockParamUnion{
 				{OfText: &anthropic.TextBlockParam{Text: "Hello"}},
 			},
-		},
+		}},
 	}
 	system := []anthropic.TextBlockParam{
 		{Text: "You are helpful"},
@@ -347,6 +371,8 @@ func TestCountAnthropicTokens_Success(t *testing.T) {
 
 	client := anthropic.NewClient(
 		option.WithAPIKey("test-key"),
+		option.WithHeaderDel("Authorization"),
+		option.WithHeader("X-Api-Key", "test-key"),
 		option.WithBaseURL(server.URL),
 	)
 

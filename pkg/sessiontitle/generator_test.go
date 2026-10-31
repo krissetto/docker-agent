@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -35,11 +36,17 @@ func (p *mockProvider) CreateChatCompletionStream(
 	return p.createFn()
 }
 
+// The rebuilder returns the same fake so title clones reach the scripted
+// responses instead of failing with ErrNoRebuilder.
 func (p *mockProvider) BaseConfig() base.Config {
+	cfg := base.Config{}
 	if p.baseCfgFn != nil {
-		return p.baseCfgFn()
+		cfg = p.baseCfgFn()
 	}
-	return base.Config{}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}
+	return cfg
 }
 
 type mockStream struct {

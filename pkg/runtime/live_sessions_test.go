@@ -14,6 +14,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -67,8 +69,14 @@ func (p *stepProvider) CreateChatCompletionStream(ctx context.Context, messages 
 	return step.stream, nil
 }
 
-func (p *stepProvider) BaseConfig() base.Config { return base.Config{} }
-func (p *stepProvider) MaxTokens() int          { return 0 }
+// The rebuilder returns the same fake so summary-model clones on the policy-A
+// path reach the scripted steps instead of failing with ErrNoRebuilder.
+func (p *stepProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
+func (p *stepProvider) MaxTokens() int { return 0 }
 
 // newLiveSessionsRuntime builds a runtime with a "root" agent and a "worker"
 // agent whose model is the supplied provider.

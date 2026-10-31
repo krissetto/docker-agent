@@ -35,8 +35,8 @@ type openAIAliasProvider struct {
 	model    string // default model to send
 	greeting string // words the mock server streams back, joined into one reply
 
-	// mergesSystemMessages is true for open-model hosts (openModelHostProviders
-	// in the openai client) whose strict chat templates require the per-source
+	// mergesSystemMessages is true for open-model hosts (catalog aliases with
+	// merge_consecutive_messages) whose strict chat templates require the per-source
 	// system messages to be coalesced into a single leading one (issue #3344).
 	// First-party APIs with a fixed model lineup leave them untouched.
 	mergesSystemMessages bool

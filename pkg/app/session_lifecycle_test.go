@@ -9,7 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -169,7 +172,13 @@ func (p *lifecycleBlockingTitleProvider) ID() modelsdev.ID {
 	return modelsdev.NewID("test", "title")
 }
 
-func (p *lifecycleBlockingTitleProvider) BaseConfig() base.Config { return base.Config{} }
+// The rebuilder returns the same fake so the title clone reaches the blocking
+// call instead of failing with ErrNoRebuilder.
+func (p *lifecycleBlockingTitleProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
 
 func (p *lifecycleBlockingTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
 	close(p.started)

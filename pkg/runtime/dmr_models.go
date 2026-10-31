@@ -9,6 +9,8 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -23,7 +25,7 @@ const dmrModelsTTL = 1 * time.Minute
 // itself runs outside the lock, coalesced by the singleflight group so
 // concurrent callers share one in-flight request.
 type dmrModelsEntry struct {
-	ids       []string
+	models    []dmrmodels.Model
 	err       error
 	fetchedAt time.Time
 }
@@ -34,11 +36,11 @@ type dmrModelsCache struct {
 	entries map[string]dmrModelsEntry
 }
 
-// listDMRModels returns the model IDs available to Docker Model Runner, using
+// listDMRModels returns the models available to Docker Model Runner, using
 // the runtime's cache when fresh. It returns (nil, nil) when no lister is
 // configured (e.g. runtimes built directly in tests), so DMR discovery is
 // opt-in via NewLocalRuntime.
-func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
+func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]dmrmodels.Model, error) {
 	config, err := r.modelSwitcherConfigForContext(ctx)
 	if err != nil {
 		return nil, err
@@ -46,7 +48,7 @@ func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
 	return r.listDMRModelsForConfig(ctx, config)
 }
 
-func (r *LocalRuntime) listDMRModelsForConfig(ctx context.Context, _ *ModelSwitcherConfig) ([]string, error) {
+func (r *LocalRuntime) listDMRModelsForConfig(ctx context.Context, _ *ModelSwitcherConfig) ([]dmrmodels.Model, error) {
 	if r.dmrModelLister == nil {
 		slog.DebugContext(ctx, "DMR model discovery skipped; no lister configured")
 		return nil, nil
@@ -60,43 +62,43 @@ func (r *LocalRuntime) listDMRModelsForConfig(ctx context.Context, _ *ModelSwitc
 		key = env.SourceID() + "\x00" + env.RevisionID()
 	}
 	c := &r.dmrModels
-	readFresh := func() (ids []string, ok bool, err error) {
+	readFresh := func() (models []dmrmodels.Model, ok bool, err error) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		entry, exists := c.entries[key]
 		if exists && !entry.fetchedAt.IsZero() && now().Sub(entry.fetchedAt) < dmrModelsTTL {
-			return slices.Clone(entry.ids), true, entry.err
+			return slices.Clone(entry.models), true, entry.err
 		}
 		return nil, false, nil
 	}
-	if ids, ok, err := readFresh(); ok {
-		slog.DebugContext(ctx, "DMR model discovery cache hit", "models", len(ids), "error", err)
-		return ids, err
+	if models, ok, err := readFresh(); ok {
+		slog.DebugContext(ctx, "DMR model discovery cache hit", "models", len(models), "error", err)
+		return models, err
 	}
 	start := time.Now()
 	v, err, _ := c.sf.Do(key, func() (any, error) {
-		if ids, ok, err := readFresh(); ok {
-			return ids, err
+		if models, ok, err := readFresh(); ok {
+			return models, err
 		}
-		ids, err := r.dmrModelLister(ctx)
+		models, err := r.dmrModelLister(ctx)
 		if err != nil && ctx.Err() != nil {
-			return ids, err
+			return models, err
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.entries == nil {
 			c.entries = make(map[string]dmrModelsEntry)
 		}
-		c.entries[key] = dmrModelsEntry{ids: slices.Clone(ids), err: err, fetchedAt: now()}
-		return ids, err
+		c.entries[key] = dmrModelsEntry{models: slices.Clone(models), err: err, fetchedAt: now()}
+		return models, err
 	})
 	if err != nil {
 		slog.DebugContext(ctx, "DMR model discovery fetch completed", "duration", time.Since(start), "error", err)
 		return nil, err
 	}
-	ids := v.([]string)
-	slog.DebugContext(ctx, "DMR model discovery fetch completed", "duration", time.Since(start), "models", len(ids))
-	return slices.Clone(ids), nil
+	models := v.([]dmrmodels.Model)
+	slog.DebugContext(ctx, "DMR model discovery fetch completed", "duration", time.Since(start), "models", len(models))
+	return slices.Clone(models), nil
 }
 
 // buildDMRChoices builds ModelChoice entries for the models currently pulled
@@ -113,12 +115,12 @@ func (r *LocalRuntime) buildDMRChoices(ctx context.Context) []ModelChoice {
 }
 
 func (r *LocalRuntime) buildDMRChoicesForConfig(ctx context.Context, config *ModelSwitcherConfig) []ModelChoice {
-	ids, err := r.listDMRModelsForConfig(ctx, config)
+	models, err := r.listDMRModelsForConfig(ctx, config)
 	if err != nil {
 		slog.DebugContext(ctx, "DMR model discovery failed, skipping DMR picker entries", "error", err)
 		return nil
 	}
-	if len(ids) == 0 {
+	if len(models) == 0 {
 		return nil
 	}
 
@@ -130,8 +132,9 @@ func (r *LocalRuntime) buildDMRChoicesForConfig(ctx context.Context, config *Mod
 		}
 	}
 
-	choices := make([]ModelChoice, 0, len(ids))
-	for _, id := range ids {
+	choices := make([]ModelChoice, 0, len(models))
+	for _, model := range models {
+		id := model.ID
 		// DMR model IDs (e.g. "ai/qwen3:latest") contain slashes; the ref is
 		// "dmr/<id>" and ParseModelRef cuts on the first slash, so it
 		// round-trips back to provider="dmr", model="<id>".
@@ -175,9 +178,56 @@ func (r *LocalRuntime) buildDMRChoicesForConfig(ctx context.Context, config *Mod
 			}
 			applyCatalogMetadata(&choice, meta)
 		}
+		applyDMRMetadata(&choice, model.Metadata)
 		choices = append(choices, choice)
 	}
 
 	slog.DebugContext(ctx, "Built DMR model choices", "count", len(choices))
 	return choices
+}
+
+func applyDMRMetadata(choice *ModelChoice, metadata *dmrmodels.Metadata) {
+	if metadata == nil {
+		return
+	}
+	if metadata.ContextWindow > 0 {
+		choice.ContextLimit = int(metadata.ContextWindow)
+	}
+	choice.Architecture = metadata.Architecture
+	choice.Parameters = metadata.Parameters
+	choice.Quantization = metadata.Quantization
+	choice.Size = metadata.Size
+}
+
+// populateDMRChoices applies DMR-reported metadata to configured choices that
+// point at the local Model Runner. Configured models at explicit endpoints must
+// not inherit another runner's metadata, and an explicit context_size always
+// wins over the runner's reported window.
+func (r *LocalRuntime) populateDMRChoices(ctx context.Context, config *ModelSwitcherConfig, choices []ModelChoice) {
+	if config.ModelsGateway != "" {
+		return
+	}
+	models, err := r.listDMRModelsForConfig(ctx, config)
+	if err != nil {
+		return
+	}
+	metadata := make(map[string]*dmrmodels.Metadata, len(models))
+	for _, model := range models {
+		metadata[model.ID] = model.Metadata
+	}
+	for i := range choices {
+		choice := &choices[i]
+		cfg := config.Models[choice.Ref]
+		if cfg.Provider != "dmr" || cfg.BaseURL != "" {
+			continue
+		}
+		meta := metadata[cfg.Model]
+		if meta == nil {
+			meta = metadata[cfg.Model+":latest"]
+		}
+		applyDMRMetadata(choice, meta)
+		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+			choice.ContextLimit = int(n)
+		}
+	}
 }

@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -56,6 +58,49 @@ func GatewayAuthRetry(env environment.Provider, gateway string) []httpclient.Opt
 		desktop.InvalidateToken(rejected)
 		return GatewayAuthToken(ctx, env, gateway)
 	})}
+}
+
+// GatewayClient holds the per-request HTTP client and SDK connection settings.
+// Each provider remains responsible for applying AuthToken to its SDK.
+type GatewayClient struct {
+	HTTPClient *http.Client
+	BaseURL    string
+	AuthToken  string
+}
+
+// NewGatewayClient refreshes gateway auth and builds a transport for one SDK call.
+// Call it inside the provider's clientFn, not at provider construction time.
+func NewGatewayClient(ctx context.Context, env environment.Provider, gateway, defaultBaseURL, pathSuffix string, cfg *latest.ModelConfig, modelOpts *options.ModelOptions, extra ...httpclient.Opt) (*GatewayClient, error) {
+	authToken, err := GatewayAuthToken(ctx, env, gateway)
+	if err != nil {
+		return nil, err
+	}
+	gatewayURL, err := url.Parse(gateway)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gateway URL: %w", err)
+	}
+	if (gatewayURL.Scheme != "http" && gatewayURL.Scheme != "https") || gatewayURL.Host == "" {
+		return nil, errors.New("gateway must be an absolute HTTP(S) URL")
+	}
+	// Preserve escaped routing prefixes and repeated slashes without interpreting delimiters.
+	suffix, err := url.PathUnescape(pathSuffix)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gateway path: %w", err)
+	}
+	target := &url.URL{
+		Scheme: gatewayURL.Scheme, Host: gatewayURL.Host,
+		Path: gatewayURL.Path + suffix, RawPath: gatewayURL.EscapedPath() + pathSuffix,
+	}
+	baseURL := target.String()
+	httpOptions := GatewayHTTPOptions(gatewayURL, defaultBaseURL, cfg, modelOpts)
+	httpOptions = append(httpOptions, GatewayAuthRetry(env, gateway)...)
+	httpOptions = append(httpOptions, extra...)
+
+	client := httpclient.NewHTTPClient(ctx, httpOptions...)
+	if modelOpts != nil {
+		modelOpts.WrapTransport(ctx, client)
+	}
+	return &GatewayClient{HTTPClient: client, BaseURL: baseURL, AuthToken: authToken}, nil
 }
 
 // GatewayHTTPOptions builds the httpclient options shared by all

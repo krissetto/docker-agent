@@ -8,10 +8,10 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+	"github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/option"
+	"github.com/anthropics/anthropic-sdk-go/v2/packages/param"
+	"github.com/anthropics/anthropic-sdk-go/v2/packages/ssestream"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -36,11 +36,22 @@ func (c *Client) createBetaStream(
 		return nil, err
 	}
 
-	requestTools = c.toolsWithSupportedDeferral(requestTools)
+	requestTools = c.toolsWithSupportedDeferral(ctx, requestTools, messages)
 	allTools, err := convertBetaTools(requestTools)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to convert tools for Anthropic Beta request", "error", err)
 		return nil, err
+	}
+
+	if sel, enabled := strictToolsOpt(c.ModelConfig.ProviderOpts); enabled {
+		restoreBetaStrictToolSchemas(allTools, requestTools)
+		var schema any
+		if output := c.ModelOptions.StructuredOutput(); output != nil {
+			schema = output.Schema
+		}
+		if err := sel.applyBeta(allTools, schema); err != nil {
+			return nil, err
+		}
 	}
 
 	converted, err := c.convertBetaMessagesWithDeferred(ctx, messages, requestTools)
@@ -52,11 +63,13 @@ func (c *Client) createBetaStream(
 		return nil, errors.New("no messages to send after conversion: all messages were filtered out")
 	}
 
-	sys := extractBetaSystemBlocks(messages)
+	sys, transient := c.betaSystemContext(messages)
 
-	betas := []anthropic.AnthropicBeta{
-		anthropic.AnthropicBetaInterleavedThinking2025_05_14,
-		"fine-grained-tool-streaming-2025-05-14",
+	betas := []anthropic.AnthropicBeta{"fine-grained-tool-streaming-2025-05-14"}
+	// Requests reach this path for other reasons (fallbacks, structured
+	// output, ...); an explicit interleaved_thinking: false still holds.
+	if _, set := c.ModelConfig.ProviderOpts["interleaved_thinking"]; !set || c.interleavedThinkingEnabled() {
+		betas = append([]anthropic.AnthropicBeta{anthropic.AnthropicBetaInterleavedThinking2025_05_14}, betas...)
 	}
 
 	params := anthropic.BetaMessageNewParams{
@@ -85,6 +98,19 @@ func (c *Client) createBetaStream(
 	// The beta client is also used for structured output and file attachments,
 	// which don't require thinking.
 	c.applyBetaThinkingConfig(&params, maxTokens)
+	c.applyThinkingBinding(&params)
+
+	// As on the standard path: sampling only applies with thinking off.
+	thinkingEnabled := params.Thinking.OfEnabled != nil || params.Thinking.OfAdaptive != nil
+	var samplingOpts []option.RequestOption
+	if !thinkingEnabled && !rejectsSampling(c.ModelConfig.Model) {
+		if c.ModelConfig.Temperature != nil {
+			samplingOpts = append(samplingOpts, option.WithJSONSet("temperature", *c.ModelConfig.Temperature))
+		}
+		if c.ModelConfig.TopP != nil {
+			samplingOpts = append(samplingOpts, option.WithJSONSet("top_p", *c.ModelConfig.TopP))
+		}
+	}
 
 	// Forward task_budget via `output_config.task_budget` (Anthropic
 	// Opus 4.7+) and enable the corresponding beta header. Older Claude
@@ -101,27 +127,50 @@ func (c *Client) createBetaStream(
 		"message_count", len(params.Messages))
 
 	// Forward top_k from provider_opts (Anthropic natively supports it)
-	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
-		params.TopK = param.NewOpt(topK)
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok && !rejectsSampling(c.ModelConfig.Model) {
+		samplingOpts = append(samplingOpts, option.WithJSONSet("top_k", topK))
 		slog.DebugContext(ctx, "Anthropic Beta provider_opts: set top_k", "value", topK)
 	}
 
 	// Enable server-side fallbacks when the fallbacks provider_opt is set;
 	// the beta is appended to params.Betas so the SDK composes a single
 	// anthropic-beta header.
-	var requestOpts []option.RequestOption
-	if fallbacks := fallbackModels(c.ModelConfig.ProviderOpts); len(fallbacks) > 0 {
+	if spec, _ := parseFallbacks(c.ModelConfig.ProviderOpts); spec.enabled() {
 		params.Betas = append(params.Betas, serverSideFallbackBeta)
-		requestOpts = append(requestOpts, fallbacksBody(fallbacks))
+		params.Fallbacks = spec.param()
 	}
 
-	stream := client.Beta.Messages.NewStreaming(ctx, params, requestOpts...)
+	configureCacheDiagnostics(&params, messages, c.ModelConfig.ProviderOpts)
+	if c.hasNativeCompaction(messages) {
+		params.Betas = append(params.Betas, nativeCompactionBeta)
+	}
+	var requestContext json.RawMessage
+	if cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) {
+		updates, err := applyConversationUpdates(ctx, c.ModelConfig.Model, &params, messages, transient)
+		if err != nil {
+			return nil, err
+		}
+		requestContext = updates.RequestContext
+	}
+	stream := client.Beta.Messages.NewStreaming(ctx, params, samplingOpts...)
 	trackUsage := c.TrackUsageEnabled()
 	ad := c.newBetaStreamAdapter(stream, trackUsage)
+	ad.requestContext = requestContext
+	ad.fallbackModels = fallbackTargets(c.ModelConfig.ProviderOpts)
+	for _, message := range params.Messages {
+		if !isBetaAssistantMessage(message) {
+			continue
+		}
+		for _, block := range betaMessageContent(message) {
+			if block.OfFallback != nil {
+				ad.fallbackModels = append(ad.fallbackModels, block.OfFallback.To.Model)
+			}
+		}
+	}
 
 	// Set up single retry for context length errors
 	ad.retryFn = func() *ssestream.Stream[anthropic.BetaRawMessageStreamEventUnion] {
-		used, err := countAnthropicTokensBeta(ctx, client, c.ModelConfig.Model, converted, sys, allTools)
+		used, err := countAnthropicTokensBeta(ctx, client, c.ModelConfig.Model, params.Messages, params.System, params.Tools, params.Betas...)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to count tokens for retry, skipping", "error", err)
 			return nil
@@ -134,7 +183,7 @@ func (c *Client) createBetaStream(
 		slog.WarnContext(ctx, "Retrying with clamped max_tokens after context length error", "original", maxTokens, "clamped", newMaxTokens, "used", used)
 		retryParams := params
 		retryParams.MaxTokens = newMaxTokens
-		return client.Beta.Messages.NewStreaming(ctx, retryParams, requestOpts...)
+		return client.Beta.Messages.NewStreaming(ctx, retryParams, samplingOpts...)
 	}
 
 	slog.DebugContext(ctx, "Anthropic Beta API chat completion stream created successfully", "model", c.ModelConfig.Model)
@@ -150,10 +199,10 @@ func countAnthropicTokensBeta(
 	messages []anthropic.BetaMessageParam,
 	system []anthropic.BetaTextBlockParam,
 	anthropicTools []anthropic.BetaToolUnionParam,
+	betas ...anthropic.AnthropicBeta,
 ) (int64, error) {
 	params := anthropic.BetaMessageCountTokensParams{
-		Model:    model,
-		Messages: messages,
+		Model: model, Messages: messages, Betas: betas,
 	}
 	if len(system) > 0 {
 		params.System = anthropic.BetaMessageCountTokensParamsSystemUnion{
@@ -164,11 +213,11 @@ func countAnthropicTokensBeta(
 		// Convert BetaToolUnionParam to BetaMessageCountTokensParamsToolUnion
 		toolParams := make([]anthropic.BetaMessageCountTokensParamsToolUnion, len(anthropicTools))
 		for i, tool := range anthropicTools {
-			if tool.OfTool != nil {
-				toolParams[i] = anthropic.BetaMessageCountTokensParamsToolUnion{
-					OfTool: tool.OfTool,
-				}
+			raw, err := json.Marshal(tool)
+			if err != nil {
+				return 0, err
 			}
+			toolParams[i] = param.Override[anthropic.BetaMessageCountTokensParamsToolUnion](json.RawMessage(raw))
 		}
 		params.Tools = toolParams
 	}
@@ -211,13 +260,10 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 
 	// Construct minimal Beta messages payload.
 	msgs := []anthropic.BetaMessageParam{
-		{
-			Role: anthropic.BetaMessageParamRoleUser,
-			Content: []anthropic.BetaContentBlockParamUnion{
-				{OfText: &anthropic.BetaTextBlockParam{Text: systemPrompt}},
-				{OfText: &anthropic.BetaTextBlockParam{Text: userPrompt}},
-			},
-		},
+		betaUserMessage([]anthropic.BetaContentBlockParamUnion{
+			{OfText: &anthropic.BetaTextBlockParam{Text: systemPrompt}},
+			{OfText: &anthropic.BetaTextBlockParam{Text: userPrompt}},
+		}),
 	}
 
 	// JSON schema for { "scores": [number, ...] }.
@@ -255,23 +301,24 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 
 	// Apply user-configured sampling settings if specified.
 	// For reranking, default temperature to 0 for deterministic scoring if not explicitly set.
-	if c.ModelConfig.Temperature != nil {
-		params.Temperature = param.NewOpt(*c.ModelConfig.Temperature)
-	} else {
-		params.Temperature = param.NewOpt(0.0)
+	var samplingOpts []option.RequestOption
+	if !rejectsSampling(c.ModelConfig.Model) && c.ModelConfig.Temperature != nil {
+		samplingOpts = append(samplingOpts, option.WithJSONSet("temperature", *c.ModelConfig.Temperature))
+	} else if !rejectsSampling(c.ModelConfig.Model) {
+		samplingOpts = append(samplingOpts, option.WithJSONSet("temperature", 0.0))
 	}
-	if c.ModelConfig.TopP != nil {
-		params.TopP = param.NewOpt(*c.ModelConfig.TopP)
+	if !rejectsSampling(c.ModelConfig.Model) && c.ModelConfig.TopP != nil {
+		samplingOpts = append(samplingOpts, option.WithJSONSet("top_p", *c.ModelConfig.TopP))
 	}
 
 	// Forward top_k from provider_opts (Anthropic natively supports it)
-	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
-		params.TopK = param.NewOpt(topK)
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok && !rejectsSampling(c.ModelConfig.Model) {
+		samplingOpts = append(samplingOpts, option.WithJSONSet("top_k", topK))
 		slog.DebugContext(ctx, "Anthropic Beta provider_opts: set top_k", "value", topK)
 	}
 
 	// Use streaming API to avoid timeout errors for operations that may take longer than 10 minutes
-	stream := client.Beta.Messages.NewStreaming(ctx, params)
+	stream := client.Beta.Messages.NewStreaming(ctx, params, samplingOpts...)
 
 	// Accumulate the full response from the stream
 	resp, err := accumulateBetaStreamResponse(stream)

@@ -26,8 +26,8 @@ func newRestoreFixture(t *testing.T) (*LocalRuntime, session.Store, *session.Ses
 	require.NoError(t, err)
 	t.Cleanup(func() { store.(*session.SQLiteSessionStore).Close() })
 
-	prov := func() *mockProvider {
-		return &mockProvider{id: "test/mock-model", stream: newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()}
+	prov := func() *rebuildableMockProvider {
+		return &rebuildableMockProvider{&mockProvider{id: "test/mock-model", stream: newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()}}
 	}
 	tm := team.New(team.WithAgents(
 		agent.New("root", "prompt", agent.WithModel(prov()), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "planner", Name: "planner"}, latest.SubagentRef{Agent: "planner", Name: "alternate"})),

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -280,7 +281,10 @@ func addEnvVarsForCoreProvider(ctx context.Context, providerType string, model *
 		requiredEnv["ANTHROPIC_API_KEY"] = true
 	case "google":
 		if model.ProviderOpts["project"] == nil && model.ProviderOpts["location"] == nil {
-			if value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI"); value != "" {
+			value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
+			useVertexAI, _ := strconv.ParseBool(value)
+			publisher, _ := model.ProviderOpts["publisher"].(string)
+			if useVertexAI || (publisher != "" && !strings.EqualFold(publisher, "google")) {
 				requiredEnv["GOOGLE_CLOUD_PROJECT"] = true
 				requiredEnv["GOOGLE_CLOUD_LOCATION"] = true
 			} else if value, _ := env.Get(ctx, "GEMINI_API_KEY"); value == "" {

@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
@@ -85,6 +86,17 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			clientOptions = append(clientOptions,
 				option.WithAPIKey(""),
 				option.WithMiddleware(chatgptAuthMiddleware(tokenSource)),
+			)
+		case globalOptions.TokenSource() != nil:
+			// Request-time bearer token (e.g. a host-managed credential): the
+			// middleware resolves it on every request.
+			tokenSource := globalOptions.TokenSource()
+			if _, err := tokenSource(ctx); err != nil {
+				return nil, fmt.Errorf("resolving access token: %w", err)
+			}
+			clientOptions = append(clientOptions,
+				option.WithAPIKey(""),
+				option.WithMiddleware(tokenAuthMiddleware(tokenSource)),
 			)
 		case cfg.TokenKey != "":
 			// Explicit token_key configured - use that env var
@@ -148,6 +160,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		httpClient := httpclient.NewHTTPClient(ctx)
 		globalOptions.WrapTransport(ctx, httpClient)
+		base.WrapOpenCodeSession(cfg, httpClient)
 		clientOptions = append(clientOptions, option.WithHTTPClient(httpClient))
 
 		client := openai.NewClient(clientOptions...)
@@ -190,9 +203,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			if authToken != "" {
 				clientOptions = append(clientOptions, option.WithAPIKey(authToken))
 			}
-			client := openai.NewClient(clientOptions...)
-
-			return &client, nil
+			return new(openai.NewClient(clientOptions...)), nil
 		}
 	}
 
@@ -214,7 +225,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	// WebSocket is also skipped when an HTTP transport wrapper is registered:
 	// gorilla/websocket dials raw TCP and never calls http.RoundTripper, so the
 	// wrapper cannot be applied. Fall back to SSE so the wrapper covers all calls.
-	if getTransport(cfg) == "websocket" && globalOptions.Gateway() == "" && globalOptions.TransportWrapper() == nil {
+	if webSocketEnabled(cfg, &globalOptions) {
 		client.wsPool = newWSPool(httpToWSURL(resolvedBaseURL), client.buildWSHeaderFn())
 	}
 
@@ -229,9 +240,22 @@ func (c *Client) Close() {
 	}
 }
 
+// replaysReasoning reports whether stored assistant reasoning is replayed as
+// reasoning_content on Chat Completions requests. Replay defaults on; an
+// explicit provider_opts.replay_reasoning value can opt out.
+func (c *Client) replaysReasoning() bool {
+	return oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts)
+}
+
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+	// Gated here rather than inside the converter so that every path below --
+	// including the prompt-cache breakpoint path, which must keep computing the
+	// same body it will send -- sees the same messages.
+	if !c.replaysReasoning() {
+		messages = oaistream.WithoutReplayedReasoning(messages)
+	}
 	// Explicit prompt-cache breakpoints take priority over the consecutive-
 	// message merge below. [sendsExplicitCacheBreakpoints] only admits genuine
 	// OpenAI vendor endpoints — including a trusted named custom OpenAI
@@ -265,30 +289,6 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	return oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 }
 
-// openModelHostProviders are built-in OpenAI-compatible aliases that front
-// arbitrary open-weight models (Qwen, GLM, Llama, DeepSeek, ...) whose
-// server-side chat templates may reject a request with more than one system
-// message. First-party APIs with a fixed, vendor-controlled model lineup
-// (openai, mistral, xai, minimax, github-copilot, opencode) tolerate multiple
-// system messages and are deliberately absent so their behavior is unchanged.
-var openModelHostProviders = map[string]bool{
-	"baseten":     true,
-	"ovhcloud":    true,
-	"openrouter":  true,
-	"nebius":      true,
-	"nvidia":      true,
-	"cerebras":    true,
-	"fireworks":   true,
-	"together":    true,
-	"huggingface": true,
-	"vercel":      true,
-	// Cloudflare Workers AI serves open-weight models directly; the AI Gateway
-	// fronts them (and other providers) through one endpoint. Both plausibly
-	// reach models with strict single-system-message chat templates.
-	"cloudflare-workers-ai": true,
-	"cloudflare-ai-gateway": true,
-}
-
 // shouldMergeConsecutiveMessages reports whether the chat-completions request
 // should coalesce consecutive same-role messages before sending.
 //
@@ -302,8 +302,8 @@ var openModelHostProviders = map[string]bool{
 // It is scoped to endpoints that plausibly front such models: explicit
 // chat-completions custom providers, a self-hosted server reached by pointing
 // the openai provider at a custom base_url (vLLM/SGLang), and the open-model
-// host aliases above. The official OpenAI API and other first-party APIs are
-// left untouched.
+// host aliases declared in the catalog. The official OpenAI API and other
+// first-party APIs are left untouched.
 func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	if cfg == nil {
 		return false
@@ -317,7 +317,11 @@ func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	if cfg.Provider == "openai" && cfg.BaseURL != "" {
 		return true
 	}
-	return openModelHostProviders[cfg.Provider]
+	// Open-model host aliases front arbitrary open-weight models whose chat
+	// templates may reject more than one system message. The embedded provider
+	// catalog declares them with merge_consecutive_messages; first-party APIs
+	// with a fixed model lineup leave it unset so their requests are unchanged.
+	return catalog.Lookup(cfg.Provider).MergeConsecutiveMessages
 }
 
 // contextLimit returns this model's context window in tokens, preferring an
@@ -410,6 +414,7 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	messages = c.withClaudeSchemaInstruction(ctx, messages)
+	requestTools = tools.WithoutSearchOnly(requestTools)
 
 	trackUsage := c.TrackUsageEnabled()
 
@@ -455,6 +460,7 @@ func (c *Client) CreateChatCompletionStream(
 				slog.DebugContext(ctx, "Failed to convert tool parameters to OpenAI schema", "tool_name", tool.Name, "error", err)
 				return nil, err
 			}
+			tools.OrderedSchemaProperties(parameters)
 
 			toolsParam[i] = openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
 				Name:        tool.Name,
@@ -545,6 +551,10 @@ func (c *Client) CreateChatCompletionStream(
 		}
 	}
 
+	if err := applyChatProviderOpts(&params, c.ModelConfig.ProviderOpts); err != nil {
+		return nil, err
+	}
+
 	// Log the request in JSON format for debugging
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.DebugContext(ctx, "OpenAI chat completion request", "request", string(requestJSON))
@@ -557,11 +567,6 @@ func (c *Client) CreateChatCompletionStream(
 		slog.ErrorContext(ctx, "Failed to create OpenAI client", "error", err)
 		return nil, err
 	}
-
-	// Forward sampling-related provider_opts as extra body fields.
-	// This allows custom/OpenAI-compatible providers (vLLM, Ollama, etc.)
-	// to receive parameters like top_k, repetition_penalty, etc.
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
 
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 
@@ -616,6 +621,7 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 			if err != nil {
 				return nil, err
 			}
+			tools.OrderedSchemaProperties(parameters)
 			loaded = append(loaded, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
 				Name:         tool.Name,
 				Description:  param.NewOpt(tool.Description),
@@ -659,8 +665,14 @@ func (c *Client) CreateResponseStream(
 	}
 
 	messages = c.withClaudeSchemaInstruction(ctx, messages)
+	allRequestTools := requestTools
+	requestTools, hostedTools, err := c.hostedToolSearchTools(ctx, requestTools)
+	if err != nil {
+		return nil, err
+	}
 
 	input := c.convertMessagesToResponseInput(ctx, messages)
+	input = c.filterToolSearchHistory(input, allRequestTools)
 	deferredToolsEnabled := c.supportsDeferredTools()
 	if deferredToolsEnabled {
 		loadedInput, err := injectDeferredToolLoads(input, requestTools)
@@ -675,7 +687,7 @@ func (c *Client) CreateResponseStream(
 		ServiceTier: responses.ResponseNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 	}
 	params.Input.OfInputItemList = input
-	c.configureResponseState(&params)
+	c.configureResponseState(ctx, &params, messages)
 
 	if c.ModelConfig.Temperature != nil {
 		params.Temperature = param.NewOpt(*c.ModelConfig.Temperature)
@@ -690,9 +702,9 @@ func (c *Client) CreateResponseStream(
 		slog.DebugContext(ctx, "OpenAI responses request configured with max output tokens", "max_output_tokens", maxTokens)
 	}
 
-	if len(requestTools) > 0 {
+	if len(requestTools) > 0 || len(hostedTools) > 0 {
 		slog.DebugContext(ctx, "Adding tools to OpenAI responses request", "tool_count", len(requestTools))
-		toolsParam := make([]responses.ToolUnionParam, 0, len(requestTools))
+		toolsParam := make([]responses.ToolUnionParam, 0, len(requestTools)+len(hostedTools))
 		for _, tool := range requestTools {
 			if deferredToolsEnabled && tool.Deferred {
 				continue
@@ -702,6 +714,7 @@ func (c *Client) CreateResponseStream(
 				slog.DebugContext(ctx, "Failed to convert tool parameters to OpenAI schema", "tool_name", tool.Name, "error", err)
 				return nil, err
 			}
+			tools.OrderedSchemaProperties(parameters)
 
 			functionTool := &responses.FunctionToolParam{
 				Name:        tool.Name,
@@ -717,6 +730,7 @@ func (c *Client) CreateResponseStream(
 
 			slog.DebugContext(ctx, "Added tool to OpenAI responses request", "tool_name", tool.Name)
 		}
+		toolsParam = append(toolsParam, hostedTools...)
 		if len(toolsParam) > 0 {
 			params.Tools = toolsParam
 
@@ -798,7 +812,7 @@ func (c *Client) CreateResponseStream(
 		applyChatGPTResponsesPolicy(ctx, &params)
 	}
 
-	// Log the request in JSON format for debugging
+	// Keep prompt and tool diagnostics without logging opaque reasoning blobs.
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.DebugContext(ctx, "OpenAI responses request", "request", redactEncryptedContent(requestJSON))
 	} else {
@@ -813,7 +827,7 @@ func (c *Client) CreateResponseStream(
 	transport := getTransport(&c.ModelConfig)
 
 	switch {
-	case transport == "websocket" && c.ModelOptions.Gateway() == "" && c.ModelOptions.TransportWrapper() == nil:
+	case webSocketEnabled(&c.ModelConfig, &c.ModelOptions):
 		stream, err := c.createWebSocketStream(ctx, params)
 		if err != nil {
 			slog.WarnContext(ctx, "WebSocket stream failed, falling back to SSE", "error", err)
@@ -826,8 +840,11 @@ func (c *Client) CreateResponseStream(
 		slog.DebugContext(ctx, "WebSocket transport requested but Gateway is configured, using SSE",
 			"model", c.ModelConfig.Model,
 			"gateway", c.ModelOptions.Gateway())
-	case transport == "websocket":
+	case transport == "websocket" && c.ModelOptions.TransportWrapper() != nil:
 		slog.DebugContext(ctx, "WebSocket transport requested but HTTP transport wrapper is set, using SSE",
+			"model", c.ModelConfig.Model)
+	case transport == "websocket":
+		slog.DebugContext(ctx, "WebSocket transport requested but the endpoint is OpenCode, using SSE",
 			"model", c.ModelConfig.Model)
 	}
 
@@ -870,7 +887,13 @@ func (c *Client) buildWSHeaderFn() func(ctx context.Context) (http.Header, error
 
 		// Resolve the API key using the same logic as the HTTP client.
 		var apiKey string
-		if c.ModelConfig.TokenKey != "" {
+		if source := c.ModelOptions.TokenSource(); source != nil {
+			var err error
+			apiKey, err = source(ctx)
+			if err != nil {
+				return nil, err
+			}
+		} else if c.ModelConfig.TokenKey != "" {
 			apiKey, _ = authTokenForTokenKey(ctx, &c.ModelConfig, c.Env)
 		}
 		if apiKey == "" {
@@ -902,6 +925,16 @@ func authTokenForTokenKey(ctx context.Context, cfg *latest.ModelConfig, env envi
 		}
 	}
 	return token, cfg.TokenKey
+}
+
+// webSocketEnabled reports whether transport=websocket can be honoured. WebSocket
+// dials bypass http.RoundTripper, so SSE is used behind a gateway, under a
+// transport wrapper, and for OpenCode, whose session header needs the RoundTripper.
+func webSocketEnabled(cfg *latest.ModelConfig, opts *options.ModelOptions) bool {
+	return getTransport(cfg) == "websocket" &&
+		opts.Gateway() == "" &&
+		opts.TransportWrapper() == nil &&
+		!base.IsOpenCodeProvider(cfg)
 }
 
 // getTransport returns the streaming transport preference from ProviderOpts.
@@ -1054,66 +1087,14 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 			}
 
 		case chat.MessageRoleTool:
-			// Tool response message - convert to function call output
 			item.OfFunctionCallOutput = &responses.ResponseInputItemFunctionCallOutputParam{
 				CallID: param.NewOpt(msg.ToolCallID),
-				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-					OfString: param.NewOpt(msg.Content),
-				},
+				Output: c.convertToolResultOutput(ctx, msg),
 			}
 		}
 
 		if item.OfMessage != nil || item.OfInputMessage != nil || item.OfFunctionCall != nil || item.OfFunctionCallOutput != nil {
 			input = append(input, item)
-		}
-
-		// For tool messages with attachments, inject a follow-up user message
-		// since OpenAI function call outputs only support text.
-		if msg.Role == chat.MessageRoleTool && len(msg.MultiContent) > 0 {
-			var attachmentParts []responses.ResponseInputContentUnionParam
-			for _, part := range msg.MultiContent {
-				switch part.Type {
-				case chat.MessagePartTypeImageURL:
-					if part.ImageURL != nil {
-						detail := responses.ResponseInputImageContentDetailAuto
-						switch part.ImageURL.Detail {
-						case chat.ImageURLDetailHigh:
-							detail = responses.ResponseInputImageContentDetailHigh
-						case chat.ImageURLDetailLow:
-							detail = responses.ResponseInputImageContentDetailLow
-						}
-						attachmentParts = append(attachmentParts, responses.ResponseInputContentUnionParam{
-							OfInputImage: &responses.ResponseInputImageParam{
-								ImageURL: param.NewOpt(part.ImageURL.URL),
-								Detail:   responses.ResponseInputImageDetail(detail),
-							},
-						})
-					}
-				case chat.MessagePartTypeDocument:
-					if part.Document != nil {
-						docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
-						if err != nil {
-							slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
-							continue
-						}
-						attachmentParts = append(attachmentParts, docParts...)
-					}
-				}
-			}
-			if len(attachmentParts) > 0 {
-				label := responses.ResponseInputContentUnionParam{
-					OfInputText: &responses.ResponseInputTextParam{
-						Text: "Attached content from tool result:",
-					},
-				}
-				allParts := append([]responses.ResponseInputContentUnionParam{label}, attachmentParts...)
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfInputMessage: &responses.ResponseInputItemMessageParam{
-						Role:    "user",
-						Content: allParts,
-					},
-				})
-			}
 		}
 
 		// Translate the CacheControl marker into an explicit prompt-cache
@@ -1333,7 +1314,9 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		},
 	}
 
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
+	if err := applyChatProviderOpts(&params, c.ModelConfig.ProviderOpts); err != nil {
+		return nil, err
+	}
 
 	resp, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {

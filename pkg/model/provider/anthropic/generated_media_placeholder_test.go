@@ -160,9 +160,9 @@ func TestConvertBetaMessages_GeneratedMediaPlaceholder_MediaOnly(t *testing.T) {
 	out, err := testClient().convertBetaMessages(t.Context(), msgs)
 	require.NoError(t, err)
 	require.Len(t, out, 1, "the media-only placeholder turn must not be dropped")
-	require.Len(t, out[0].Content, 1)
-	require.NotNil(t, out[0].Content[0].OfText)
-	assert.Equal(t, generatedMediaPlaceholderText, out[0].Content[0].OfText.Text)
+	require.Len(t, betaMessageContent(out[0]), 1)
+	require.NotNil(t, betaMessageContent(out[0])[0].OfText)
+	assert.Equal(t, generatedMediaPlaceholderText, betaMessageContent(out[0])[0].OfText.Text)
 }
 
 // TestConvertBetaMessages_GeneratedMediaPlaceholder_Mixed is the beta
@@ -175,9 +175,9 @@ func TestConvertBetaMessages_GeneratedMediaPlaceholder_Mixed(t *testing.T) {
 	out, err := testClient().convertBetaMessages(t.Context(), msgs)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
-	require.Len(t, out[0].Content, 1)
-	require.NotNil(t, out[0].Content[0].OfText)
-	text := out[0].Content[0].OfText.Text
+	require.Len(t, betaMessageContent(out[0]), 1)
+	require.NotNil(t, betaMessageContent(out[0])[0].OfText)
+	text := betaMessageContent(out[0])[0].OfText.Text
 	assert.Contains(t, text, "here you go")
 	assert.Contains(t, text, generatedMediaPlaceholderText)
 }

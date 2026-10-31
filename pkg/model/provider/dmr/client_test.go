@@ -127,7 +127,7 @@ func TestNewClientGatewaySkipsLocalDiscovery(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"printf 'unknown flag: --json\\n' >&2\n" +
 		"exit 1\n"
-	require.NoError(t, os.WriteFile(dockerPath, []byte(script), 0o755))
+	writeMockCLI(t, dockerPath, script)
 
 	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MODEL_RUNNER_HOST", "")
@@ -152,7 +152,7 @@ func TestNewClientReturnsErrNotInstalledWhenDockerModelUnsupported(t *testing.T)
 	script := "#!/bin/sh\n" +
 		"printf 'unknown flag: --json\\n\\nUsage:  docker [OPTIONS] COMMAND [ARG...]\\n\\nRun '\\''docker --help'\\'' for more information\\n' >&2\n" +
 		"exit 1\n"
-	require.NoError(t, os.WriteFile(dockerPath, []byte(script), 0o755))
+	writeMockCLI(t, dockerPath, script)
 
 	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MODEL_RUNNER_HOST", "")
@@ -180,7 +180,7 @@ func TestNewClientReturnsErrNotInstalledWithVariantUsageText(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"printf 'unknown flag: --json\\n\\nUsage:  docker model COMMAND\\n\\nSee docker model --help\\n' >&2\n" +
 		"exit 1\n"
-	require.NoError(t, os.WriteFile(dockerPath, []byte(script), 0o755))
+	writeMockCLI(t, dockerPath, script)
 
 	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MODEL_RUNNER_HOST", "")

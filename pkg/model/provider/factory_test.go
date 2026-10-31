@@ -19,19 +19,38 @@ import (
 
 // fakeProvider is a Provider stub used to verify factory dispatch.
 type fakeProvider struct {
-	id modelsdev.ID
+	id     modelsdev.ID
+	config base.Config
 }
 
 func (f *fakeProvider) ID() modelsdev.ID { return f.id }
 func (f *fakeProvider) CreateChatCompletionStream(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
 	return nil, errors.New("not implemented")
 }
-func (f *fakeProvider) BaseConfig() base.Config { return base.Config{} }
+func (f *fakeProvider) BaseConfig() base.Config { return f.config }
 
 func tagFactory(id string) providerFactory {
 	return func(_ context.Context, _ *latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (Provider, error) {
 		return &fakeProvider{id: modelsdev.NewID("test", id)}, nil
 	}
+}
+
+func TestEmptyRegistryCannotConstructProviders(t *testing.T) {
+	t.Parallel()
+
+	r := EmptyRegistry()
+	assert.Empty(t, r.Types())
+
+	_, err := r.New(t.Context(), &latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, environment.NewDefaultProvider())
+	require.EqualError(t, err, `unknown provider type "openai" (register it with provider.NewRegistry or use providers.NewDefaultRegistry)`)
+}
+
+func TestNilRegistryReturnsConfigurationError(t *testing.T) {
+	t.Parallel()
+
+	var r *Registry
+	_, err := r.New(t.Context(), &latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, environment.NewDefaultProvider())
+	require.EqualError(t, err, "provider registry is required")
 }
 
 // TestCreateDirectProvider_DispatchByType verifies that resolveProviderType's

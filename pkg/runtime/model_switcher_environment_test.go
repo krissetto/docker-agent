@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -125,16 +126,16 @@ func TestDMRDiscoveryCacheIsRevisionScoped(t *testing.T) {
 	calls := 0
 	r := &LocalRuntime{
 		teamEnvironments: store,
-		dmrModelLister: func(ctx context.Context) ([]string, error) {
+		dmrModelLister: func(ctx context.Context) ([]dmrmodels.Model, error) {
 			calls++
 			env := teamEnvironmentFromContext(ctx)
 			if env == nil {
 				return nil, errors.New("missing revision")
 			}
 			if env.RevisionID() == "dmr-old" {
-				return []string{"model-old"}, nil
+				return []dmrmodels.Model{{ID: "model-old"}}, nil
 			}
-			return []string{"model-new"}, nil
+			return []dmrmodels.Model{{ID: "model-new"}}, nil
 		},
 	}
 	oldLease, err := store.AcquireCurrent()
@@ -142,14 +143,14 @@ func TestDMRDiscoveryCacheIsRevisionScoped(t *testing.T) {
 	oldCtx := environmentScopedContext(t.Context(), oldLease)
 	oldModels, err := r.listDMRModels(oldCtx)
 	require.NoError(t, err)
-	require.Equal(t, []string{"model-old"}, oldModels)
+	require.Equal(t, []dmrmodels.Model{{ID: "model-old"}}, oldModels)
 	newEnv := revisionModelEnvironment(t, "dmr-new", "new-choice", "new-model")
 	require.NoError(t, store.Publish("model-source", "dmr-old", newEnv))
 	newLease, err := store.AcquireCurrent()
 	require.NoError(t, err)
 	newModels, err := r.listDMRModels(environmentScopedContext(t.Context(), newLease))
 	require.NoError(t, err)
-	require.Equal(t, []string{"model-new"}, newModels)
+	require.Equal(t, []dmrmodels.Model{{ID: "model-new"}}, newModels)
 	require.Equal(t, 2, calls, "new revision must not reuse old revision discovery cache")
 	require.NoError(t, newLease.Release(t.Context()))
 	require.NoError(t, oldLease.Release(t.Context()))

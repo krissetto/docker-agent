@@ -87,7 +87,7 @@ func TestHaikuRegistryAndNoThinkingCloneRequests(t *testing.T) {
 				if mode == "default" {
 					effort = "medium"
 				}
-				assert.Equal(t, map[string]any{"type": "adaptive", "display": "summarized"}, body["thinking"])
+				assert.Equal(t, map[string]any{"type": "adaptive", "display": "summarized", "block_binding": map[string]any{"prefix_mismatch_behavior": "drop_block"}}, body["thinking"])
 				assert.Equal(t, map[string]any{"effort": effort}, body["output_config"])
 			}
 		})

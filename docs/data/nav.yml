@@ -163,6 +163,10 @@
       url: /providers/overview/
     - title: Anthropic
       url: /providers/anthropic/
+    - title: API Route
+      url: /providers/api-route/
+    - title: Atlas Cloud
+      url: /providers/atlascloud/
     - title: AWS Bedrock
       url: /providers/bedrock/
     - title: Baseten
@@ -175,6 +179,8 @@
       url: /providers/cloudflare-workers-ai/
     - title: ChatGPT
       url: /providers/chatgpt/
+    - title: DaoXE
+      url: /providers/daoxe/
     - title: DeepSeek
       url: /providers/deepseek/
     - title: Docker Model Runner
@@ -191,12 +197,16 @@
       url: /providers/huggingface/
     - title: Local Models
       url: /providers/local/
+    - title: Lunaroute
+      url: /providers/lunaroute/
     - title: MiniMax
       url: /providers/minimax/
     - title: Mistral
       url: /providers/mistral/
     - title: Moonshot AI
       url: /providers/moonshot/
+    - title: Nativ
+      url: /providers/nativ/
     - title: Nebius
       url: /providers/nebius/
     - title: NVIDIA
@@ -209,8 +219,14 @@
       url: /providers/opencode-zen/
     - title: OpenRouter
       url: /providers/openrouter/
+    - title: Opper
+      url: /providers/opper/
+    - title: OrcaRouter
+      url: /providers/orcarouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: Runcrate
+      url: /providers/runcrate/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

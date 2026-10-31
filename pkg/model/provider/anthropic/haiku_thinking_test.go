@@ -26,20 +26,23 @@ func TestHaikuThinkingRequests(t *testing.T) {
 		wantThinking map[string]any
 		wantEffort   string
 	}{
-		{name: "default", wantThinking: map[string]any{"type": "adaptive", "display": "summarized"}, wantEffort: "medium"},
+		// No budget: adaptive thinking with the summarized display and no effort (upstream wire shape).
+		{name: "default", wantThinking: map[string]any{"type": "adaptive", "display": "summarized"}},
 		{name: "adaptive high", budget: &latest.ThinkingBudget{Effort: "adaptive/high"}, wantEffort: "high"},
 		{name: "adaptive xhigh", budget: &latest.ThinkingBudget{Effort: "adaptive/xhigh"}, wantEffort: "xhigh"},
 		{name: "Vertex alias", model: "claude-haiku-5-5@default", budget: &latest.ThinkingBudget{Effort: "adaptive/xhigh"}, wantEffort: "xhigh"},
 		{name: "dated snapshot", model: "claude-haiku-5-5-20260901", budget: &latest.ThinkingBudget{Effort: "adaptive/high"}, wantEffort: "high"},
 		{name: "plain xhigh", budget: &latest.ThinkingBudget{Effort: "xhigh"}, wantEffort: "xhigh"},
 		{name: "max", budget: &latest.ThinkingBudget{Effort: "adaptive/max"}, wantEffort: "max"},
-		{name: "token budget", budget: &latest.ThinkingBudget{Tokens: 32768}, wantEffort: "high"},
+		// A token budget coerced to adaptive on Claude 5.x leaves effort to the model default (upstream rule).
+		{name: "token budget", budget: &latest.ThinkingBudget{Tokens: 32768}, wantThinking: map[string]any{"type": "adaptive", "display": "summarized"}},
 		{name: "omitted display", budget: &latest.ThinkingBudget{Effort: "high"}, display: "omitted", wantThinking: map[string]any{"type": "adaptive", "display": "omitted"}, wantEffort: "high"},
 		{name: "explicit summarized", budget: &latest.ThinkingBudget{Effort: "adaptive/xhigh"}, display: "summarized", wantEffort: "xhigh"},
 		{name: "none", budget: &latest.ThinkingBudget{Effort: "none"}, wantThinking: map[string]any{"type": "disabled"}},
 		{name: "zero", budget: &latest.ThinkingBudget{}, wantThinking: map[string]any{"type": "disabled"}},
-		{name: "no thinking overrides xhigh", budget: &latest.ThinkingBudget{Effort: "adaptive/xhigh"}, noThinking: true, wantThinking: map[string]any{"type": "disabled"}},
-		{name: "no thinking overrides max", budget: &latest.ThinkingBudget{Effort: "max"}, noThinking: true, wantThinking: map[string]any{"type": "disabled"}},
+		// NoThinking applies only to a nil budget (upstream); an explicit budget still sends thinking.
+		{name: "no thinking keeps explicit xhigh", budget: &latest.ThinkingBudget{Effort: "adaptive/xhigh"}, noThinking: true, wantEffort: "xhigh"},
+		{name: "no thinking keeps explicit max", budget: &latest.ThinkingBudget{Effort: "max"}, noThinking: true, wantEffort: "max"},
 		{name: "older Haiku effort", model: "claude-haiku-4-5", budget: &latest.ThinkingBudget{Effort: "adaptive/high"}, wantThinking: map[string]any{"type": "enabled", "budget_tokens": float64(16384)}},
 		{name: "older Haiku default", model: "claude-haiku-4-5"},
 	}
@@ -78,12 +81,22 @@ func TestHaikuThinkingRequests(t *testing.T) {
 				drain(stream)
 				require.Len(t, requests, 1, "expected an outgoing request")
 				got := <-requests
+				// Haiku 5.5+ (checks thinking prefixes) routes through the Beta Messages API
+				// even with thinking_prefix_mismatch unset, which adds the block binding. The
+				// interleaved-thinking header follows the explicit interleaved_thinking option.
 				assert.Equal(t, beta, strings.Contains(got.betas, "interleaved-thinking-2025-05-14"))
 				var body map[string]any
 				require.NoError(t, json.Unmarshal(got.body, &body))
 				want := tc.wantThinking
 				if want == nil && tc.wantEffort != "" {
 					want = map[string]any{"type": "adaptive", "display": "summarized"}
+				}
+				if want != nil && want["type"] != "disabled" && checksThinkingPrefix(model) {
+					want = map[string]any{
+						"type":          want["type"],
+						"display":       want["display"],
+						"block_binding": map[string]any{"prefix_mismatch_behavior": "drop_block"},
+					}
 				}
 				if want == nil {
 					assert.NotContains(t, body, "thinking")

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
@@ -157,7 +158,7 @@ var DefaultModels = map[string]string{
 	"dmr":            "ai/qwen3:latest",
 	"mistral":        "mistral-small-latest",
 	"openrouter":     "meta-llama/llama-4-maverick",
-	"baseten":        "deepseek-ai/DeepSeek-V4-Pro",
+	"baseten":        "deepseek-ai/DeepSeek-V4-Pro-0813",
 	"ovhcloud":       "Qwen3.5-397B-A17B",
 	"groq":           "llama-3.3-70b-versatile",
 	"fireworks":      "accounts/fireworks/models/kimi-k3",
@@ -222,6 +223,11 @@ func AvailableProviders(ctx context.Context, modelsGateway string, env environme
 	for _, p := range cloudProviders {
 		for _, envVar := range p.envVars {
 			if key, _ := env.Get(ctx, envVar); key != "" {
+				if envVar == "GOOGLE_GENAI_USE_VERTEXAI" {
+					if enabled, _ := strconv.ParseBool(key); !enabled {
+						continue
+					}
+				}
 				providers = append(providers, p.name)
 				break // found one, no need to check other env vars for this provider
 			}

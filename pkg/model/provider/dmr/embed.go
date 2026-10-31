@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -60,8 +61,10 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 
 	embeddings := make([][]float64, len(response.Data))
 	for i, data := range response.Data {
-		vec := make([]float64, len(data.Embedding))
-		copy(vec, data.Embedding)
+		vec := slices.Clip(slices.Clone(data.Embedding))
+		if vec == nil {
+			vec = []float64{}
+		}
 		embeddings[i] = vec
 	}
 

@@ -401,8 +401,15 @@ func TestMakeAllRequired_TypeArrayWithObject(t *testing.T) {
 	// Top-level should have additionalProperties: false
 	assert.Equal(t, false, updated["additionalProperties"])
 
-	// The schema property should also have additionalProperties: false
-	schemaProps := updated["properties"].(map[string]any)["schema"].(map[string]any)
+	// The nullable object is expressed as anyOf [object, null]
+	nullable := updated["properties"].(map[string]any)["schema"].(map[string]any)
+	variants := nullable["anyOf"].([]any)
+	require.Len(t, variants, 2)
+	assert.Equal(t, map[string]any{"type": "null"}, variants[1])
+
+	// The object variant should also have additionalProperties: false
+	schemaProps := variants[0].(map[string]any)
+	assert.Equal(t, "object", schemaProps["type"])
 	assert.Equal(t, false, schemaProps["additionalProperties"])
 
 	// All properties in schema should be required
@@ -1190,4 +1197,137 @@ func TestFixSchemaArrayItems(t *testing.T) {
   ],
   "type": "object"
 }`, string(buf))
+}
+
+func TestConvertParametersToSchema_NullableContainers(t *testing.T) {
+	t.Parallel()
+
+	stringArray := func() map[string]any {
+		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	}
+	nullVariant := map[string]any{"type": "null"}
+	rootWith := func(prop map[string]any, required ...any) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             required,
+			"properties":           map[string]any{"p": prop},
+		}
+	}
+	nestedBehindDefs := func(prop map[string]any) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []any{"f"},
+			"properties":           map[string]any{"f": map[string]any{"$ref": "#/$defs/N"}},
+			"$defs": map[string]any{
+				"N": map[string]any{"$ref": "#/$defs/S"},
+				"S": rootWith(prop, "p"),
+			},
+		}
+	}
+	propertyOf := func(object map[string]any) map[string]any {
+		return object["properties"].(map[string]any)["p"].(map[string]any)
+	}
+
+	tests := []struct {
+		name       string
+		schema     map[string]any
+		property   func(out map[string]any) map[string]any
+		want       map[string]any
+		wantStrict bool
+	}{
+		{
+			name:   "required nullable array behind $defs and $ref",
+			schema: nestedBehindDefs(map[string]any{"type": []any{"array", "null"}, "items": map[string]any{"type": "string"}}),
+			property: func(out map[string]any) map[string]any {
+				return propertyOf(out["$defs"].(map[string]any)["S"].(map[string]any))
+			},
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:   "required nullable array with null first, as emitted by schema generators",
+			schema: nestedBehindDefs(map[string]any{"type": []any{"null", "array"}, "items": map[string]any{"type": "string"}}),
+			property: func(out map[string]any) map[string]any {
+				return propertyOf(out["$defs"].(map[string]any)["S"].(map[string]any))
+			},
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional top-level array",
+			schema:     rootWith(stringArray()),
+			property:   propertyOf,
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:     "optional top-level array without items gets default items",
+			schema:   rootWith(map[string]any{"type": "array"}),
+			property: propertyOf,
+			want: map[string]any{"anyOf": []any{
+				map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				nullVariant,
+			}},
+			wantStrict: true,
+		},
+		{
+			name: "optional top-level object",
+			schema: rootWith(map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"a": map[string]any{"type": "string"}},
+			}),
+			property: propertyOf,
+			want: map[string]any{"anyOf": []any{
+				map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []any{"a"},
+					"properties":           map[string]any{"a": map[string]any{"type": []string{"string", "null"}}},
+				},
+				nullVariant,
+			}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional scalar keeps the type pair",
+			schema:     rootWith(map[string]any{"type": "string"}),
+			property:   propertyOf,
+			want:       map[string]any{"type": []string{"string", "null"}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional $ref keeps the anyOf wrapper",
+			schema:     rootWith(map[string]any{"$ref": "#/$defs/thing"}),
+			property:   propertyOf,
+			want:       map[string]any{"anyOf": []any{map[string]any{"$ref": "#/$defs/thing"}, nullVariant}},
+			wantStrict: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			out, strict, err := ConvertParametersToSchema(tt.schema)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, tt.property(out))
+			if tt.wantStrict {
+				assert.True(t, strict)
+				assert.True(t, isStrictCompatible(out))
+			}
+			assertNoNullableContainerTypePairs(t, out)
+		})
+	}
+}
+
+func assertNoNullableContainerTypePairs(t *testing.T, schema map[string]any) {
+	t.Helper()
+
+	walkSchema(schema, func(node map[string]any) {
+		container, isNullablePair := nullableContainerType(node)
+		assert.False(t, isNullablePair, "found nullable %s type pair: %v", container, node)
+	})
 }

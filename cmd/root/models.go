@@ -46,6 +46,7 @@ const listTimeout = 5 * time.Second
 // from the snapshot) prevents surprising side effects like `docker agent models
 // --provider ollama` issuing a real GET against localhost.
 var liveFetchProviders = map[string]bool{
+	"lunaroute":    true,
 	"opencode-zen": true,
 	"opencode-go":  true,
 }
@@ -129,11 +130,22 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	env := f.runConfig.EnvProvider()
 
-	// Normalize the provider filter to lowercase so case-sensitive map lookups
-	// in db.Providers and IsCatalogProvider all match the same way
-	// strings.EqualFold does in the outer row filter below.
+	isCustomProvider := func(name string) bool {
+		for customName := range f.runConfig.Providers {
+			if strings.EqualFold(customName, name) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Custom names take precedence over built-in aliases, regardless of case.
+	customFilter := isCustomProvider(f.providerFilter)
 	if f.providerFilter != "" {
 		f.providerFilter = strings.ToLower(f.providerFilter)
+		if !customFilter {
+			f.providerFilter = modelsdev.CanonicalProviderID(f.providerFilter)
+		}
 	}
 
 	// Determine which model auto-selection would pick. DMR discovery is left
@@ -156,12 +168,25 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 		maps.Copy(availableProviders, f.customProviderAvailability(ctx, env))
 
 		rows = f.collectModels(ctx, env, availableProviders, autoModel)
+		// Catalogue rows use the catalogue ID, so legacy spellings and canonical
+		// IDs list one name. Custom providers keep their configured names, and
+		// gateway rows keep the provider name the gateway serves.
+		for i := range rows {
+			if !isCustomProvider(rows[i].Provider) {
+				rows[i].Provider = modelsdev.CanonicalProviderID(rows[i].Provider)
+			}
+		}
 	}
 
-	// Apply provider filter
 	if f.providerFilter != "" {
 		rows = slices.DeleteFunc(rows, func(r modelRow) bool {
-			return !strings.EqualFold(r.Provider, f.providerFilter)
+			if strings.EqualFold(r.Provider, f.providerFilter) {
+				return false
+			}
+			if customFilter || isCustomProvider(r.Provider) {
+				return true
+			}
+			return modelsdev.CanonicalProviderID(strings.ToLower(r.Provider)) != f.providerFilter
 		})
 	}
 
@@ -269,6 +294,29 @@ func (f *modelsListFlags) customProviderAvailability(ctx context.Context, env en
 	return available
 }
 
+// hasCustomProvider reports whether a configured custom provider has this name,
+// regardless of case.
+func (f *modelsListFlags) hasCustomProvider(name string) bool {
+	for customName := range f.runConfig.Providers {
+		if strings.EqualFold(customName, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// providerAvailable reports whether a catalogue provider ID is available. The
+// availability map keys providers by the names auto-selection uses, which may
+// be legacy spellings of the same catalogue ID (e.g. fireworks for fireworks-ai).
+func providerAvailable(available map[string]bool, providerID string) bool {
+	for name, ok := range available {
+		if ok && modelsdev.CanonicalProviderID(name) == providerID {
+			return true
+		}
+	}
+	return false
+}
+
 // collectModels returns all models from the catalog, filtered by credential
 // availability unless --all is set. Default models for each available provider
 // are always included even if the catalog fetch fails.
@@ -279,6 +327,11 @@ func (f *modelsListFlags) collectModels(ctx context.Context, env environment.Pro
 	// Always include the per-provider defaults so we have something even
 	// if the catalog is unreachable.
 	for prov, model := range config.DefaultModels {
+		// A configured custom provider takes precedence over a built-in alias
+		// of the same name, so the built-in default is not listed under it.
+		if f.hasCustomProvider(prov) {
+			continue
+		}
 		if !f.all && !availableProviders[prov] {
 			continue
 		}
@@ -310,7 +363,7 @@ func (f *modelsListFlags) collectModels(ctx context.Context, env environment.Pro
 		if !provider.IsCatalogProvider(providerID) {
 			continue
 		}
-		if !f.all && !availableProviders[providerID] {
+		if !f.all && !providerAvailable(availableProviders, providerID) {
 			continue
 		}
 		for modelID, model := range prov.Models {

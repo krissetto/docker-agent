@@ -10,6 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -116,6 +120,14 @@ type blockingTitleProvider struct {
 
 	entered chan struct{}
 	release chan struct{}
+}
+
+// The rebuilder returns the same fake so title clones reach the blocking
+// stream instead of failing with ErrNoRebuilder.
+func (p *blockingTitleProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
 }
 
 func (p *blockingTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {

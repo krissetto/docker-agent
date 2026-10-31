@@ -11,8 +11,11 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -27,9 +30,17 @@ type ownedTitleProvider struct {
 	failure error
 }
 
-func (*ownedTitleProvider) ID() modelsdev.ID        { return modelsdev.ParseIDOrZero("test/title") }
-func (*ownedTitleProvider) BaseConfig() base.Config { return base.Config{} }
-func (*ownedTitleProvider) MaxTokens() int          { return 128 }
+func (*ownedTitleProvider) ID() modelsdev.ID { return modelsdev.ParseIDOrZero("test/title") }
+
+// The rebuilder returns the same fake, as queueProvider does: policy-A title
+// clones (sessiontitle generateOnce) must reach this double, not fail with
+// ErrNoRebuilder before the call is counted.
+func (p *ownedTitleProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
+func (*ownedTitleProvider) MaxTokens() int { return 128 }
 func (p *ownedTitleProvider) CreateChatCompletionStream(ctx context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
 	p.calls.Add(1)
 	if p.entered != nil {

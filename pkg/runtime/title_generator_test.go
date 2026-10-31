@@ -14,6 +14,8 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -37,7 +39,9 @@ func (p *imageOutputProvider) CreateChatCompletionStream(context.Context, []chat
 }
 
 func (p *imageOutputProvider) BaseConfig() base.Config {
-	return base.Config{ModelConfig: latest.ModelConfig{
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}, ModelConfig: latest.ModelConfig{
 		OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
 	}}
 }

@@ -40,6 +40,12 @@ type ModelChoice struct {
 	// IsCatalog indicates this is a model from the models.dev catalog
 	IsCatalog bool `json:"is_catalog,omitempty"`
 
+	// Local model metadata reported by Docker Model Runner.
+	Architecture string `json:"architecture,omitempty"`
+	Parameters   string `json:"parameters,omitempty"`
+	Quantization string `json:"quantization,omitempty"`
+	Size         string `json:"size,omitempty"`
+
 	// The fields below are populated (best-effort) from the models.dev
 	// catalog. They are optional and may all be zero/empty when no
 	// catalog entry is found for the model.

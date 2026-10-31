@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // expandModelConfigEnv substitutes ${env.X} / ${X} references in the model
@@ -157,11 +158,21 @@ func applyProviderDefaults(cfg *latest.ModelConfig, customProviders map[string]l
 			"base_url", providerCfg.BaseURL,
 		)
 		mergeFromProviderConfig(enhancedCfg, providerCfg)
+		if providerCfg.Provider != "" {
+			enhancedCfg.Provider = modelsdev.CanonicalProviderID(enhancedCfg.Provider)
+		}
 		applyModelDefaults(enhancedCfg)
 		return enhancedCfg
 	}
 
-	if alias, exists := LookupAlias(cfg.Provider); exists {
+	enhancedCfg.Provider = modelsdev.CanonicalProviderID(enhancedCfg.Provider)
+	// Only OpenAI-compatible aliases receive catalogue endpoint and token
+	// defaults. Native SDK providers (openai, anthropic, google, amazon-bedrock,
+	// dmr) keep an empty BaseURL and TokenKey here, so their SDKs resolve
+	// endpoint environment overrides before their own defaults. Gemini Vertex
+	// clients rely on the same rule, so a catalogue default never shadows
+	// GOOGLE_GEMINI_BASE_URL.
+	if alias, exists := LookupAlias(enhancedCfg.Provider); exists {
 		applyAliasFallbacks(enhancedCfg, alias)
 	}
 
@@ -226,12 +237,17 @@ func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig)
 }
 
 // applyAliasFallbacks applies BaseURL and TokenKey defaults from a built-in
-// alias when the model config does not already specify them.
+// alias when the model config does not already specify them. An explicit
+// api_type with a user base_url names an OpenAI-compatible endpoint that is
+// unauthenticated unless the user supplies a token, so the alias token is not
+// sent to it.
 func applyAliasFallbacks(dst *latest.ModelConfig, alias Alias) {
+	apiType, _ := dst.ProviderOpts["api_type"].(string)
+	unauthenticatedEndpoint := dst.BaseURL != "" && apiType != "" && alias.APIType == "openai"
 	if dst.BaseURL == "" {
 		dst.BaseURL = alias.BaseURL
 	}
-	if dst.TokenKey == "" {
+	if dst.TokenKey == "" && !unauthenticatedEndpoint {
 		dst.TokenKey = alias.TokenEnvVar
 	}
 }

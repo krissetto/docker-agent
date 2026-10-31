@@ -12,7 +12,10 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -26,9 +29,16 @@ type presentationTitleProvider struct {
 	calls   atomic.Int32
 }
 
-func (*presentationTitleProvider) ID() modelsdev.ID        { return modelsdev.ParseIDOrZero("test/title") }
-func (*presentationTitleProvider) BaseConfig() base.Config { return base.Config{} }
-func (*presentationTitleProvider) MaxTokens() int          { return 128 }
+func (*presentationTitleProvider) ID() modelsdev.ID { return modelsdev.ParseIDOrZero("test/title") }
+
+// The rebuilder returns the same fake so the title clone reaches the scripted
+// call instead of failing with ErrNoRebuilder.
+func (p *presentationTitleProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
+func (*presentationTitleProvider) MaxTokens() int { return 128 }
 func (p *presentationTitleProvider) CreateChatCompletionStream(ctx context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
 	p.calls.Add(1)
 	close(p.entered)

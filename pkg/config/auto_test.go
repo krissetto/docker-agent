@@ -311,7 +311,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"BASETEN_API_KEY": "test-key",
 			},
 			expectedProvider:  "baseten",
-			expectedModel:     "deepseek-ai/DeepSeek-V4-Pro",
+			expectedModel:     "deepseek-ai/DeepSeek-V4-Pro-0813",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -495,7 +495,7 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "meta-llama/llama-4-maverick", DefaultModels["openrouter"])
-	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro", DefaultModels["baseten"])
+	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro-0813", DefaultModels["baseten"])
 	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "llama-3.3-70b-versatile", DefaultModels["groq"])
 	assert.Equal(t, "accounts/fireworks/models/kimi-k3", DefaultModels["fireworks"])

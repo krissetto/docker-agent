@@ -276,6 +276,9 @@ func (s *Store) getProvider(ctx context.Context, providerID string) (*Provider, 
 
 	provider, exists := db.Providers[providerID]
 	if !exists {
+		provider, exists = db.Providers[CanonicalProviderID(providerID)]
+	}
+	if !exists {
 		return nil, fmt.Errorf("provider %q not found", providerID)
 	}
 
@@ -357,6 +360,11 @@ func lookupProviderModel(provider *Provider, id ID) (*Model, bool) {
 			model, exists = provider.Models[after]
 		}
 	}
+	if !exists && id.Provider == "ovhcloud" {
+		// OVHcloud's API uses mixed-case IDs; its catalog uses lowercase IDs.
+		model, exists = provider.Models[strings.ToLower(id.Model)]
+	}
+	model.Cost = model.Cost.forModel(id)
 	if !exists {
 		return nil, false
 	}

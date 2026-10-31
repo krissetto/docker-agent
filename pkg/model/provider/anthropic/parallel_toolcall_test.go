@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+	"github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/packages/ssestream"
 )
 
 // fakeDecoder feeds a fixed sequence of SSE events to ssestream.Stream.

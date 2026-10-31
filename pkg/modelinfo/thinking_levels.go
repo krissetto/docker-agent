@@ -112,7 +112,7 @@ func anthropicTopEfforts(modelID string) []effort.Level {
 // accepts the xhigh and max effort tiers. The capability matrix it encodes is
 // quoted in [anthropicTopEfforts]'s authoritative reference.
 func anthropicTopTierSupport(m string) (hasXHigh, hasMax bool) {
-	if UsesAdaptiveThinkingByDefault(m) {
+	if _, ok := LookupClaude5(m); ok || UsesAdaptiveThinkingByDefault(m) {
 		return true, true
 	}
 	if bare, ok := bedrockClaudeModelName(m); ok {

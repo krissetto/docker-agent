@@ -9,20 +9,27 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 
-	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	sdkvertex "github.com/anthropics/anthropic-sdk-go/vertex"
+	anthropicsdk "github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/option"
+	sdkvertex "github.com/anthropics/anthropic-sdk-go/v2/vertex"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 )
 
 // cloudPlatformScope is the OAuth2 scope required for Vertex AI API access.
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+
+// vertexAnthropicVersion is the API version Vertex AI accepts in the body.
+const vertexAnthropicVersion = "vertex-2023-10-16"
 
 // NewClient creates a new Anthropic client that talks to Claude models
 // hosted on Google Cloud's Vertex AI via the Anthropic-native endpoints
@@ -35,8 +42,31 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 //
 // See: https://docs.anthropic.com/en/api/claude-on-vertex-ai
 func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, opts ...options.Opt) (*anthropic.Client, error) {
+	return newClient(ctx, cfg, env, project, location, nil, opts...)
+}
+
+// NewClientWithTokenSource is NewClient authenticated with source instead of
+// Application Default Credentials, which are never looked up. The token is
+// resolved with each request's context, so per-request values such as the
+// session ID and cancellation reach the source.
+func NewClientWithTokenSource(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, source options.TokenSource, opts ...options.Opt) (*anthropic.Client, error) {
+	if source == nil {
+		return nil, errors.New("token source is required")
+	}
+	return newClient(ctx, cfg, env, project, location, source, opts...)
+}
+
+func newClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, source options.TokenSource, opts ...options.Opt) (*anthropic.Client, error) {
 	if cfg == nil {
 		return nil, errors.New("model configuration is required")
+	}
+	for _, name := range []string{"native_compaction", "cache_diagnostics"} {
+		if enabled, _ := providerutil.GetProviderOptBool(cfg.ProviderOpts, name); enabled {
+			return nil, fmt.Errorf("%s requires the Claude API and is not available on Vertex AI", name)
+		}
+	}
+	if providerutil.HasProviderOpt(cfg.ProviderOpts, "fallbacks") {
+		return nil, errors.New("fallbacks requires the Claude API and is not available on Vertex AI")
 	}
 	if env == nil {
 		return nil, errors.New("environment provider is required")
@@ -48,15 +78,23 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, errors.New("vertex AI requires a GCP location")
 	}
 
+	// With a token source the factory needs the transport options too. Apply
+	// the options once here and hand the factory their round-tripped form, so
+	// each option function runs exactly once.
+	factoryOpts := opts
+	var globalOptions options.ModelOptions
+	if source != nil {
+		globalOptions = options.Apply(opts...)
+		factoryOpts = options.FromModelOptions(globalOptions)
+	}
+
 	// Config validation (thinking_display, ...) runs inside
 	// NewClientFromFactory before the factory below, so configuration errors
 	// surface without requiring GCP credentials.
 	anthropicClient, err := anthropic.NewClientFromFactory(ctx, cfg, env, func(ctx context.Context) (anthropicsdk.Client, error) {
-		// Resolve GCP credentials up front so we can return a descriptive error
-		// instead of the panic that vertex.WithGoogleAuth would raise.
-		creds, err := google.FindDefaultCredentials(ctx, cloudPlatformScope)
+		creds, err := credentials(ctx, source)
 		if err != nil {
-			return anthropicsdk.Client{}, fmt.Errorf("failed to obtain GCP credentials for Vertex AI: %w (run 'gcloud auth application-default login')", err)
+			return anthropicsdk.Client{}, err
 		}
 
 		slog.DebugContext(ctx, "Creating Anthropic client for Vertex AI",
@@ -77,15 +115,76 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// OAuth2 (via the google transport in vertex.WithCredentials), so we
 		// must clear the stray X-Api-Key header that would otherwise leak a
 		// direct-API credential into Google's infrastructure.
-		return anthropicsdk.NewClient(
+		// SDK v2's Vertex middleware takes the body anthropic_version from the
+		// anthropic-version header, which otherwise carries the SDK's own API
+		// date. Vertex requires the Vertex API version, so set it explicitly.
+		sdkOptions := []option.RequestOption{
 			sdkvertex.WithCredentials(ctx, location, project, creds),
 			option.WithAPIKey(""),
-		), nil
-	}, opts...)
+			option.WithHeader("anthropic-version", vertexAnthropicVersion),
+		}
+		if source != nil {
+			sdkOptions = append(sdkOptions, tokenSourceOptions(ctx, globalOptions, source)...)
+		}
+		return anthropicsdk.NewClient(sdkOptions...), nil
+	}, factoryOpts...)
 	if err != nil {
 		return nil, err
 	}
 
 	slog.DebugContext(ctx, "Anthropic (Vertex AI) client created successfully", "model", cfg.Model)
 	return anthropicClient, nil
+}
+
+// credentials returns Application Default Credentials or, with an explicit
+// source, placeholder credentials whose token source is never used because
+// tokenSourceOptions replaces the HTTP client built from them. The source is
+// probed once so a broken one fails construction, like missing ADC does.
+func credentials(ctx context.Context, source options.TokenSource) (*google.Credentials, error) {
+	if source != nil {
+		if _, err := source(ctx); err != nil {
+			return nil, fmt.Errorf("resolving access token: %w", err)
+		}
+		return &google.Credentials{TokenSource: unusedTokenSource{}}, nil
+	}
+	// Resolve GCP credentials up front so we can return a descriptive error
+	// instead of the panic that vertex.WithGoogleAuth would raise.
+	creds, err := google.FindDefaultCredentials(ctx, cloudPlatformScope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to obtain GCP credentials for Vertex AI: %w (run 'gcloud auth application-default login')", err)
+	}
+	return creds, nil
+}
+
+// tokenSourceOptions replaces the OAuth-wrapped HTTP client installed by
+// vertex.WithCredentials: option.WithHTTPClient passed after it is used
+// as-is, so the SDK never overrides the Authorization header that the
+// middleware sets from the request context.
+func tokenSourceOptions(ctx context.Context, globalOptions options.ModelOptions, source options.TokenSource) []option.RequestOption {
+	httpClient := httpclient.NewHTTPClient(ctx)
+	globalOptions.WrapTransport(ctx, httpClient)
+	return []option.RequestOption{
+		option.WithMiddleware(bearerTokenMiddleware(source)),
+		option.WithHTTPClient(httpClient),
+	}
+}
+
+// unusedTokenSource keeps vertex.WithCredentials from looking up ADC for the
+// HTTP client it builds; that client is replaced, so no token is ever minted.
+type unusedTokenSource struct{}
+
+func (unusedTokenSource) Token() (*oauth2.Token, error) {
+	return nil, errors.New("vertex AI: the SDK token source must not be used; tokens come from the request middleware")
+}
+
+// bearerTokenMiddleware resolves the bearer token on every request.
+func bearerTokenMiddleware(source options.TokenSource) option.Middleware {
+	return func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		token, err := source(req.Context())
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		return next(req)
+	}
 }

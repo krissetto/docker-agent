@@ -124,6 +124,9 @@ func TestAssistantPresentationEmptyRefusalClearsPlaceholder(t *testing.T) {
 	require.Len(t, own, 1)
 	assert.Empty(t, own[0].Message.Content)
 	assert.Empty(t, own[0].Message.ToolCalls)
+	// No visible content either, so no blank or visible assistant bubble.
+	assert.Empty(t, own[0].Message.Presentation)
+	assert.Empty(t, own[0].Message.MultiContent)
 	assert.NotNil(t, own[0].Message.Usage)
 	assert.Equal(t, chat.FinishReasonRefusal, own[0].Message.FinishReason)
 	got, err := store.GetSession(t.Context(), sess.ID)

@@ -27,7 +27,8 @@ func TestMergeCloneOptions_NoOverrides(t *testing.T) {
 		},
 	}
 
-	got, mergedOpts := mergeCloneOptions(cfg, nil)
+	got, mergedOpts, err := mergeCloneOptions(cfg, nil)
+	require.NoError(t, err)
 
 	require.NotNil(t, got.MaxTokens)
 	assert.Equal(t, originalMax, *got.MaxTokens, "MaxTokens should be untouched when no overrides")
@@ -45,11 +46,14 @@ func TestMergeCloneOptions_MaxTokensOverride(t *testing.T) {
 	}
 
 	newMax := int64(2048)
-	got, mergedOpts := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(newMax)})
+	got, mergedOpts, err := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(newMax)})
+	require.NoError(t, err)
 
 	require.NotNil(t, got.MaxTokens)
 	assert.Equal(t, newMax, *got.MaxTokens, "MaxTokens should follow explicit override")
-	assert.Len(t, mergedOpts, 1, "user-supplied option should appear in mergedOpts")
+	// The user-supplied cap is kept, and an explicit cap also constrains routed
+	// children through an auxiliary cap appended after it.
+	assert.Len(t, mergedOpts, 2, "user-supplied option and its auxiliary cap should appear in mergedOpts")
 }
 
 // TestMergeCloneOptions_NoThinking covers the option-merge branch that
@@ -67,7 +71,8 @@ func TestMergeCloneOptions_NoThinking(t *testing.T) {
 		},
 	}
 
-	got, _ := mergeCloneOptions(cfg, []options.Opt{options.WithNoThinking()})
+	got, _, err := mergeCloneOptions(cfg, []options.Opt{options.WithNoThinking()})
+	require.NoError(t, err)
 
 	require.NotNil(t, got.ThinkingBudget, "WithNoThinking must write the disabled sentinel, not nil")
 	assert.True(t, got.ThinkingBudget.IsDisabled(),
@@ -88,7 +93,8 @@ func TestMergeCloneOptions_PreservesBaseOptions(t *testing.T) {
 		ModelConfig:  latest.ModelConfig{Provider: "openai", Model: "gpt-4o"},
 	}
 
-	_, mergedOpts := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(1024)})
+	_, mergedOpts, err := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(1024)})
+	require.NoError(t, err)
 
 	// Replay the merged opts and check all three flags survived.
 	var probe options.ModelOptions
@@ -113,7 +119,8 @@ func TestMergeCloneOptions_LaterOverridesWin(t *testing.T) {
 		ModelConfig:  latest.ModelConfig{Provider: "openai", Model: "gpt-4o"},
 	}
 
-	got, _ := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(int64(4096))})
+	got, _, err := mergeCloneOptions(cfg, []options.Opt{options.WithMaxTokens(int64(4096))})
+	require.NoError(t, err)
 
 	require.NotNil(t, got.MaxTokens)
 	assert.Equal(t, int64(4096), *got.MaxTokens, "later opt must override earlier opt")
@@ -125,11 +132,14 @@ func TestMergeCloneOptions_LaterOverridesWin(t *testing.T) {
 func TestCloneWithOptions_FallbackOnError(t *testing.T) {
 	t.Parallel()
 
-	// fakeProvider returns a zero-valued base.Config, so its Provider type is
-	// empty; that always fails the factory-registry lookup in createDirectProvider.
+	// fakeProvider has neither a rebuild function nor a registry, so the clone
+	// fails. Per the approved policy the failure surfaces when the clone creates
+	// its stream instead of silently running the base provider.
 	original := &fakeProvider{id: modelsdev.NewID("test", "original")}
 
 	got := CloneWithOptions(t.Context(), original, options.WithMaxTokens(int64(2048)))
 
-	assert.Same(t, original, got, "should fall back to base provider when cloning fails")
+	assert.NotSame(t, original, got, "a failed clone must not silently run the base provider")
+	_, err := got.CreateChatCompletionStream(t.Context(), nil, nil)
+	require.ErrorIs(t, err, ErrNoRebuilder)
 }

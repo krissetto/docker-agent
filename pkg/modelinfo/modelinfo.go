@@ -181,14 +181,19 @@ func isAdaptiveOnlyOpus(modelID string) bool {
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
 //
-// Applies to Claude Haiku 5.5+ and Claude Opus 4.6, 4.7, 4.8, 5,
-// and their dated variants (e.g. claude-opus-4-7-20251101). Bedrock-style identifiers
+// Applies to every model in the Claude 5.x table ([LookupClaude5]), to Claude
+// Haiku 5.5+ (see [UsesAdaptiveThinkingByDefault]), and to Claude Opus 4.6, 4.7,
+// 4.8, 5, and their dated variants (e.g. claude-opus-4-7-20251101,
+// claude-opus-5-20260724). Bedrock-style identifiers
 // such as "global.anthropic.claude-opus-5" are recognised too.
 // For these models the agent transparently switches a token-based budget to
 // adaptive thinking.
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
+	if _, ok := LookupClaude5(modelID); ok {
+		return true
+	}
 	return isAdaptiveOnlyOpus(modelID) || UsesAdaptiveThinkingByDefault(modelID)
 }
 
@@ -201,17 +206,19 @@ func RejectsTokenThinking(modelID string) bool {
 // Claude 3.x) reject `thinking.type=adaptive`/`output_config.effort` with a 400
 // and must use token-based extended thinking (`thinking.type=enabled`) instead.
 //
-// Supported: Opus 4.6/4.7/4.8/5 (which additionally reject token budgets, see
-// [RejectsTokenThinking]), Sonnet 4.6+, Opus/Sonnet 5+, Haiku 5.5+, and the
-// codenamed frontier models (Fable, Mythos). Bedrock-style identifiers such as
-// "global.anthropic.claude-sonnet-4-6" are recognised too.
+// Supported: every model in the Claude 5.x table ([LookupClaude5]) and Haiku
+// 5.5+ (see [UsesAdaptiveThinkingByDefault]), Opus 4.6/4.7/4.8/5 (which
+// additionally reject token budgets, see [RejectsTokenThinking]), Sonnet 4.6+,
+// Opus/Sonnet 5+, and the codenamed frontier models (Fable, Mythos).
+// Bedrock-style identifiers such as "global.anthropic.claude-sonnet-4-6" are
+// recognised too.
 //
 // The set is a superset of [RejectsTokenThinking]: a model that rejects token
 // budgets must accept adaptive thinking.
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func SupportsAdaptiveThinking(modelID string) bool {
-	if UsesAdaptiveThinkingByDefault(modelID) {
+	if _, ok := LookupClaude5(modelID); ok || UsesAdaptiveThinkingByDefault(modelID) {
 		return true
 	}
 	m := normalize(modelID)
@@ -363,10 +370,10 @@ func atLeastGPT(modelID string, major, minor int) bool {
 // Matches both "gemini-3-<family>" and "gemini-3.X-<family>" patterns.
 func UsesThinkingLevel(modelID string) bool {
 	m := normalize(modelID)
-	if !strings.HasPrefix(m, "gemini-3") {
+	rest, found := strings.CutPrefix(m, "gemini-3")
+	if !found {
 		return false
 	}
-	rest := m[len("gemini-3"):]
 	if rest == "" {
 		return false
 	}

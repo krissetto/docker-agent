@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/shared"
+	"github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/shared"
 
 	"github.com/docker/docker-agent/pkg/modelerrors"
 )

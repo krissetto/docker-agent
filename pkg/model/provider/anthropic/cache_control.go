@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/v2"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -107,7 +107,7 @@ func extractBetaSystemBlocks(messages []chat.Message) []anthropic.BetaTextBlockP
 // of the last `breakpoints` messages for prompt caching.
 func applyMessageCacheControl(messages []anthropic.MessageParam, breakpoints int) {
 	for i := len(messages) - 1; i >= 0 && i >= len(messages)-breakpoints; i-- {
-		content := messages[i].Content
+		content := messageContent(messages[i])
 		if len(content) == 0 {
 			continue
 		}
@@ -122,7 +122,17 @@ func applyMessageCacheControl(messages []anthropic.MessageParam, breakpoints int
 // of the last `breakpoints` messages for prompt caching.
 func applyBetaMessageCacheControl(messages []anthropic.BetaMessageParam, breakpoints int) {
 	for i := len(messages) - 1; i >= 0 && i >= len(messages)-breakpoints; i-- {
-		content := messages[i].Content
+		if messages[i].OfSystem != nil {
+			sys := messages[i].OfSystem.Content
+			if len(sys) == 0 {
+				continue
+			}
+			if cc := sys[len(sys)-1].GetCacheControl(); cc != nil {
+				*cc = anthropic.NewBetaCacheControlEphemeralParam()
+			}
+			continue
+		}
+		content := betaMessageContent(messages[i])
 		if len(content) == 0 {
 			continue
 		}

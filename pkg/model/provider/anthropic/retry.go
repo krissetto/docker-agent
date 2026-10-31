@@ -4,7 +4,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+	"github.com/anthropics/anthropic-sdk-go/v2/packages/ssestream"
 )
 
 // retryableStream wraps an ssestream.Stream and adds a single-retry mechanism

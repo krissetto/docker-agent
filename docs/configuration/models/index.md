@@ -86,13 +86,20 @@ models:
 | `compaction_prompt` | string    | ✗        | Replaces the built-in compaction user prompt for agents running this model. The built-in system prompt is kept. Precedence: agent-level `compaction_prompt`, then this value, then a provider-level default. Cannot be combined with `first_available`. See [Customizing the Compaction Prompt](#customizing-the-compaction-prompt). |
 | `bypass_models_gateway` | boolean  | ✗        | When `true`, this model connects directly to its provider even when a models gateway (`--models-gateway` / `DOCKER_AGENT_MODELS_GATEWAY`) is configured. Implied by a custom `base_url`. See [Gateway Bypass](#gateway-bypass). |
 
+Built-in provider IDs use models.dev names: `fireworks-ai`, `togetherai`,
+`moonshotai`, and `opencode`. Existing configurations using `fireworks`,
+`together`, `moonshot`, or `opencode-zen` continue to work without warnings.
+New configurations using canonical IDs require a version that supports them.
+Explicitly named custom providers still take precedence.
+
 ## Attachment Capability Overrides
 
 For custom OpenAI-compatible providers, local models (Ollama, DMR), and any
 model the built-in catalogue does not describe, Docker Agent cannot
 auto-detect whether the endpoint accepts image, PDF, audio, or video
 attachments. When the model is absent from the catalogue, Docker Agent logs a
-diagnostic and falls back to text-only, silently dropping attachments.
+diagnostic and falls back to text-only, silently dropping attachments. For the `chatgpt` provider, a missing entry first falls back to the matching `openai`
+entry for **image input only**; PDF, audio, and video are not inferred.
 
 Declare `capabilities` to make the model's attachment support authoritative
 and skip the catalogue lookup entirely:
@@ -132,8 +139,8 @@ models:
 
 The flags must match what the endpoint actually accepts. Claiming a modality
 that the endpoint does not support leads to a provider-side API error. When
-`capabilities` is omitted the behaviour is unchanged (catalogue lookup then
-conservative text-only fallback).
+`capabilities` is omitted, input support comes from the catalogue, the scoped
+ChatGPT image fallback above, or conservative text-only fallback.
 
 ### Unsupported media is stripped before the call
 
@@ -184,15 +191,12 @@ output. Enabling image output only opts the model into behavior that keys off
 that capability (for example, a provider-specific image-output request
 contract); it does not guarantee that a provider will return an image.
 
-Session-title and compaction requests omit image response modalities and
-bypass the guard even for image-output-capable models; they do not explicitly
-force TEXT-only output. On supported Google surfaces, the guard runs only when
-image output resolves as enabled and an ordinary request includes custom tools
-or structured output; matching requests are rejected locally. Google
-server-side built-ins remain available. For a custom-tool conflict,
-models.dev's `tool_call` capability makes the error say
-whether the model lacks tool calls entirely or only cannot combine them with
-image output; unavailable metadata keeps a conservative generic message.
+Which requests ask for image output, and which request shapes are rejected
+when it is enabled, is provider-specific — see
+[Google Gemini: Generated Images](../../providers/google/index.md#generated-images).
+Where the returned images land and how they are rendered is covered under
+[Generated Media Files](../../features/sessions/index.md#generated-media-files)
+and the TUI's [Generated Media](../../features/tui/index.md#generated-media).
 
 > [!WARNING]
 > **Constraint**
@@ -200,6 +204,7 @@ image output; unavailable metadata keeps a conservative generic message.
 > `output_capabilities` cannot be combined with `first_available` model selection — the combination is rejected at validation time. Declare it on the concrete candidate models instead.
 
 See [`examples/gemini_image_output.yaml`](https://github.com/docker/docker-agent/blob/main/examples/gemini_image_output.yaml) for a complete example.
+
 
 ## Custom Token Pricing
 
@@ -450,60 +455,32 @@ See [`examples/first_available.yaml`](https://github.com/docker/docker-agent/blo
 
 ## Thinking Budget
 
-Control how much reasoning the model does before responding. This varies by provider:
-
-### OpenAI
-
-Uses effort levels as strings:
-
-```yaml
-models:
-  gpt:
-    provider: openai
-    model: gpt-5.6
-    thinking_budget: low # none | minimal | low | medium | high | xhigh | max (xhigh needs gpt-5.2+; none/max need gpt-5.6+; minimal dropped on gpt-5.6+)
-```
-
-### Anthropic
-
-Uses an integer token budget (1024–32768), or — on adaptive-capable models (Opus 4.6+) — `adaptive`, `adaptive/<effort>`, or a bare effort level:
+Control how much reasoning the model does before responding with `thinking_budget` (string or integer). The accepted values and defaults depend on the provider and model. See the [Thinking / Reasoning guide](../../guides/thinking/index.md#quick-reference) for the comparison and how to choose an effort level.
 
 ```yaml
 models:
   claude:
     provider: anthropic
     model: claude-sonnet-4-5
-    thinking_budget: 16384 # must be < max_tokens
-
-  opus:
-    provider: anthropic
-    model: claude-opus-4-6
-    thinking_budget: adaptive # or adaptive/<effort>, or low | medium | high | xhigh | max
+    max_tokens: 32768
+    thinking_budget: 16384
 ```
+
+### OpenAI
+
+Use a string effort level. See [OpenAI thinking budgets](../../providers/openai/index.md#thinking-budget) for supported levels and model restrictions.
+
+### Anthropic
+
+Use an integer token budget or an adaptive effort setting, depending on the model. See [Anthropic thinking budgets](../../providers/anthropic/index.md#thinking-budget) for accepted values, the `max_tokens` constraint, and model restrictions.
 
 ### Google Gemini 2.5
 
-Uses an integer token budget. `0` disables, `-1` lets the model decide:
-
-```yaml
-models:
-  gemini:
-    provider: google
-    model: gemini-2.5-flash
-    thinking_budget: -1 # dynamic (default)
-```
+Use an integer token budget. See [Gemini thinking budgets](../../providers/google/index.md#thinking-budget) for defaults, limits, and dynamic thinking.
 
 ### Google Gemini 3
 
-Uses effort levels like OpenAI:
-
-```yaml
-models:
-  gemini3:
-    provider: google
-    model: gemini-3-flash
-    thinking_budget: medium # minimal | low | medium | high
-```
+Use a string effort level. See [Gemini thinking budgets](../../providers/google/index.md#thinking-budget) for supported values and examples.
 
 ### Disabling Thinking
 
@@ -511,21 +488,9 @@ models:
 thinking_budget: none # or 0
 ```
 
-`none` and `0` both clear Docker Agent's local thinking configuration (omitting `thinking_budget` has the same effect); neither is guaranteed to reach the API as a real "off" switch:
+`none` and `0` both clear Docker Agent's local thinking configuration (omitting `thinking_budget` has the same effect). Whether that reaches the API as a real "off" switch depends on the model — see [Disabling Thinking](../../guides/thinking/index.md#disabling-thinking) in the guide.
 
-- **OpenAI gpt-5.6+** (Sol/Terra/Luna) is the only case with a genuine API-level `none` reasoning effort: Docker Agent sends it as-is and the model does not reason.
-- **Older OpenAI reasoning models** (o-series, gpt-5 through gpt-5.5) have no such switch: `none`/`0` just clear the local config, and the model falls back to the API's own default effort and still reasons internally. Same for other always-reasoning models (Gemini 3).
-- Providers with a true optional-thinking switch (Gemini 2.5, Claude, local models) are fully disabled by `none`/`0`.
 
-```yaml
-models:
-  fast-responder:
-    provider: openai
-    model: gpt-5.6
-    thinking_budget: none # real API-level disable on gpt-5.6+
-```
-
-See the [Thinking / Reasoning guide](../../guides/thinking/index.md) for per-provider details, including AWS Bedrock and Docker Model Runner.
 
 ## Task Budget
 
@@ -613,6 +578,45 @@ models:
 `display` (full thinking blocks) is only accepted by pre-4.6 token-thinking models (e.g. Sonnet 4.5, Haiku 4.5); newer models (Opus/Sonnet 4.6+, Sonnet 5, Fable 5) only accept `summarized` and `omitted`, and Docker Agent rejects the configuration at startup.
 
 See the [Anthropic provider page](../../providers/anthropic/index.md#thinking-display) for details.
+
+## Extra Request Body
+
+For OpenAI-compatible providers and Docker Model Runner, `provider_opts.extra_body`
+adds arbitrary top-level fields to **Chat Completions** request bodies. Use it for
+backend-specific options that Docker Agent does not expose directly:
+
+```yaml
+models:
+  local:
+    provider: openai
+    model: mlx-community/Qwen3.6-35B-A3B-8bit
+    base_url: http://localhost:8080/v1
+    provider_opts:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+```
+
+Choose the switch your server supports. Other backends may accept
+`extra_body: {reasoning_effort: none}` or
+`extra_body: {thinking: {type: disabled}}` instead. Docker Agent does not translate
+these options or infer them from `thinking_budget: none`.
+
+`extra_body` must be an object; other values cause a request error. Its contents
+are merged at the top level, without an `extra_body` wrapper. Nested objects are
+replaced, not deep-merged. Explicit values override generated fields, including
+sampling parameters, token limits, and internal no-thinking settings. These
+overrides also apply to title generation, compaction, and OpenAI-client reranking
+when they use the configured model's Chat Completions endpoint. Streaming calls
+always force `stream: true`, regardless of `extra_body`. Only set fields your
+server accepts, and avoid overriding request structure such as `messages`.
+
+This option does not apply to the Responses API, embeddings, or DMR's model-wide
+`_configure` endpoint. Other `provider_opts` keys remain client-side unless
+explicitly supported.
+
+See [`examples/extra_body.yaml`](https://github.com/docker/docker-agent/blob/main/examples/extra_body.yaml)
+for a complete local-server configuration.
 
 ## Custom HTTP Headers
 

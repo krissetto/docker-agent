@@ -14,6 +14,9 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -42,6 +45,16 @@ func (s *titleTestStream) Recv() (chat.MessageStreamResponse, error) {
 }
 
 func (*titleTestStream) Close() {}
+
+// BaseConfig gives the fake a rebuild function that returns itself, so the
+// title model clone succeeds without a provider factory.
+func (p titleTestProvider) BaseConfig() base.Config {
+	cfg := p.rootTestProvider.BaseConfig()
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}
+	return cfg
+}
 
 func (p titleTestProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
 	p.calls.Add(1)

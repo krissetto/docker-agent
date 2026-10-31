@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/v2"
 
 	"github.com/docker/docker-agent/pkg/attachment"
 	"github.com/docker/docker-agent/pkg/chat"

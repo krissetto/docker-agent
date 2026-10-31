@@ -27,6 +27,8 @@ type ResponseStreamAdapter struct {
 	serviceTier       string
 	done              bool
 	responseState     *chat.OpenAIResponse
+	preserveOutput    bool
+	onResponseDone    func(responses.Response)
 	responseItems     map[int64]json.RawMessage
 	responseReasoning strings.Builder
 	itemCallIDMap     map[string]string
@@ -316,6 +318,12 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		slog.Debug("Reasoning summary part event", "type", event.Type, "item_id", event.ItemID)
 
 	case "response.output_item.done":
+		if a.preserveOutput && replayableResponseItem(event.Item) && event.JSON.OutputIndex.Valid() {
+			if a.responseItems == nil {
+				a.responseItems = make(map[int64]json.RawMessage)
+			}
+			a.responseItems[event.OutputIndex] = responseItemJSON(event.Item)
+		}
 		// Tool call or message item is complete
 		itemID := cmp.Or(event.ItemID, event.Item.ID)
 		slog.Debug("Output item done", "item_id", itemID, "type", event.Item.Type)
@@ -447,6 +455,9 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	}
 
 	a.captureResponseState(event, &response)
+	if a.onResponseDone != nil && (event.Type == "response.completed" || event.Type == "response.done") {
+		a.onResponseDone(event.Response)
+	}
 	return response, nil
 }
 

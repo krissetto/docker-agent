@@ -16,9 +16,13 @@ Docker Agent reads the first credential it finds from these environment variable
 | --------------------------- | ----------------------------------------------------------------------------------- |
 | `GOOGLE_API_KEY`            | Primary Gemini API key.                                                             |
 | `GEMINI_API_KEY`            | Alternative name for the Gemini API key (also used by the official Google SDK).     |
-| `GOOGLE_GENAI_USE_VERTEXAI` | When set (any value), routes through Vertex AI instead of the Gemini Developer API. |
-| `GOOGLE_CLOUD_PROJECT`      | GCP project used when `GOOGLE_GENAI_USE_VERTEXAI` is set or for Vertex AI Model Garden. |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Boolean flag (`true` or `1` enables Vertex AI); unset, empty, `false`, `0`, or invalid values do not enable it. |
+| `GOOGLE_CLOUD_PROJECT`      | GCP project used when `GOOGLE_GENAI_USE_VERTEXAI` is enabled or for Vertex AI Model Garden. |
 | `GOOGLE_CLOUD_LOCATION`     | GCP region for Vertex AI (defaults to the SDK default).                             |
+
+Explicit `provider_opts.project` or `provider_opts.location` selects Vertex AI regardless of the flag.
+
+On the Gemini Developer API, a model or [custom provider](../custom/index.md) that sets `token_key` reads its key from that variable instead of `GOOGLE_API_KEY` / `GEMINI_API_KEY`. The Vertex AI backends use Application Default Credentials and ignore `token_key`.
 
 ```bash
 # Gemini Developer API
@@ -63,30 +67,14 @@ models:
 ## Generated Images
 
 Some Gemini models (e.g. `gemini-2.5-flash-image`) are designed to generate
-an image directly as part of their reply, not just describe one. Docker
-Agent requests that image output on supported Google surfaces — the models
-gateway, direct Gemini API, and Vertex AI — according to one binding policy:
-explicit `false`, explicit `true`, then an exact models.dev record whose
-`Modalities.Output` contains `image`. An omitted image flag, including
-`output_capabilities: {}`, uses that catalogue default. Unknown models or
-unavailable catalogue data leave image response modalities disabled; model
-names are never used to guess capability.
-Each eligible ordinary chat request asks for text *and* image output.
-Vertex AI has deterministic guard/predicate coverage; live image-generation
-validation is deferred.
-
-Docker Agent attempts to save each returned image and display it in the TUI — see [Generated Media](../../features/tui/index.md#generated-media)
-for file naming, collision handling, and rendering details.
-
-The workspace file is the visible deliverable. After that file and its manifest
-entry are saved, a portable copy is also stored in the session database and
-preferred when the session is reopened. It can render the original generated
-bytes even if the workspace file was edited, moved, or deleted.
-Generated-media storage and resolution do not impose a size cap. If portable
-persistence fails, the workspace file is still kept and the turn includes a
-warning.
-Sessions created before portable copies were introduced continue to use their
-manifest-gated workspace files.
+an image directly as part of their reply, not just describe one. When the
+model's image output capability resolves as enabled — see
+[Output capabilities](../../configuration/models/index.md#output-capabilities)
+for the `output_capabilities.image` / models.dev precedence rules — Docker
+Agent requests that image output on supported Google surfaces: the models
+gateway, direct Gemini API, and Vertex AI. Each eligible ordinary chat request
+asks for text *and* image output. Vertex AI has deterministic guard/predicate
+coverage; live image-generation validation is deferred.
 
 ```yaml
 models:
@@ -95,11 +83,9 @@ models:
     model: gemini-2.5-flash-image
 ```
 
-When `output_capabilities.image` is omitted, including in an empty block,
-Docker Agent uses models.dev output modalities for the exact known model. Set
-it explicitly for custom models or to override incorrect catalogue data;
-unknown or unavailable metadata remains disabled and capability is never
-guessed from the model name.
+`output_capabilities.image` can be omitted for models that models.dev lists
+with image output; set it explicitly for custom models or to override
+incorrect catalogue data. Capability is never guessed from the model name.
 
 Session-title and compaction requests omit image response modalities and
 bypass the guard even for image-output-capable models. They do not explicitly
@@ -117,17 +103,19 @@ A few provider-side behaviors to know:
   `.gif` or `.svg` filename does not transcode anything — the saved file's
   extension is corrected to match the data actually returned.
 - **An image is not guaranteed.** Even a correctly configured image model
-  can answer with text only and generate no image. At a text-only stop,
-  phrases such as "generate an image" or "draw a picture" in the last user
-  prompt trigger a nonfatal warning while preserving the reply:
-  `The model returned text but no image for this image-generation request. Try rephrasing the request.`
-  This phrase-based check is not semantic intent detection and does not
-  check output capability: negated or quoted phrases can match and other
-  wording can be missed. It does not track a whole submission across tool
-  calls, steering, stop hooks, or handoffs. A terminal provider error skips
-  this check, as does structured output configured on the current agent
-  model; per-call overrides and reply content are not independently
-  classified.
+  can answer with text only and generate no image; that is provider behavior,
+  so reword or repeat the prompt. At a text-only stop, Docker Agent may add a
+  nonfatal phrase-based warning to the turn — see
+  [Generated Media](../../features/tui/index.md#generated-media) for the exact
+  check and its limitations.
+
+Docker Agent attempts to save each returned image into the session workspace,
+keep a portable copy in the session database, and display it in the TUI. See
+[Generated Media Files](../../features/sessions/index.md#generated-media-files)
+for persistence and portability, and
+[Generated Media](../../features/tui/index.md#generated-media) for file
+naming, collision handling, and rendering.
+
 
 ## Thinking Budget
 
@@ -175,8 +163,8 @@ models:
 
 ## Built-in Tools (Grounding)
 
-Gemini models support built-in tools that let the model access Google Search and Google Maps
-directly during generation. Enable them via `provider_opts`:
+Gemini models support built-in tools that let the model access Google Search, Google Maps,
+and public URLs, or execute code directly during generation. Enable them via `provider_opts`:
 
 ```yaml
 models:
@@ -194,6 +182,111 @@ models:
 | `google_search`  | Enables Google Search grounding for up-to-date info  |
 | `google_maps`    | Enables Google Maps grounding for location queries   |
 | `code_execution` | Enables server-side code execution for computations  |
+| `url_context`    | Lets Gemini read public URLs supplied in the prompt   |
+
+### URL Context
+
+Enable `url_context` to let Gemini read links supplied in your prompt without a
+separate fetch tool:
+
+```yaml
+models:
+  reader:
+    provider: google
+    model: gemini-3.8-flash
+    provider_opts:
+      url_context: true
+      google_search: true # Optional: discover sources as well as read links
+```
+
+Then ask, for example, `Summarize https://docs.docker.com/ai/docker-agent/`.
+Google fetches the content on its servers; it cannot read local files, private
+network URLs, or pages requiring your browser's authentication. The option is
+opt-in and accepts a YAML boolean, not the string `"true"`.
+
+Docker Agent forwards this tool on the Gemini Developer API, models gateway,
+and native Gemini Vertex AI paths. Model, backend, region, and tool-combination
+support still depend on Google and the gateway. On supported models it can be
+combined with Google Search. Mixing built-in and custom function tools currently
+uses a flag that the Go SDK accepts only on the Gemini Developer API path
+(including gateways forwarding to that API), not Vertex AI. This is not a
+general browser or an alternative to the local fetch tool for authenticated
+requests.
+
+See Google's [URL Context guide](https://ai.google.dev/gemini-api/docs/url-context)
+for supported content types, limits, and models, and
+[`examples/gemini_url_context.yaml`](https://github.com/docker/docker-agent/blob/main/examples/gemini_url_context.yaml)
+for a complete agent.
+
+## Embeddings
+
+Gemini embedding models can back the [RAG](../../tools/rag/index.md)
+`chunked-embeddings` and `semantic-embeddings` strategies. Text is embedded
+natively through the Gemini API (`batchEmbedContents`) or Vertex AI, and vectors
+come back in input order. On Vertex AI, Gemini Embedding 2 models accept one
+input per request, so batches are sent one text at a time there.
+
+```yaml
+models:
+  gemini-embed:
+    provider: google
+    model: gemini-embedding-2
+    provider_opts:
+      output_dimensionality: 768   # optional; defaults to the model's native size
+
+rag:
+  docs:
+    docs: [./docs]
+    strategies:
+      - type: chunked-embeddings
+        embedding_model: gemini-embed
+        database: ./docs.db
+        vector_dimensions: 768       # must match output_dimensionality (or the native size)
+```
+
+| Option                  | Description                                                                                                           |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `output_dimensionality` | Positive integer. Truncates vectors to this size on models that support it (Matryoshka). Omit to use the native size. |
+
+`gemini-embedding-001` works the same way. Vectors from different models (or
+different `output_dimensionality` values) live in different vector spaces, so
+rebuild the index after changing either.
+
+Only text is embedded, and no `task_type` is sent: queries and documents share
+one vector space with no automatic task prefixes, and the same configuration
+works with Gemini Embedding 2, which rejects `task_type`. The Gemini Developer
+API does not report token usage for embeddings, so RAG cost statistics stay at
+zero; Vertex AI per-input token statistics are summed into the input token
+count when present.
+
+## Service Tier
+
+Set `provider_opts.service_tier` to pick a Gemini API [Flex](https://ai.google.dev/gemini-api/docs/flex-inference)
+or [Priority](https://ai.google.dev/gemini-api/docs/priority-inference) inference tier:
+
+```yaml
+models:
+  gemini-flex:
+    provider: google
+    model: gemini-2.5-flash
+    provider_opts:
+      service_tier: flex
+```
+
+| Tier       | Description                                                                 |
+| ---------- | --------------------------------------------------------------------------- |
+| `flex`     | Discounted, queued processing; a request may wait before the model answers. |
+| `standard` | The default tier; same as omitting the option.                              |
+| `priority` | Premium pricing for faster, more consistent processing.                     |
+
+The value is forwarded unchanged as the top-level `serviceTier` of every `generateContent` request on the Gemini Developer API, Vertex AI, and the Docker models gateway; the endpoint must support it. It applies to all requests using the configured model, including reranking, title generation, and compaction. Other values are passed through for the API to validate. When omitted or empty, no `serviceTier` is sent, leaving the API's default behavior unchanged. Non-string values are ignored. [Vertex AI Model Garden](#vertex-ai-model-garden) models do not use this option.
+
+Flex requests can sit in Google's queue for up to 15 minutes before the first byte arrives. Docker Agent normally treats a stream that stays silent for 5 minutes as stalled; for `google` models with `service_tier: flex` it waits 15 minutes instead. Other tiers and providers keep the 5 minute limit. Rate-limit (`429`) and overloaded (`503`) responses are retried like any other Gemini request; Docker Agent never upgrades a request to a different tier on your behalf.
+
+> [!WARNING]
+> Docker Agent's cost estimates do not adjust for `service_tier`. They use the catalogue's standard pricing, which overestimates `flex` and underestimates `priority` charges. Set the model's [`cost` override](../../configuration/models/index.md#custom-token-pricing) to the applicable input, output, and cache token rates for your tier.
+
+See [`examples/gemini_service_tier.yaml`](https://github.com/docker/docker-agent/blob/main/examples/gemini_service_tier.yaml) for a complete example.
 
 ## Vertex AI Model Garden
 

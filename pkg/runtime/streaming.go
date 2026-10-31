@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"github.com/docker/docker-agent/pkg/model/provider"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -298,6 +298,9 @@ mainLoop:
 				// token counts, so the last value is the most accurate.
 				messageUsage = response.Usage
 			}
+			if len(response.UsageAttempts) > 0 {
+				usageAttempts = response.UsageAttempts
+			}
 
 			if len(response.Choices) == 0 {
 				continue
@@ -309,6 +312,10 @@ mainLoop:
 
 			if len(choice.Delta.ThoughtSignature) > 0 {
 				thoughtSignature = choice.Delta.ThoughtSignature
+			}
+
+			if choice.Delta.ProviderState != nil {
+				providerState = choice.Delta.ProviderState
 			}
 
 			// A server fallback supersedes the declined model's tool calls and
@@ -431,6 +438,8 @@ mainLoop:
 						openAIResponse = nil
 						presentation = slices.DeleteFunc(presentation, func(part chat.AssistantPart) bool { return part.Type == chat.AssistantPartToolCall })
 					}
+					// The raw response still holds those blocks, so it goes too.
+					providerState = nil
 				} else {
 					applyXMLFallback()
 					if finishReason == chat.FinishReasonStop && len(toolCalls) > 0 {
@@ -445,10 +454,12 @@ mainLoop:
 					ThinkingSignature: thinkingSignature,
 					ThoughtSignature:  thoughtSignature,
 					OpenAIResponse:    openAIResponse,
+					ProviderState:     providerState,
 					Media:             media,
 					Stopped:           len(toolCalls) == 0, // stop only when there are no tool calls to execute
 					FinishReason:      finishReason,
 					Usage:             messageUsage,
+					UsageAttempts:     usageAttempts,
 				}, nil
 			}
 
@@ -533,11 +544,11 @@ mainLoop:
 		ThinkingSignature: thinkingSignature,
 		ThoughtSignature:  thoughtSignature,
 		OpenAIResponse:    openAIResponse,
+		ProviderState:     providerState,
 		Media:             media,
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,
 		Usage:             messageUsage,
-		ProviderState:     providerState,
 		UsageAttempts:     usageAttempts,
 	}, nil
 }

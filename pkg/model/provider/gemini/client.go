@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	"google.golang.org/genai"
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
@@ -69,10 +71,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// Determine whether Vertex AI would normally be used, then check whether
 		// an HTTP transport wrapper forces a fallback to BackendGeminiAPI.
 		// The Vertex AI backend relies on ADC-managed HTTP clients that bypass
-		// http.RoundTripper, so the wrapper cannot be applied there.
-		_, useVertexAIEnv := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
+		// http.RoundTripper, so the wrapper cannot be applied there. With an
+		// explicit token source we own the HTTP client and the wrapper applies.
+		value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
+		useVertexAIEnv, _ := strconv.ParseBool(value)
 		wantVertexAI := cfg.ProviderOpts["project"] != nil || cfg.ProviderOpts["location"] != nil || useVertexAIEnv
-		useVertexAI := wantVertexAI && globalOptions.TransportWrapper() == nil
+		tokenSource := globalOptions.TokenSource()
+		useVertexAI := wantVertexAI && (globalOptions.TransportWrapper() == nil || tokenSource != nil)
 
 		if wantVertexAI && !useVertexAI {
 			slog.DebugContext(ctx, "Vertex AI requested but HTTP transport wrapper is set, falling back to GeminiAPI backend")
@@ -99,21 +104,15 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			}
 
 			backend = genai.BackendVertexAI
-			httpClient = nil // Use ADC-managed client
 		case useVertexAI:
 			project, _ = env.Get(ctx, "GOOGLE_CLOUD_PROJECT")
 			location, _ = env.Get(ctx, "GOOGLE_CLOUD_LOCATION")
 			backend = genai.BackendVertexAI
-			httpClient = nil // Use ADC-managed client
 		default:
-			if value, exist := env.Get(ctx, "GEMINI_API_KEY"); exist {
-				apiKey = value
-			}
-			if value, exist := env.Get(ctx, "GOOGLE_API_KEY"); exist {
-				apiKey = value
-			}
-			if apiKey == "" {
-				return nil, errors.New("GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required")
+			var err error
+			apiKey, err = directAPIKey(ctx, cfg, env)
+			if err != nil {
+				return nil, err
 			}
 
 			backend = genai.BackendGeminiAPI
@@ -122,12 +121,31 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		if backend == genai.BackendVertexAI {
 			apiSurface = apiSurfaceVertexAI
+			// A nil httpClient means the SDK's ADC-managed client. With an explicit
+			// token source we supply our own, authenticated per request below, so
+			// no ADC lookup runs.
+			switch {
+			case tokenSource != nil:
+				if _, err := tokenSource(ctx); err != nil {
+					return nil, fmt.Errorf("resolving access token: %w", err)
+				}
+				httpClient = httpclient.NewHTTPClient(ctx)
+			case !adcSupported:
+				return nil, errors.New("vertex AI requires an explicit token source on this platform: application default credentials are unavailable")
+			}
 		} else {
 			apiSurface = apiSurfaceGeminiAPI
 		}
 
 		globalOptions.WrapTransport(ctx, httpClient)
+		base.WrapOpenCodeSession(cfg, httpClient)
+		if backend == genai.BackendVertexAI && tokenSource != nil {
+			// Outermost so the wrapper sees the same authenticated request the
+			// other providers' SDK middlewares produce.
+			httpClient.Transport = &bearerTokenTransport{source: tokenSource, base: httpClient.Transport}
+		}
 
+		baseURL := clientBaseURL(backend, cfg.Provider, cfg.BaseURL)
 		client, err := genai.NewClient(ctx, &genai.ClientConfig{
 			APIKey:     apiKey,
 			Project:    project,
@@ -135,7 +153,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			Backend:    backend,
 			HTTPClient: httpClient,
 			HTTPOptions: genai.HTTPOptions{
-				BaseURL: cfg.BaseURL,
+				BaseURL: baseURL,
 			},
 		})
 		if err != nil {
@@ -210,6 +228,45 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		clientFn:   clientFn,
 		apiSurface: apiSurface,
 	}, nil
+}
+
+// bearerTokenTransport resolves the bearer token on every request.
+type bearerTokenTransport struct {
+	source options.TokenSource
+	base   http.RoundTripper
+}
+
+func (t *bearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	token, err := t.source(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+token)
+	return t.base.RoundTrip(req)
+}
+
+// directAPIKey resolves the Gemini API key for the direct path: the model's
+// token_key when set, otherwise GOOGLE_API_KEY or GEMINI_API_KEY.
+func directAPIKey(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) (string, error) {
+	if cfg.TokenKey != "" {
+		apiKey, _ := env.Get(ctx, cfg.TokenKey)
+		if apiKey == "" {
+			return "", fmt.Errorf("%s environment variable is required", cfg.TokenKey)
+		}
+		return apiKey, nil
+	}
+	var apiKey string
+	if value, exist := env.Get(ctx, "GEMINI_API_KEY"); exist {
+		apiKey = value
+	}
+	if value, exist := env.Get(ctx, "GOOGLE_API_KEY"); exist {
+		apiKey = value
+	}
+	if apiKey == "" {
+		return "", errors.New("GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required")
+	}
+	return apiKey, nil
 }
 
 // defaultThoughtSignature is a well-known sentinel that tells Gemini to skip
@@ -455,7 +512,11 @@ func extractMimeType(dataURLPrefix string) string {
 
 // BuildConfig creates GenerateContentConfig from model config.
 func (c *Client) buildConfig() *genai.GenerateContentConfig {
-	config := &genai.GenerateContentConfig{}
+	// Set before the NoThinking early return so every request (chat, rerank,
+	// title, compaction) is billed on the same tier.
+	config := &genai.GenerateContentConfig{
+		ServiceTier: genai.ServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
+	}
 	if c.ModelConfig.MaxTokens != nil {
 		config.MaxOutputTokens = int32(*c.ModelConfig.MaxTokens) //nolint:gosec // user-configured token count; realistic values fit in int32
 	}
@@ -564,8 +625,7 @@ func (c *Client) applyGemini25ThinkingBudget(config *genai.GenerateContentConfig
 	slog.Debug("Gemini request using thinking_budget", "budget_tokens", tokens)
 }
 
-// builtInTools returns Gemini built-in tools (Google Search, Google Maps,
-// Code Execution) enabled via provider_opts.
+// builtInTools returns Gemini built-in tools enabled via provider_opts.
 func (c *Client) builtInTools() []*genai.Tool {
 	entries := []struct {
 		key  string
@@ -574,6 +634,7 @@ func (c *Client) builtInTools() []*genai.Tool {
 		{"google_search", &genai.Tool{GoogleSearch: &genai.GoogleSearch{}}},
 		{"google_maps", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}},
 		{"code_execution", &genai.Tool{CodeExecution: &genai.ToolCodeExecution{}}},
+		{"url_context", &genai.Tool{URLContext: &genai.URLContext{}}},
 	}
 
 	var builtIn []*genai.Tool
@@ -627,7 +688,25 @@ func ConvertParametersToSchema(params any) (*genai.Schema, error) {
 		return nil, err
 	}
 
+	applyPropertyOrdering(schema, m)
 	return schema, nil
+}
+
+func applyPropertyOrdering(schema *genai.Schema, source map[string]any) {
+	if schema == nil {
+		return
+	}
+	schema.PropertyOrdering = tools.SchemaPropertyNames(source)
+	if properties, ok := source["properties"].(map[string]any); ok {
+		for name, child := range properties {
+			if child, ok := child.(map[string]any); ok {
+				applyPropertyOrdering(schema.Properties[name], child)
+			}
+		}
+	}
+	if items, ok := source["items"].(map[string]any); ok {
+		applyPropertyOrdering(schema.Items, items)
+	}
 }
 
 // normalizeBooleanSchemas recursively replaces JSON Schema boolean sub-schemas
@@ -796,7 +875,7 @@ func (c *Client) CreateChatCompletionStream(
 		applyImageOutputMediaFileInstruction(config)
 	}
 
-	// Start with Google built-in tools (search, maps, code execution) from provider_opts
+	// Start with Google built-in tools from provider_opts
 	builtInTools := c.builtInTools()
 	config.Tools = builtInTools
 
@@ -1006,4 +1085,15 @@ func providerOption(cfg *latest.ModelConfig, name string) string {
 		return v
 	}
 	return ""
+}
+
+// clientBaseURL returns the endpoint handed to the genai SDK. The catalog
+// endpoint is Google's generic API host, so Vertex AI clears it (omitted or
+// default) and the SDK picks its regional endpoint. Any explicit endpoint is
+// honored for both backends.
+func clientBaseURL(backend genai.Backend, provider, baseURL string) string {
+	if backend == genai.BackendVertexAI && catalog.IsDefaultEndpoint(provider, baseURL) {
+		return ""
+	}
+	return baseURL
 }

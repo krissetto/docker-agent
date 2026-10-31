@@ -30,31 +30,53 @@ func (a *ResponseStreamAdapter) captureResponseState(event responses.ResponseStr
 	state.ID = event.Response.ID
 	reasoning := a.responseReasoning.String()
 	state.ReasoningContent = &reasoning
-	if len(event.Response.Output) > 0 {
-		for i, item := range event.Response.Output {
-			raw := responseItemJSON(item)
-			if item.Type == "reasoning" && item.EncryptedContent == "" {
-				if completed := a.responseItems[int64(i)]; len(completed) > 0 {
-					var previous responses.ResponseOutputItemUnion
-					if json.Unmarshal(completed, &previous) == nil && previous.Type == "reasoning" && previous.ID == item.ID && previous.EncryptedContent != "" {
-						raw = completed
-					}
-				}
-			}
-			state.Output = append(state.Output, slices.Clone(raw))
-		}
-	} else {
+	// Diagnostics alone keep the response ID and reasoning snapshot, never output.
+	if a.preserveOutput {
+		state.Output = a.terminalOutput(event.Response)
+	}
+	if len(response.Choices) == 0 {
+		response.Choices = []chat.MessageStreamChoice{{}}
+	}
+	response.Choices[0].Delta.OpenAIResponse = state
+}
+
+// terminalOutput returns the ordered raw output to replay when output is
+// preserved. Only replayable items are kept; a reasoning item missing its
+// ciphertext in the terminal snapshot is restored from the completed item with
+// the same ID before that check.
+func (a *ResponseStreamAdapter) terminalOutput(response responses.Response) []json.RawMessage {
+	var output []json.RawMessage
+	if len(response.Output) == 0 {
 		indices := make([]int64, 0, len(a.responseItems))
 		for index := range a.responseItems {
 			indices = append(indices, index)
 		}
 		slices.Sort(indices)
 		for _, index := range indices {
-			state.Output = append(state.Output, slices.Clone(a.responseItems[index]))
+			output = append(output, slices.Clone(a.responseItems[index]))
 		}
+		return output
 	}
-	if len(response.Choices) == 0 {
-		response.Choices = []chat.MessageStreamChoice{{}}
+	for i, item := range response.Output {
+		raw := responseItemJSON(item)
+		if item.Type == "reasoning" && item.EncryptedContent == "" {
+			if completed := a.responseItems[int64(i)]; len(completed) > 0 {
+				var previous responses.ResponseOutputItemUnion
+				if json.Unmarshal(completed, &previous) == nil && previous.Type == "reasoning" && previous.ID == item.ID && previous.EncryptedContent != "" {
+					raw = completed
+				}
+			}
+		}
+		if !replayableRawItem(raw) {
+			continue
+		}
+		output = append(output, slices.Clone(raw))
 	}
-	response.Choices[0].Delta.OpenAIResponse = state
+	return output
+}
+
+// replayableRawItem reports whether a raw output item can be replayed.
+func replayableRawItem(raw json.RawMessage) bool {
+	var item responses.ResponseOutputItemUnion
+	return json.Unmarshal(raw, &item) == nil && replayableResponseItem(item)
 }

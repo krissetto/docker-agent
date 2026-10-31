@@ -26,6 +26,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -424,8 +426,16 @@ func TestSessionHTTPCreateUnsupportedWithoutSingleSourceRuntime(t *testing.T) {
 // the public HTTP boundary without a production model dependency.
 type sessionHTTPProvider struct{}
 
-func (sessionHTTPProvider) ID() modelsdev.ID        { return modelsdev.ParseIDOrZero("test/http") }
-func (sessionHTTPProvider) BaseConfig() base.Config { return base.Config{} }
+func (sessionHTTPProvider) ID() modelsdev.ID { return modelsdev.ParseIDOrZero("test/http") }
+
+// The rebuilder returns the stateless fake so title and compaction clones
+// (which fall back to the agent model) keep working.
+func (sessionHTTPProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return sessionHTTPProvider{}, nil
+	}}
+}
+
 func (sessionHTTPProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
 	return &sessionHTTPStream{}, nil
 }

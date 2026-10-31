@@ -532,6 +532,9 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 			choice.CacheReadCost = cfg.Cost.CacheRead
 			choice.CacheWriteCost = cfg.Cost.CacheWrite
 		}
+		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+			choice.ContextLimit = int(n)
+		}
 		choices = append(choices, choice)
 	}
 	configuredDuration := time.Since(configuredStart)
@@ -569,6 +572,7 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 	// would show nothing selectable in the picker.
 	dmrStart := time.Now()
 	dmrChoices := r.buildDMRChoicesForConfig(ctx, modelConfig)
+	r.populateDMRChoices(ctx, modelConfig, choices)
 	dmrDuration := time.Since(dmrStart)
 	choices = append(choices, dmrChoices...)
 

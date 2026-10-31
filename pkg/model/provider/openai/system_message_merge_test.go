@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // TestChatCompletions_MergesConsecutiveSystemMessages is a regression test for
@@ -165,6 +166,10 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"open-model host together", &latest.ModelConfig{Provider: "together", Model: "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"}, true},
 		{"open-model host huggingface", &latest.ModelConfig{Provider: "huggingface", Model: "meta-llama/Llama-3.3-70B-Instruct"}, true},
 		{"open-model host gateway vercel", &latest.ModelConfig{Provider: "vercel", Model: "openai/gpt-5"}, true},
+		{"catalog-only host lunaroute", &latest.ModelConfig{Provider: "lunaroute", Model: "glm-5.3"}, true},
+		{"catalog-only host runcrate", &latest.ModelConfig{Provider: "runcrate", Model: "deepseek-ai/DeepSeek-V4.1-Flash"}, true},
+		{"catalog-only host api-route", &latest.ModelConfig{Provider: "api-route", Model: "gpt-6.1-sol"}, true},
+		{"catalog-only host atlascloud", &latest.ModelConfig{Provider: "atlascloud", Model: "qwen/qwen3.8-max"}, true},
 		{"explicit api_type openai_chatcompletions", &latest.ModelConfig{Provider: "custom", Model: "qwen3", ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"}}, true},
 		// First-party APIs with fixed model lineups: unchanged (no merge).
 		{"first-party mistral", &latest.ModelConfig{Provider: "mistral", Model: "mistral-small"}, false},
@@ -177,6 +182,20 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, shouldMergeConsecutiveMessages(tt.cfg))
+		})
+	}
+}
+
+// TestShouldMergeConsecutiveMessages_CatalogFlag keeps the request path in step
+// with the embedded provider catalog: every alias that declares
+// merge_consecutive_messages coalesces, and no other alias does.
+func TestShouldMergeConsecutiveMessages_CatalogFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, alias := range catalog.Ordered() {
+		t.Run(alias.Name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, alias.MergeConsecutiveMessages, shouldMergeConsecutiveMessages(&latest.ModelConfig{Provider: alias.Name}))
 		})
 	}
 }

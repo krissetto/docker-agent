@@ -85,19 +85,44 @@ models:
 
 ## Inference Profiles
 
-Use inference profile prefixes for optimal routing:
+Inference profiles route requests across the regions supported by that profile:
 
 | Prefix    | Routes To                                |
 | --------- | ---------------------------------------- |
-| `global.` | All commercial AWS regions (recommended) |
+| `global.` | Supported commercial AWS regions         |
 | `us.`     | US regions only                          |
-| `eu.`     | EU regions only (GDPR compliance)        |
+| `eu.`     | Supported European regions               |
 | `apac.`   | Asia Pacific regions only                |
 
 > [!TIP]
 > **Inference profiles**
 >
-> Use `global.` prefix on model IDs for automatic cross-region routing. Use `eu.` prefix for GDPR compliance.
+> Choose an exact profile from the set on that model's AWS card; prefix availability differs per model. A routing prefix alone does not establish GDPR compliance.
+
+## Claude on Bedrock: transport and limits
+
+Docker Agent calls **`ConverseStream`** on Bedrock runtime. Native Mantle,
+InvokeModel, Bedrock Messages and Claude Platform on AWS are not wired by this
+integration. A custom endpoint does not switch the runtime client's API.
+
+[Mythos 5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5.html)
+is Mantle-only and explicitly unsupported on runtime/Converse.
+[Mythos 5.1](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5-1.html)
+is documented on runtime, with gated access, not Mantle. Vendor support does not
+mean this client's complete 5.x compatibility work has shipped.
+
+[AWS compaction](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-compaction.html)
+requires InvokeModel for both `compact-2026-01-12` and `compact-2026-09-04`;
+neither works through Converse. Haiku 5.5, Opus 5/5.5 and Sonnet 5/5.5 cards
+document the latter; Fable 5/5.1 and Mythos 5.1 cards do not document compaction.
+The current client also does not wire Claude API cache diagnostics, server-side
+fallbacks or native JSON-schema structured output. General Bedrock feature
+statements do not override a specific model card.
+
+See [Claude access paths](../anthropic/index.md#claude-access-paths) for the dated
+nine-model evidence matrix, exact card-sourced IDs, structured-output limits and
+account prerequisites. `apac.` in the general profile table is not a documented
+Claude 5.x profile in this audit; do not generate IDs by copying prefixes.
 
 ## Thinking Budget (Claude on Bedrock)
 
@@ -144,6 +169,21 @@ Docker Agent recognizes these models (including Bedrock-style IDs) and transpare
 > **Temperature and top_p**
 >
 > Bedrock Claude suppresses `temperature` and `top_p` while extended thinking is active — Anthropic requires `temperature=1.0` internally.
+
+### Claude 5.x models
+
+The nine Claude 5.x models listed in the [Anthropic provider guide](../anthropic/index.md#claude-5x-models) follow the same rules on Bedrock, including Bedrock-style IDs such as `us.anthropic.claude-sonnet-5-5-v1:0`:
+
+- Effort levels and `adaptive` are sent as adaptive thinking. An integer token budget becomes adaptive thinking with the model's default effort.
+- `temperature`, `top_p` and `top_k` are never sent.
+- `thinking_budget: none` sends `thinking: {"type": "disabled"}` on Haiku 5.5, Opus 5 and Sonnet 5. The other six get adaptive thinking with `low` effort and a startup warning.
+- Reasoning blocks are stored and replayed exactly as Bedrock returned them, in order: signed thinking (including signature-only thinking, the default display on these models), redacted thinking and the text and tool calls around them. If a message changed after it was received but its reasoning did not (for example a sanitized tool name or a redacted tool argument), its recorded reasoning is still replayed in its original place, with the current text and tool calls substituted. If the reasoning itself changed, it is sent without it, with a warning in the logs; inside the tool loop the next request continues, with thinking on, the request is refused instead, and a new user turn starts a fresh loop. Sessions saved by older versions keep that flattened replay; older versions ignore the stored blocks.
+- Mythos 5 is refused at startup: AWS serves it only through Bedrock Mantle, which Docker Agent does not support. Use Mythos 5.1, which is available on Converse, or the Claude API.
+
+> [!NOTE]
+> **Not yet verified live**
+>
+> The `disabled` value follows the Claude Messages contract; it has not yet been verified against live Bedrock Converse.
 
 ## Interleaved Thinking (Claude on Bedrock)
 

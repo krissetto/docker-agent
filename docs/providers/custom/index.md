@@ -45,30 +45,14 @@ agents:
 
 ### Anthropic with shared defaults
 
-```yaml
-providers:
-  my_anthropic:
-    provider: anthropic
-    token_key: MY_ANTHROPIC_KEY
-    max_tokens: 16384
-    thinking_budget: 8192
+Use a named Anthropic provider to share settings across models while allowing model-level overrides. See [Default Inheritance](#default-inheritance) for the example and precedence rules.
 
-models:
-  claude_smart:
-    provider: my_anthropic
-    model: claude-sonnet-5
-    # Inherits max_tokens: 16384, thinking_budget: 8192
-
-  claude_fast:
-    provider: my_anthropic
-    model: claude-haiku-4-5
-    thinking_budget: 1024  # Overrides provider default
-
-agents:
-  root:
-    model: claude_smart
-    instruction: You are a helpful assistant.
-```
+A custom Anthropic `base_url` reuses the Messages client but selects a different
+host. It does not inherit Claude API capability, beta, price or signature-portability
+guarantees. Intermediary prefix rewrites can invalidate signed history. The `azure`
+alias uses the OpenAI-compatible client, not native Azure AI Foundry Claude.
+These custom configurations are not live-tested by this guide; see
+[Claude access paths](../anthropic/index.md#claude-access-paths).
 
 ### Google with shared temperature
 
@@ -107,9 +91,8 @@ agents:
 | `parallel_tool_calls` | boolean    | Whether to enable parallel tool calls by default. When omitted, the provider/API default is used.         | —                        |
 | `track_usage`         | boolean    | Whether to track token usage by default.                                              | —                        |
 | `thinking_budget`     | string/int | Default reasoning effort/budget.                                                      | —                        |
-| `task_budget`         | int/object | Default total token budget for an agentic task (forwarded to Anthropic; honored by Claude Opus 4.7+ today). Integer shorthand or `{type: tokens, total: N}`. | —                        |
+| `task_budget`         | int/object | Default total token budget for an agentic task. See [Task Budget](../../configuration/models/index.md#task-budget) for syntax and [Anthropic](../anthropic/index.md#task-budget) for model support. | —                        |
 | `compaction_model`    | string     | Default model used for session compaction (summary generation) by agents whose model uses this provider. Named model or inline `provider/model` string. Agent-level and model-level `compaction_model` take precedence. | —                        |
-| `compaction_prompt`   | string     | Default replacement for the built-in compaction user prompt for agents whose model uses this provider. Agent-level and model-level `compaction_prompt` take precedence. | —                        |
 | `provider_opts`       | object     | Provider-specific options passed through to the client.                               | —                        |
 
 ## Default Inheritance
@@ -139,8 +122,8 @@ models:
     thinking_budget: low
 ```
 
-`compaction_model` and `compaction_prompt` work slightly differently: they are not merged into the model
-but resolved per agent, with the agent-level value winning over
+`compaction_model` works slightly differently: it is not merged into the model
+but resolved per agent, with the agent-level `compaction_model` winning over
 the model-level one, which wins over the provider-level default.
 
 ## Shorthand Syntax
@@ -183,6 +166,51 @@ agents:
 >
 > Models that stream reasoning under `delta.reasoning` (e.g. Qwen3 served via OVHcloud AI Endpoints, OpenRouter, or a self-hosted vLLM / SGLang deployment) are fully supported. Docker Agent reads both the `delta.reasoning_content` and `delta.reasoning` fields from the stream, so thinking blocks are captured and shown in the TUI regardless of which field the server uses.
 
+### Replaying reasoning on later turns
+
+Captured reasoning is sent back to the model on subsequent requests as a `reasoning_content` field on the assistant message. Servers that understand the field read it back, so the model sees its own earlier reasoning instead of re-deriving it after every tool call. Reasoning that is only useful to the model is not free: replaying it can multiply the size of a long request, so it is limited to turns the session keeps anyway (those with content or a tool call).
+
+Chat Completions reasoning replay defaults on. Because `reasoning_content` is a
+non-standard extension, set `provider_opts.replay_reasoning: false` for a model
+or provider whose endpoint rejects or must not receive it. An invalid,
+non-boolean value also fails closed and disables replay.
+
+Set the opt-out on a model, or once on a provider and let its models inherit it.
+A model that sets the option itself wins over the provider:
+
+```yaml
+providers:
+  local_llm:
+    base_url: http://localhost:8000/v1
+    provider_opts:
+      replay_reasoning: false # opt out every local_llm model
+
+models:
+  qwen_default:
+    provider: local_llm
+    model: qwen3 # inherits the opt-out
+
+  qwen_replay:
+    provider: local_llm
+    model: qwen3
+    provider_opts:
+      replay_reasoning: true # opts this model back in
+
+agents:
+  root:
+    model: qwen_default
+```
+
+This option is specific to the Chat Completions API and its `reasoning_content`
+field. It is not the same as `preserve_reasoning`, which replays the encrypted
+reasoning items of first-party OpenAI Responses sessions; neither option
+applies to the other API. See [Reasoning state preservation](../openai/index.md#reasoning-state-preservation).
+
+The field is worth a look if you switch models mid-session or use fallbacks:
+Docker Agent stores reasoning from every provider in one place, so a later Chat
+Completions model may otherwise receive reasoning captured from another vendor.
+Set `replay_reasoning: false` on that destination when this is undesirable.
+
 ### API Router (Requesty, LiteLLM)
 
 ```yaml
@@ -210,32 +238,20 @@ models:
 
 ### Anthropic Team Setup
 
+Agents can use different models backed by the same named provider. Starting from the [Default Inheritance](#default-inheritance) example:
+
 ```yaml
-providers:
-  team_anthropic:
-    provider: anthropic
-    token_key: TEAM_ANTHROPIC_KEY
-    max_tokens: 32768
-    thinking_budget: high
-    temperature: 0.5
-
-models:
-  architect:
-    provider: team_anthropic
-    model: claude-sonnet-5
-
-  reviewer:
-    provider: team_anthropic
-    model: claude-haiku-4-5
-    thinking_budget: low  # faster reviews
-
 agents:
   root:
-    model: architect
+    model: claude_default
+    instruction: You coordinate the development team.
     sub_agents: [code_reviewer]
   code_reviewer:
-    model: reviewer
+    model: claude_custom
+    instruction: You review code.
 ```
+
+Each model inherits provider defaults independently; its overrides do not affect the other model.
 
 ### Multi-Provider with Shared Defaults
 

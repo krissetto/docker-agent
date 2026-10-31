@@ -266,6 +266,18 @@ func TestEncryptedConfigBodyInjection(t *testing.T) {
 	}
 }
 
+func TestInjectEncryptedConfigBodyLeavesJSONNullUntouched(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.com", strings.NewReader("null"))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	require.NoError(t, injectEncryptedConfigBody(req, "secret"))
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "null", string(body))
+}
+
 func TestRemoveEncryptedConfig(t *testing.T) {
 	t.Parallel()
 
