@@ -427,3 +427,66 @@ func buildPartialToolCallEvents(n int) []any {
 	}
 	return events
 }
+
+// Coalescing must keep each chunk's runtime message identity: an ID-less merged
+// chunk is treated as a different message by the transcript and splits the reply.
+func TestMergeEventsKeepsAgentChoiceMessageIdentity(t *testing.T) {
+	t.Parallel()
+
+	a := &App{}
+	events := []any{
+		&runtime.AgentChoiceEvent{Content: "Hello ", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceEvent{Content: "streaming ", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceEvent{Content: "world", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+	}
+
+	merged := a.mergeEvents(events)
+
+	require.Len(t, merged, 1)
+	got := merged[0].(*runtime.AgentChoiceEvent)
+	assert.Equal(t, "Hello streaming world", got.Content)
+	assert.Equal(t, "m1", got.MessageID)
+}
+
+func TestMergeEventsSplitsAgentChoiceAtMessageBoundary(t *testing.T) {
+	t.Parallel()
+
+	a := &App{}
+	events := []any{
+		&runtime.AgentChoiceEvent{Content: "a1", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceEvent{Content: "a2", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceEvent{Content: "b1", MessageID: "m2", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceEvent{Content: "b2", MessageID: "m2", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+	}
+
+	merged := a.mergeEvents(events)
+
+	require.Len(t, merged, 2)
+	first := merged[0].(*runtime.AgentChoiceEvent)
+	second := merged[1].(*runtime.AgentChoiceEvent)
+	assert.Equal(t, "a1a2", first.Content)
+	assert.Equal(t, "m1", first.MessageID)
+	assert.Equal(t, "b1b2", second.Content)
+	assert.Equal(t, "m2", second.MessageID)
+}
+
+func TestMergeEventsKeepsReasoningMessageIdentity(t *testing.T) {
+	t.Parallel()
+
+	a := &App{}
+	events := []any{
+		&runtime.AgentChoiceReasoningEvent{Content: "think ", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceReasoningEvent{Content: "more", MessageID: "m1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+		&runtime.AgentChoiceReasoningEvent{Content: "next", MessageID: "m2", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
+	}
+
+	merged := a.mergeEvents(events)
+
+	require.Len(t, merged, 2)
+	first := merged[0].(*runtime.AgentChoiceReasoningEvent)
+	second := merged[1].(*runtime.AgentChoiceReasoningEvent)
+	assert.Equal(t, "think more", first.Content)
+	assert.Equal(t, "m1", first.MessageID)
+	assert.Equal(t, "next", second.Content)
+	assert.Equal(t, "m2", second.MessageID)
+}

@@ -2073,7 +2073,9 @@ func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []any) (*runtime.
 	total := len(first.Content)
 	for _, msg := range rest {
 		next, ok := msg.(*runtime.AgentChoiceEvent)
-		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.SessionID != first.SessionID {
+		// A runtime message ID bounds the run: chunks of another assistant message
+		// must stay separate, and the merged event keeps the ID it was built from.
+		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.SessionID != first.SessionID || next.MessageID != first.MessageID {
 			break
 		}
 		total += len(next.Content)
@@ -2093,6 +2095,7 @@ func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []any) (*runtime.
 		Type:         first.Type,
 		Content:      b.String(),
 		SessionID:    first.SessionID,
+		MessageID:    first.MessageID,
 		AgentContext: first.AgentContext,
 	}, n
 }
@@ -2104,7 +2107,9 @@ func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest
 	total := len(first.Content)
 	for _, msg := range rest {
 		next, ok := msg.(*runtime.AgentChoiceReasoningEvent)
-		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.SessionID != first.SessionID {
+		// A runtime message ID bounds the run: chunks of another assistant message
+		// must stay separate, and the merged event keeps the ID it was built from.
+		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.SessionID != first.SessionID || next.MessageID != first.MessageID {
 			break
 		}
 		total += len(next.Content)
@@ -2124,6 +2129,7 @@ func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest
 		Type:         first.Type,
 		Content:      b.String(),
 		SessionID:    first.SessionID,
+		MessageID:    first.MessageID,
 		AgentContext: first.AgentContext,
 	}, n
 }
