@@ -39,7 +39,7 @@ budget:
 | Field | Type | Description |
 | --- | --- | --- |
 | `max_cost` | number | Maximum spend, in USD. |
-| `max_tokens` | integer | Maximum cumulative input+output tokens. |
+| `max_tokens` | integer | Maximum cumulative tokens: fresh input, cache read, cache write, and output. |
 | `max_time` | string | Maximum time the agents spend working, in Go duration format (`10m`, `30s`, `1h30m`). |
 
 ### Named budgets
@@ -80,6 +80,19 @@ This is deliberate, and it is the whole reason budgets are worth having. If each
 Give agents **distinct budget names** when you want independent pots.
 
 The same applies to the run-wide `budget`: every sub-session inside a run (transferred tasks, sub-agents, skills) spends from that one wallet.
+
+Compaction model calls also count towards the run-wide budget and the compacted agent's named budgets, including when a dedicated compaction model is configured. An exhausted budget skips LLM-based compaction; a hook-supplied summary can still be applied without spending tokens.
+
+The native runtime in `docker agent serve api` enforces run-wide and named budgets per root
+session across requests while that session's runtime remains loaded. Agent switches, delegated
+sub-sessions, and multiple API requests for the same session share its wallets; unrelated sessions
+have independent allowances.
+
+Budget counters are in-memory and count spend since the runtime started. Restarting the API server
+or otherwise reconstructing a runtime starts fresh counters, even when stored conversation history
+and cost totals are resumed; budgets are not persistent quotas. External `harness:` execution counts only the usage its spend stream
+reports to the native budget loop. Model calls it does not report are not metered, so they
+bypass these budgets.
 
 ## Scope: a budget spans the session
 
@@ -180,7 +193,7 @@ This is the same granularity [`max_iterations`](../agents/index.md) has, and it 
 
 ### `max_tokens` here is not the model's `max_tokens`
 
-The `max_tokens` in a budget is a **cumulative** count of input+output tokens across the whole run. It is unrelated to the provider- or model-level [`max_tokens`](../models/index.md), which caps the output of a single response.
+The `max_tokens` in a budget is a **cumulative** count of tokens across the whole run: fresh input, cache-read input, cache-write input, and output all count towards it. It is unrelated to the provider- or model-level [`max_tokens`](../models/index.md), which caps the output of a single response.
 
 It is also not the session's context length: compaction resets that, while the budget keeps counting.
 

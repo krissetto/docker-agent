@@ -249,6 +249,11 @@ func formatUSD(v float64) string {
 
 const runBudgetName = "run"
 
+// unpricedSpendWarning explains why spend the runtime cannot price does not
+// count against a max_cost limit.
+const unpricedSpendWarning = "This run has a max_cost limit, but the model reported usage the runtime cannot price, " +
+	"so that spend does not count against the limit. Set a model-level `cost:` block to price it."
+
 type namedTracker struct {
 	Name    string
 	Tracker *budgetTracker
@@ -591,17 +596,21 @@ func (r *LocalRuntime) budgetUsageForContext(ctx context.Context, sess *session.
 	return view.snapshot()
 }
 
-func (r *LocalRuntime) enforceBudgetForContext(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) iterationDecision {
+// budgetBreachFor reports the first budget the agent has exhausted on the
+// root ledger that governs sess, or nil. It records nothing.
+func (r *LocalRuntime) budgetBreachFor(ctx context.Context, sess *session.Session, a *agent.Agent) *budgetBreach {
 	view := r.budgetViewForContext(ctx, sess)
 	if view == nil {
-		return iterationContinue
+		return nil
 	}
-	var breach *budgetBreach
 	if view.legacy {
-		breach = view.ledger.exceededFor(a.Name())
-	} else {
-		breach = view.exceededFor(a.Name())
+		return view.ledger.exceededFor(a.Name())
 	}
+	return view.exceededFor(a.Name())
+}
+
+func (r *LocalRuntime) enforceBudgetForContext(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) iterationDecision {
+	breach := r.budgetBreachFor(ctx, sess, a)
 	if breach == nil {
 		return iterationContinue
 	}
@@ -645,7 +654,7 @@ func (r *LocalRuntime) recordBudgetForContext(ctx context.Context, sess *session
 			}
 		}
 		if hasCostLimit {
-			events.Emit(Warning("This run has a max_cost limit, but the model reported usage the runtime cannot price, so that spend does not count against the limit. Set a model-level `cost:` block to price it.", a.Name()))
+			events.Emit(Warning(unpricedSpendWarning, a.Name()))
 		}
 	}
 	if view.legacy {
@@ -908,11 +917,7 @@ func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage
 		nt.Tracker.record(a.Name(), usage, cost, active)
 	}
 	if warnUnpriced && s.unpricedSpend() {
-		events.Emit(Warning(
-			"This run has a max_cost limit, but the model reported usage the runtime cannot price, "+
-				"so that spend does not count against the limit. Set a model-level `cost:` block to price it.",
-			a.Name(),
-		))
+		events.Emit(Warning(unpricedSpendWarning, a.Name()))
 	}
 	events.Emit(BudgetUsage(sess.ID, a.Name(), s.snapshot()))
 	s.cancelExceeded()
