@@ -99,8 +99,8 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 		t.Fatal("first response did not reach the replay gate")
 	}
 
-	// Alt+Enter steers into the ongoing stream; plain Enter queues.
-	d.Press(tea.KeyEnter, tea.ModAlt).
+	// Plain Enter steers into the ongoing stream by default (busy_send_mode steer).
+	d.Enter().
 		WaitFor(tuitest.Contains("Message steered into the working agent")).
 		Assert(tuitest.Absent("Message queued"))
 	// The first answer remains in the session history sent to the second model
@@ -112,7 +112,7 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 }
 
 // TestChat_QueueSendModeWhileStreaming submits a second message while the
-// agent is still streaming; plain Enter queues by default. The session must
+// agent is still streaming; Alt+Enter always queues. The session must
 // accept it immediately, project it in the sidebar, and promote it only once
 // the first stream stops, producing a second turn with its own answer.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
@@ -132,7 +132,7 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 
 	// With queue send mode, session admission immediately projects the pending
 	// FIFO in the sidebar instead of maintaining a local queue/toast mirror.
-	d.Enter().
+	d.Press(tea.KeyEnter, tea.ModAlt).
 		WaitFor(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s*$`)).
 		WaitFor(tuitest.Contains("Also, what's 3+3?"))
 	d.Assert(tuitest.Absent("Message sent to the working agent"))
