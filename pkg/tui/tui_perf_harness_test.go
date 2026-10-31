@@ -113,6 +113,11 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	ss.SetCurrentAgentName("root")
 	page := chat.New(m.ar, tb.Context(), a, ss, chat.WithHideSidebar())
 	_ = page.SetSize(width, height-9)
+	// tui.New already built an initial chat page; release it before it is
+	// replaced so its sidebar's branch watcher does not outlive the harness.
+	for _, discarded := range m.chatPages {
+		chat.Cleanup(discarded)
+	}
 	m.chatPages = map[string]chat.Page{}
 	m.sessionStates = map[string]*service.SessionState{}
 	_, err := m.supervisor.AddSession(tb.Context(), a, sess, "", nil)

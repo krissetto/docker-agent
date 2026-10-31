@@ -4974,8 +4974,9 @@ func (m *appModel) cleanupManagedResources() {
 }
 
 // Shutdown releases the resources the TUI owns (theme watcher, tab-state
-// store, session supervisor) and returns once they are closed. It is for
-// callers that stop the program without going through the exit dialogs —
+// store, session supervisor, and each chat page's context-bound watchers such
+// as the sidebar's git-branch watcher) and returns once they are closed. It is
+// for callers that stop the program without going through the exit dialogs —
 // notably the tuitest harness, which must have tui_state.db closed before
 // t.TempDir removes it (Windows cannot delete an open file). The context
 // watcher started by contextShutdownCmd performs the same once-guarded
@@ -4985,6 +4986,15 @@ func (m *appModel) Shutdown() {
 	m.rollbackSettings()
 	m.notification.Cleanup()
 	m.panelAnimation.Stop()
+	// Chat pages cancel their own context on cleanup, which stops the sidebar's
+	// git-branch watcher. Without this, every harness-stopped TUI keeps an
+	// inotify instance and goroutine alive for the rest of the process.
+	for _, page := range m.chatPages {
+		chat.Cleanup(page)
+	}
+	for _, ed := range m.editors {
+		ed.Cleanup()
+	}
 	m.cleanupManagedResources()
 }
 

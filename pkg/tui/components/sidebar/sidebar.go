@@ -219,6 +219,16 @@ func SetWorkingDirectoryForTesting(dir, branch string) (restore func()) {
 	return func() { getwd, currentBranch, watchBranch = prevGetwd, prevCurrent, prevWatch }
 }
 
+// SetBranchWatcherForTesting replaces the git branch watcher factory for
+// sidebars created afterwards and returns a function restoring the previous
+// one. Like SetWorkingDirectoryForTesting, it must not run alongside sidebars
+// created by other tests, so call it from a serial test only.
+func SetBranchWatcherForTesting(watch func(context.Context, string) (*gitbranch.Watcher, error)) (restore func()) {
+	prev := watchBranch
+	watchBranch = watch
+	return func() { watchBranch = prev }
+}
+
 func waitForGitBranch(watcher *gitbranch.Watcher) tea.Cmd {
 	if watcher == nil {
 		return nil
