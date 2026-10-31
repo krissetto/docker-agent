@@ -1126,6 +1126,13 @@ func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier
 				}
 				item.Usage = &usage
 			}
+			if row.messageJSON.Valid && row.messageJSON.String != "" {
+				var compaction chat.CompactionResult
+				if err := json.Unmarshal([]byte(row.messageJSON.String), &compaction); err != nil {
+					return nil, fmt.Errorf("unmarshaling summary compaction at position %d: %w", row.position, err)
+				}
+				item.Compaction = &compaction
+			}
 			items = append(items, item)
 
 		case "error":
@@ -1728,14 +1735,14 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 		return classifySQLiteContextError(ctx, err)
 
 	case item.Summary != "":
-		usageJSON, err := summaryUsageJSON(item.Usage)
+		usageJSON, compactionJSON, err := summaryColumns(item)
 		if err != nil {
 			return classifySQLiteContextError(ctx, err)
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json)
-			 VALUES (?, ?, 'summary', ?, ?, ?, ?, ?)`,
-			sessionID, position, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
+			`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json, message_json)
+			 VALUES (?, ?, 'summary', ?, ?, ?, ?, ?, ?)`,
+			sessionID, position, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON, compactionJSON)
 		return classifySQLiteContextError(ctx, err)
 
 	case item.Error != nil:
@@ -1773,7 +1780,7 @@ func (s *SQLiteSessionStore) PersistCompaction(ctx context.Context, compacted *S
 	if compacted.ID == "" {
 		return ErrEmptyID
 	}
-	usageJSON, err := summaryUsageJSON(item.Usage)
+	usageJSON, compactionJSON, err := summaryColumns(item)
 	if err != nil {
 		return classifySQLiteContextError(ctx, err)
 	}
@@ -1816,9 +1823,9 @@ func (s *SQLiteSessionStore) PersistCompaction(ctx context.Context, compacted *S
 	}
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json)
-		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?)`,
-		snapshot.ID, snapshot.ID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
+		`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json, message_json)
+		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?, ?)`,
+		snapshot.ID, snapshot.ID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON, compactionJSON)
 	if err != nil {
 		return classifySQLiteContextError(ctx, err)
 	}
@@ -1835,14 +1842,14 @@ func (s *SQLiteSessionStore) AddSummary(ctx context.Context, sessionID string, i
 		return ErrEmptyID
 	}
 
-	usageJSON, err := summaryUsageJSON(item.Usage)
+	usageJSON, compactionJSON, err := summaryColumns(item)
 	if err != nil {
 		return classifySQLiteContextError(ctx, err)
 	}
 	_, err = execSQLiteWrite(ctx, s.db,
-		`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json)
-		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?)`,
-		sessionID, sessionID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
+		`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json, message_json)
+		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?, ?)`,
+		sessionID, sessionID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON, compactionJSON)
 	if err != nil {
 		return classifySQLiteContextError(ctx, err)
 	}
@@ -1850,18 +1857,25 @@ func (s *SQLiteSessionStore) AddSummary(ctx context.Context, sessionID string, i
 	return nil
 }
 
-// summaryUsageJSON serializes a summary item's usage for the usage_json
-// column; nil usage maps to the empty string so old rows and unbilled
-// summaries look the same on load.
-func summaryUsageJSON(usage *chat.Usage) (string, error) {
-	if usage == nil {
-		return "", nil
+// summaryColumns serializes a summary item's usage and native compaction for
+// the usage_json and message_json columns. Nil maps to the empty string and
+// NULL respectively so old rows and plain LLM summaries look the same on load.
+func summaryColumns(item Item) (usageJSON string, compactionJSON sql.NullString, err error) {
+	if item.Usage != nil {
+		b, err := json.Marshal(item.Usage)
+		if err != nil {
+			return "", sql.NullString{}, fmt.Errorf("marshaling summary usage: %w", err)
+		}
+		usageJSON = string(b)
 	}
-	b, err := json.Marshal(usage)
-	if err != nil {
-		return "", fmt.Errorf("marshaling summary usage: %w", err)
+	if item.Compaction != nil {
+		b, err := json.Marshal(item.Compaction)
+		if err != nil {
+			return "", sql.NullString{}, fmt.Errorf("marshaling summary compaction: %w", err)
+		}
+		compactionJSON = sql.NullString{String: string(b), Valid: true}
 	}
-	return string(b), nil
+	return usageJSON, compactionJSON, nil
 }
 
 // AddError appends a recorded error item to a session at the next position.

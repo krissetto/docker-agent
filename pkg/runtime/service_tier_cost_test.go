@@ -115,10 +115,10 @@ func TestRunStreamServiceTierCost(t *testing.T) {
 			assert.InDelta(t, tc.want, budget.Cost, 1e-9)
 			records := rec.snapshot().tokenUsages
 			require.Len(t, records, 1)
-			// The fork emits telemetry during stream handling, before this turn's
-			// canonical assistant cost is committed. Pricing flows through the
-			// hook, message, usage event and budget assertions above.
-			assert.Zero(t, records[0].Cost)
+			// Telemetry is emitted once per provider attempt, after that attempt is
+			// billed, so its cost is the per-call cost asserted above (tc.want:
+			// the fixture rate times the fixture token counts), not zero.
+			assert.InDelta(t, tc.want, records[0].Cost, 1e-9)
 			assert.Equal(t, int64(100_000), records[0].InputTokens)
 			assert.Equal(t, int64(5_000), records[0].OutputTokens)
 		})

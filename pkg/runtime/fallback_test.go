@@ -12,8 +12,11 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
@@ -51,8 +54,14 @@ func (p *countingProvider) CreateChatCompletionStream(context.Context, []chat.Me
 	}
 	return p.stream, nil
 }
-func (p *countingProvider) BaseConfig() base.Config { return base.Config{} }
-func (p *countingProvider) MaxTokens() int          { return 0 }
+
+// The rebuilder returns the same fake so policy-A title clones reach the counter.
+func (p *countingProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
+func (p *countingProvider) MaxTokens() int { return 0 }
 
 // Verify interface compliance
 var (

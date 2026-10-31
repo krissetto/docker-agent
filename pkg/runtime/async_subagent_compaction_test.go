@@ -16,6 +16,8 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -46,8 +48,13 @@ func (p *asyncCompactionRecordingProvider) CreateChatCompletionStream(_ context.
 	return stream, nil
 }
 
-func (p *asyncCompactionRecordingProvider) BaseConfig() base.Config { return base.Config{} }
-func (p *asyncCompactionRecordingProvider) MaxTokens() int          { return 0 }
+// The rebuilder returns the same fake so policy-A clones reach the recorder.
+func (p *asyncCompactionRecordingProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
+func (p *asyncCompactionRecordingProvider) MaxTokens() int { return 0 }
 
 func (p *asyncCompactionRecordingProvider) snapshotCalls() [][]chat.Message {
 	p.mu.Lock()

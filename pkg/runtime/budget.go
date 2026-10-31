@@ -623,6 +623,12 @@ func (r *LocalRuntime) enforceBudgetForContext(ctx context.Context, sess *sessio
 }
 
 func (r *LocalRuntime) recordBudgetForContext(ctx context.Context, sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink) {
+	if r.compactionSpend != nil && usage != nil {
+		// A compaction summary runs on a child runtime; its spend is charged
+		// to the parent's budgets once the compaction settles.
+		r.compactionSpend.record(compactionCharge{usage: *usage, cost: cost})
+		return
+	}
 	view := r.budgetViewForContext(ctx, sess)
 	if view == nil {
 		return

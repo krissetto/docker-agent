@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,20 @@ import (
 // state (and can therefore run in parallel).
 const defaultStreamIdleTimeout = 5 * time.Minute
 
+// flexStreamIdleTimeout replaces defaultStreamIdleTimeout for Gemini Flex
+// requests, which Google may queue for up to 15 minutes before the first byte.
+const flexStreamIdleTimeout = 15 * time.Minute
+
+// streamIdleTimeoutFor returns the idle timeout for p's streams. Only Gemini
+// Flex gets the longer window; every other provider and tier keeps the default.
+func streamIdleTimeoutFor(p provider.Provider) time.Duration {
+	cfg := p.BaseConfig().ModelConfig
+	if cfg.Provider == "google" && cfg.ProviderOpts["service_tier"] == "flex" {
+		return flexStreamIdleTimeout
+	}
+	return defaultStreamIdleTimeout
+}
+
 // errStreamIdle is the sentinel error returned when the upstream model stream
 // produces no SSE events for longer than defaultStreamIdleTimeout. It does
 // not wrap any standard context error so that the retry/fallback machinery
@@ -55,6 +70,9 @@ type streamResult struct {
 	ThinkingSignature string
 	ThoughtSignature  []byte
 	OpenAIResponse    *chat.OpenAIResponse
+	// ProviderState is the provider's raw response, when it sent one on the
+	// terminal chunk. See chat.ProviderState.
+	ProviderState *chat.ProviderState
 	// Media accumulates every [chat.MediaDelta] streamed during the turn
 	// (e.g. generated images). Populated regardless of provider — see
 	// chat.MessageDelta.Media.
@@ -63,6 +81,15 @@ type streamResult struct {
 	Steered      bool
 	FinishReason chat.FinishReason
 	Usage        *chat.Usage
+	// UsageAttempts lists each model that ran when a server fallback spread
+	// the response across models; Usage describes only the last one.
+	UsageAttempts []chat.UsageAttempt
+	// Serving is the endpoint that produced the stream, when it reports one
+	// (a routed stream names the sub-model that served the turn).
+	Serving *provider.ServingModel
+	// Dispatched is the endpoint the request went to (e.g. a router's leaf),
+	// before a server fallback handed it to another model.
+	Dispatched *provider.ServingModel
 }
 
 // handleStream reads a chat.MessageStream to completion, emitting streaming
@@ -76,7 +103,7 @@ type streamResult struct {
 // underlying TCP connection and unblocks the stream reader goroutine.
 //
 // idleTimeout bounds the wait for the next SSE chunk; production callers pass
-// defaultStreamIdleTimeout, tests pass a short value.
+// streamIdleTimeoutFor(provider), tests pass a short value.
 //
 // handleStream is a pure stream-aggregation routine: it does not touch
 // runtime state and can be unit-tested by feeding a mock chat.MessageStream.
@@ -126,11 +153,13 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var thinkingSignature string
 	var thoughtSignature []byte
 	var openAIResponse *chat.OpenAIResponse
+	var providerState *chat.ProviderState
 	var toolCalls []tools.ToolCall
 	var presentation []chat.AssistantPart
 	var presentationText chat.AssistantTextAppender
 	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
+	var usageAttempts []chat.UsageAttempt
 	var providerFinishReason chat.FinishReason
 
 	toolCallIndex := make(map[string]int)   // toolCallID -> index in toolCalls slice
@@ -198,6 +227,8 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 			"tool_calls", len(extracted),
 		)
 		toolCalls = extracted
+		// The raw response has no tool_use blocks for these calls; never replay it.
+		providerState = nil
 		fullContent.Reset()
 		fullContent.WriteString(textBefore)
 		for _, tc := range toolCalls {
@@ -207,8 +238,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		}
 	}
 
-	// recordUsage persists the final token counts and emits telemetry exactly
-	// once per stream, after we have the most accurate usage snapshot.
+	// recordUsage persists the final token counts once per stream.
 	usageRecorded := false
 	recordUsage := func() {
 		if usageRecorded || messageUsage == nil {
@@ -218,12 +248,6 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 
 		input := messageUsage.InputTokens + messageUsage.CachedInputTokens + messageUsage.CacheWriteTokens
 		sess.SetUsage(input, messageUsage.OutputTokens)
-
-		modelName := "unknown"
-		if m != nil {
-			modelName = m.Name
-		}
-		tel.RecordTokenUsage(ctx, modelName, input, messageUsage.OutputTokens, sess.TotalCost())
 	}
 
 	interrupted := func() (streamResult, error) {
@@ -285,6 +309,26 @@ mainLoop:
 
 			if len(choice.Delta.ThoughtSignature) > 0 {
 				thoughtSignature = choice.Delta.ThoughtSignature
+			}
+
+			// A server fallback supersedes the declined model's tool calls and
+			// thinking: they must never run, and the next request drops them.
+			// Its text stays, as the API keeps it. The declined reasoning is
+			// only dropped here, not retracted from live consumers.
+			if fb := choice.Delta.ServerFallback; fb != nil {
+				if len(toolCalls) > 0 {
+					slog.WarnContext(ctx, "Dropping tool calls superseded by a server fallback",
+						"agent", a.Name(), "tool_calls", len(toolCalls), "from", fb.From, "to", fb.To)
+				}
+				toolCalls = nil
+				clear(toolCallIndex)
+				clear(emittedPartial)
+				fullReasoningContent.Reset()
+				thinkingSignature = ""
+				presentation = slices.DeleteFunc(presentation, func(part chat.AssistantPart) bool {
+					return part.Type == chat.AssistantPartToolCall || part.Type == chat.AssistantPartReasoning
+				})
+				events.Emit(Warning(fmt.Sprintf("%s declined this turn; %s continues it.", fb.From, fb.To), a.Name()))
 			}
 
 			// A terminal chunk can also carry media; collect it before returning.
@@ -493,5 +537,7 @@ mainLoop:
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,
 		Usage:             messageUsage,
+		ProviderState:     providerState,
+		UsageAttempts:     usageAttempts,
 	}, nil
 }

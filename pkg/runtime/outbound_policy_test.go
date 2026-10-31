@@ -303,7 +303,7 @@ func TestOutboundPolicyMissingOriginAndFrozenChain(t *testing.T) {
 	_, err = (providerModelClient{registry: registry, runtime: r}).Ask(t.Context(), "test/model", "", "PRIVATE", nil)
 	require.ErrorContains(t, err, "originating session and agent")
 	require.Empty(t, p.got)
-	require.ErrorContains(t, r.runCompactionAgent(t.Context(), a, session.New()), "originating session and agent")
+	require.ErrorContains(t, r.runCompactionAgent(t.Context(), a, session.New(), nil), "originating session and agent")
 	WithMessagePolicy("late", func(context.Context, *hooks.Input, []chat.Message) ([]chat.Message, error) {
 		return nil, errors.New("late must not run")
 	})(r)

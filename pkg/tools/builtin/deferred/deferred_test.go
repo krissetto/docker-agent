@@ -2,6 +2,7 @@ package deferred
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/fuzzy"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
@@ -77,6 +79,40 @@ func TestDeferredToolset_SearchTool(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, result.Output, "delete_file")
 	})
+}
+
+func TestDeferredToolset_SearchRanking(t *testing.T) {
+	t.Parallel()
+
+	const query = "read"
+	candidates := []tools.Tool{
+		{Name: "file_read"},
+		{Name: "read"},
+		{Name: "read_file"},
+		{Name: "xyz"},
+	}
+	dt := New()
+	dt.AddSource(&mockToolSet{toolList: candidates}, true, nil)
+
+	result, err := dt.handleSearchTool(t.Context(), SearchToolArgs{Query: query})
+	require.NoError(t, err)
+	_, output, ok := strings.Cut(result.Output, "\n")
+	require.True(t, ok)
+	var matches []SearchToolResult
+	require.NoError(t, json.Unmarshal([]byte(output), &matches))
+	require.Len(t, matches, 3)
+	names := make([]string, 0, len(matches))
+	var previous int
+	for i, match := range matches {
+		names = append(names, match.Name)
+		score, matched := fuzzy.Score(match.Name+" "+match.Description, []rune(query))
+		require.True(t, matched)
+		if i > 0 {
+			assert.GreaterOrEqual(t, previous, score)
+		}
+		previous = score
+	}
+	assert.ElementsMatch(t, []string{"file_read", "read", "read_file"}, names)
 }
 
 func TestDeferredToolset_AddTool(t *testing.T) {
@@ -248,4 +284,65 @@ func TestDeferredToolset_ConcurrentAddTool(t *testing.T) {
 	currentTools, err := dt.Tools(ctx)
 	require.NoError(t, err)
 	assert.Len(t, currentTools, 3) // search_tool, add_tool, tool1 — never duplicated
+}
+
+// The catalog exposes every deferred tool, handler included, before any
+// add_tool call, so a provider-native tool search can dispatch straight
+// into it. Activation does not change it: the host keeps the declaration
+// stable and resolves the duplicate with the regular list itself.
+func TestDeferredToolset_CatalogTools(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	handler := tools.NewHandler(func(context.Context, struct{}) (*tools.ToolCallResult, error) {
+		return tools.ResultSuccess("ran"), nil
+	})
+	source := &mockToolSet{toolList: []tools.Tool{
+		{Name: "write_file", Description: "Writes", Handler: handler},
+		{Name: "kept", Description: "Always exposed"},
+		{Name: "read_file", Description: "Reads", Handler: handler},
+	}}
+	slow := &mockToolSet{toolList: []tools.Tool{{Name: "slow_tool", Handler: handler}}}
+	slow.notStarted.Store(true)
+
+	dt := New()
+	dt.AddSource(source, false, []string{"read_file", "write_file"})
+	dt.AddSource(slow, true, nil)
+
+	catalog, err := dt.CatalogTools(ctx)
+	require.NoError(t, err)
+	require.Len(t, catalog, 2)
+	assert.Equal(t, "read_file", catalog[0].Name)
+	assert.Equal(t, "write_file", catalog[1].Name)
+	for _, tool := range catalog {
+		require.NotNil(t, tool.Handler, tool.Name)
+		result, err := tool.Handler(ctx, tools.ToolCall{}, tools.NopRuntime{})
+		require.NoError(t, err)
+		assert.Equal(t, "ran", result.Output)
+	}
+
+	slow.notStarted.Store(false)
+	result, err := dt.handleAddTool(ctx, AddToolArgs{Name: "read_file"})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "has been activated")
+
+	catalog, err = dt.CatalogTools(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"read_file", "slow_tool", "write_file"}, catalogNames(catalog))
+
+	currentTools, err := dt.Tools(ctx)
+	require.NoError(t, err)
+	assert.Len(t, currentTools, 3) // search_tool, add_tool, read_file
+
+	result, err = dt.handleSearchTool(ctx, SearchToolArgs{})
+	require.NoError(t, err)
+	assert.NotContains(t, result.Output, `"read_file"`, "search_tool only offers what add_tool can still activate")
+}
+
+func catalogNames(catalog []tools.Tool) []string {
+	names := make([]string, 0, len(catalog))
+	for _, tool := range catalog {
+		names = append(names, tool.Name)
+	}
+	return names
 }

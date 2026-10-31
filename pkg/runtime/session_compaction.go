@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -19,6 +20,63 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
+
+// compactionCharge is one piece of a compaction's own model spend: the usage
+// of a summary call and its cost, nil when the runtime could not price it.
+type compactionCharge struct {
+	usage chat.Usage
+	cost  *float64
+}
+
+// compactionSpendLog collects the spend of one compaction. The summary runs
+// before the compaction settles, so its spend is charged to the parent's
+// budgets only afterwards: charging mid-summary would cancel the run and
+// could stop the summary before its result is persisted.
+type compactionSpendLog struct {
+	mu      sync.Mutex
+	charges []compactionCharge
+	// active is the time the summary strategy took, on the parent's clock.
+	active time.Duration
+}
+
+func (l *compactionSpendLog) record(c compactionCharge) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.charges = append(l.charges, c)
+}
+
+func (l *compactionSpendLog) setActive(d time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.active = d
+}
+
+func (l *compactionSpendLog) settled() ([]compactionCharge, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]compactionCharge(nil), l.charges...), l.active
+}
+
+// chargeCompactionSpend charges the compaction's spend to the budgets that
+// govern sess, as ordinary model spend of agent a. The strategy's time is
+// active time of the compaction, charged once, on the first charge.
+func (r *LocalRuntime) chargeCompactionSpend(ctx context.Context, sess *session.Session, a *agent.Agent, spend *compactionSpendLog, events EventSink) {
+	charges, active := spend.settled()
+	if len(charges) == 0 {
+		if active > 0 {
+			r.recordBudgetForContext(ctx, sess, a, nil, nil, active, events)
+		}
+		return
+	}
+	for i, c := range charges {
+		usage := c.usage
+		var t time.Duration
+		if i == 0 {
+			t = active
+		}
+		r.recordBudgetForContext(ctx, sess, a, &usage, c.cost, t, events)
+	}
+}
 
 // Compaction reasons reported to BeforeCompaction / AfterCompaction hooks.
 const (
@@ -89,30 +147,55 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	defer func() {
 		events.Emit(SessionCompactionCompleted(sess.ID, outcome, a.Name()))
 	}()
+	spend := &compactionSpendLog{}
+	defer func() {
+		r.chargeCompactionSpend(ctx, sess, a, spend, events)
+	}()
 
 	// Choose the strategy: a hook-supplied summary if before_compaction
 	// returned one, otherwise the default LLM strategy.
 	result := summaryFromHook(sess, a, pre, contextLimit)
 	if result == nil {
-		if contextLimit <= 0 {
-			slog.ErrorContext(ctx, "Failed to generate session summary",
-				"error", "model definition unavailable")
-			events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
+		// An exhausted budget skips the model call. A hook-supplied summary
+		// above is free and still applies.
+		if breach := r.budgetBreachFor(ctx, sess, a); breach != nil {
+			events.Emit(Warning(fmt.Sprintf("Compaction skipped: %s limit reached (used %s of %s).", breach.configPath(), breach.Used, breach.Max), a.Name()))
+			outcome = CompactionOutcomeSkipped
+			return
+		}
+		// Provider-native compaction, when the model opts in, replaces the LLM
+		// strategy. A model that cannot honour the opt-in is a configuration
+		// error, not a reason to fall back.
+		strategyStarted := r.now()
+		native, err := nativeCompactor(ctx, a)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
+			events.Emit(ErrorForSession(sess.ID, err.Error()))
 			outcome = CompactionOutcomeFailed
 			return
 		}
-
-		var err error
-		result, err = compactor.RunLLM(ctx, compactor.LLMArgs{
-			Session:          sess,
-			Agent:            a,
-			AdditionalPrompt: additionalPrompt,
-			ContextLimit:     contextLimit,
-			RunAgent: func(ctx context.Context, summaryAgent *agent.Agent, summarySession *session.Session) error {
-				ctx = context.WithValue(ctx, outboundOriginKey{}, r.messageOrigin(sess, a, "compaction"))
-				return r.runCompactionAgent(ctx, summaryAgent, summarySession)
-			},
-		})
+		if native != nil {
+			result, err = r.compactNatively(ctx, sess, a, native, additionalPrompt, spend, events)
+		} else {
+			if contextLimit <= 0 {
+				slog.ErrorContext(ctx, "Failed to generate session summary",
+					"error", "model definition unavailable")
+				events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
+				outcome = CompactionOutcomeFailed
+				return
+			}
+			result, err = compactor.RunLLM(ctx, compactor.LLMArgs{
+				Session:          sess,
+				Agent:            a,
+				AdditionalPrompt: additionalPrompt,
+				ContextLimit:     contextLimit,
+				RunAgent: func(ctx context.Context, summaryAgent *agent.Agent, summarySession *session.Session) error {
+					ctx = context.WithValue(ctx, outboundOriginKey{}, r.messageOrigin(sess, a, "compaction"))
+					return r.runCompactionAgent(ctx, summaryAgent, summarySession, spend)
+				},
+			})
+		}
+		spend.setActive(r.now().Sub(strategyStarted))
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
 			events.Emit(ErrorForSession(sess.ID, err.Error()))
@@ -141,12 +224,18 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		Cost:           result.Cost,
 		Model:          result.Model,
 		Usage:          summaryUsage(result),
+		Compaction:     result.Compaction,
 	}
 	if err := r.persistCompactionEffect(ctx, sess, result.InputTokens, item); err != nil {
 		slog.ErrorContext(ctx, "Failed to persist session compaction", "session_id", sess.ID, "error", err)
 		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to persist session compaction: %v", err)))
 		outcome = CompactionOutcomeFailed
 		return
+	}
+	if result.Compaction != nil {
+		// The provider block replaced the conversation, so the tool-deferral
+		// baseline recorded against the old history no longer applies.
+		r.toolDeferrals.Reset(sess.ID)
 	}
 
 	slog.DebugContext(ctx, "Generated session summary", "session_id", sess.ID, "summary_length", len(result.Summary))
@@ -295,10 +384,14 @@ func compactionCaps(primaryLimit, compactionLimit int64) bool {
 //     same number the engine will enforce. This also makes compaction
 //     work for local models that aren't catalogued in models.dev (e.g.
 //     a HuggingFace GGUF).
-//  2. Otherwise, the models.dev catalogue limit looked up by id.
-//  3. Otherwise, 0 (caller treats this as "can't compact").
+//  2. Otherwise, the provider's discovered runtime context window.
+//  3. Otherwise, the models.dev catalogue limit looked up by id.
+//  4. Otherwise, 0 (caller treats this as "can't compact").
 func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provider, id modelsdev.ID) int64 {
 	if n := providerContextLimit(p); n > 0 {
+		return n
+	}
+	if n := r.discoveredContextLimit(ctx, p); n > 0 {
 		return n
 	}
 	m, err := r.modelsStore.GetModel(ctx, id)
@@ -332,7 +425,10 @@ func providerContextLimit(p provider.Provider) int64 {
 // priced from the same catalogue as every other call — otherwise the
 // compaction cost recorded on the summary item would silently be 0 whenever
 // the default lazy store cannot price the model the configured store can.
-func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) (retErr error) {
+//
+// The summary's spend is recorded into spend rather than charged here; see
+// [compactionSpendLog].
+func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session, spend *compactionSpendLog) (retErr error) {
 	origin, ok := ctx.Value(outboundOriginKey{}).(outboundOrigin)
 	if !ok || origin.sessionID == "" || origin.agentName == "" {
 		for _, policy := range r.mandatoryMessagePolicies() {
@@ -348,7 +444,10 @@ func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, s
 			policies = append(policies, transform)
 		}
 	}
-	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore), func(child *LocalRuntime) { child.transforms = append(child.transforms, policies...) })
+	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore), func(child *LocalRuntime) {
+		child.transforms = append(child.transforms, policies...)
+		child.compactionSpend = spend
+	})
 	if err != nil {
 		return err
 	}

@@ -126,6 +126,7 @@ type LocalRuntime struct {
 	providerRegistry           *provider.Registry
 	gatewayModels              gatewayModelsCache
 	dmrModels                  dmrModelsCache
+	modelContexts              modelContextCache
 	// Workspace roots and manifests for generated-media resolution.
 	generatedFiles generatedFileCache
 
@@ -184,6 +185,9 @@ type LocalRuntime struct {
 	// rootBudgets keeps independent wallets for canonical root session trees.
 	budgetMu    sync.Mutex
 	rootBudgets map[string]*budgetSet
+	// compactionSpend, set only on the child runtime that runs a compaction
+	// summary, collects that summary's spend for the parent's budgets.
+	compactionSpend *compactionSpendLog
 
 	// onToolsChanged is called when an MCP toolset reports a tool list
 	// change. Protected by toolsChangedMu because MCP change-notification
@@ -873,9 +877,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		return nil, fmt.Errorf("register %q builtin: %w", BuiltinCacheResponse, err)
 	}
 
-	// Build the cooldown manager and wire the fallback executor's
-	// runtime-bound dependencies after opts so they pick up the final
-	// clock and telemetry sink ([WithClock] / [WithTelemetry]).
+	// Build cooldowns after opts so they pick up [WithClock].
 	r.fallback.cooldowns = newCooldownManager(r.now)
 	r.fallback.telemetry = r.telemetry
 

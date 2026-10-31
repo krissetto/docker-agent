@@ -13,12 +13,12 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -46,10 +46,6 @@ type Client struct {
 	routes   []Provider
 	fallback Provider
 	matcher  *matcher
-	// lastSelectedID holds the ID of the provider selected by the most recent
-	// call. A plain atomic pointer suffices because it is the only mutable
-	// field; everything else is set once at construction and read-only after.
-	lastSelectedID atomic.Pointer[modelsdev.ID]
 }
 
 // NewClient creates a new rule-based routing client.
@@ -62,7 +58,12 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, models map[string]l
 		return nil, errors.New("no routing rules configured")
 	}
 
+	effective := options.Apply(opts...)
 	routeOpts := filterOutMaxTokens(opts)
+	// Ordinary router limits stay local; only the effective auxiliary cap propagates.
+	if effective.MaxTokensInheritable() && effective.MaxTokens() != 0 {
+		routeOpts = append(routeOpts, options.WithAuxiliaryMaxTokens(effective.MaxTokens()))
+	}
 
 	// Create fallback provider from the model's provider/model fields.
 	fallbackSpec := cfg.Provider + "/" + cfg.Model
@@ -73,9 +74,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, models map[string]l
 
 	client := &Client{
 		Config: base.Config{
-			ModelConfig: *cfg,
-			Models:      models,
-			Env:         env,
+			ModelConfig:  *cfg,
+			ModelOptions: effective,
+			Models:       models,
+			Env:          env,
 		},
 		matcher:  newMatcher(),
 		fallback: fallback,
@@ -123,53 +125,89 @@ func filterOutMaxTokens(opts []options.Opt) []options.Opt {
 }
 
 // CreateChatCompletionStream selects a provider based on input and delegates the call.
-// The selected provider's ID is recorded in LastSelectedModelID.
+// The returned stream reports the selected provider as its ServingModel.
 func (c *Client) CreateChatCompletionStream(
 	ctx context.Context,
 	messages []chat.Message,
 	availableTools []tools.Tool,
 ) (chat.MessageStream, error) {
-	provider := c.selectProvider(messages)
+	provider, selfServe := c.routeProvider(messages)
 	if provider == nil {
 		return nil, errors.New("no provider available for routing")
 	}
 
 	selectedID := provider.ID()
-	c.lastSelectedID.Store(&selectedID)
 	slog.DebugContext(ctx, "Rule-based router selected model",
 		"router", c.ID().String(),
 		"selected_model", selectedID.String(),
 		"message_count", len(messages),
 	)
 
-	return provider.CreateChatCompletionStream(ctx, messages, availableTools)
-}
-
-// LastSelectedModelID returns the ID of the provider selected by the most
-// recent CreateChatCompletionStream call. This allows callers to display
-// the YAML-configured sub-model name for rule-based routing.
-func (c *Client) LastSelectedModelID() modelsdev.ID {
-	if id := c.lastSelectedID.Load(); id != nil {
-		return *id
+	stream, err := provider.CreateChatCompletionStream(ctx, messages, availableTools)
+	if err != nil || stream == nil {
+		return stream, err
 	}
-	return modelsdev.ID{}
+	serving := contracts.ServingModel{ID: selectedID, Config: provider.BaseConfig()}
+	if selfServe {
+		serving.ID = c.ID()
+		// The default provider is built from provider/model alone; preserve
+		// the router's accounting overrides without losing the resolved endpoint.
+		if serving.Config.ModelConfig.Cost == nil {
+			serving.Config.ModelConfig.Cost = c.ModelConfig.Cost
+		}
+		if serving.Config.ModelConfig.BaseURL == "" {
+			serving.Config.ModelConfig.BaseURL = c.ModelConfig.BaseURL
+		}
+	}
+	if inner, ok := stream.(contracts.ServingStream); ok {
+		serving = inner.ServingModel()
+	}
+	return &routedStream{MessageStream: stream, serving: serving}, nil
 }
 
-// selectProvider finds the best matching provider for the messages.
-func (c *Client) selectProvider(messages []chat.Message) Provider {
+// routeProvider finds the provider for messages. selfServe reports that no
+// route matched, so the router's default provider serves the turn.
+func (c *Client) routeProvider(messages []chat.Message) (Provider, bool) {
 	userMessage := getLastUserMessage(messages)
 	if userMessage == "" {
-		return c.defaultProvider()
+		return c.defaultProvider(), true
 	}
 
 	routeIdx, ok := c.matcher.bestRoute(userMessage)
 	if !ok || routeIdx >= len(c.routes) {
-		return c.defaultProvider()
+		return c.defaultProvider(), true
 	}
 
 	selected := c.routes[routeIdx]
 	slog.Debug("Route matched", "model", selected.ID().String())
-	return selected
+	return selected, false
+}
+
+// selectProvider finds the best matching provider for the messages.
+func (c *Client) selectProvider(messages []chat.Message) Provider {
+	provider, _ := c.routeProvider(messages)
+	return provider
+}
+
+// routedStream wraps a routed provider stream and reports the endpoint that
+// served it, so accounting and display read the same metadata for every route.
+type routedStream struct {
+	chat.MessageStream
+
+	serving contracts.ServingModel
+}
+
+func (s *routedStream) ServingModel() contracts.ServingModel {
+	return s.serving
+}
+
+// ServedBy forwards the inner stream's final server-fallback handoff, read
+// once it has ended; never a snapshot taken when the route was chosen.
+func (s *routedStream) ServedBy() (contracts.ServingModel, bool) {
+	if served, ok := s.MessageStream.(contracts.ServedStream); ok {
+		return served.ServedBy()
+	}
+	return contracts.ServingModel{}, false
 }
 
 func (c *Client) defaultProvider() Provider {

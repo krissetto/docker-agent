@@ -24,6 +24,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -1006,7 +1008,11 @@ func (p *queueProvider) CreateChatCompletionStream(context.Context, []chat.Messa
 	return s, nil
 }
 
-func (p *queueProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *queueProvider) BaseConfig() base.Config {
+	return base.Config{RebuildProvider: func(context.Context, *latest.ModelConfig, ...options.Opt) (contracts.Provider, error) {
+		return p, nil
+	}}
+}
 
 func (p *queueProvider) MaxTokens() int { return 0 }
 

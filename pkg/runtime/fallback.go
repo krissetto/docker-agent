@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/backoff"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
@@ -35,17 +36,18 @@ type modelWithFallback struct {
 // lives here. [LocalRuntime] holds a single *fallbackExecutor and
 // delegates the model-attempt loop to [fallbackExecutor.execute].
 //
-// The executor's [cooldowns] and [telemetry] fields are wired in
-// [NewLocalRuntime] *after* options have been applied, so that
-// [WithClock] / [WithTelemetry] are reflected. [WithRetryOnRateLimit]
-// mutates the executor directly, so the executor itself must exist
-// before opts run; the field assignments after opts complete the wiring.
+// Cooldowns are wired after options so [WithClock] is reflected.
+// [WithRetryOnRateLimit] mutates the executor directly, so the executor
+// itself must exist before opts run.
 type fallbackExecutor struct {
 	// prepareMessages applies runtime message transforms for the provider
 	// selected for each attempt. It is set by [NewLocalRuntime].
 	prepareMessages func(context.Context, *session.Session, *agent.Agent, provider.Provider, []chat.Message) ([]chat.Message, error)
 	// prepareTools reapplies live runtime policy after retry backoff.
 	prepareTools func(*session.Session, []tools.Tool) []tools.Tool
+
+	// telemetry is forwarded to [handleStream] so it can record per-model-call telemetry.
+	telemetry Telemetry
 
 	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit)
 	// errors when no fallback models are configured. When false (default),
@@ -62,16 +64,10 @@ type fallbackExecutor struct {
 	// Wired in [NewLocalRuntime] after opts so the cooldown windows
 	// honour [WithClock]; safe for concurrent use.
 	cooldowns *cooldownManager
-
-	// telemetry is forwarded to [handleStream] so it can record per-
-	// stream observability (token usage, finish reason, errors). Wired
-	// in [NewLocalRuntime] after opts so [WithTelemetry] is reflected.
-	telemetry Telemetry
 }
 
 // newFallbackExecutor returns a *fallbackExecutor with rate-limit retries
-// off; [cooldowns] and [telemetry] are wired in [NewLocalRuntime] once
-// runtime opts have finalised the clock and telemetry sink.
+// off; cooldowns are wired in [NewLocalRuntime] after clock options.
 func newFallbackExecutor() *fallbackExecutor {
 	return &fallbackExecutor{}
 }
@@ -337,6 +333,7 @@ func (e *fallbackExecutor) execute(
 			if e.prepareTools != nil {
 				attemptTools = e.prepareTools(sess, agentTools)
 			}
+			attemptTools = toolsForProvider(ctx, modelEntry.provider, attemptTools)
 			if e.prepareMessages != nil {
 				var err error
 				attemptMessages, err = e.prepareMessages(streamCtx, sess, a, modelEntry.provider, messages)
@@ -377,17 +374,19 @@ func (e *fallbackExecutor) execute(
 
 			slog.DebugContext(ctx, "Processing stream", "agent", a.Name(), "model", modelEntry.provider.ID().String())
 
-			// If the provider is a rule-based router, notify the sidebar
-			// of the selected sub-model's YAML-configured name.
-			if rp, ok := modelEntry.provider.(interface {
-				LastSelectedModelID() modelsdev.ID
-			}); ok {
-				if selected := rp.LastSelectedModelID(); !selected.IsZero() {
-					events.Emit(AgentInfo(a.Name(), selected.String(), a.Description(), a.WelcomeMessage()))
+			// A routed stream reports the sub-model that served the turn; the sidebar
+			// shows it only when it differs from the dispatched provider.
+			announceServing := func(stream chat.MessageStream) {
+				if serving := servingModelFrom(stream); serving != nil && !serving.ID.IsZero() && serving.ID != modelEntry.provider.ID() {
+					events.Emit(AgentInfo(a.Name(), serving.ID.String(), a.Description(), a.WelcomeMessage()))
 				}
 			}
+			announceServing(stream)
 
-			res, err := handleStream(streamCtx, streamCancel, stream, a, agentTools, sess, m, e.telemetry, events, defaultStreamIdleTimeout)
+			idleTimeout := streamIdleTimeoutFor(modelEntry.provider)
+			res, err := handleStream(streamCtx, streamCancel, stream, a, agentTools, sess, m, e.telemetry, events, idleTimeout)
+			res.Serving = servingModelFrom(stream)
+			res.Dispatched = dispatchedModelFrom(stream)
 			streamCancel(nil) // always release the child context
 			if err != nil {
 				lastErr = err
@@ -408,7 +407,7 @@ func (e *fallbackExecutor) execute(
 			if !res.Steered {
 				e.recordSuccess(a, modelEntry, primaryFailedWithNonRetryable)
 			}
-			fbSpan.SetFinalModel(modelEntry.provider.ID().Model)
+			fbSpan.SetFinalModel(finalModelFor(res.Serving, modelEntry.provider))
 			fbSpan.SetOutcome(genai.FallbackOutcomeSuccess)
 			return res, modelEntry.provider, nil
 		}
@@ -525,4 +524,40 @@ func (e *fallbackExecutor) handleModelError(
 		"attempt", attempt+1,
 		"error", err)
 	return retryDecisionContinue
+}
+
+// finalModelFor names the model that served the turn: the stream's serving
+// model when it reports one, otherwise the dispatched provider.
+func finalModelFor(serving *provider.ServingModel, dispatched provider.Provider) string {
+	if serving != nil && serving.ID.Model != "" {
+		return serving.ID.Model
+	}
+	return dispatched.ID().Model
+}
+
+func servingModelFrom(stream chat.MessageStream) *provider.ServingModel {
+	if served, ok := provider.ServedBy(stream); ok {
+		return &served
+	}
+	if stream, ok := stream.(provider.ServingStream); ok {
+		return new(stream.ServingModel())
+	}
+	return nil
+}
+
+// dispatchedModelFrom reports the endpoint a stream was sent to, ignoring a
+// server fallback's handoff; nil when the stream doesn't say.
+func dispatchedModelFrom(stream chat.MessageStream) *provider.ServingModel {
+	if stream, ok := stream.(provider.ServingStream); ok {
+		return new(stream.ServingModel())
+	}
+	return nil
+}
+
+// dispatchedConfig is the config that prices the requested model's attempt.
+func dispatchedConfig(res streamResult, fallback base.Config) base.Config {
+	if res.Dispatched != nil {
+		return res.Dispatched.Config
+	}
+	return fallback
 }

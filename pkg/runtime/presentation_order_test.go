@@ -118,7 +118,14 @@ func TestAssistantPresentationEmptyRefusalClearsPlaceholder(t *testing.T) {
 	res, err := handleStream(t.Context(), nil, newStreamBuilder().AddToolCallName("call", "read").AddRefusal().Build(), a, nil, sess, nil, defaultTelemetry{}, sink, time.Second)
 	require.NoError(t, err)
 	(&LocalRuntime{now: time.Now}).recordAssistantMessage(t.Context(), sess, a, res, nil, "test", nil, sink)
-	assert.Empty(t, sess.OwnMessages())
+	// The refused turn was billed, so it is kept as one usage-only assistant item:
+	// the placeholder text and tool calls are cleared, the usage and finish reason stay.
+	own := sess.OwnMessages()
+	require.Len(t, own, 1)
+	assert.Empty(t, own[0].Message.Content)
+	assert.Empty(t, own[0].Message.ToolCalls)
+	assert.NotNil(t, own[0].Message.Usage)
+	assert.Equal(t, chat.FinishReasonRefusal, own[0].Message.FinishReason)
 	got, err := store.GetSession(t.Context(), sess.ID)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)

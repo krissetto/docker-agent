@@ -22,6 +22,7 @@
 package provider
 
 import (
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"context"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -92,4 +93,33 @@ func New(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider,
 // The models map is used to resolve model references in routing rules.
 func NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
 	return DefaultRegistry().NewWithModels(ctx, cfg, models, env, opts...)
+}
+
+// ServingModel identifies the endpoint that produced a completion stream.
+type ServingModel = contracts.ServingModel
+
+// ServingStream reports the serving endpoint when it differs from the dispatched provider.
+type ServingStream = contracts.ServingStream
+
+// ServedStream reports a model that served the response in place of the dispatched one.
+type ServedStream = contracts.ServedStream
+
+// ServedBy reports the model that served a finished stream in place of the
+// dispatched one; false when the stream doesn't say or nothing changed.
+func ServedBy(stream chat.MessageStream) (ServingModel, bool) {
+	if served, ok := stream.(ServedStream); ok {
+		return served.ServedBy()
+	}
+	return ServingModel{}, false
+}
+
+// ContextWindowResolver returns an optional live context-window lookup, preserving
+// access through instrumentation wrappers. Providers without discovery return nil.
+func ContextWindowResolver(p Provider) func(context.Context) (int64, error) {
+	if resolver, ok := unwrapProvider(p).(interface {
+		ContextWindow(ctx context.Context) (int64, error)
+	}); ok {
+		return resolver.ContextWindow
+	}
+	return nil
 }

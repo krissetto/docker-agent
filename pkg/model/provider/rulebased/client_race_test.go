@@ -1,6 +1,7 @@
 package rulebased
 
 import (
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"sync"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
-func TestLastSelectedModelID_Concurrent(t *testing.T) {
+func TestServingModelConcurrentPerStream(t *testing.T) {
 	t.Parallel()
 
 	cfg := &latest.ModelConfig{
@@ -38,7 +39,15 @@ func TestLastSelectedModelID_Concurrent(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			_ = client.LastSelectedModelID()
+			messages := []chat.Message{{Role: chat.MessageRoleUser, Content: "hi there"}}
+			stream, err := client.CreateChatCompletionStream(t.Context(), messages, nil)
+			if err != nil || stream == nil {
+				return
+			}
+			// The serving model is immutable per call and read from that call's stream.
+			if served, ok := stream.(contracts.ServedStream); ok {
+				_, _ = served.ServedBy()
+			}
 		}()
 	}
 	wg.Wait()

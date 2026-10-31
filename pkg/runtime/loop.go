@@ -707,6 +707,11 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		inputTokens, outputTokens := sess.Usage()
 		if contextLimit > 0 && r.sessionCompactionEnabled(a) && compaction.ShouldCompact(inputTokens, outputTokens, 0, contextLimit, a.CompactionThreshold()) {
 			r.compactWithReason(ctx, sess, "", compactionReasonThreshold, sink)
+			// The summary may have exhausted the budget since the first check.
+			if r.enforceBudgetForContext(ctx, sess, a, sink) == iterationStop {
+				streamReason = turnEndReasonBudgetExceeded
+				return
+			}
 		}
 
 		// Drain steer messages queued while idle or before the first model call
@@ -721,6 +726,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			ls.userPromptMsgs = sr.contextMsgs
 			ls.consumeTurnInput(sr.quietOnly)
 			r.compactIfNeeded(ctx, sess, a, contextLimit, sr.messageCountBefore, sink)
+			if r.enforceBudgetForContext(ctx, sess, a, sink) == iterationStop {
+				streamReason = turnEndReasonBudgetExceeded
+				return
+			}
 		}
 
 		// Everything from turn_start onwards is wrapped in a closure so a
@@ -974,18 +983,26 @@ func (r *LocalRuntime) runTurn(
 	}
 
 	if usedModel != nil {
-		if usedModel.ID() != modelID {
-			slog.InfoContext(ctx, "Used fallback model", "agent", a.Name(), "primary", modelID.String(), "used", usedModel.ID().String())
-			modelID = usedModel.ID()
+		agentTools = toolsForProvider(ctx, usedModel, agentTools)
+		servingID, servingConfig := usedModel.ID(), usedModel.BaseConfig()
+		if res.Serving != nil {
+			servingID, servingConfig = res.Serving.ID, res.Serving.Config
+		}
+		if servingID != modelID {
+			// A routed sub-model is announced by the fallback stream itself.
+			if servingID == usedModel.ID() {
+				slog.InfoContext(ctx, "Used fallback model", "agent", a.Name(), "primary", modelID.String(), "used", servingID.String())
+				events.Emit(AgentInfo(a.Name(), servingID.String(), a.Description(), a.WelcomeMessage()))
+			}
+			modelID = servingID
 			m, err = r.modelsStore.GetModel(ctx, modelID)
 			if err != nil {
 				slog.DebugContext(ctx, "Failed to get fallback model definition", "model_id", modelID.String(), "error", err)
 				m = nil
 			}
-			events.Emit(AgentInfo(a.Name(), modelID.String(), a.Description(), a.WelcomeMessage()))
 		}
-		// Fallbacks may share an ID but have different endpoints or cost overrides.
-		m = applyModelCost(m, modelID, res.Usage, usedModel.BaseConfig())
+		// Serving endpoints may share an ID but have different rates or cost overrides.
+		m = applyModelCost(m, modelID, res.Usage, servingConfig)
 	}
 
 	// A successful model call resets the overflow compaction counter.
@@ -998,6 +1015,23 @@ func (r *LocalRuntime) runTurn(
 	// the turn cannot be priced (no usage, or a model with no pricing
 	// table); see computeMessageCost.
 	msgCost := computeMessageCost(res.Usage, m)
+	if len(res.UsageAttempts) > 0 && usedModel != nil {
+		msgCost = attemptsCost(ctx, res.UsageAttempts, dispatchedConfig(res, usedModel.BaseConfig()), r.modelsStore)
+	}
+
+	// Report the per-call cost after attempts are priced, so telemetry matches
+	// the cost the session bills for this turn.
+	if res.Usage != nil {
+		modelName := "unknown"
+		if m != nil {
+			modelName = m.Name
+		}
+		var cost float64
+		if msgCost != nil {
+			cost = *msgCost
+		}
+		r.telemetry.RecordTokenUsage(ctx, modelName, res.Usage.PromptTokens(), res.Usage.OutputTokens, cost)
+	}
 
 	// Fold this turn into the run budget from the same computed value, so
 	// what the ceiling counts can never disagree with what the session
@@ -1236,7 +1270,7 @@ func (r *LocalRuntime) runTurn(
 
 func applyModelCost(m *modelsdev.Model, id modelsdev.ID, usage *chat.Usage, config base.Config) *modelsdev.Model {
 	cfg := config.ModelConfig
-	// Routers cannot identify the serving endpoint here; custom endpoints need their own rates.
+	// Unreported routing endpoints and custom endpoints cannot use vendor tier multipliers.
 	isCustomEndpoint := func(endpoint string) bool {
 		return endpoint != "" && strings.TrimRight(endpoint, "/") != "https://api.openai.com/v1"
 	}
@@ -1332,7 +1366,13 @@ func (r *LocalRuntime) recordAssistantMessage(
 	displayOnly := !hasResponseOutput && strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && slices.ContainsFunc(res.Presentation, func(part chat.AssistantPart) bool {
 		return part.Type == chat.AssistantPartReasoning && part.Text != ""
 	})
-	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered && !displayOnly && !hasResponseOutput {
+	// Root-approved upstream parity: a provider-billed empty served turn is
+	// persisted as a usage-only assistant item (no text) so its usage and cost
+	// land in the published history. A cancelled turn and a turn without usage
+	// are still skipped. Stopped marks a natural stop without tool calls, not a
+	// cancel, so cancellation is read from the turn context.
+	billedEmpty := res.Usage != nil && ctx.Err() == nil
+	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered && !displayOnly && !hasResponseOutput && !billedEmpty {
 		if res.FinishReason == chat.FinishReasonRefusal {
 			message := chat.Message{MessageID: res.MessageID, Role: chat.MessageRoleAssistant, Content: res.Content, ReasoningContent: res.ReasoningContent, Presentation: res.Presentation, FinishReason: res.FinishReason}
 			boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &message), a.Name(), -1).(*MessageAddedEvent)
@@ -1430,6 +1470,8 @@ func (r *LocalRuntime) recordAssistantMessage(
 		}
 		assistantMessage.MultiContent = append(assistantMessage.MultiContent, mediaParts...)
 	}
+	// Sealed after name sanitization and media so the hash reflects what is persisted.
+	assistantMessage.AttachProviderState(res.ProviderState)
 
 	if res.Steered && strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && res.ReasoningContent == "" {
 		boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &assistantMessage), a.Name(), -1).(*MessageAddedEvent)
@@ -1787,7 +1829,8 @@ func (r *LocalRuntime) getTools(ctx context.Context, sess *session.Session, a *a
 		}
 	}
 	toolCtx := todotool.WithBindings(ctx, r.todoBindingsForTeam(teams))
-	agentTools, err := toolAgent.Tools(toolCtx)
+	// Catalog tools ride through the same session filters below.
+	agentTools, err := listAgentTools(toolCtx, toolAgent)
 	if err == nil {
 		agentTools = append(agentTools, r.teamEditDefinitions(ctx, sess, toolAgent)...)
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)

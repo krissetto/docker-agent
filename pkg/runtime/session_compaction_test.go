@@ -601,7 +601,7 @@ func TestRunCompactionAgentPreservesSeedAndDetachedAccounting(t *testing.T) {
 			original := sess.Clone()
 			seedItems := sess.Messages
 
-			require.NoError(t, rt.runCompactionAgent(t.Context(), a, sess))
+			require.NoError(t, rt.runCompactionAgent(t.Context(), a, sess, nil))
 			prov.mu.Lock()
 			requests := prov.messages
 			prov.mu.Unlock()
@@ -638,7 +638,10 @@ func TestRunCompactionAgentPreservesSeedAndDetachedAccounting(t *testing.T) {
 			if summary != "" {
 				assert.InDelta(t, 0.002, sess.TotalCost(), 1e-9)
 			} else {
-				assert.Zero(t, sess.TotalCost(), "empty assistant responses are not recorded")
+				// Root-approved upstream parity: a billed empty summary turn is recorded
+				// once as a usage-only item; the detached turn's spend is charged to the
+				// parent budget once, through the compaction spend log.
+				assert.InDelta(t, 0.002, sess.TotalCost(), 1e-9, "a billed empty summary is accounted exactly once")
 			}
 			var usage chat.Usage
 			for _, item := range sess.Messages[len(original.Messages):] {
@@ -651,7 +654,8 @@ func TestRunCompactionAgentPreservesSeedAndDetachedAccounting(t *testing.T) {
 				assert.Equal(t, int64(100), usage.InputTokens)
 				assert.Equal(t, int64(50), usage.OutputTokens)
 			} else {
-				assert.Zero(t, usage)
+				assert.Equal(t, int64(100), usage.InputTokens, "the billed empty summary keeps its input tokens")
+				assert.Equal(t, int64(50), usage.OutputTokens, "the billed empty summary keeps its output tokens")
 			}
 			sess.Messages[0].Message.Message.Content = "detached edit"
 			assert.Equal(t, original.Messages, seedItems, "result must not alias the seed")
@@ -681,7 +685,7 @@ func TestRunCompactionAgentFailureLeavesPrivateResultUnchanged(t *testing.T) {
 			sess := session.New(session.WithUserMessage("Generate the summary."))
 			original := sess.Clone()
 			result := make(chan error, 1)
-			go func() { result <- rt.runCompactionAgent(ctx, a, sess) }()
+			go func() { result <- rt.runCompactionAgent(ctx, a, sess, nil) }()
 			if cancelRun {
 				waitClosed(t, step.started, "compaction provider to start")
 				cancel()

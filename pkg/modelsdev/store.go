@@ -282,6 +282,23 @@ func (s *Store) getProvider(ctx context.Context, providerID string) (*Provider, 
 	return &provider, nil
 }
 
+// legacyProviderIDs contains shipped names for the same service in models.dev.
+var legacyProviderIDs = map[string]string{
+	"fireworks":    "fireworks-ai",
+	"together":     "togetherai",
+	"moonshot":     "moonshotai",
+	"opencode-zen": "opencode",
+}
+
+// CanonicalProviderID returns the models.dev ID for a built-in provider name.
+// Unknown names and distinct services, including ChatGPT, are unchanged.
+func CanonicalProviderID(providerID string) string {
+	if canonical, ok := legacyProviderIDs[providerID]; ok {
+		return canonical
+	}
+	return providerID
+}
+
 // GetModel returns a specific model by ID. The ID must carry both a
 // provider and a model component; pass the result of [NewID], [ParseID],
 // or a provider's [ID] method.
@@ -290,16 +307,31 @@ func (s *Store) GetModel(ctx context.Context, id ID) (*Model, error) {
 		return nil, fmt.Errorf("invalid model ID: %q", id.String())
 	}
 
-	provider, err := s.getProvider(ctx, id.Provider)
+	allowFetch := s.knownProvider == nil || s.knownProvider(id.Provider)
+	db, err := s.getDatabase(ctx, allowFetch)
 	if err != nil {
 		return nil, err
 	}
 
-	model, exists := lookupProviderModel(provider, id)
-	if !exists {
-		return nil, fmt.Errorf("model %q not found in provider %q", id.Model, id.Provider)
+	provider, exists := db.Providers[id.Provider]
+	if model, ok := lookupProviderModel(&provider, id); ok {
+		model.Cost = model.Cost.withFastPricing(db, id)
+		return model, nil
 	}
-	return model, nil
+
+	// Legacy shipped names resolve to the models.dev provider that serves them.
+	if canonical := CanonicalProviderID(id.Provider); canonical != id.Provider {
+		aliasedProvider, aliasExists := db.Providers[canonical]
+		exists = exists || aliasExists
+		if model, ok := lookupProviderModel(&aliasedProvider, NewID(canonical, id.Model)); ok {
+			return model, nil
+		}
+	}
+
+	if !exists {
+		return nil, fmt.Errorf("provider %q not found", id.Provider)
+	}
+	return nil, fmt.Errorf("model %q not found in provider %q", id.Model, id.Provider)
 }
 
 // LookupModel looks up a model without I/O, using the same matching rules as
