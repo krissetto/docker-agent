@@ -1201,6 +1201,15 @@ func (d *sessionDriver) isStopped() bool {
 	return d.stopped
 }
 
+// stoppedForObservation reports a stop that is final for observers. Unlike a
+// reclaiming session, which refuses a live stream only for now, it never resumes
+// a stream, so a tree observer may treat it as settled.
+func (d *sessionDriver) stoppedForObservation() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.stopped && !d.stoppedView && !d.reclaiming
+}
+
 func (d *sessionDriver) stoppedAndSettled() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()

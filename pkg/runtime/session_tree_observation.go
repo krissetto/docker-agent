@@ -57,35 +57,56 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	}
 	errorsCh := make(chan error, 1)
 	observations := make(map[string]Observation)
+	// stopped holds descendants already stopped when observed: they have no live
+	// observation, so their baseline entry is recorded once and never re-observed.
+	stopped := make(map[string]bool)
 	var snapshots []SessionSnapshot
 	var replay []SessionEvent
 	var wg sync.WaitGroup
 	start := func(sessionID string, collect bool) error {
-		if _, exists := observations[sessionID]; exists {
+		if _, exists := observations[sessionID]; exists || stopped[sessionID] {
 			return nil
 		}
 		observation, err := observe(obsCtx, sessionID, ObserveOptions{Buffer: buffer})
-		if err != nil {
-			return err
+		var primary SessionSnapshot
+		live := err == nil
+		if live {
+			observations[sessionID] = observation
+			primary = observation.Primary()
+			if sessionID == h.sessionID {
+				h.attachLiveSubtree(&primary)
+			}
+		} else {
+			// A descendant already stopped is a settled part of the tree, not a
+			// failed baseline. The watch root and every other failure stay terminal.
+			var sessionErr *SessionError
+			if sessionID == h.sessionID || !errors.As(err, &sessionErr) || sessionErr.Kind != SessionErrorStopped {
+				return err
+			}
+			// A failed lookup keeps the observe error, so existing handling is unchanged.
+			snapshot, settled, lookupErr := h.stoppedDescendantSnapshot(obsCtx, sessionID)
+			if lookupErr != nil || !settled {
+				return err
+			}
+			primary = snapshot
+			stopped[sessionID] = true
 		}
-		observations[sessionID] = observation
 		switch {
 		case collect:
-			snapshots = append(snapshots, observation.Primary())
+			snapshots = append(snapshots, primary)
 			replay = append(replay, observation.Replay...)
 		case updates != nil:
-			snapshot := observation.Primary()
 			select {
-			case updates <- TreeUpdate{Snapshot: &snapshot, Replay: observation.Replay}:
+			case updates <- TreeUpdate{Snapshot: &primary, Replay: observation.Replay}:
 			case <-obsCtx.Done():
-				observation.Cancel()
+				cancelObservation(observation)
 				return nil
 			}
 		default:
 			select {
-			case sessionsAdded <- observation.Primary():
+			case sessionsAdded <- primary:
 			case <-obsCtx.Done():
-				observation.Cancel()
+				cancelObservation(observation)
 				return nil
 			}
 		}
@@ -97,6 +118,9 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 					return nil
 				}
 			}
+		}
+		if !live {
+			return nil
 		}
 		wg.Add(1)
 		go func(observedSessionID string) {
@@ -209,6 +233,52 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	var once sync.Once
 	cancel := func() { once.Do(cancelCtx) }
 	return Observation{Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: cancel}, nil
+}
+
+// attachLiveSubtree gives a non-root watch root the live subtree of its own node,
+// so a baseline carries descendant stops that have not yet reached its projection.
+func (h *sessionHandle) attachLiveSubtree(primary *SessionSnapshot) {
+	if primary.Session == nil || primary.Session.ParentID == "" {
+		return
+	}
+	node, ok := subtreeForSession(h.runtime.subagents.tree.Snapshot(), h.sessionID)
+	if !ok {
+		return
+	}
+	tree := subagent.Snapshot{Version: subagent.SnapshotVersion, Root: node.Node.ID, Nodes: []subagent.NodeSnapshot{node}}
+	primary.Session.SetSubagentTree(&tree)
+}
+
+// stoppedDescendantSnapshot describes a descendant whose stop is final, from its
+// session and status, which stay readable after its live observation is gone.
+// It reports settled=false for any session that is not finally stopped.
+func (h *sessionHandle) stoppedDescendantSnapshot(ctx context.Context, sessionID string) (snapshot SessionSnapshot, settled bool, err error) {
+	driver, ok := h.runtime.sessionDrivers.Lookup(sessionID)
+	if !ok || !driver.stoppedForObservation() {
+		return SessionSnapshot{}, false, nil
+	}
+	handle, err := h.runtime.SessionByID(sessionID)
+	if err != nil {
+		return SessionSnapshot{}, false, err
+	}
+	sess, err := handle.Snapshot(ctx)
+	if err != nil {
+		return SessionSnapshot{}, false, err
+	}
+	status, err := handle.Status(ctx)
+	if err != nil {
+		return SessionSnapshot{}, false, err
+	}
+	status.SessionID = sessionID
+	snapshot = SessionSnapshot{Session: sess, Status: status}
+	snapshot.Epoch, snapshot.Cursor = driver.events.CurrentCursor(sessionID)
+	return snapshot, true, nil
+}
+
+func cancelObservation(observation Observation) {
+	if observation.Cancel != nil {
+		observation.Cancel()
+	}
 }
 
 func subtreeForSession(snapshot subagent.Snapshot, sessionID string) (subagent.NodeSnapshot, bool) {
