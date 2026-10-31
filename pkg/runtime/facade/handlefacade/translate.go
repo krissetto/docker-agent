@@ -102,7 +102,19 @@ func (t *translator) translate(env runtime.SessionEvent) []facade.Event {
 }
 
 func (t *translator) envelope(env runtime.SessionEvent, seq uint64, payload facade.Payload) facade.Event {
-	return facade.Event{SessionID: env.SessionID, TurnID: env.TurnID, Seq: seq, Epoch: env.Epoch, Payload: payload}
+	return facade.Event{SessionID: env.SessionID, TurnID: env.TurnID, Seq: seq, Epoch: env.Epoch, MessageID: messageIDOf(env.Event), Payload: payload}
+}
+
+// messageIDOf returns the message identity the runtime provided on a chunk.
+// Other events, and chunks without an ID, have none; it is never synthesized.
+func messageIDOf(event runtime.Event) string {
+	switch event := event.(type) {
+	case *runtime.AgentChoiceEvent:
+		return event.MessageID
+	case *runtime.AgentChoiceReasoningEvent:
+		return event.MessageID
+	}
+	return ""
 }
 
 func (t *translator) outcome(turnID string, outcome runtime.TurnOutcome) facade.Outcome {
