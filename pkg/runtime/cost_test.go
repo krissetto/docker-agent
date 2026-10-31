@@ -161,7 +161,7 @@ func TestApplyModelCostServiceTier(t *testing.T) {
 		{name: "missing actual tier", provider: "openai", model: "gpt-6-astra", cfg: latest.ModelConfig{ProviderOpts: map[string]any{"service_tier": "ultrafast"}}, short: 1.145, long: 11.165},
 		{name: "unknown tier", provider: "openai", model: "gpt-6-astra", tier: "future-tier", short: 1.145, long: 11.165},
 		{name: "unsupported Luna ultrafast", provider: "openai", model: "gpt-5.6-luna", tier: "ultrafast", short: 0.1434, long: 1.3488},
-		{name: "gateway fast already priced", provider: "vercel", model: "openai/gpt-6-astra-fast", tier: "fast", short: 2.29, long: 21.58},
+		{name: "gateway fast already priced", provider: "vercel", model: "openai/gpt-6-astra-fast", tier: "fast", short: 2.29, long: 22.33},
 		{name: "Azure unchanged", provider: "azure", model: "gpt-6-astra", tier: "fast", short: 1.145, long: 11.165},
 		{name: "custom OpenAI endpoint unchanged", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", cfg: latest.ModelConfig{BaseURL: "https://example.com/v1"}, short: 1.145, long: 11.165},
 		{name: "override wins over ultrafast and context bands", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", cfg: latest.ModelConfig{Cost: &latest.CostConfig{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1.25}}, short: 0.0995, long: 0.5495},

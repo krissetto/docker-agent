@@ -112,6 +112,7 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`rag/hybrid.yaml`](rag/hybrid.yaml) | Hybrid BM25 + embeddings retrieval. |
 | [`rag/reranking.yaml`](rag/reranking.yaml) | Hybrid retrieval with a re-ranking model on top. |
 | [`rag/custom_provider.yaml`](rag/custom_provider.yaml) | Pointing the embeddings model at a custom OpenAI-compatible provider. |
+| [`rag/gemini_embeddings.yaml`](rag/gemini_embeddings.yaml) | Google Gemini embedding model with `output_dimensionality`. |
 
 ---
 
@@ -199,12 +200,20 @@ remote MCP endpoints.
 | [`baseten.yaml`](baseten.yaml) | Baseten cloud provider. |
 | [`ovhcloud.yaml`](ovhcloud.yaml) | OVHcloud AI Endpoints provider. |
 | [`groq.yaml`](groq.yaml) | Groq fast-inference provider. |
-| [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference provider. |
+| [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference (`fireworks-ai`). |
 | [`deepseek.yaml`](deepseek.yaml) | DeepSeek chat and reasoning provider. |
 | [`cerebras.yaml`](cerebras.yaml) | Cerebras fast-inference provider. |
-| [`together.yaml`](together.yaml) | Together AI open-model inference provider. |
+| [`together.yaml`](together.yaml) | Together AI open-model inference (`togetherai`). |
 | [`huggingface.yaml`](huggingface.yaml) | Hugging Face Inference Providers open-model router. |
-| [`moonshot.yaml`](moonshot.yaml) | Moonshot AI (Kimi K2) provider. |
+| [`moonshot.yaml`](moonshot.yaml) | Moonshot AI Kimi provider (`moonshotai`). |
+| [`opencode-zen.yaml`](opencode-zen.yaml) | OpenCode Zen gateway (`opencode`). |
+| [`daoxe.yaml`](daoxe.yaml) | DaoXE multi-model gateway provider. |
+| [`orcarouter.yaml`](orcarouter.yaml) | OrcaRouter multi-model gateway provider. |
+| [`runcrate.yaml`](runcrate.yaml) | Runcrate open-model host (`runcrate`). |
+| [`lunaroute.yaml`](lunaroute.yaml) | Lunaroute OpenAI-compatible provider. |
+| [`opper.yaml`](opper.yaml) | Opper multi-model gateway provider. |
+| [`atlascloud.yaml`](atlascloud.yaml) | Atlas Cloud open-model host (`atlascloud`). |
+| [`api-route.yaml`](api-route.yaml) | API Route multi-model gateway provider. |
 | [`vercel.yaml`](vercel.yaml) | Vercel AI Gateway multi-provider router. |
 | [`cloudflare-workers-ai.yaml`](cloudflare-workers-ai.yaml) | Cloudflare Workers AI edge-hosted open models. |
 | [`cloudflare-ai-gateway.yaml`](cloudflare-ai-gateway.yaml) | Cloudflare AI Gateway multi-provider router. |
@@ -217,12 +226,19 @@ remote MCP endpoints.
 | [`structured-output.yaml`](structured-output.yaml) | Forces the model to return JSON matching a schema. |
 | [`google_search_grounding.yaml`](google_search_grounding.yaml) | Enables Google Search grounding on Gemini models. |
 | [`openai-service-tier.yaml`](openai-service-tier.yaml) | OpenAI Fast mode and service tier selection with `provider_opts.service_tier`. |
+| [`chatgpt-images.yaml`](chatgpt-images.yaml) + [`chatgpt-images.png`](chatgpt-images.png) | ChatGPT image input with an attached sample image and automatic capability detection. |
+| [`gemini_url_context.yaml`](gemini_url_context.yaml) | Gemini reads public documentation URLs with its built-in URL Context tool. |
+| [`gemini_service_tier.yaml`](gemini_service_tier.yaml) | Gemini Flex/standard/priority service tier selection with `provider_opts.service_tier`. |
 | [`gemini_image_output.yaml`](gemini_image_output.yaml) | Gemini image-output model: generated images are saved into the workspace, stored portably with the session, and rendered inline in the TUI. |
 | [`sampling-opts.yaml`](sampling-opts.yaml) | Provider-specific sampling parameters (`top_k`, `repetition_penalty`, …). |
 | [`thinking_budget.yaml`](thinking_budget.yaml) | Reasoning/thinking budgets across OpenAI, Anthropic and Google. |
 | [`task_budget.yaml`](task_budget.yaml) | Anthropic `task_budget`: cap total tokens spent across a multi-step agentic task. |
 
 ---
+
+Provider examples use the canonical IDs `fireworks-ai`, `togetherai`,
+`moonshotai`, and `opencode`. The old IDs `fireworks`, `together`, `moonshot`,
+and `opencode-zen` remain accepted for existing configurations.
 
 ## Permissions, redaction & sandboxing
 

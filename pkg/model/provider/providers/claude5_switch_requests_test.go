@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -51,6 +52,13 @@ func reloadedClaudeAPIHistory(t *testing.T) []chat.Message {
 	return reloaded
 }
 
+// embeddedCatalog serves the embedded models.dev snapshot without network, as
+// the store production passes to every client: Bedrock reads attachment
+// support from it.
+func embeddedCatalog() options.Opt {
+	return options.WithModelsDevStore(modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot()))
+}
+
 // wireBlocks returns the content blocks of the i-th message on the wire: 1 is
 // the recorded tool turn, 4 the new user turn.
 func wireBlocks(t *testing.T, req recorded, i int) []map[string]any {
@@ -77,6 +85,7 @@ func TestClaude5SwitchAfterReload(t *testing.T) {
 	t.Parallel()
 
 	anthropicEnv := map[string]string{"ANTHROPIC_API_KEY": "test-key"}
+	bedrockEnv := map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "test-token", "AWS_REGION": "us-east-1"}
 	vertexToken := options.WithTokenSource(func(context.Context) (string, error) { return "vertex-token", nil })
 
 	anthropicCases := map[string]struct {
@@ -118,4 +127,16 @@ func TestClaude5SwitchAfterReload(t *testing.T) {
 			assert.True(t, slices.ContainsFunc(wireBlocks(t, req, 4), func(b map[string]any) bool { return b["type"] == "document" }), "the new turn carries the attachment")
 		})
 	}
+
+	t.Run("transport switch to bedrock", func(t *testing.T) {
+		t.Parallel()
+		req := captureHistoryRequest(t, latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-sonnet-5-5"}, bedrockEnv, reloadedClaudeAPIHistory(t), embeddedCatalog())
+
+		turn := wireBlocks(t, req, 1)
+		require.Len(t, turn, 2, "the Claude API's redacted block has no Converse form")
+		assert.Equal(t, "plan", field(turn[0], "reasoningContent", "reasoningText", "text"))
+		assert.Equal(t, "sig-1", field(turn[0], "reasoningContent", "reasoningText", "signature"), "recorded thinking is replayed as signed reasoning")
+		assert.Contains(t, turn[1], "toolUse")
+		assert.True(t, slices.ContainsFunc(wireBlocks(t, req, 4), func(b map[string]any) bool { return b["document"] != nil }), "the new turn carries the attachment")
+	})
 }
