@@ -440,6 +440,7 @@ type appModel struct {
 	// layoutSettings is shared by every tab and managed via /settings.
 	layoutSettings            messages.LayoutSettings
 	dimInactivePanes          bool
+	inactivePaneDim           float64
 	transparentBackground     bool
 	paneDimCache              map[string]paneDimEntry
 	paneRenderCache           paneRenderCache
@@ -748,6 +749,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		panelSettings:                 panelSettingsFromConfig(userSettings.GetPanel()),
 		panelWorkingDir:               panelWorkingDir,
 		dimInactivePanes:              userSettings.GetDimInactivePanes(),
+		inactivePaneDim:               userSettings.GetInactivePaneDim(),
 		transparentBackground:         userSettings.GetTransparentBackground(),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),

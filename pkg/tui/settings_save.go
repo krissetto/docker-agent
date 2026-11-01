@@ -45,6 +45,9 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		if original.DimInactivePanes != draft.DimInactivePanes {
 			latest.DimInactivePanes = draft.DimInactivePanes
 		}
+		if original.InactivePaneDim != draft.InactivePaneDim {
+			latest.InactivePaneDim = draft.InactivePaneDim
+		}
 		if original.TransparentBackground != draft.TransparentBackground {
 			latest.TransparentBackground = draft.TransparentBackground
 		}

@@ -4,7 +4,6 @@
 │  ────────────────────────────────────────────────────────────────────    │
 │  Appearance   Behavior   Notifications   Panel                           │
 │                                                                          │
-│    Dim inactive panes                [ ]                              │  │
 │    Split diff view                   [x]                              │  │
 │    Git diff layout                   ‹ Unified ›                      │  │
 │    Compact work log                  [ ]                              │  │
@@ -13,6 +12,7 @@
 │    Hide tool results by default      [ ]                              │  │
 │    Render images                     [x]                              │  │
 │    Show startup banner               [x]                              │  │
+│    Inactive pane dim                 ‹ 0% ›                           │  │
 │                                                                       │  │
 │  Sidebar layout                                                       │  │
 │    Sidebar position                  ‹ Right ›                        │  │

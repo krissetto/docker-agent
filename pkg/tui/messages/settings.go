@@ -292,6 +292,7 @@ type Preferences struct {
 	RenderImages          bool
 	ShowBanner            bool
 	DimInactivePanes      bool
+	InactivePaneDim       float64
 	TransparentBackground bool
 	YOLO                  bool
 	RestoreTabs           bool

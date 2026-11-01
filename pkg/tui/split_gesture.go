@@ -43,6 +43,7 @@ type panePointerTransaction struct {
 	baseFrame                               string
 	baseStatuses                            map[string]runtime.SessionStatus
 	baseDimInactive                         bool
+	baseInactivePaneDim                     float64
 	baseGenerations                         map[string]uint64
 }
 
@@ -474,7 +475,7 @@ func (m *appModel) paneGhostLayer() *lipgloss.Layer {
 
 func (m *appModel) paneGestureBaseValid() bool {
 	g := m.paneGesture
-	if g == nil || g.base == "" || g.baseTheme != styles.ThemeGeneration() || g.baseAgentColors != styles.AgentColorGeneration() || g.baseSidebar != sidebarVisualGeneration(m.chatPage) || g.baseFocus != m.paneFocus() || g.baseBounds != m.paneBounds || g.baseWidth != m.width || g.baseHeight != m.contentHeight || g.baseFrame != m.paneActivityFrame() || g.baseDimInactive != m.dimInactivePanes || !m.paneStatusesMatch(g.baseStatuses) || len(g.baseGenerations) != len(m.paneGeometry.Panes) {
+	if g == nil || g.base == "" || g.baseTheme != styles.ThemeGeneration() || g.baseAgentColors != styles.AgentColorGeneration() || g.baseSidebar != sidebarVisualGeneration(m.chatPage) || g.baseFocus != m.paneFocus() || g.baseBounds != m.paneBounds || g.baseWidth != m.width || g.baseHeight != m.contentHeight || g.baseFrame != m.paneActivityFrame() || g.baseDimInactive != m.dimInactivePanes || g.baseInactivePaneDim != m.inactivePaneDim || !m.paneStatusesMatch(g.baseStatuses) || len(g.baseGenerations) != len(m.paneGeometry.Panes) {
 		return false
 	}
 	for id := range m.paneGeometry.Panes {
@@ -494,6 +495,7 @@ func (m *appModel) cachePaneGestureBase(view string) {
 	g.baseAgentColors, g.baseFocus, g.baseBounds = styles.AgentColorGeneration(), m.paneFocus(), m.paneBounds
 	g.baseWidth, g.baseHeight, g.baseFrame = m.width, m.contentHeight, m.paneActivityFrame()
 	g.baseDimInactive = m.dimInactivePanes
+	g.baseInactivePaneDim = m.inactivePaneDim
 	if m.composingPaneStatuses != nil {
 		g.baseStatuses = m.composingPaneStatuses
 	} else {

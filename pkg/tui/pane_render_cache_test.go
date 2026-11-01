@@ -134,7 +134,7 @@ func TestOptionalInactivePaneDimmingStrongWholeContentAndFocus(t *testing.T) {
 	root, _, _ := paneReplayRoot(t)
 	original := styles.CurrentTheme()
 	t.Cleanup(func() { styles.ApplyTheme(original) })
-	require.InDelta(t, 0.35, inactivePaneContrast, 0, "enabled dimming is deliberately pronounced")
+	require.InDelta(t, 0.5, inactivePaneContrast, 0, "the default dim keeps half of each text color's distance from the background")
 	content := "plain 界 é\n\x1b[38;2;230;180;100;48;2;30;90;150m[ control ] ▐\x1b[49m tail\x1b[m\n\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\"
 	for _, ref := range []string{"default", "default-light", "nord"} {
 		theme, err := styles.LoadTheme(ref)
@@ -161,10 +161,10 @@ func TestOptionalInactivePaneDimmingStrongWholeContentAndFocus(t *testing.T) {
 					fc := styles.NewFadeContext()
 					lines := strings.Split(content, "\n")
 					for i := range lines {
-						lines[i] = styles.FadeLineCtx(lines[i], 0.35, &fc)
+						lines[i] = styles.FadeLineCtx(lines[i], inactivePaneContrast, &fc)
 					}
 					require.Equal(t, strings.Join(lines, "\n"), got, "whole transcript/control/scrollbar painted exactly once")
-					require.Equal(t, styles.FadeLineCtx(titles[id], 0.35, &fc), title, "title/status painted exactly once")
+					require.Equal(t, styles.FadeLineCtx(titles[id], inactivePaneContrast, &fc), title, "title/status painted exactly once")
 					require.Equal(t, ansi.Strip(content), ansi.Strip(got))
 					require.Contains(t, got, "\x1b]8;;https://example.test\x1b\\")
 				}

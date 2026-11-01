@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -95,6 +96,11 @@ type Settings struct {
 	// DimInactivePanes reduces contrast of unfocused split-pane content.
 	// Defaults to true when not set.
 	DimInactivePanes *bool `yaml:"dim_inactive_panes,omitempty"`
+	// InactivePaneDim is how strongly unfocused split-pane content fades toward
+	// the theme background: 0 disables fading, 1 fades it fully. Values outside
+	// [0, 1] are clamped; non-finite values fall back to the default. Only used
+	// while DimInactivePanes is on. Defaults to 0.5.
+	InactivePaneDim *float64 `yaml:"inactive_pane_dim,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
 	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
 	// The special value "auto" follows the terminal's light/dark background,
@@ -356,6 +362,28 @@ func (s *Settings) GetDimInactivePanes() bool {
 		return true
 	}
 	return *s.DimInactivePanes
+}
+
+// DefaultInactivePaneDim is the default fade amount for unfocused panes. It
+// keeps 50% of the text color's distance from the background (previously 35%,
+// i.e. a 0.65 dim), so inactive text reads about 25% less faded.
+const DefaultInactivePaneDim = 0.5
+
+// NormalizeInactivePaneDim clamps a fade amount to [0, 1]. NaN and infinities
+// have no meaningful direction, so they resolve to DefaultInactivePaneDim.
+func NormalizeInactivePaneDim(dim float64) float64 {
+	if math.IsNaN(dim) || math.IsInf(dim, 0) {
+		return DefaultInactivePaneDim
+	}
+	return min(1, max(0, dim))
+}
+
+// GetInactivePaneDim returns the validated inactive-pane fade amount.
+func (s *Settings) GetInactivePaneDim() float64 {
+	if s == nil || s.InactivePaneDim == nil {
+		return DefaultInactivePaneDim
+	}
+	return NormalizeInactivePaneDim(*s.InactivePaneDim)
 }
 
 // GetRestoreTabs returns whether previously open tabs are restored on

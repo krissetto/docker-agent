@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 const (
@@ -46,6 +48,7 @@ const (
 	rowHideToolResults
 	rowRenderImages
 	rowShowBanner
+	rowInactivePaneDim
 	rowPosition
 	rowSpacing
 	rowInfoMode
@@ -235,6 +238,7 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool, trans
 	preferences.GitDiffLayout = messages.ParseGitDiffLayout(string(preferences.GitDiffLayout))
 	preferences.SendMode = messages.ParseSendMode(string(preferences.SendMode))
 	preferences.CloseTabChoice = messages.ParseCloseTabChoice(string(preferences.CloseTabChoice))
+	preferences.InactivePaneDim = userconfig.NormalizeInactivePaneDim(preferences.InactivePaneDim)
 	if preferences.TabTitleMaxLength <= 0 {
 		preferences.TabTitleMaxLength = 20
 	}
@@ -508,7 +512,7 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (d *settingsDialog) adjustable(row int) bool {
-	return (d.tab == tabAppearance && (row >= rowPosition && row <= rowInfoMode || row == rowGitDiffLayout || row == rowVisibleReplies)) ||
+	return (d.tab == tabAppearance && (row >= rowPosition && row <= rowInfoMode || row == rowGitDiffLayout || row == rowVisibleReplies || row == rowInactivePaneDim)) ||
 		(d.tab == tabBehavior && (row == rowInterruptConfirmation || row == rowTabTitleLength || row == rowCloseTabChoice)) ||
 		(d.tab == tabNotifications && row == rowSoundThreshold)
 }
@@ -556,6 +560,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.TransparentBackground = !d.current.TransparentBackground
 		case rowDimInactivePanes:
 			d.current.DimInactivePanes = !d.current.DimInactivePanes
+		case rowInactivePaneDim:
+			d.current.InactivePaneDim = stepInactivePaneDim(d.current.InactivePaneDim, delta)
 		case rowSplitDiff:
 			d.current.SplitDiffView = !d.current.SplitDiffView
 		case rowGitDiffLayout:
@@ -634,6 +640,14 @@ func cycleValue[T comparable](values []T, current T, delta int) T {
 
 func stepValue(current, delta, step, minimum, maximum int) int {
 	return max(minimum, min(maximum, current+delta*step))
+}
+
+// stepInactivePaneDim moves the fade amount in 5% steps over [0%, 100%]. It
+// snaps hand-edited values to the nearest whole percent first, so repeated
+// steps never accumulate float error.
+func stepInactivePaneDim(current float64, delta int) float64 {
+	percent := stepValue(int(math.Round(userconfig.NormalizeInactivePaneDim(current)*100)), delta, 5, 0, 100)
+	return float64(percent) / 100
 }
 
 func (d *settingsDialog) apply() tea.Cmd {
@@ -770,6 +784,7 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 	d.addToggle(body, rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	d.addToggle(body, rowRenderImages, "Render images", d.current.RenderImages)
 	d.addToggle(body, rowShowBanner, "Show startup banner", d.current.ShowBanner)
+	d.addControl(body, rowInactivePaneDim, "Inactive pane dim", fmt.Sprintf("%d%%", int(math.Round(d.current.InactivePaneDim*100))), false, false)
 	if d.showVisuals {
 		body.section("Sidebar layout")
 		d.addControl(body, rowPosition, "Sidebar position", positionLabels[d.current.Layout.SidebarPosition], false, false)

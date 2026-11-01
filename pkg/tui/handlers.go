@@ -985,6 +985,7 @@ func preferencesFromConfig(settings *userconfig.Settings) messages.Preferences {
 		RenderImages:          settings.GetRenderImages(),
 		ShowBanner:            settings.GetShowBanner(),
 		DimInactivePanes:      settings.GetDimInactivePanes(),
+		InactivePaneDim:       settings.GetInactivePaneDim(),
 		TransparentBackground: settings.GetTransparentBackground(),
 		YOLO:                  settings.YOLO,
 		RestoreTabs:           settings.GetRestoreTabs(),
@@ -1095,6 +1096,11 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 	s.RenderImages = boolPreference(p.RenderImages, true)
 	s.ShowBanner = boolPreference(p.ShowBanner, true)
 	s.DimInactivePanes = boolPreference(p.DimInactivePanes, true)
+	if dim := userconfig.NormalizeInactivePaneDim(p.InactivePaneDim); dim == userconfig.DefaultInactivePaneDim {
+		s.InactivePaneDim = nil
+	} else {
+		s.InactivePaneDim = &dim
+	}
 	s.TransparentBackground = boolPreference(p.TransparentBackground, true)
 	s.YOLO = p.YOLO
 	s.Lean = p.Lean

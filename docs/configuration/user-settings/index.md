@@ -44,6 +44,8 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `expand_thinking` | boolean | `false` | Start new sessions with thinking/tool blocks expanded instead of collapsed. |
 | `split_diff_view` | boolean | `true` | Render file-edit diffs side-by-side instead of unified. |
 | `render_images` | boolean | `true` | Render images in the TUI using the Kitty graphics protocol. Applies to both tool-result images and Markdown images in agent responses. Automatically disabled when the terminal does not support Kitty. |
+| `dim_inactive_panes` | boolean | `true` | Fade the content of unfocused split panes so the focused pane stands out. Managed by **Dim inactive panes** in `/settings` → **Appearance**. Turn it off to keep every pane at full contrast. |
+| `inactive_pane_dim` | number | `0.5` | How strongly unfocused split panes fade, from `0` (no fade) to `1` (fully faded into the theme background). `0.5` keeps half of the text color's distance from the background; the previous fixed fade was `0.65`. Values outside `0`–`1` are clamped to the nearest bound, and a non-finite value (`.nan`, `.inf`) falls back to `0.5`. A non-numeric value fails config loading like any other mistyped field. Only applies while `dim_inactive_panes` is on. Managed by **Inactive pane dim** in `/settings` → **Appearance** (adjusted in 5% steps; it takes effect while **Dim inactive panes** is on). Changes apply live. |
 | `show_banner` | boolean | `true` | Show the ASCII-art startup banner on an empty conversation. Applies to both the full TUI and the [lean TUI](../../features/tui/index.md#lean-tui). Managed from the **Appearance** tab of `/settings`. |
 | `theme` | string | `docker-next-dark` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. Use `default` for the previous default palette (Old School); an unset value means Docker Next - Dark. Before Docker Next, choosing the old default cleared this setting, so a historical unset value cannot be told apart from an explicit Old School choice and is not migrated; set `theme: default` to keep Old School. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
 | `theme_dark` | string | `docker-next-dark` | Theme applied when `theme: auto` and the terminal background is dark. |
@@ -128,6 +130,8 @@ settings:
   hide_tool_results: false
   sound: true
   sound_threshold: 10
+  dim_inactive_panes: true
+  inactive_pane_dim: 0.5
   snapshot: true
   cache_stable_prompts: true
   warn_on_cache_miss: true
@@ -162,4 +166,4 @@ User settings are a **low-priority** source: they establish defaults, and anythi
 - **Permissions are merged, not overridden.** Global `settings.permissions` and an agent's own `permissions:` are combined into a single set of `deny` → `allow` → `ask` patterns before evaluation — a global deny always blocks, regardless of what the agent config allows. See [Merging Behavior](../permissions/index.md#merging-behavior).
 - **Hooks are additive, not overridden.** For a given lifecycle event, hooks from the agent config, `settings.hooks`, `hooks.d/` drop-ins, and `--hook-*` CLI flags **all** run, in that order. Global hooks cannot be suppressed by an individual agent.
 - **Subagent delegation is a user-owned local runtime preference.** `use_subagents` defaults to `true` and has no agent-YAML or CLI-flag override. `/subagents on` and `/subagents off` save the preference; new and restored local runtimes read it. Remote and standalone service boundaries are described [above](#subagent-preference).
-- **Everything else is a plain default.** Fields with no CLI or agent-config equivalent (`sound`, `sound_threshold`, `restore_tabs`, `tab_title_max_length`, `split_diff_view`, `render_images`, `show_banner`, `cache_stable_prompts`, `warn_on_cache_miss`, `keybindings`, `layout`) only ever come from `settings:` (or the `/settings` dialog that writes it) — there is nothing to override them per run. `busy_send_mode` only changes what plain Enter does while the agent is busy.
+- **Everything else is a plain default.** Fields with no CLI or agent-config equivalent (`sound`, `sound_threshold`, `restore_tabs`, `tab_title_max_length`, `split_diff_view`, `render_images`, `show_banner`, `dim_inactive_panes`, `inactive_pane_dim`, `cache_stable_prompts`, `warn_on_cache_miss`, `keybindings`, `layout`) only ever come from `settings:` (or the `/settings` dialog that writes it) — there is nothing to override them per run. `busy_send_mode` only changes what plain Enter does while the agent is busy.

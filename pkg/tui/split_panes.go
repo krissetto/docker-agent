@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/rendering/retained"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 const paneMinWidth, paneMinHeight = 24, 6
@@ -524,6 +525,7 @@ func (m *appModel) paneTitle(id string, width int) string {
 	in := paneTitlePaintInput{
 		content: label, foreground: snapshotPaneColor(styles.TextPrimary), background: snapshotPaneColor(background),
 		dimmed: m.dimInactivePanes && m.panesEnabled() && !focused,
+		alpha:  m.inactivePaneAlpha(),
 	}
 	if in.dimmed {
 		in.fade = styles.NewFadeContext()
@@ -687,14 +689,20 @@ func (m *appModel) paneActivityForStatus(id string, status runtime.SessionStatus
 	return styles.MutedStyle.Render("· idle")
 }
 
-// Keep 35% of each semantic color's distance from the active theme background.
-// This visibly subordinates inactive content without replacing its hues or
-// relying on terminal faint support, on both dark and light themes.
-const inactivePaneContrast = 0.35
+// inactivePaneContrast is the default foreground weight of inactive content:
+// each semantic color keeps this fraction of its distance from the active theme
+// background. The live weight is 1 - the user's inactive_pane_dim setting.
+const inactivePaneContrast = 1 - userconfig.DefaultInactivePaneDim
+
+// inactivePaneAlpha is the foreground weight for the configured fade amount.
+func (m *appModel) inactivePaneAlpha() float64 {
+	return 1 - userconfig.NormalizeInactivePaneDim(m.inactivePaneDim)
+}
 
 type paneDimInput struct {
 	content string
 	fade    styles.FadeContext
+	alpha   float64
 }
 
 type paneDimEntry struct {
@@ -705,7 +713,7 @@ type paneDimEntry struct {
 func drawPaneDim(in paneDimInput) string {
 	lines := strings.Split(in.content, "\n")
 	for i, line := range lines {
-		lines[i] = styles.FadeLineCtx(line, inactivePaneContrast, &in.fade)
+		lines[i] = styles.FadeLineCtx(line, in.alpha, &in.fade)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -719,7 +727,7 @@ func (m *appModel) paneTranscript(id, content string) string {
 	}
 	// Cache only the current bounded viewport, never transcript histories.
 	entry := m.paneDimCache[id]
-	rendered := entry.slot.Render(paneDimInput{content: content, fade: styles.NewFadeContext()}, drawPaneDim)
+	rendered := entry.slot.Render(paneDimInput{content: content, fade: styles.NewFadeContext(), alpha: m.inactivePaneAlpha()}, drawPaneDim)
 	entry.theme = styles.ThemeGeneration()
 	m.paneDimCache[id] = entry
 	for cached := range m.paneDimCache {

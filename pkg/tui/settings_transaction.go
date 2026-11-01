@@ -63,6 +63,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	runtime := original
 	runtime.Layout, runtime.Panel = m.layoutSettings, messages.NormalizePanelSettings(m.panelSettings)
 	runtime.ShowBanner, runtime.DimInactivePanes, runtime.TransparentBackground = m.showBanner, m.dimInactivePanes, m.transparentBackground
+	runtime.InactivePaneDim = m.inactivePaneDim
 	runtime.CompactWorkLog = m.compactWorkLog
 	runtime.ShowAgentContext = m.agentContextReadings
 	runtime.VisibleReplies = m.visibleReplies
@@ -152,6 +153,9 @@ func (m *appModel) previewSettings(before, p messages.Preferences) tea.Cmd {
 	}
 	if before.DimInactivePanes != p.DimInactivePanes {
 		m.dimInactivePanes = p.DimInactivePanes
+	}
+	if before.InactivePaneDim != p.InactivePaneDim {
+		m.inactivePaneDim = userconfig.NormalizeInactivePaneDim(p.InactivePaneDim)
 	}
 	if before.TransparentBackground != p.TransparentBackground {
 		m.transparentBackground = p.TransparentBackground

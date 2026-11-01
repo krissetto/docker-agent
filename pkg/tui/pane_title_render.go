@@ -55,6 +55,7 @@ type paneTitlePaintInput struct {
 	foreground, background paneColor
 	dimmed                 bool
 	fade                   styles.FadeContext
+	alpha                  float64
 }
 
 type paneTitleEntry struct {
@@ -74,7 +75,7 @@ func drawPaneTitlePaint(in paneTitlePaintInput) string {
 	surface := lipgloss.NewStyle().Foreground(in.foreground.color()).Background(in.background.color())
 	heading := styles.RenderComposite(surface, in.content)
 	if in.dimmed {
-		heading = styles.FadeLineCtx(heading, inactivePaneContrast, &in.fade)
+		heading = styles.FadeLineCtx(heading, in.alpha, &in.fade)
 	}
 	return heading
 }

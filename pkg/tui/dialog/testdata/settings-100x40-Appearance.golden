@@ -17,6 +17,7 @@
 │    Hide tool results by default      [ ]                              │  │
 │    Render images                     [x]                              │  │
 │    Show startup banner               [x]                              │  │
+│    Inactive pane dim                 ‹ 0% ›                           │  │
 │                                                                       │  │
 │  Sidebar layout                                                       │  │
 │    Sidebar position                  ‹ Right ›                        │  │
@@ -27,7 +28,6 @@
 │                                                                       │  │
 │  Sidebar sections                                                     │  │
 │    Session path                      [x]                              │  │
-│    Token usage                       [x]                              │  │
 │                                                                          │
 │  Cancel                                                       Save       │
 │                                                                          │
