@@ -855,17 +855,23 @@ func (g *gitSection) line(width, line int, hoverState ...map[string]hoverValue) 
 	r := g.displayRows[line-1]
 	focused := g.focused && g.cursor == line
 	hover := gitHoverProgress(hoverValues, g.rowID(line))
-	painted := strings.Repeat(" ", indent) + g.renderRow(r, max(1, width-indent), focused, hover)
 	selected := r.kind == gitRowFile && g.data.Open.WorktreeID == r.worktree && g.data.Open.Path == r.file.Path && g.data.Open.Group == r.group
 	selected = selected || r.kind == gitRowBrowse && !r.branch && g.data.Open.Mode == review.ModeFiles && g.data.Open.WorktreeID == r.worktree && g.data.Open.Path == r.path
-	if g.data.Open.Path != "" && !selected && !focused {
+	resting := g.data.Open.Path != "" && !selected && !focused
+	fileRow := r.kind == gitRowFile || r.kind == gitRowBrowse && !r.branch
+	if resting && fileRow && styles.ReviewRestFg() != nil {
+		// A theme that authors review_rest_fg mutes only the filename; status and stats keep full strength.
+		return strings.Repeat(" ", indent) + g.renderRowRest(r, max(1, width-indent), focused, hover, true)
+	}
+	painted := strings.Repeat(" ", indent) + g.renderRow(r, max(1, width-indent), focused, hover)
+	if resting {
 		// Resting de-emphasis is static; pointer brightness comes only from the shared hover ramp in renderRow.
 		return styles.FadeLine(painted, gitOtherFileRestAlpha)
 	}
 	return painted
 }
 
-// gitOtherFileRestAlpha is the resting strength of rows other than the open file.
+// gitOtherFileRestAlpha is the legacy resting strength of rows other than the open file.
 const gitOtherFileRestAlpha = .55
 
 // gitHoverProgress reads the shared hover ramp only; a missing entry is rest.
@@ -884,6 +890,11 @@ func (g *gitSection) lineForHoverKey(key string) int {
 }
 
 func (g *gitSection) renderRow(r gitRow, width int, focused bool, hover float64) string {
+	return g.renderRowRest(r, width, focused, hover, false)
+}
+
+// renderRowRest renders a row; mutedName paints a resting file row's filename in the theme's review_rest_fg.
+func (g *gitSection) renderRowRest(r gitRow, width int, focused bool, hover float64, mutedName bool) string {
 	guides := styles.MutedStyle.Render(r.guides)
 	label := r.label
 	inlineStats := false
@@ -916,6 +927,8 @@ func (g *gitSection) renderRow(r gitRow, width int, focused bool, hover float64)
 		nameStyle := styles.BaseStyle
 		if focused || selected {
 			nameStyle = styles.HighlightWhiteStyle
+		} else if mutedName && styles.ReviewRestFg() != nil {
+			nameStyle = styles.BaseStyle.Foreground(styles.ReviewRestFg())
 		}
 		label = styles.HoverText(status+" "+nameStyle.Render(name), hover, styles.TextPrimary)
 		if stats != "" {

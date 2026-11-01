@@ -36,6 +36,10 @@ func TestDockerNextPalettesDefineEveryKey(t *testing.T) {
 		require.NoError(t, yaml.Unmarshal(data, &raw))
 		assert.Equal(t, wantName, raw.Name, ref)
 		assertAllFieldsSet(t, ref, raw.Colors)
+		// Light derives its word-emphasis fill from diff_add_bg; only dark authors the explicit override.
+		if ref == DockerNextLightThemeRef {
+			require.Empty(t, raw.Colors.DiffAddEmphBg, "light keeps the derived emphasis fill")
+		}
 		assertAllFieldsSet(t, ref, raw.Chroma)
 		assertAllFieldsSet(t, ref, raw.Markdown)
 	}
@@ -48,6 +52,9 @@ func assertAllFieldsSet(t *testing.T, ref string, section any) {
 	for i := range v.NumField() {
 		field := v.Type().Field(i)
 		value := v.Field(i)
+		if ref == DockerNextLightThemeRef && field.Name == "DiffAddEmphBg" {
+			continue // optional override; light uses the derived fill
+		}
 		if value.Kind() == reflect.Slice {
 			assert.NotZero(t, value.Len(), "%s: %s not set", ref, field.Name)
 			continue

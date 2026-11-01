@@ -113,7 +113,11 @@ func TestHoverTextWarmThemesRebaseOriginalColorsAtCurrentProgress(t *testing.T) 
 			require.Len(t, cells, 1)
 			require.NotNil(t, cells[0].fg)
 			require.NotNil(t, cells[0].bg)
-			assert.Equal(t, RGBToHex(ColorToRGB(Brighten(fg, .125))), RGBToHex(ColorToRGB(cells[0].fg)))
+			want := shiftLightness(fg, hoverLightness*.5)
+			if hoverTextColor != nil && isHoverTextRole(fg) {
+				want = lerpHoverText(fg, hoverTextColor, .5)
+			}
+			assert.Equal(t, RGBToHex(ColorToRGB(want)), RGBToHex(ColorToRGB(cells[0].fg)))
 			assert.Equal(t, RGBToHex(ColorToRGB(EditorBg)), RGBToHex(ColorToRGB(cells[0].bg)))
 			assert.Equal(t, base, HoverText(base, 0, TextPrimary))
 			assert.Equal(t, got, HoverText(base, .5, TextPrimary), "settled rendering is deterministic")

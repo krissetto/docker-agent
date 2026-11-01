@@ -8,7 +8,7 @@ colors:
   text_primary: "#DDD4C9"  # Neutral
   text_secondary: "#97918A"  # Neutral +34% toward Ether
   text_muted: "#97918A"  # Neutral +34% toward Ether
-  text_faint: "#4E4B48"  # Neutral +70% toward Ether
+  text_faint: "#76726C"  # Neutral +50% toward Ether
   # Accent
   accent: "#6F7FFE"  # Base +22% toward Zero
   accent_muted: "#A0A5E6"  # Base lift +45% toward Neutral
@@ -21,7 +21,7 @@ colors:
   success: "#00E476"  # Flux
   error: "#FF3D40"  # Trigger
   warning: "#FFCEA5"  # Sand
-  info: "#D1E4FF"  # Air
+  info: "#528DE0"  # Air hue, HSL 215/70/60 (thumb distinct from Zero drag state)
   highlight: "#D4A6DD"  # Bloom hue, HSL 290/45/76
   # Brand
   brand: "#475BFF"  # Base
@@ -34,11 +34,12 @@ colors:
   spinner_bright: "#B2B9FC"  # Base +58% toward Zero
   spinner_brightest: "#D3D6FB"  # Base +76% toward Zero
   # Diff
-  diff_add_bg: "#0E2E1E"  # Flux 14% over Ether
+  diff_add_bg: "#0E251A"  # Flux 10% over Ether (darker so syntax tokens on added rows/emphasis stay >=4.5)
   diff_remove_bg: "#281415"  # Trigger 10% over Ether
+  diff_add_emph_bg: "#0D3823"  # Flux 19% over Ether; explicit word-emphasis fill (absent = derived)
   # UI elements
   line_number: "#97918A"  # Neutral +34% toward Ether
-  separator: "#56534F"  # Neutral +66% toward Ether
+  separator: "#6E6A65"  # Neutral +54% toward Ether
   selected: "#1E244E"  # Base 26% over Ether
   selected_fg: "#FFFDFA"  # Zero
   suggestion_ghost: "#97918A"  # Neutral +34% toward Ether
@@ -60,12 +61,14 @@ colors:
   context_empty: "#101010"  # Ether
   context_fill: "#D1E4FF"  # Air
   context_text: "#97918A"  # Neutral +34% toward Ether
-  resize: "#56534F"  # Neutral +66% toward Ether
+  resize: "#6E6A65"  # Neutral +54% toward Ether
   resize_hover: "#6F7FFE"  # Base +22% toward Zero
   resize_active: "#FFFDFA"  # Zero
+  hover_text: "#919CFD"  # Base +40% toward Zero; hover target for primary/bright text (absent = lightness shift only)
+  review_rest_fg: "#97918A"  # = text_muted; resting review rows draw the name muted instead of FadeLine .55 (absent = legacy fade)
   hint: "#97918A"  # Neutral +34% toward Ether
   focus: "#6F7FFE"  # Base +22% toward Zero
-  disabled: "#4E4B48"  # Neutral +70% toward Ether
+  disabled: "#76726C"  # Neutral +50% toward Ether
   status_adjacent: "#97918A"  # Neutral +34% toward Ether
   scrollbar_track: "#2D2B2A"  # Neutral 14% over Ether
   # Badges
@@ -78,23 +81,23 @@ chroma:
   error_fg: "#FFFDFA"  # Zero
   error_bg: "#5C0909"  # Root
   success: "#00E476"  # Flux
-  comment: "#97918A"  # Neutral +34% toward Ether
+  comment: "#A09992"  # Neutral +30% toward Ether (>=4.5 on diff emphasis)
   comment_preproc: "#FF6A3D"  # Launch
-  keyword: "#6F7FFE"  # Base +22% toward Zero
+  keyword: "#8692FD"  # Base +34% toward Zero (>=4.5 on diff emphasis)
   keyword_reserved: "#D4A6DD"  # Bloom hue, HSL 290/45/76
   keyword_namespace: "#FF7778"  # Trigger +30% toward Zero
   keyword_type: "#D1E4FF"  # Air
   operator: "#FF7778"  # Trigger +30% toward Zero
   punctuation: "#DDD4C9"  # Neutral
   name_builtin: "#FF6A3D"  # Launch
-  name_tag: "#6F7FFE"  # Base +22% toward Zero
+  name_tag: "#8692FD"  # Base +34% toward Zero (>=4.5 on diff emphasis)
   name_attribute: "#D1E4FF"  # Air
   name_decorator: "#FF6A3D"  # Launch
   literal_number: "#D4A6DD"  # Bloom hue, HSL 290/45/76
   literal_string: "#FFCEA5"  # Sand
   literal_string_escape: "#FF6A3D"  # Launch
-  generic_deleted: "#FF3D40"  # Trigger
-  generic_subheading: "#97918A"  # Neutral +34% toward Ether
+  generic_deleted: "#FF7778"  # Trigger +30% toward Zero (>=4.5 on diff emphasis)
+  generic_subheading: "#A09992"  # Neutral +30% toward Ether (>=4.5 on diff emphasis)
   background: "#1D1D1D"  # Ink
 
 markdown:

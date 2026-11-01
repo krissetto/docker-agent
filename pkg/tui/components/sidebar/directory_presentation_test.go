@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,22 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
+
+// fullHover is the expected settled hover color of the muted foreground for a theme.
+// Absent hover_lightness keeps the legacy +0.25 lift. The only authored value is
+// docker-next-light's -0.20, so its expectation is an explicit hex rather than a
+// call into the production helper.
+func fullHover(t *testing.T, theme *styles.Theme, ref string) color.Color {
+	t.Helper()
+	muted := styles.MutedStyle.GetForeground()
+	if theme.Colors.HoverLightness == nil {
+		return styles.Brighten(muted, .25)
+	}
+	require.Equal(t, "docker-next-light", ref, "only docker-next-light authors hover_lightness")
+	require.InDelta(t, -0.20, *theme.Colors.HoverLightness, 1e-12)
+	require.Equal(t, "#64605c", styles.RGBToHex(styles.ColorToRGB(muted)), "muted base before the -0.20 darkening")
+	return lipgloss.Color("#2F2D2B")
+}
 
 func TestDirectoryPaletteAndAnimatedRevealAcrossThemes(t *testing.T) {
 	original := styles.CurrentTheme()
@@ -64,8 +81,8 @@ func TestDirectoryPaletteAndAnimatedRevealAcrossThemes(t *testing.T) {
 
 			_, cmd = m.Update(tea.MouseMotionMsg{X: x, Y: y})
 			settlePlacement(t, m, cmd)
-			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-5))
-			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-2))
+			sameColor(fullHover(t, theme, ref), iconColor(width-5))
+			sameColor(fullHover(t, theme, ref), iconColor(width-2))
 			line := ansi.Strip(m.directoryRow(width))
 			assert.True(t, strings.HasSuffix(line, directoryCopyIcon+"  "+directoryIcon+" "))
 			for col := width - 5; col < width; col++ {
@@ -81,8 +98,8 @@ func TestDirectoryPaletteAndAnimatedRevealAcrossThemes(t *testing.T) {
 			}
 			_, cmd = m.Update(tea.MouseMotionMsg{X: x + width - 2, Y: y})
 			settlePlacement(t, m, cmd)
-			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-5))
-			sameColor(styles.Brighten(styles.MutedStyle.GetForeground(), .25), iconColor(width-2))
+			sameColor(fullHover(t, theme, ref), iconColor(width-5))
+			sameColor(fullHover(t, theme, ref), iconColor(width-2))
 			settled := m.View()
 			cmd = advancePlacement(t, m, m.ClearSubagentHover())
 			assert.NotEqual(t, settled, m.View(), "exit follows the shared highlight before removing the glyphs")

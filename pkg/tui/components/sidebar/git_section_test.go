@@ -479,7 +479,12 @@ func TestGitRowsShareAnimatedHoverAndReviewDimming(t *testing.T) {
 
 	otherRow := m.git.line(width, secondIndex)
 	baseOther := strings.Repeat(" ", min(2, max(0, width-1))) + m.git.renderRow(second, max(1, width-min(2, max(0, width-1))), false, 0)
-	assert.Equal(t, styles.FadeLine(baseOther, .55), otherRow, "other Git entries dim while a file is reviewed")
+	if styles.ReviewRestFg() != nil {
+		// docker-next mutes only the filename of resting rows; guides, status and stats keep full strength.
+		assert.Equal(t, strings.Repeat(" ", min(2, max(0, width-1)))+m.git.renderRowRest(second, max(1, width-min(2, max(0, width-1))), false, 0, true), otherRow, "resting Git entries mute only the filename")
+	} else {
+		assert.Equal(t, styles.FadeLine(baseOther, .55), otherRow, "other Git entries dim while a file is reviewed")
+	}
 	assert.NotContains(t, otherRow, styles.BaseStyle.Background(styles.TabHoverBg).Foreground(styles.TabHoverFg).Render("pkg/tui/view.go"), "hover does not introduce a bespoke filled background")
 
 	key := "git:" + m.git.rowID(firstIndex)

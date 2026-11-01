@@ -306,6 +306,24 @@ type ThemeColors struct {
 
 	// Agent colors
 	AgentHues []float64 `yaml:"agent_hues,omitempty"` // Hue values (0-360) for agent color generation
+
+	// HoverLightness is the HSL lightness delta HoverText applies at full hover.
+	// A pointer keeps presence: nil (absent) means the legacy +0.25 lift, while an
+	// explicit 0 means no change. Negative values darken for light surfaces.
+	HoverLightness *float64 `yaml:"hover_lightness,omitempty"`
+
+	// HoverText is an optional explicit hover target for primary and bright text.
+	// Absent (empty) keeps the lightness-only hover; a hex value lerps those cells
+	// toward it by hover progress. Other foregrounds keep HoverLightness.
+	HoverText string `yaml:"hover_text,omitempty"`
+
+	// DiffAddEmphBg is an optional explicit word-emphasis fill for added diff lines.
+	// Absent keeps the value derived from diff_add_bg and success.
+	DiffAddEmphBg string `yaml:"diff_add_emph_bg,omitempty"`
+
+	// ReviewRestFg is an optional muted filename color for resting review file rows.
+	// Absent keeps the legacy whole-row fade; present mutes only the filename.
+	ReviewRestFg string `yaml:"review_rest_fg,omitempty"`
 }
 
 // ChromaColors contains syntax highlighting colors (for code blocks).
@@ -1056,6 +1074,18 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	if len(override.AgentHues) > 0 {
 		result.AgentHues = override.AgentHues
 	}
+	if override.HoverLightness != nil {
+		result.HoverLightness = override.HoverLightness
+	}
+	if override.HoverText != "" {
+		result.HoverText = override.HoverText
+	}
+	if override.DiffAddEmphBg != "" {
+		result.DiffAddEmphBg = override.DiffAddEmphBg
+	}
+	if override.ReviewRestFg != "" {
+		result.ReviewRestFg = override.ReviewRestFg
+	}
 	return result
 }
 
@@ -1211,6 +1241,9 @@ func ApplyTheme(theme *Theme) {
 	DiffAddFg = lipgloss.Color(c.Success)
 	DiffRemoveFg = lipgloss.Color(c.Error)
 	DiffAddEmphBg = deriveDiffEmphasisBg(c.DiffAddBg, c.Success)
+	if emph := resolveColorHex(c.DiffAddEmphBg); emph != nil {
+		DiffAddEmphBg = emph
+	}
 	DiffRemoveEmphBg = deriveDiffEmphasisBg(c.DiffRemoveBg, c.Error)
 	// UI element colors
 	LineNumber = lipgloss.Color(c.LineNumber)
@@ -1265,6 +1298,10 @@ func ApplyTheme(theme *Theme) {
 		track = deriveScrollbarTrack(c.ShellBg, c.CardBg, c.EditorBg)
 	}
 	ScrollbarTrack = lipgloss.Color(track)
+
+	hoverLightness = resolveHoverLightness(c.HoverLightness)
+	hoverTextColor = resolveHoverText(c.HoverText)
+	reviewRestFg = resolveColorHex(c.ReviewRestFg)
 
 	// Rebuild all derived styles
 	rebuildStyles()

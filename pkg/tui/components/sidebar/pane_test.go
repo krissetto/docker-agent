@@ -125,7 +125,13 @@ func TestPaneRegionsSharedHoverCellsAndNoopMotion(t *testing.T) {
 			base = styles.TextPrimary
 		}
 		require.NotNil(t, after[x].fg, "hover target must remain on its text cell after cached re-render")
-		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(base, .25)), color.NRGBAModel.Convert(after[x].fg))
+		// Primary and bright text hover to docker-next-dark's hover_text target (#919CFD);
+		// other foregrounds keep the +0.25 lift.
+		want := styles.Brighten(base, .25)
+		if base == styles.TextPrimary || base == styles.TextBright {
+			want = lipgloss.Color("#919CFD")
+		}
+		assert.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(after[x].fg))
 		assert.Zero(t, m.ar.ActiveCount(), "settled hover holds no animation lease")
 		gen := m.VisualGeneration()
 		for range 100 {

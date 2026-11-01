@@ -179,7 +179,9 @@ func AgentAccentStyleFor(agentName string) lipgloss.Style {
 func AgentIdentityStyle(agentName string, hovered bool) lipgloss.Style {
 	style := AgentAccentStyleFor(agentName)
 	if hovered {
-		style = style.Foreground(Brighten(style.GetForeground(), 0.25))
+		// Uses the theme's hover_lightness: absent keeps the legacy +0.25 lift, while
+		// docker-next-light darkens so hovered identities stay readable on light surfaces.
+		style = style.Foreground(shiftLightness(style.GetForeground(), hoverLightness))
 	}
 	return style
 }
