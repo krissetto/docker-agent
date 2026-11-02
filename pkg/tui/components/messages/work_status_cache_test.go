@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -60,6 +61,8 @@ func newWorkStatusCacheHistory(tb testing.TB, workEnabled bool, turns int) *mode
 // transcriptPlainText returns every virtual row, so history stays checkable
 // even when it is scrolled out of the viewport.
 func transcriptPlainText(m *model) string {
+	// The explicit full demand makes the loop run over an exact, settled total.
+	m.ensureAllItemsRendered()
 	var b strings.Builder
 	for i := range m.displayTotalHeight() {
 		b.WriteString(ansi.Strip(m.renderedLine(i)))
@@ -322,12 +325,46 @@ func TestSetWorkStatusCancelsReferenceHoverOnlyWhenOffsetsMove(t *testing.T) {
 	_ = m.View()
 	toggle("work on")
 
-	// A real offset change must cancel the stale reference hover.
-	total := m.totalHeight
-	m.addMessage(types.User("grow the transcript"))
+	// Hover is keyed on the hovered message's identity and cancels only when that
+	// message's own offset moves. Appending below it changes the total but not its
+	// offset, so the hover stays.
+	target := m.referenceHoverTarget
+	m.addMessage(types.User("grow below the hovered item"))
 	_ = m.View()
-	require.NotEqual(t, total, m.totalHeight)
-	require.Empty(t, m.referenceHoverValues, "a moved transcript must cancel reference hover")
+	require.Equal(t, target, m.referenceHoverTarget, "appending below must keep the hover")
+	require.NotEmpty(t, m.referenceHoverValues)
+
+	// Growth above the hovered reference through the production async result path.
+	// The tool card above is expanded by a real click before any hover exists, the
+	// reference is then hovered by real motion, and only the result arrival moves
+	// the card. No click follows the hover.
+	m.SetCompactWorkLog(false)
+	call := tools.ToolCall{ID: "hover-above-tool", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"true"}`}}
+	m.AddOrUpdateToolCall("root", call, tools.Tool{Name: "shell"}, types.ToolStatusPending)
+	input := session.UserMessage("reference below the tool card")
+	input.InputOrigin, input.SenderID, input.SenderName = session.InputOriginAgent, "child-session", "worker"
+	m.AddInputMessage(input, 0)
+	_ = m.View()
+	frame := strings.Split(ansi.Strip(m.View()), "\n")
+	row := rowOf(frame, "shell")
+	require.GreaterOrEqual(t, row, 0, "the tool card above is visible")
+	col := ansi.StringWidth(frame[row][:strings.LastIndex(frame[row], ">")]) + 1
+	m.Update(tea.MouseClickMsg{X: m.xPos + col, Y: m.yPos + row, Button: tea.MouseLeft})
+	_ = m.View()
+	hoverLastReferenceCell(t, m)
+	require.NotEmpty(t, m.referenceHoverValues)
+	hovered := m.referenceHoverSlot
+	require.GreaterOrEqual(t, hovered, 0)
+	offset := m.slotOffset(hovered)
+
+	m.AddToolResult(&runtime.ToolCallResponseEvent{
+		ToolCallID:     "hover-above-tool",
+		ToolDefinition: tools.Tool{Name: "shell"},
+		Response:       strings.Repeat("tool output line\n", 30),
+	}, types.ToolStatusCompleted)
+	_ = m.View()
+	require.NotEqual(t, offset, m.slotOffset(hovered), "the tool result above moved the hovered item")
+	require.Empty(t, m.referenceHoverValues, "the hover is cancelled when its item's offset moves")
 }
 
 // buildWorkStatusSessionHistory loads turns persisted history messages with

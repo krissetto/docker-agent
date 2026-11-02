@@ -28,6 +28,17 @@ func (m *model) setReferenceHover(key referenceHoverKey) {
 		return
 	}
 	m.referenceHoverTarget = key
+	// The hover is keyed on the message identity: the slot is resolved from it, not from
+	// hoveredMessageIndex, which a reference hover does not set.
+	m.referenceHoverSlot, m.referenceHoverOffset = -1, 0
+	if key.message != nil {
+		m.referenceHoverSlot = m.messagePointerIndex(key.message)
+	} else {
+		m.referenceHoverSlot = m.hoveredMessageIndex
+	}
+	if i := m.referenceHoverSlot; i >= 0 && i < len(m.views) {
+		m.referenceHoverOffset = m.slotOffset(i)
+	}
 	if m.referenceHoverValues == nil {
 		m.referenceHoverValues = make(map[referenceHoverKey]referenceHoverValue)
 	}

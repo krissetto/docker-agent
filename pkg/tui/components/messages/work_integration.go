@@ -1,7 +1,6 @@
 package messages
 
 import (
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
 	"github.com/docker/docker-agent/pkg/tui/components/workblock"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -67,7 +67,9 @@ func (m *model) ReplyHandoffActive() bool { return m.replyHandoff.Active() }
 func (m *model) SetWorkStatus(active bool, elapsed time.Duration) tea.Cmd {
 	m.workActive, m.workElapsed = active, elapsed
 	if !active {
-		projection := projectWorkWithVisibleReplies(m.messages, m.responseGroups, m.visibleReplies, m.currentSessionOpener())
+		m.stats.projectionRebuilds++
+		// Local read of exchanges only: the unindexed variant is never published.
+		projection := projectWorkWith(m.messages, m.responseGroups, m.visibleReplies, m.currentSessionOpener(), false)
 		if len(projection.exchanges) > 0 {
 			exchange := projection.exchanges[len(projection.exchanges)-1]
 			identity := (*types.Message)(nil)
@@ -91,29 +93,36 @@ func (m *model) SetWorkStatus(active bool, elapsed time.Duration) tea.Cmd {
 		m.workCommands = nil
 		return cmd
 	}
-	previousMembership := maps.Clone(m.workSourceToHeader)
+	// previousMembership is the old map itself, not a copy. syncWorkProjection
+	// publishes a fresh map on every rebuild (and the disabled and restoreWorkPlain
+	// paths assign fresh maps too), and nothing writes to a published membership
+	// map in place. Keep that invariant, or clone here again.
+	previousMembership := m.workSourceToHeader
 	m.workProjectionDirty = true
 	m.syncWorkProjection()
 	cmd := tea.Batch(m.workCommands...)
 	m.workCommands = nil
 	// Only header text changes. Plain rows keep their cached lines unless their
-	// Work membership or anchor moved; the rebuild reuses every other entry.
-	for _, block := range m.workBlocks {
-		m.invalidateWorkBlock(block)
+	// Work membership or anchor moved; the rebuild reuses every other entry. Each
+	// anchor is dropped once here: looking blocks up per block would be quadratic.
+	m.stats.workRangeScans += uint64(len(m.workHeaderBySource))
+	for anchor := range m.workHeaderBySource {
+		m.dropSlot(anchor)
 	}
 	for source, anchor := range previousMembership {
 		if current, ok := m.workSourceToHeader[source]; !ok || current != anchor {
-			m.renderedItems.Delete(source)
+			m.dropSlot(source)
 		}
 	}
+	m.stats.workRangeScans += uint64(len(m.workSourceToHeader))
 	for source := range m.workSourceToHeader {
 		if _, ok := previousMembership[source]; !ok {
-			m.renderedItems.Delete(source)
+			m.dropSlot(source)
 		}
 	}
 	// Like invalidateHistoryStep, drop the last row: it may be the streaming suffix.
 	if last := len(m.views) - 1; last >= 0 {
-		m.renderedItems.Delete(last)
+		m.dropSlot(last)
 	}
 	m.renderDirty = true
 	m.invalidateFrameContent()
@@ -151,10 +160,20 @@ func (m *model) setSessionOpenerDefault(msg *types.Message, open bool) {
 	if !ok || !view.SetSessionOpenerDefault(open) {
 		return
 	}
-	m.renderedItems.Delete(index)
+	m.dropSlot(index)
 	m.renderDirty = true
 	m.invalidateFrameContent()
 	m.invalidateView()
+}
+
+// workStateEmpty reports whether every work structure the compact-off reset
+// clears is already empty, so the reset would only replace empty maps.
+func (m *model) workStateEmpty() bool {
+	return len(m.workBlocks) == 0 && len(m.workHeaderBySource) == 0 && len(m.workSourceToHeader) == 0 &&
+		len(m.workAnchorByBlock) == 0 && len(m.workExchangeBySource) == 0 && len(m.workRanges) == 0 &&
+		len(m.workProjection.exchanges) == 0 && len(m.workProjection.bySource) == 0 &&
+		m.workProjection.owner != nil && len(m.workProjection.owner) == 0 &&
+		m.workProjection.byBoundary != nil && len(m.workProjection.byBoundary) == 0
 }
 
 func (m *model) syncWorkProjection() {
@@ -166,15 +185,22 @@ func (m *model) syncWorkProjection() {
 			m.replyHandoffFrameRows = nil
 			m.replyHandoffSerial++
 		}
-		for _, view := range m.views {
-			view.SetSize(m.contentWidth(), 0)
-		}
 		for _, block := range m.workBlocks {
 			block.StopAnimation()
 		}
+		if len(m.workHeaderBySource) > 0 || len(m.workSourceToHeader) > 0 {
+			m.restoreWorkPlain()
+		}
+		// Idle compact-off syncs (every View and tick while Work is off) have nothing
+		// to reset: skip the fresh maps and only clear the dirty flag.
+		if m.workStateEmpty() {
+			m.workProjectionDirty = false
+			return
+		}
 		m.workBlocks = map[*types.Message]*workblock.Model{}
-		m.workProjection = workProjection{}
-		m.workHeaderBySource = map[int]*workblock.Model{}
+		m.workProjection = emptyWorkProjection()
+		m.workExchangeBySource = nil
+		m.setWorkHeaders(map[int]*workblock.Model{})
 		m.workSourceToHeader = map[int]int{}
 		m.workRanges = nil
 		m.workProjectionDirty = false
@@ -187,6 +213,7 @@ func (m *model) syncWorkProjection() {
 	m.syncSessionOpenerDefault()
 	m.workCommands = nil
 	previous := m.workProjection
+	m.stats.projectionRebuilds++
 	projection := projectWorkWithVisibleReplies(m.messages, m.responseGroups, m.visibleReplies, m.currentSessionOpener())
 	if m.workRetentionHeld() {
 		for _, prior := range previous.exchanges {
@@ -212,6 +239,7 @@ func (m *model) syncWorkProjection() {
 				if _, retained := m.workRetained[m.messages[source]]; retained {
 					exchange.response = append(exchange.response, source)
 					delete(projection.bySource, source)
+					delete(projection.workOwner, source)
 					continue
 				}
 			}
@@ -226,6 +254,9 @@ func (m *model) syncWorkProjection() {
 	blocks := make(map[*types.Message]*workblock.Model, len(projection.exchanges))
 	headerBySource := make(map[int]*workblock.Model)
 	sourceToHeader := make(map[int]int)
+	// Anchors whose header text changed. Their rows are no longer valid, and
+	// nothing else would re-measure them now that layout does not poll blocks.
+	var restyled []int
 	for exchangeIndex, exchange := range projection.exchanges {
 		visibleWork := make([]int, 0, len(exchange.work))
 		for _, source := range exchange.work {
@@ -271,8 +302,12 @@ func (m *model) syncWorkProjection() {
 		} else {
 			status.Elapsed = m.workDurations[identity]
 		}
+		before := block.Status()
 		if cmd := block.SetStatus(status); cmd != nil {
 			m.workCommands = append(m.workCommands, cmd)
+		}
+		if block.Status() != before {
+			restyled = append(restyled, anchor)
 		}
 		blocks[identity] = block
 		headerBySource[anchor] = block
@@ -283,22 +318,54 @@ func (m *model) syncWorkProjection() {
 		}
 	}
 	m.workBlocks = blocks
-	m.workHeaderBySource = headerBySource
+	m.rememberPlainHeights(sourceToHeader)
+	if !sameMembership(m.workHeaderBySource, headerBySource) || !sameSourceMap(m.workSourceToHeader, sourceToHeader) {
+		m.stats.workRangeScans += uint64(len(m.workSourceToHeader) + len(headerBySource))
+		// Anchors and children change role here: the slot index must see it. An
+		// unchanged membership (the common tick) leaves the index alone.
+		m.markSlotsStale()
+		// A block whose children changed has different rows: mark both the new and
+		// the former anchor. Only changed sources are visited.
+		for source, anchor := range sourceToHeader {
+			if previous, was := m.workSourceToHeader[source]; !was || previous != anchor {
+				m.dropSlot(anchor)
+				if was {
+					m.dropSlot(previous)
+				}
+			}
+		}
+		for source, previous := range m.workSourceToHeader {
+			if _, still := sourceToHeader[source]; !still {
+				m.dropSlot(previous)
+			}
+		}
+	}
+	for _, anchor := range restyled {
+		m.dropSlot(anchor)
+	}
+	m.setWorkHeaders(headerBySource)
 	m.workSourceToHeader = sourceToHeader
-	for source, view := range m.views {
+	// Only sources whose grouping changed are sized here: a width change sizes
+	// every view in SetSize, and an unchanged membership needs no walk.
+	resize := func(source int, grouped bool) {
+		m.stats.projectionVisits++
 		width := m.contentWidth()
-		_, grouped := sourceToHeader[source]
 		if grouped {
 			width = workblock.SourceContentWidth(width)
+			m.workSizedAsGroup = true
 		}
-		child, ok := view.(interface{ GetSize() (int, int) })
+		if source < 0 || source >= len(m.views) {
+			return
+		}
+		child, ok := m.views[source].(interface{ GetSize() (int, int) })
 		if !ok {
-			// Views that cannot report their width are sized on every sync; SetSize is a no-op when unchanged.
-			view.SetSize(width, 0)
-			continue
+			// Views that cannot report their width are sized on every change; SetSize is a no-op when unchanged.
+			m.views[source].SetSize(width, 0)
+			return
 		}
 		if current, _ := child.GetSize(); current != width {
-			view.SetSize(width, 0)
+			m.stats.sizeCalls++
+			m.views[source].SetSize(width, 0)
 			if grouped {
 				if owner := headerBySource[sourceToHeader[source]]; owner != nil {
 					owner.InvalidateSource(source)
@@ -306,10 +373,95 @@ func (m *model) syncWorkProjection() {
 			}
 		}
 	}
+	for source := range sourceToHeader {
+		if _, was := m.workSourceToHeader[source]; !was {
+			resize(source, true)
+		}
+	}
+	for source := range m.workSourceToHeader {
+		if _, still := sourceToHeader[source]; !still {
+			resize(source, false)
+		}
+	}
 	m.workProjection = projection
+	m.workExchangeBySource = projection.workOwner
 	m.workProjectionDirty = false
 
 	// Reply movement is owned by mutation-owned handoff scheduling.
+}
+
+// rememberPlainHeights keeps the plain height of every source that joins a work
+// role now. Compact-off restores these heights without rendering the source
+// again. It reads only the sources whose role changed.
+func (m *model) rememberPlainHeights(sourceToHeader map[int]int) {
+	for source := range sourceToHeader {
+		if _, was := m.workSourceToHeader[source]; was {
+			continue
+		}
+		if source < 0 || source >= len(m.views) || source >= len(m.slotKnown) || !m.slotKnown[source] || m.hiddenSlot(source) {
+			continue
+		}
+		if m.workPlain == nil {
+			m.workPlain = make(map[layout.Model]int)
+		}
+		m.workPlain[m.views[source]] = m.slotBase[source]
+	}
+}
+
+// restoreWorkPlain returns the affected work structure to plain rows: every
+// former anchor and child, nothing else. A source whose plain height was kept
+// gets it back as a known height; any other source keeps a one-row estimate
+// and is measured when the viewport reaches it. Neighbour separators are
+// refreshed too. Nothing is rendered here and no slot outside the structure is
+// visited.
+func (m *model) restoreWorkPlain() {
+	affected := make([]int, 0, len(m.workSourceToHeader)+len(m.workHeaderBySource))
+	m.stats.workRangeScans += uint64(len(m.workSourceToHeader) + len(m.workHeaderBySource))
+	for source := range m.workSourceToHeader {
+		affected = append(affected, source)
+	}
+	for anchor := range m.workHeaderBySource {
+		if _, ok := m.workSourceToHeader[anchor]; !ok {
+			affected = append(affected, anchor)
+		}
+	}
+	slices.Sort(affected)
+	m.workSourceToHeader = map[int]int{}
+	m.setWorkHeaders(map[int]*workblock.Model{})
+	for _, source := range affected {
+		m.stats.projectionVisits++
+		if source < 0 || source >= len(m.views) || source >= len(m.slotBase) {
+			continue
+		}
+		m.dropEntry(source)
+		view := m.views[source]
+		m.stats.sizeCalls++
+		view.SetSize(m.contentWidth(), 0)
+		if h, ok := m.workPlain[view]; ok {
+			delete(m.workPlain, view)
+			m.slotKnown[source] = false
+			m.setSlotBase(source, h)
+			continue
+		}
+		m.slotKnown[source] = false
+		m.slotBase[source] = 1
+		m.geom.Set(source, 1+b2i(m.slotSep[source]))
+	}
+	for _, source := range affected {
+		for i := source - 1; i <= source+1; i++ {
+			if i < 0 || i >= len(m.slotSep) || i >= len(m.views) {
+				continue
+			}
+			m.stats.slotMetaVisits++
+			sep := m.displayNeedsSeparator(i)
+			if sep != m.slotSep[i] {
+				m.slotSep[i] = sep
+				m.geom.Set(i, m.slotBase[i]+b2i(sep))
+			}
+		}
+	}
+	m.workSizedAsGroup = false
+	m.markFacade()
 }
 
 func (m *model) workStatusForIndices(indices []int) workblock.Status {
@@ -330,19 +482,85 @@ func (m *model) workStatusForIndices(indices []int) workblock.Status {
 	return status
 }
 
-func (m *model) workRangeAt(globalLine int) (anchor, local int, ok bool) {
-	m.syncWorkProjection()
-	for _, item := range m.workRanges {
-		if globalLine < item.start || globalLine >= item.start+item.height {
+// workBlockAt returns the work block whose rows contain global line g, with its
+// anchor and first row. The slot index finds the one slot that owns the line, so
+// the lookup is O(log N) and never walks the other blocks.
+func (m *model) workBlockAt(g int) (anchor int, block *workblock.Model, start int, ok bool) {
+	slot := m.slotAt(g)
+	if slot < 0 || slot >= len(m.views) {
+		return 0, nil, 0, false
+	}
+	block = m.workHeaderBySource[slot]
+	if block == nil {
+		return 0, nil, 0, false
+	}
+	start = m.slotOffset(slot)
+	if g < start || g >= start+m.slotBase[slot] {
+		return 0, nil, 0, false
+	}
+	return slot, block, start, true
+}
+
+// unmeasuredWorkAnchorsIn returns the work anchors that still have an estimated
+// height and whose block rows overlap [start, end). The walk starts at the slot
+// the range begins in and stops at its end, so blocks outside the range are never
+// visited.
+func (m *model) unmeasuredWorkAnchorsIn(start, end int) []int {
+	var anchors []int
+	for slot := max(0, m.slotAt(start)); slot < len(m.views); slot++ {
+		m.stats.workIndexVisits++
+		offset := m.slotOffset(slot)
+		if offset >= end {
+			break
+		}
+		if m.workHeaderBySource[slot] == nil || slot >= len(m.slotKnown) || m.slotKnown[slot] {
 			continue
 		}
-		relative := globalLine - item.start
-		if source, childLine, found := item.block.SourceAt(relative); found {
-			return source, childLine, true
+		if offset < end && offset+m.slotBase[slot] > start {
+			anchors = append(anchors, slot)
 		}
-		return item.anchor, relative, true
 	}
-	return 0, 0, false
+	return anchors
+}
+
+// setWorkHeaders replaces the anchor-to-block map and rebuilds its reverse map.
+// Only structural sync and the compact-off or reset paths call it, so the walk
+// never runs on an epoch, hover or scroll.
+func (m *model) setWorkHeaders(headerBySource map[int]*workblock.Model) {
+	m.workHeaderBySource = headerBySource
+	m.workAnchorByBlock = make(map[*workblock.Model]int, len(headerBySource))
+	for anchor, block := range headerBySource {
+		m.stats.workRangeScans++
+		if block == nil {
+			continue
+		}
+		if prev, ok := m.workAnchorByBlock[block]; !ok || anchor < prev {
+			m.workAnchorByBlock[block] = anchor
+		}
+	}
+}
+
+// targetWorkBlock returns the work block that owns a hit target, counting the
+// block read so the hit path's body access stays observable.
+func (m *model) targetWorkBlock(source int) *workblock.Model {
+	block := m.workBlockForSource(source)
+	if block != nil {
+		m.stats.targetBodyRenders++
+	}
+	return block
+}
+
+func (m *model) workRangeAt(globalLine int) (anchor, local int, ok bool) {
+	m.syncWorkProjection()
+	anchor, block, start, found := m.workBlockAt(globalLine)
+	if !found {
+		return 0, 0, false
+	}
+	relative := globalLine - start
+	if source, childLine, found := block.SourceAt(relative); found {
+		return source, childLine, true
+	}
+	return anchor, relative, true
 }
 
 func (m *model) toggleWork(block *workblock.Model) {
@@ -350,7 +568,7 @@ func (m *model) toggleWork(block *workblock.Model) {
 		return
 	}
 	anchorSourceLine, anchorLocal := -1, 0
-	if m.userHasScrolled && m.scrollOffset < m.totalHeight {
+	if m.userHasScrolled && m.scrollOffset < m.layoutTotal() {
 		if source, local, ok := m.workRangeAt(m.scrollOffset); ok {
 			anchorSourceLine, anchorLocal = source, local
 		}
@@ -358,7 +576,11 @@ func (m *model) toggleWork(block *workblock.Model) {
 	wasAtBottom := m.isAtBottom()
 	block.Toggle()
 	m.invalidateAllItems()
-	m.ensureAllItemsRendered()
+	// Only the toggled block changes height; the layout pass re-measures it.
+	if source := m.workSourceForBlock(block); source >= 0 {
+		m.dropSlot(source)
+	}
+	m.layoutViewport()
 	if anchorSourceLine >= 0 {
 		if mapped := m.sourceToGlobalLine(anchorSourceLine, anchorLocal); mapped >= 0 {
 			m.setScrollOffset(mapped)
@@ -370,57 +592,62 @@ func (m *model) toggleWork(block *workblock.Model) {
 }
 
 func (m *model) sourceToGlobalLine(source, local int) int {
-	for _, block := range m.workRanges {
-		if block.block == nil {
-			continue
-		}
-		for _, row := range block.block.Rows() {
-			if row.SourceIndex == source {
-				return block.start + row.Start + min(local, max(0, row.End-row.Start-1))
+	// Only the block that owns the source can hold its rows, so that one block is
+	// read. Every other block is left alone.
+	if anchor, ok := m.workSourceToHeader[source]; ok {
+		if block := m.workHeaderBySource[anchor]; block != nil {
+			start := m.slotOffset(anchor)
+			m.stats.targetBodyRenders++
+			for _, row := range m.blockRows(block) {
+				if row.SourceIndex == source {
+					return start + row.Start + min(local, max(0, row.End-row.Start-1))
+				}
 			}
-		}
-		if block.anchor == source {
-			return block.start
-		}
-		if block.block.Expanded() {
-			continue
-		}
-		for index, item := range block.block.Items() {
-			if item.SourceIndex == source {
-				return block.start + 1 + index
+			if anchor == source {
+				return start
+			}
+			if !block.Expanded() {
+				for index, item := range block.Items() {
+					if item.SourceIndex == source {
+						return start + 1 + index
+					}
+				}
 			}
 		}
 	}
-	if source >= 0 && source < len(m.lineOffsets) {
-		return m.lineOffsets[source] + local
+	if source >= 0 && source < len(m.views) {
+		return m.slotOffset(source) + local
 	}
 	return -1
 }
 
+// workItemsForAnchor returns the visible children of the block anchored at anchor,
+// or nil when anchor is not the first visible source of an exchange. The anchor
+// is found through the index, so a lookup touches one exchange. The visible
+// anchor depends on historyStart, which paging changes without a projection
+// sync, so it is checked here against the sorted work list rather than cached.
 func (m *model) workItemsForAnchor(anchor int) []workblock.Item {
 	if !m.workEnabled {
 		return nil
 	}
-	for _, exchange := range m.workProjection.exchanges {
-		visibleAnchor := -1
-		for _, source := range exchange.work {
-			if source >= m.historyStart {
-				visibleAnchor = source
-				break
-			}
-		}
-		if visibleAnchor != anchor {
-			continue
-		}
-		items := make([]workblock.Item, 0, len(exchange.work))
-		for _, source := range exchange.work {
-			if source >= m.historyStart && source >= 0 && source < len(m.views) {
-				items = append(items, workblock.Item{SourceIndex: source, View: m.views[source]})
-			}
-		}
-		return items
+	m.stats.anchorLookups++
+	exchangeIndex, ok := m.workExchangeBySource[anchor]
+	if !ok || exchangeIndex < 0 || exchangeIndex >= len(m.workProjection.exchanges) {
+		return nil
 	}
-	return nil
+	m.stats.exchangeVisits++
+	work := m.workProjection.exchanges[exchangeIndex].work
+	first, _ := slices.BinarySearch(work, m.historyStart)
+	if first >= len(work) || work[first] != anchor {
+		return nil
+	}
+	items := make([]workblock.Item, 0, len(work)-first)
+	for _, source := range work[first:] {
+		if source >= m.historyStart && source >= 0 && source < len(m.views) {
+			items = append(items, workblock.Item{SourceIndex: source, View: m.views[source]})
+		}
+	}
+	return items
 }
 
 func (m *model) displayNeedsSeparator(index int) bool {
@@ -450,27 +677,41 @@ func (m *model) displayNeedsSeparator(index int) bool {
 }
 
 func (m *model) workCopyContent(anchor int) string {
-	for _, exchange := range m.workProjection.exchanges {
-		if len(exchange.work) == 0 || exchange.work[0] != anchor {
+	index, ok := m.workExchangeOf(anchor)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, source := range m.workProjection.exchanges[index].work {
+		if source < 0 || source >= len(m.messages) {
 			continue
 		}
-		var parts []string
-		for _, source := range exchange.work {
-			if source < 0 || source >= len(m.messages) {
-				continue
-			}
-			msg := m.messages[source]
-			text := copyableMessageContent(msg)
-			if text == "" && msg.Type == types.MessageTypeToolCall {
-				text = msg.ToolCall.Function.Arguments
-			}
-			if strings.TrimSpace(text) != "" {
-				parts = append(parts, text)
-			}
+		msg := m.messages[source]
+		text := copyableMessageContent(msg)
+		if text == "" && msg.Type == types.MessageTypeToolCall {
+			text = msg.ToolCall.Function.Arguments
 		}
-		return strings.Join(parts, "\n\n")
+		if strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
 	}
-	return ""
+	return strings.Join(parts, "\n\n")
+}
+
+// workExchangeOf returns the exchange whose work list starts with anchor. The
+// source index names the one exchange that owns anchor, so the lookup touches one
+// entry and never scans the projection.
+func (m *model) workExchangeOf(anchor int) (int, bool) {
+	m.stats.workIndexVisits++
+	index, ok := m.workExchangeBySource[anchor]
+	if !ok || index < 0 || index >= len(m.workProjection.exchanges) {
+		return 0, false
+	}
+	work := m.workProjection.exchanges[index].work
+	if len(work) == 0 || work[0] != anchor {
+		return 0, false
+	}
+	return index, true
 }
 
 func (m *model) WorkBlockAtSource(source int) *workblock.Model { return m.workHeaderBySource[source] }
@@ -495,7 +736,7 @@ func (m *model) SetCompactWorkLog(enabled bool) tea.Cmd {
 		m.replyHandoffFrameRows = nil
 		m.replyHandoffSerial++
 	}
-	if !wasBottom && m.scrollOffset < m.totalHeight {
+	if !wasBottom && m.scrollOffset < m.layoutTotal() {
 		if m.workEnabled {
 			if source, local, ok := m.workRangeAt(m.scrollOffset); ok {
 				m.workAnchorSource, m.workAnchorLocal = source, local
@@ -509,13 +750,36 @@ func (m *model) SetCompactWorkLog(enabled bool) tea.Cmd {
 	m.workEnabled = enabled
 	m.workProjectionDirty = true
 	m.invalidateAllItems()
-	m.ensureAllItemsRendered()
-	if wasBottom && !m.userHasScrolled {
-		m.scrollOffset = max(0, m.totalScrollableHeight()-m.height)
-	} else if m.workAnchorSource >= 0 {
-		if line := m.sourceToGlobalLine(m.workAnchorSource, m.workAnchorLocal); line >= 0 {
-			m.scrollOffset = line
+	// Structure first: the work projection and the slot index are brought to the
+	// new mode without measuring, so the reader's target offset is computed on
+	// the new geometry. Only then does the layout measure what the viewport shows.
+	m.syncWorkProjection()
+	m.syncSlots()
+	m.publishFacade(false)
+	// The reader's target is derived from the index, so it is recomputed after
+	// the viewport is measured: measuring changes the heights above the target.
+	place := func() {
+		if wasBottom && !m.userHasScrolled {
+			m.scrollOffset = max(0, m.totalScrollableHeight()-m.height)
+		} else if m.workAnchorSource >= 0 {
+			// The target row lives inside the anchor's block, whose rows exist only
+			// once the block is laid out: lay out that one block, nothing else.
+			if anchor, ok := m.workSourceToHeader[m.workAnchorSource]; ok && m.workHeaderBySource[anchor] != nil && !m.materialized(anchor) {
+				m.measureSlot(anchor)
+			}
+			if line := m.sourceToGlobalLine(m.workAnchorSource, m.workAnchorLocal); line >= 0 {
+				m.scrollOffset = line
+			}
 		}
+	}
+	place()
+	// Like a theme change: estimates stay, slots whose role changed are measured,
+	// and only what the viewport shows renders now.
+	m.layoutViewport()
+	before := m.scrollOffset
+	place()
+	if m.scrollOffset != before {
+		m.layoutViewport()
 	}
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	m.lastFrameOutput = ""
@@ -549,6 +813,11 @@ func (m *model) SetScrollbarsActive(active bool) {
 }
 
 func (m *model) captureVisibleReplyRows(projection workProjection) []replyHandoffLayoutRow {
+	if m.renderDirty {
+		// A dirty layout has rows that are not measured yet: lay out the viewport
+		// and the exchange first, so the captured rows are the rows on screen.
+		m.layoutViewport()
+	}
 	if !m.workEnabled || len(projection.exchanges) == 0 || m.renderDirty || m.replay != nil {
 		return nil
 	}
@@ -560,37 +829,46 @@ func (m *model) captureVisibleReplyRows(projection workProjection) []replyHandof
 	if start >= end {
 		return nil
 	}
+	// An unmeasured work anchor in the window still has its one-row estimate, so the
+	// composite rows below would be laid out at the wrong height. Measure those anchors
+	// first; only anchors that overlap the captured exchange are touched.
+	measured := false
+	for _, anchor := range m.unmeasuredWorkAnchorsIn(start, end) {
+		m.measureSlot(anchor)
+		measured = true
+	}
+	if measured {
+		m.publishFacade(false)
+	}
 	rows := make([]replyHandoffLayoutRow, 0, end-start)
+	// One pass renders each source once: rows of the same message share its render.
+	memo := &handoffSyncMemo{items: make(map[int]renderedItem), composites: make(map[*workblock.Model][]string)}
 	for line := start; line < end; line++ {
 		source, local := m.globalLineToMessageLineCanonical(line)
 		row := replyHandoffLayoutRow{SourceIndex: -1, LocalRow: -1, Y: float64(line), Height: 1, CompositeLine: -1}
 		inComposite := false
-		for _, blockRange := range m.workRanges {
-			if line < blockRange.start || line >= blockRange.start+blockRange.height {
-				continue
-			}
+		if anchor, block, blockStart, ok := m.workBlockAt(line); ok {
 			inComposite = true
-			row.Composite, row.CompositeLine, row.CompositeAnchor = blockRange.block, line-blockRange.start, blockRange.anchor
-			if child, childLine, ok := blockRange.block.SourceAt(row.CompositeLine); ok {
+			row.Composite, row.CompositeLine, row.CompositeAnchor = block, line-blockStart, anchor
+			if child, childLine, ok := block.SourceAt(row.CompositeLine); ok {
 				source, local = child, childLine
 			} else {
 				source, local = -1, -1
 				row.SourceIndex, row.LocalRow = row.CompositeAnchor, -1
 			}
-			break
 		}
 		if source >= 0 && source < len(m.messages) {
 			row.Source = m.messages[source]
 			row.SourceIndex, row.LocalRow = source, local
 			row.Component = m.replyComponentForSource(projection, source)
 			if row.Composite == nil {
-				row.Text = m.sourceTextRow(handoffFrameRow(row, 1, false))
+				row.Text = m.sourceTextRowMemo(handoffFrameRow(row, 1, false), memo)
 			}
 		} else if row.Composite == nil {
 			row.Text = m.renderedLineCanonical(line)
 		}
 		if inComposite && row.CompositeLine == 0 && row.Source == nil {
-			row.Text = m.sourceTextRow(handoffFrameRow(row, 1, false))
+			row.Text = m.sourceTextRowMemo(handoffFrameRow(row, 1, false), memo)
 		}
 		rows = append(rows, row)
 	}
@@ -604,8 +882,8 @@ func (m *model) workExchangeStart(projection workProjection) int {
 	last := projection.exchanges[len(projection.exchanges)-1]
 	start := int(^uint(0) >> 1)
 	for _, source := range append(slices.Clone(last.work), last.response...) {
-		if source >= 0 && source < len(m.lineOffsets) {
-			start = min(start, m.lineOffsets[source])
+		if source >= 0 && source < len(m.views) {
+			start = min(start, m.slotOffset(source))
 		}
 	}
 	if start == int(^uint(0)>>1) {
@@ -621,7 +899,7 @@ func (m *model) workExchangeEnd(projection workProjection) int {
 	last := projection.exchanges[len(projection.exchanges)-1]
 	end := 0
 	for _, source := range append(slices.Clone(last.work), last.response...) {
-		if source >= 0 && source < len(m.lineOffsets) {
+		if source >= 0 && source < len(m.views) {
 			rowEnd := m.displayEnd(source)
 			end = max(end, rowEnd)
 		}
@@ -631,14 +909,12 @@ func (m *model) workExchangeEnd(projection workProjection) int {
 
 func (m *model) replyComponentForSource(projection workProjection, source int) replyHandoffComponentID {
 	exchangeID := replyHandoffExchangeID{Generation: m.replyHandoffGeneration}
-	for _, exchange := range projection.exchanges {
-		if slices.Contains(exchange.work, source) || slices.Contains(exchange.response, source) {
-			if exchange.boundary >= 0 && exchange.boundary < len(m.messages) {
-				exchangeID.Boundary = m.messages[exchange.boundary]
-			} else {
-				exchangeID.Orphan = 1
-			}
-			break
+	if e, ok := m.projectionOwner(projection, source); ok {
+		exchange := projection.exchanges[e]
+		if exchange.boundary >= 0 && exchange.boundary < len(m.messages) {
+			exchangeID.Boundary = m.messages[exchange.boundary]
+		} else {
+			exchangeID.Orphan = 1
 		}
 	}
 	group := m.responseGroups[m.messages[source]]
@@ -655,7 +931,7 @@ func (m *model) workRetentionHeld() bool {
 // recapture would show the new state as the retiring layout. placeholder is a
 // prose-less reply that the mutation gives its first prose.
 func (m *model) snapshotPendingReplyHandoff(placeholder *types.Message) {
-	m.ensureAllItemsRendered()
+	m.layoutViewport()
 	m.pendingReplyHandoffBefore = m.workProjection
 	m.pendingReplyHandoffOld = m.captureVisibleReplyRows(m.workProjection)
 	m.pendingReplyHandoffPlaceholder = placeholder
@@ -667,7 +943,7 @@ func (m *model) snapshotPendingReplyHandoff(placeholder *types.Message) {
 func (m *model) resetPendingReplyHandoff() {
 	m.pendingReplyHandoff = false
 	m.pendingReplyHandoffOld = nil
-	m.pendingReplyHandoffBefore = workProjection{}
+	m.pendingReplyHandoffBefore = emptyWorkProjection()
 	m.pendingReplyHandoffPlaceholder = nil
 }
 
@@ -751,7 +1027,7 @@ func (m *model) startReplyHandoff(previous, target workProjection, oldLayout []r
 	}
 }
 
-func (m *model) filterHandoffLayoutToExchange(layout []replyHandoffLayoutRow, projection workProjection, exchangeIndex int) []replyHandoffLayoutRow {
+func (m *model) filterHandoffLayoutToExchange(rows []replyHandoffLayoutRow, projection workProjection, exchangeIndex int) []replyHandoffLayoutRow {
 	if exchangeIndex < 0 || exchangeIndex >= len(projection.exchanges) {
 		return nil
 	}
@@ -763,8 +1039,8 @@ func (m *model) filterHandoffLayoutToExchange(layout []replyHandoffLayoutRow, pr
 	for _, source := range exchange.response {
 		allowed[source] = struct{}{}
 	}
-	filtered := make([]replyHandoffLayoutRow, 0, len(layout))
-	for _, row := range layout {
+	filtered := make([]replyHandoffLayoutRow, 0, len(rows))
+	for _, row := range rows {
 		if row.Source != nil {
 			if _, ok := allowed[row.SourceIndex]; ok {
 				filtered = append(filtered, row)
@@ -779,14 +1055,55 @@ func (m *model) filterHandoffLayoutToExchange(layout []replyHandoffLayoutRow, pr
 }
 
 func (m *model) componentResponseVisible(projection workProjection, component replyHandoffComponentID) bool {
-	for _, exchange := range projection.exchanges {
-		for _, source := range exchange.response {
+	// Only the exchanges with the component's boundary can own it, so those are the
+	// only response lists read. The exact component comparison is unchanged.
+	for _, e := range m.exchangesForBoundary(projection, component.Exchange.Boundary) {
+		for _, source := range projection.exchanges[e].response {
+			if source < 0 || source >= len(m.messages) {
+				continue
+			}
 			if m.replyComponentForSource(projection, source) == component {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// projectionOwner returns the first exchange of projection that holds source as work
+// or response. A projection from its builder answers from its index; a hand-built
+// one without an index falls back to the exchange walk.
+func (m *model) projectionOwner(projection workProjection, source int) (int, bool) {
+	m.stats.workIndexVisits++
+	if projection.owner != nil {
+		e, ok := projection.owner[source]
+		return e, ok
+	}
+	m.stats.fullProjectionLookupScans++
+	for e, exchange := range projection.exchanges {
+		m.stats.workIndexVisits++
+		if slices.Contains(exchange.work, source) || slices.Contains(exchange.response, source) {
+			return e, true
+		}
+	}
+	return 0, false
+}
+
+// exchangesForBoundary returns the exchanges of projection whose boundary is the
+// given message (nil selects the orphan exchanges), through the boundary index.
+func (m *model) exchangesForBoundary(projection workProjection, boundary *types.Message) []int {
+	if projection.byBoundary == nil {
+		m.stats.fullProjectionLookupScans++
+		var all []int
+		for e := range projection.exchanges {
+			m.stats.workIndexVisits++
+			all = append(all, e)
+		}
+		return all
+	}
+	exchanges := projection.byBoundary[boundary]
+	m.stats.workIndexVisits += uint64(len(exchanges))
+	return exchanges
 }
 
 func (m *model) captureReplyHandoffAnchor() {
@@ -988,25 +1305,59 @@ func (m *model) compositeLines(block *workblock.Model, memo *handoffSyncMemo) []
 			return lines
 		}
 	}
-	lines := strings.Split(strings.TrimSuffix(block.View(), "\n"), "\n")
+	lines := strings.Split(strings.TrimSuffix(m.blockView(block), "\n"), "\n")
 	if memo != nil {
 		memo.composites[block] = lines
 	}
 	return lines
 }
 
-// renderItemMemo renders a source once per pass when a memo is supplied.
+// renderItemMemo returns the rendered lines of a source row. A plain slot is
+// served from its materialized entry, which is measured on first use and then
+// kept while the viewport or an in-progress handoff reads it, so a handoff tick
+// never renders a row twice. Hidden work children and work anchors have no
+// slot lines of their own; they render once per pass through memo.
 func (m *model) renderItemMemo(index int, memo *handoffSyncMemo) renderedItem {
 	if memo != nil {
 		if item, ok := memo.items[index]; ok {
 			return item
 		}
 	}
-	item := m.renderItem(index, m.views[index])
+	var item renderedItem
+	if index >= m.historyStart && index < len(m.views) && !m.hiddenSlot(index) && m.workHeaderBySource[index] == nil {
+		if !m.materialized(index) {
+			m.measureSlot(index)
+		}
+		if e, ok := m.entryFor(index); ok {
+			if e.virtual {
+				item = renderedItem{segments: e.seg, height: e.height}
+			} else {
+				item = renderedItem{lines: e.lines, height: len(e.lines)}
+			}
+		}
+	} else {
+		item = m.renderItem(index, m.views[index])
+	}
 	if memo != nil {
 		memo.items[index] = item
 	}
 	return item
+}
+
+// handoffRetained returns the slots whose materialized rows an in-progress reply
+// handoff reads. Its frame rows name the sources; the set is empty when no
+// handoff is active, so it is released with the handoff.
+func (m *model) handoffRetained() map[int]struct{} {
+	if m.replyHandoff == nil || !m.replyHandoff.Active() || len(m.replyHandoffFrameRows) == 0 {
+		return nil
+	}
+	keep := make(map[int]struct{}, len(m.replyHandoffFrameRows))
+	for _, row := range m.replyHandoffFrameRows {
+		if row.Source != nil && row.SourceIndex >= 0 {
+			keep[row.SourceIndex] = struct{}{}
+		}
+	}
+	return keep
 }
 
 func (m *model) sourceTextRowMemo(row replyHandoffFrameRow, memo *handoffSyncMemo) string {
@@ -1057,16 +1408,16 @@ func (m *model) sourceTextRowMemo(row replyHandoffFrameRow, memo *handoffSyncMem
 }
 
 func (m *model) displayTotalHeight() int {
-	// Replay owns totalHeight directly; handoff rows never describe a replay frame.
+	// Replay owns the total directly; handoff rows never describe a replay frame.
 	if m.replay != nil || m.replyHandoff == nil || !m.replyHandoff.Active() || len(m.replyHandoffFrameRows) == 0 {
-		return m.totalHeight
+		return m.layoutTotal()
 	}
 	total := 0.0
 	for _, row := range m.replyHandoffFrameRows {
 		_, last := replyHandoffTerminalSpan(row.Y, row.Height)
 		total = maxFloat(total, float64(last))
 	}
-	return max(m.totalHeight, int(total))
+	return max(m.layoutTotal(), int(total))
 }
 
 func (m *model) replyHandoffBounds() (int, int) {
@@ -1146,25 +1497,19 @@ func (m *model) releaseDeferredWorkFold() {
 }
 
 func (m *model) workSourceForBlock(block *workblock.Model) int {
-	for source, candidate := range m.workHeaderBySource {
-		if candidate == block {
-			return source
-		}
+	m.stats.blockReverseLookups++
+	if anchor, ok := m.workAnchorByBlock[block]; ok {
+		return anchor
 	}
 	return -1
 }
 
 func (m *model) workRangeStart(source int) int {
 	anchor, ok := m.workSourceToHeader[source]
-	if !ok {
+	if !ok || m.workHeaderBySource[anchor] == nil {
 		return 0
 	}
-	for _, item := range m.workRanges {
-		if item.anchor == anchor {
-			return item.start
-		}
-	}
-	return 0
+	return m.slotOffset(anchor)
 }
 
 func (m *model) refreshWorkStatusForSource(source int) {
@@ -1178,49 +1523,29 @@ func (m *model) refreshWorkStatusForSource(source int) {
 		return
 	}
 	anchor := m.workSourceToHeader[source]
-	for i, exchange := range m.workProjection.exchanges {
-		if len(exchange.work) == 0 || exchange.work[0] != anchor {
-			continue
-		}
-		status := m.workStatusForIndices(exchange.work)
-		status.Active = m.workActive && i == len(m.workProjection.exchanges)-1
-		switch {
-		case status.Active:
-			status.Elapsed = 0
-		case exchange.boundary >= 0 && exchange.boundary < len(m.messages):
-			status.Elapsed = m.workDurations[m.messages[exchange.boundary]]
-		default:
-			status.Elapsed = 0
-		}
-		if cmd := block.SetStatus(status); cmd != nil {
-			m.workCommands = append(m.workCommands, cmd)
-		}
+	i, ok := m.workExchangeOf(anchor)
+	if !ok {
 		return
 	}
-}
-
-func (m *model) visibleCandidateLines(source int) []string {
-	if source < 0 || source >= len(m.views) || source >= len(m.lineOffsets) {
-		return nil
+	exchange := m.workProjection.exchanges[i]
+	status := m.workStatusForIndices(exchange.work)
+	status.Active = m.workActive && i == len(m.workProjection.exchanges)-1
+	switch {
+	case status.Active:
+		status.Elapsed = 0
+	case exchange.boundary >= 0 && exchange.boundary < len(m.messages):
+		status.Elapsed = m.workDurations[m.messages[exchange.boundary]]
+	default:
+		status.Elapsed = 0
 	}
-	start := m.lineOffsets[source]
-	item := m.renderItem(source, m.views[source])
-	lines := m.renderedItemLines(item)
-	if len(lines) == 0 {
-		return nil
+	if cmd := block.SetStatus(status); cmd != nil {
+		m.workCommands = append(m.workCommands, cmd)
 	}
-	visibleStart := max(start, m.scrollOffset)
-	visibleEnd := min(start+len(lines), m.scrollOffset+m.height)
-	if visibleEnd <= visibleStart {
-		return nil
-	}
-	lo, hi := visibleStart-start, visibleEnd-start
-	return append([]string(nil), lines[lo:hi]...)
 }
 
 func (m *model) invalidateWorkBlock(block *workblock.Model) {
 	if source := m.workSourceForBlock(block); source >= 0 {
-		m.renderedItems.Delete(source)
+		m.dropSlot(source)
 		m.renderDirty = true
 		m.invalidateView()
 	}
@@ -1266,8 +1591,8 @@ func (m *model) updateReplyHandoffTarget() {
 				lines = append(lines, item.segments.Tail...)
 			}
 			start := 0
-			if i < len(m.lineOffsets) {
-				start = m.lineOffsets[i]
+			if i < len(m.views) {
+				start = m.slotOffset(i)
 			}
 			for local, text := range lines {
 				rows = append(rows, replyHandoffLayoutRow{
@@ -1285,4 +1610,30 @@ func (m *model) updateReplyHandoffTarget() {
 	m.refreshReplyHandoffRows()
 	m.replyHandoffSerial++
 	m.invalidateFrameContent()
+}
+
+// sameMembership reports whether two anchor maps hold the same blocks.
+func sameMembership(a, b map[int]*workblock.Model) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || w != v {
+			return false
+		}
+	}
+	return true
+}
+
+// sameSourceMap reports whether two source-to-anchor maps are equal.
+func sameSourceMap(a, b map[int]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || w != v {
+			return false
+		}
+	}
+	return true
 }

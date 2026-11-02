@@ -75,6 +75,13 @@ func TestResetFromSessionPreservesReaderPosition(t *testing.T) {
 	assert.Equal(t, 7, m.scrollOffset)
 	assert.True(t, m.userHasScrolled)
 	assert.Equal(t, 3, m.selectedMessageIndex)
+	// renderedLines is the compatibility facade: it holds only materialized rows, and
+	// "recovered" is offscreen. The explicit full demand materializes it; the demand
+	// itself must leave the reader where it was.
+	m.ensureAllItemsRendered()
+	assert.Equal(t, 7, m.scrollOffset)
+	assert.True(t, m.userHasScrolled)
+	assert.Equal(t, 3, m.selectedMessageIndex)
 	assert.Contains(t, strings.Join(m.renderedLines, "\n"), "recovered")
 }
 

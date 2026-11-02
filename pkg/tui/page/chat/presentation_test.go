@@ -155,18 +155,54 @@ func TestSplitHeightAndFocusChangesReuseTranscript(t *testing.T) {
 	}
 	g := SplitPresentationGeometry{Transcript: PresentationRect{12, 8, 60, 15}, Shell: p.MeasureSplitShell(160, 40), ShowSidebar: true}
 	p.SetSplitPresentation(&g)
-	p.TranscriptView()
+	frame := p.TranscriptView()
 	r, m, rendered := p.ResizeCacheStats()
+	// Identity of every message whose text is visible in a transcript frame.
+	identities := func(frame string) map[int]bool {
+		out := map[int]bool{}
+		for line := range strings.SplitSeq(ansi.Strip(frame), "\n") {
+			if _, rest, ok := strings.Cut(line, "history λ界 "); ok {
+				var n int
+				if _, err := fmt.Sscanf(rest, "%d", &n); err == nil {
+					out[n] = true
+				}
+			}
+		}
+		return out
+	}
+	visible := identities(frame)
+	// Approved lazy semantics: a height-only change renders only the slots it newly
+	// exposes in the viewport. Slots that stay visible are cache hits, and nothing
+	// is prefetched. A step that exposes no slot must not miss or render at all.
 	for _, height := range []int{14, 18, 12, 15} {
 		g.Transcript.Height = height
 		g.Transcript.X++
 		g.ShowSidebar = !g.ShowSidebar
 		p.SetSplitPresentation(&g)
-		p.TranscriptView()
+		frame = p.TranscriptView()
 		r2, m2, rendered2 := p.ResizeCacheStats()
 		require.Equal(t, r, r2)
-		require.Equal(t, m, m2)
-		require.Equal(t, rendered, rendered2)
+		after := identities(frame)
+		var exposed []int
+		for n := range after {
+			if !visible[n] {
+				exposed = append(exposed, n)
+			}
+		}
+		if len(exposed) == 0 {
+			require.Equal(t, m, m2, "height %d exposes no slot, so it must not miss", height)
+			require.Equal(t, rendered, rendered2, "height %d exposes no slot, so it must not render", height)
+		} else {
+			require.LessOrEqual(t, m2-m, uint64(len(exposed)), "height %d exposed %v", height, exposed)
+			require.LessOrEqual(t, rendered2-rendered, uint64(len(exposed)), "height %d exposed %v", height, exposed)
+		}
+		if height == 18 {
+			// Growing from 14 to 18 moves the top up to row 781, which exposes message 195.
+			require.Equal(t, []int{195}, exposed)
+			require.Contains(t, ansi.Strip(frame), "history λ界 195", "the grown frame must show the newly exposed message")
+		}
+		visible = after
+		m, rendered = m2, rendered2
 	}
 }
 

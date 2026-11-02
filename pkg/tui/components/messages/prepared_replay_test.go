@@ -59,10 +59,19 @@ func TestPreparedReplayTransfersOwnershipAndResolvesMedia(t *testing.T) {
 		assistantItem("other", content, ""),
 	}}
 	BeginReplay(m, PrepareReplay(sess), map[int][]types.AssistantMedia{0: {{ID: 1, Fallback: "pending media"}}})
-	require.Equal(t, 2, finishPreparedReplay(t, m), "one preparation per oversized message, including finalized history")
+	require.Equal(t, 1, finishPreparedReplay(t, m), "only the oversized item in the first frame prepares; offscreen finalized history is measured on demand")
+	require.Equal(t, uint64(1), m.layoutWorkStats().prepareScheduled, "no offscreen prepare is scheduled during load")
 	for _, view := range m.views {
 		require.False(t, view.(message.Model).HasLiveRenderState(), "only the list retains replay ANSI")
 	}
+	// Old assertion read the eager flattened facade; the lazy layout keeps offscreen bodies unrendered, so the test now makes an explicit full-transcript demand after the lazy checks above.
+	// Older history is paged in first; the demand then renders only the offscreen item, once, and never prepares it.
+	finishHistoryReplay(t, m)
+	before := m.layoutWorkStats()
+	m.ensureAllItemsRendered()
+	after := m.layoutWorkStats()
+	require.Equal(t, before.syncRenders+1, after.syncRenders, "the explicit demand renders the offscreen item exactly once")
+	require.Equal(t, uint64(1), after.prepareScheduled, "the offscreen item is never prepared")
 	require.Contains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "pending media")
 	m.UpdateAssistantMedia([]types.AssistantMedia{{ID: 1, Fallback: "resolved media"}})
 	m.ensureAllItemsRendered()
@@ -76,7 +85,7 @@ func TestPreparedReplayTransfersOwnershipAndResolvesMedia(t *testing.T) {
 
 	m.SetSize(70, 12)
 	require.True(t, ReconcileReplay(m))
-	require.Equal(t, 2, finishPreparedReplay(t, m), "resize prepares once per new geometry")
+	require.Equal(t, 1, finishPreparedReplay(t, m), "resize prepares once: the resized first frame has one visible oversized item")
 	require.False(t, ReconcileReplay(m), "stable replay never reparses")
 }
 
@@ -108,10 +117,12 @@ func TestPreparedReplayRejectsAsyncMediaResult(t *testing.T) {
 		ApplyReplayRender(m, msg.(ReplayRenderedMsg))
 	}
 	require.Equal(t, 1, finishPreparedReplay(t, m), "stale completion triggers exactly one current preparation")
+	require.False(t, m.views[0].(message.Model).HasLiveRenderState())
+	// Old assertion read the eager flattened facade; the lazy layout keeps offscreen bodies unrendered, so the test now makes an explicit full-transcript demand after the lazy check above.
+	m.ensureAllItemsRendered()
 	out := ansi.Strip(strings.Join(m.renderedLines, "\n"))
 	require.Contains(t, out, "resolved media")
 	require.NotContains(t, out, "pending media")
-	require.False(t, m.views[0].(message.Model).HasLiveRenderState())
 }
 
 func BenchmarkPreparedReplayOwnership(b *testing.B) {

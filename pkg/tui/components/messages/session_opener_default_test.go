@@ -120,7 +120,17 @@ func TestSessionOpenerResolvesOnlyOnDirtySync(t *testing.T) {
 	_ = m.View()
 	require.Nil(t, m.sessionOpener, "a clean View does not re-resolve the opener")
 
+	// The projection and its opener depend on message structure and grouping, not
+	// on width or theme, so a pure epoch is not a projection input: it must not
+	// re-resolve the opener or rebuild the projection.
+	before := m.layoutWorkStats().projectionRebuilds
 	m.invalidateAllItems()
 	_ = m.View()
-	require.Same(t, opener, m.sessionOpener, "a dirty sync resolves the opener again")
+	require.Nil(t, m.sessionOpener, "a pure epoch does not re-resolve the opener")
+	require.Equal(t, before, m.layoutWorkStats().projectionRebuilds, "a pure epoch rebuilds no projection")
+
+	// A structural mutation dirties the projection, and the next View resolves it.
+	m.invalidateTranscriptStructure()
+	_ = m.View()
+	require.Same(t, opener, m.sessionOpener, "a structural mutation resolves the opener again")
 }

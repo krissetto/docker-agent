@@ -92,16 +92,20 @@ func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) te
 			m.removeReasoningBlockAt(i, block)
 		}
 	}
-	m.invalidateAllItems()
+	m.invalidateTranscriptStructure()
 	return materialize
 }
 
 // removeReasoningBlockAt removes a block that no longer carries any content and
 // keeps every index-based cursor in step with the shorter message list.
 func (m *model) removeReasoningBlockAt(i int, block *reasoningblock.Model) {
+	// Removing a message is a grouping change; the caller's epoch handles the views.
+	m.workProjectionDirty = true
 	animation.StopView(block)
 	m.messages = slices.Delete(m.messages, i, i+1)
+	m.indexMessages(i)
 	m.views = slices.Delete(m.views, i, i+1)
+	m.markSlotsStale()
 	if i < m.groupStart {
 		m.groupStart--
 	}
@@ -171,7 +175,7 @@ func (m *model) ReconcileAssistantContent(sessionID, messageID, agentName, conte
 	// settled content, as the streaming append path does.
 	if m.workEnabled {
 		m.workProjectionDirty = true
-		m.ensureAllItemsRendered()
+		m.layoutViewport()
 	}
 	m.updateReplyHandoffTarget()
 	m.visualGeneration++

@@ -82,7 +82,7 @@ func fixesGeometryHash(m *model) string {
 		r := m.renderedItems[k]
 		fmt.Fprintf(h, "r%d:%d+%d;", k, r.start, r.height)
 	}
-	for _, r := range m.workRanges {
+	for _, r := range m.workRangeList() {
 		fmt.Fprintf(h, "w%d:%d+%d;", r.anchor, r.start, r.height)
 	}
 	return hex.EncodeToString(h.Sum(nil)[:12])
@@ -170,8 +170,8 @@ func TestFixesCoverageExpandedWorkStraddle(t *testing.T) {
 	m.invalidateAllItems()
 	m.ensureAllItemsRendered()
 	tr.step("work-expanded", m)
-	if len(m.workRanges) > 0 {
-		block := m.workRanges[0]
+	if len(m.workRangeList()) > 0 {
+		block := m.workRangeList()[0]
 		m.setScrollOffset(block.start + block.height/2)
 		m.userHasScrolled = true
 	}

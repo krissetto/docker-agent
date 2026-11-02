@@ -188,7 +188,7 @@ func TestExpandedWorkChildHitDoesNotToggleTheParentHeader(t *testing.T) {
 	block.SetSize(m.contentWidth()+1, 0)
 	m.invalidateAllItems()
 	m.ensureAllItemsRendered()
-	rangeInfo := m.workRanges[0]
+	rangeInfo := m.workRangeList()[0]
 	childRow := rangeInfo.start + block.Rows()[0].Start
 	source, childLine := m.globalLineToMessageLineCached(childRow)
 	require.Equal(t, 1, source)
@@ -340,10 +340,10 @@ func TestHoverBeforeExpandedWorkKeepsCompositeAndFollowingStreamGeometry(t *test
 	block.SetSize(m.contentWidth()+1, 0)
 	m.invalidateAllItems()
 	m.ensureAllItemsRendered()
-	require.Len(t, m.workRanges, 1)
+	require.Len(t, m.workRangeList(), 1)
 	require.NotNil(t, m.activeSegments)
 	beforeTotal := m.totalHeight
-	workStart := m.workRanges[0].start
+	workStart := m.workRangeList()[0].start
 	workHeader := ansi.Strip(m.renderedLine(workStart))
 	require.Contains(t, workHeader, "  Work [-]", "expanded Work aligns to the shared two-cell tool gutter")
 	require.Contains(t, ansi.Strip(m.View()), "FINAL_CANDIDATE_MARKER")
@@ -355,7 +355,7 @@ func TestHoverBeforeExpandedWorkKeepsCompositeAndFollowingStreamGeometry(t *test
 	require.Equal(t, 3, m.hoveredMessageIndex, "the user row immediately before Work is hovered")
 	require.False(t, m.renderDirty, "hover should take the incremental refresh path")
 	require.Equal(t, beforeTotal, m.totalHeight, "reserved hover actions cannot change row height")
-	require.Equal(t, workStart, m.workRanges[0].start)
+	require.Equal(t, workStart, m.workRangeList()[0].start)
 	require.Contains(t, ansi.Strip(m.renderedLine(workStart)), "Work")
 	require.Equal(t, m.totalHeight, m.activeSegments.start+m.activeSegments.height())
 	require.Contains(t, ansi.Strip(m.View()), "WORK_REASONING_MARKER")
@@ -370,7 +370,7 @@ func TestHoverBeforeExpandedWorkKeepsCompositeAndFollowingStreamGeometry(t *test
 		}
 	}
 	require.NotNil(t, shellRow, "expanded Work exposes the shell source row: %#v", block.Rows())
-	shellLine := m.workRanges[0].start + shellRow.Start
+	shellLine := m.workRangeList()[0].start + shellRow.Start
 	_, _ = m.handleMouseMotion(tea.MouseMotionMsg{X: 4, Y: shellLine})
 	require.Equal(t, 4, m.hoveredToolIndex, "hover follows the Work child source identity")
 	require.Contains(t, ansi.Strip(m.View()), "printf child")
@@ -380,16 +380,16 @@ func TestHoverBeforeExpandedWorkKeepsCompositeAndFollowingStreamGeometry(t *test
 
 	m.ensureAllItemsRendered()
 	prior.content = "prior row one\nprior row two\nprior row three"
-	oldWorkStart, oldTailStart, oldTotal := m.workRanges[0].start, m.activeSegments.start, m.totalHeight
+	oldWorkStart, oldTailStart, oldTotal := m.workRangeList()[0].start, m.activeSegments.start, m.totalHeight
 	require.True(t, m.refreshRenderedItem(0), "height change uses the incremental source refresh")
-	require.Equal(t, oldWorkStart+2, m.workRanges[0].start, "composite start shifts by the changed preceding source row")
+	require.Equal(t, oldWorkStart+2, m.workRangeList()[0].start, "composite start shifts by the changed preceding source row")
 	require.Equal(t, oldTailStart+2, m.activeSegments.start, "active streamed suffix start shifts with the same delta")
 	require.Equal(t, oldTotal+2, m.totalHeight)
 	require.Equal(t, m.totalHeight, m.activeSegments.start+m.activeSegments.height())
-	require.Contains(t, ansi.Strip(m.renderedLine(m.workRanges[0].start)), "Work")
+	require.Contains(t, ansi.Strip(m.renderedLine(m.workRangeList()[0].start)), "Work")
 	require.Contains(t, ansi.Strip(m.View()), "FINAL_CANDIDATE_MARKER")
 
-	workLine := m.workRanges[0].start
+	workLine := m.workRangeList()[0].start
 	updated, _ := m.handleMouseClick(tea.MouseClickMsg{X: 4, Y: workLine, Button: tea.MouseLeft})
 	require.Same(t, m, updated)
 	require.False(t, block.Expanded(), "the visible Work header remains the click target after hover")
@@ -481,7 +481,7 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 		}
 	}
 	require.NotNil(t, incomingRow, "the source-owned incoming card is visible inside Work")
-	incomingHeader := m.workRanges[0].start + incomingRow.Start
+	incomingHeader := m.workRangeList()[0].start + incomingRow.Start
 	for x := range 2 {
 		_, _ = m.handleMouseClick(tea.MouseClickMsg{X: x, Y: incomingHeader - m.scrollOffset, Button: tea.MouseLeft})
 		require.False(t, incomingView.IsExpanded(), "Work margin x=%d is not forwarded to its child disclosure", x)
@@ -529,7 +529,7 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 		}
 	}
 	require.NotNil(t, reasoningRow)
-	reasoningHeader := m.workRanges[0].start + reasoningRow.Start
+	reasoningHeader := m.workRangeList()[0].start + reasoningRow.Start
 	for x := range 2 {
 		_, _ = m.handleMouseClick(tea.MouseClickMsg{X: x, Y: reasoningHeader - m.scrollOffset, Button: tea.MouseLeft})
 		require.False(t, reasoning.IsExpanded(), "Work margin x=%d does not hit a line-only reasoning header", x)
@@ -540,7 +540,7 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 
 	nestedLine, ok := reasoning.ToolCallLine(reasoningTool.ID)
 	require.True(t, ok)
-	nestedHeader := m.workRanges[0].start + reasoningRow.Start + nestedLine
+	nestedHeader := m.workRangeList()[0].start + reasoningRow.Start + nestedLine
 	before := ansi.Strip(work.View())
 	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: nestedHeader - m.scrollOffset, Button: tea.MouseLeft})
 	after := ansi.Strip(work.View())
@@ -551,7 +551,7 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 	m.invalidateItem(3)
 	m.ensureAllItemsRendered()
 	before = ansi.Strip(work.View())
-	bodyLine := m.workRanges[0].start + reasoningRow.Start + nestedLine + 3
+	bodyLine := m.workRangeList()[0].start + reasoningRow.Start + nestedLine + 3
 	m.Update(msgtypes.WheelCoalescedMsg{X: 0, Y: bodyLine - m.scrollOffset, Delta: 1})
 	m.ensureAllItemsRendered()
 	require.Equal(t, before, ansi.Strip(work.View()), "the outermost gutter does not scroll nested tool output")
@@ -565,7 +565,7 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 	require.NotEqual(t, before, ansi.Strip(work.View()), "source-width column zero scrolls the nested tool card")
 	require.True(t, work.Expanded())
 
-	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: m.workRanges[0].start - m.scrollOffset, Button: tea.MouseLeft})
+	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: m.workRangeList()[0].start - m.scrollOffset, Button: tea.MouseLeft})
 	require.False(t, work.Expanded(), "the outer header retains its separate disclosure")
 	reasoning.SetToolCallExpandedImmediately(reasoningTool.ID, true)
 	work.SetExpandedImmediately(true)
@@ -640,7 +640,7 @@ func TestWorkRoutesSecondReasoningChildToggleWheelAndInvalidationBySource(t *tes
 	require.NotEqual(t, before, after, "source-indexed invalidation refreshes non-anchor content")
 	require.True(t, work.Expanded())
 
-	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: m.workRanges[0].start - m.scrollOffset, Button: tea.MouseLeft})
+	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: m.workRangeList()[0].start - m.scrollOffset, Button: tea.MouseLeft})
 	require.False(t, work.Expanded())
 	work.SetExpandedImmediately(true)
 	m.invalidateAllItems()
@@ -651,8 +651,8 @@ func TestWorkRoutesSecondReasoningChildToggleWheelAndInvalidationBySource(t *tes
 	for _, width := range []int{64, 36, 20, 12, 8, 4} {
 		m.SetSize(width, 80)
 		m.ensureAllItemsRendered()
-		require.Len(t, m.workRanges, 1)
-		composite := m.workRanges[0]
+		require.Len(t, m.workRangeList(), 1)
+		composite := m.workRangeList()[0]
 		compositeWidth, _ := composite.block.GetSize()
 		childWidth := workblock.SourceContentWidth(compositeWidth)
 		require.True(t, work.Expanded(), "viewport width %d does not alter the outer Work disclosure", width)

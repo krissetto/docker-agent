@@ -39,10 +39,26 @@ func (c *urlSpanCache) get(line int, renderedLine string) []urlSpan {
 	return spans
 }
 
-// clear resets the cache (called when rendered lines change).
+// clear resets the cache (called when rendered lines change). Both maps are
+// emptied in place, so storage is reused across render cycles. The buckets stay
+// sized for the most lines the cache held between clears: entries are filled
+// only for the lines the pointer visits (URL hover, click, reference hover), and
+// a cleared map never holds more than that. Nil maps are created, so a zero
+// cache stays writable.
 func (c *urlSpanCache) clear() {
-	c.spans = make(map[int][]urlSpan)
-	c.references = make(map[int]renderedReference)
+	if len(c.spans) == 0 && len(c.references) == 0 && c.spans != nil && c.references != nil {
+		return
+	}
+	if c.spans == nil {
+		c.spans = make(map[int][]urlSpan)
+	} else {
+		clear(c.spans)
+	}
+	if c.references == nil {
+		c.references = make(map[int]renderedReference)
+	} else {
+		clear(c.references)
+	}
 }
 
 // urlAtPosition extracts a URL from the rendered line at the given display column.
@@ -234,7 +250,7 @@ func balanceParens(url string) string {
 // urlAt returns the URL at the given global line and display column, or empty string.
 func (m *model) urlAt(line, col int) string {
 	m.updateScrollState()
-	if line < 0 || line >= m.totalHeight {
+	if line < 0 || line >= m.layoutTotal() {
 		return ""
 	}
 	rendered := m.renderedLine(line)
@@ -253,7 +269,7 @@ func (m *model) urlAt(line, col int) string {
 func (m *model) updateHoveredURL(line, col int) {
 	m.updateScrollState()
 
-	if line >= 0 && line < m.totalHeight {
+	if line >= 0 && line < m.layoutTotal() {
 		rendered := m.renderedLine(line)
 		for _, span := range m.urlSpans.get(line, rendered) {
 			if col >= span.startCol && col < span.endCol {

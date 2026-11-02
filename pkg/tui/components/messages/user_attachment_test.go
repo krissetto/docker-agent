@@ -86,14 +86,21 @@ func TestUserAttachmentCaptureCancelsOnScrollResizeAndOwnerChange(t *testing.T) 
 				for range 30 {
 					m.AddUserMessage(strings.Repeat("filler row\n", 4))
 				}
-				m.ensureAllItemsRendered()
 				m.scrollToBottom()
 			}
 			msg := types.User("prompt")
 			msg.Attachments = []types.UserAttachment{{Name: "attached.txt", MediaType: "text/plain", Text: "inline", Available: true}}
 			m.addMessage(msg)
-			m.ensureAllItemsRendered()
 			messageIndex := len(m.messages) - 1
+			// Scroll settles the frame the reader actually paints and then clicks it.
+			// Materializing everything first would apply growth the reader never
+			// sees before the click, so the click would target stale rows.
+			var frame []string
+			if change == "scroll" {
+				frame = strings.Split(ansi.Strip(m.View()), "\n")
+			} else {
+				m.ensureAllItemsRendered()
+			}
 			view := m.views[messageIndex].(interface{ View() string })
 			localLine, col := -1, -1
 			for line, rendered := range strings.Split(ansi.Strip(view.View()), "\n") {
@@ -107,8 +114,15 @@ func TestUserAttachmentCaptureCancelsOnScrollResizeAndOwnerChange(t *testing.T) 
 				AttachmentAt(line, col int) (int, bool)
 			}).AttachmentAt(localLine, col)
 			require.True(t, hit)
-			globalLine := m.lineOffsets[messageIndex] + localLine
+			// After View the offset is the authoritative slot offset, not the facade.
+			globalLine := m.slotOffset(messageIndex) + localLine
 			x, y := m.xPos+col, m.yPos+globalLine-m.scrollOffset
+			if change == "scroll" {
+				row := y - m.yPos
+				require.GreaterOrEqual(t, row, 0)
+				require.Less(t, row, len(frame), "click row must be inside the painted frame")
+				assert.Contains(t, frame[row], "attached.txt", "click row is the visible attachment row")
+			}
 			m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			require.NotNil(t, m.attachmentClick)
 			switch change {

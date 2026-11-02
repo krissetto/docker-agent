@@ -1,7 +1,6 @@
 package messages
 
 import (
-	"slices"
 	"strings"
 	"time"
 
@@ -26,12 +25,15 @@ type sessionReplay struct {
 	items                    []session.Item
 	apply                    func(int, session.Item)
 	position, renderPosition int
-	lines                    []string
-	ranges                   renderedItemIndex
-	offsets                  []int
+	heights                  []int // item height per view, recorded as the replay renders it
 	theme                    uint64
 	agents                   uint64
 	width                    int
+	// backward marks the first usable suffix, rendered from the tail upward until
+	// the viewport rows are covered. covered counts those rows.
+	backward bool
+	covered  int
+	rendered []bool
 }
 
 // PreparedReplay is immutable after preparation and belongs to one replay.
@@ -99,25 +101,43 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 		m.replay = nil
 		return true, tea.Batch(cmds...)
 	}
-	if r.ranges == nil || r.theme != styles.ThemeGeneration() || r.agents != styles.AgentColorGeneration() || r.width != m.contentWidth() {
-		if r.initial {
-			// A minimum row per view fills the first viewport even for short cards.
-			m.historyStart = max(0, len(m.views)-max(8, m.height))
-		}
-		r.renderPosition = m.historyStart
-		r.lines = nil
-		r.ranges = make(renderedItemIndex, len(m.views))
-		r.offsets = make([]int, len(m.views))
+	if r.heights == nil || r.theme != styles.ThemeGeneration() || r.agents != styles.AgentColorGeneration() || r.width != m.contentWidth() {
+		// The first usable frame renders backwards from the tail only until the viewport
+		// rows are covered; older items stay identity-only until a viewport demand or
+		// ContinueHistory's placeholder paging reaches them.
+		// Every render, first or re-render, covers the viewport from the tail. Bodies
+		// that a re-render drops are older than the new geometry, so they are dropped
+		// before the covering suffix is rendered again.
+		m.dropMaterialized()
+		r.backward = true
+		r.covered = 0
+		r.renderPosition = len(m.views) - 1
+		r.heights = make([]int, len(m.views))
+		r.rendered = make([]bool, len(m.views))
 		r.theme = styles.ThemeGeneration()
 		r.agents = styles.AgentColorGeneration()
 		r.width = m.contentWidth()
 	}
-	for ops := 0; r.renderPosition < len(m.views) && ops < 32; ops++ {
+	more := func() bool {
+		return r.renderPosition >= m.historyStart && r.covered < max(1, m.height)
+	}
+	if r.backward {
+		// The slot index must hold the views before a rendered suffix body is stored,
+		// so the finish pass keeps it instead of re-rendering the same visible item.
+		m.syncSlots()
+	}
+	step := func() {
+		if r.backward {
+			r.renderPosition--
+		} else {
+			r.renderPosition++
+		}
+	}
+	for ops := 0; more() && ops < 32; ops++ {
 		m.syncWorkProjection()
 		i := r.renderPosition
 		if _, hidden := m.workSourceToHeader[i]; hidden && m.workSourceToHeader[i] != i {
-			r.offsets[i] = len(r.lines)
-			r.renderPosition++
+			step()
 			continue
 		}
 		composite := m.workHeaderBySource[i]
@@ -127,22 +147,25 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 					view.SetSelected(m.focused && source.SourceIndex == m.selectedMessageIndex)
 					view.SetHovered(source.SourceIndex == m.hoveredMessageIndex)
 					if r.prepared != nil && r.preparedIndex == source.SourceIndex {
-						message.ApplyPreparedRender(view, r.prepared)
+						if message.ApplyPreparedRender(view, r.prepared) {
+							m.stats.prepareApplied++
+						}
 						r.prepared = nil
 					}
 					if prepare := message.PrepareRender(view); prepare != nil {
 						r.waiting = true
-						return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: source.SourceIndex, prepared: prepare()} })...)
+						return false, tea.Batch(append(cmds, m.replayPrepareCmd(r, source.SourceIndex, prepare))...)
 					}
 				}
 				if block, ok := source.View.(*reasoningblock.Model); ok {
 					if r.preparedReasoning != nil && r.preparedIndex == source.SourceIndex {
 						block.ApplyPreparedReasoning(r.preparedReasoning)
+						m.stats.reasoningApplied++
 						r.preparedReasoning = nil
 					}
 					if prepare := block.PrepareReasoning(); prepare != nil {
 						r.waiting = true
-						return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: source.SourceIndex, reasoning: prepare()} })...)
+						return false, tea.Batch(append(cmds, m.replayReasoningCmd(r, source.SourceIndex, prepare))...)
 					}
 				}
 			}
@@ -152,31 +175,35 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 				view.SetSelected(m.focused && i == m.selectedMessageIndex)
 				view.SetHovered(i == m.hoveredMessageIndex)
 				if r.prepared != nil && r.preparedIndex == i {
-					message.ApplyPreparedRender(view, r.prepared)
+					if message.ApplyPreparedRender(view, r.prepared) {
+						m.stats.prepareApplied++
+					}
 					r.prepared = nil
 				}
 				if prepare := message.PrepareRender(view); prepare != nil {
 					r.waiting = true
-					return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, prepared: prepare()} })...)
+					return false, tea.Batch(append(cmds, m.replayPrepareCmd(r, i, prepare))...)
 				}
 			}
 			if block, ok := m.views[i].(*reasoningblock.Model); ok {
 				if r.preparedReasoning != nil && r.preparedIndex == i {
 					block.ApplyPreparedReasoning(r.preparedReasoning)
+					m.stats.reasoningApplied++
 					r.preparedReasoning = nil
 				}
 				if prepare := block.PrepareReasoning(); prepare != nil {
 					r.waiting = true
-					return false, tea.Batch(append(cmds, func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, reasoning: prepare()} })...)
+					return false, tea.Batch(append(cmds, m.replayReasoningCmd(r, i, prepare))...)
 				}
 			}
 		}
 
 		var item renderedItem
 		if composite != nil {
-			text := composite.View()
+			m.stats.compositeViews++
+			text := m.blockView(composite)
 			lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
-			item = renderedItem{lines: lines, height: composite.Height()}
+			item = renderedItem{lines: lines, height: m.blockHeight(composite)}
 		} else {
 			item = m.renderItem(i, m.views[i])
 		}
@@ -191,43 +218,50 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 			// ANSI document on every historical (or last replayed) message view.
 			message.ReleasePreparedRender(view)
 		}
-		start := len(r.lines)
-		r.offsets[i] = start
-		if item.segments != nil {
-			r.lines = append(r.lines, item.segments.Header...)
-			r.lines = append(r.lines, item.segments.Stable...)
-			r.lines = append(r.lines, item.segments.Tail...)
-		} else {
-			r.lines = append(r.lines, item.lines...)
+		// Only the height is kept: the slot layout measures rows lazily when they
+		// become visible, so the replay never holds a second flattened transcript.
+		r.heights[i] = item.height
+		r.rendered[i] = true
+		if r.backward {
+			r.covered += item.height + b2i(m.displayNeedsSeparator(i))
+			if composite == nil {
+				m.storeReplayBody(i, item)
+			}
 		}
-		if m.shouldCacheMessage(i) {
-			r.ranges[i] = renderedItemRange{start: start, height: item.height}
-		}
-		if m.displayNeedsSeparator(i) {
-			r.lines = append(r.lines, "")
-		}
-		r.renderPosition++
+		step()
 		if time.Now().After(deadline) {
 			return false, tea.Batch(cmds...)
 		}
 	}
-	if r.renderPosition < len(m.views) {
+	if more() {
 		return false, tea.Batch(cmds...)
 	}
-	m.renderedLines = r.lines
-	m.dropRenderedBacking()
-	m.renderedItems = r.ranges
-	m.lineOffsets = r.offsets
-	m.totalHeight = len(r.lines)
-	m.activeSegments = nil
+	// Only the first usable render moves the history boundary; a re-render never
+	// hides history that is already paged in.
+	if r.initial {
+		m.historyStart = r.renderPosition + 1
+	}
+	// The rendered heights become the slot geometry; older rows are estimates until a
+	// viewport demand measures them. The bodies rendered above stay materialized.
+	m.resetFacade()
+	m.slotsStale = true
+	// The replay's heights are the geometry; rows are measured on demand, so the
+	// layout is not dirty (base finished the same way).
 	m.renderDirty = false
-	m.themeGeneration = styles.ThemeGeneration()
-	m.urlSpans.clear()
 	m.replay = nil
+	m.themeGeneration = styles.ThemeGeneration()
+	m.syncSlots()
+	for i, done := range r.rendered {
+		if done && !m.hiddenSlot(i) {
+			m.setSlotBase(i, r.heights[i])
+		}
+	}
+	m.publishFacade(false)
+	m.urlSpans.clear()
 	if m.historyStart > 0 && m.historyReplay == nil {
 		m.historyReplay = &sessionReplay{}
 	}
-	m.scrollOffset = max(0, m.totalHeight-m.height)
+	m.scrollOffset = max(0, m.layoutTotal()-m.height)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	m.invalidateView()
 	return true, tea.Batch(cmds...)
@@ -268,9 +302,11 @@ func HistoryPending(list Model) bool { return list.HistoryPending() }
 
 func (m *model) HistoryPending() bool { return m.historyReplay != nil }
 
-// ContinueHistory warms older rows separately from authoritative replay so live
-// events and the recent viewport never wait for historical markdown rendering.
+// historyProgressedMsg asks the page to continue paging older history.
 type historyProgressedMsg struct{}
+
+// ContinueHistory pages older history into the geometry without rendering it, so
+// live events and the recent viewport never wait on historical markdown.
 
 func ContinueHistory(list Model) tea.Cmd {
 	m := list.(*model)
@@ -278,9 +314,9 @@ func ContinueHistory(list Model) tea.Cmd {
 	if r == nil || r.waiting || m.replay != nil {
 		return nil
 	}
-	m.ensureAllItemsRendered()
+	m.settleGeometry()
 	if m.workEnabled {
-		oldHeight := m.totalHeight
+		oldHeight := m.layoutTotal()
 		advanced := 0
 		for advanced < 8 && m.historyStart > 0 {
 			m.historyStart--
@@ -292,13 +328,12 @@ func ContinueHistory(list Model) tea.Cmd {
 		}
 		if m.historyStart == 0 {
 			m.historyReplay = nil
-			m.releaseRenderedHeadroom()
 		}
 		m.invalidateHistoryStep()
-		m.ensureAllItemsRendered()
-		delta := m.totalHeight - oldHeight
+		m.settleGeometry()
+		delta := m.layoutTotal() - oldHeight
 		if m.userHasScrolled {
-			m.scrollOffset = max(0, min(m.totalHeight-m.height, m.scrollOffset+delta))
+			m.scrollOffset = max(0, min(m.layoutTotal()-m.height, m.scrollOffset+delta))
 			m.scrollview.SetScrollOffset(m.scrollOffset)
 		}
 		if m.historyStart == 0 {
@@ -306,50 +341,17 @@ func ContinueHistory(list Model) tea.Cmd {
 		}
 		return func() tea.Msg { return historyProgressedMsg{} }
 	}
-	var prefix []historyItem
-	defer func() { m.prependHistory(prefix) }()
+	// Older history pages in as identity plus the O(1) content estimate. No body is
+	// rendered or prepared here; a viewport demand measures the rows it shows.
 	deadline := time.Now().Add(2 * time.Millisecond)
+	var prefix []int
 	for count := 0; m.historyStart-len(prefix) > 0 && count < 8; count++ {
-		i := m.historyStart - len(prefix) - 1
-		if view, ok := m.views[i].(message.Model); ok {
-			view.SetSelected(false)
-			view.SetHovered(false)
-			if r.prepared != nil && r.preparedIndex == i {
-				message.ApplyPreparedRender(view, r.prepared)
-				r.prepared = nil
-			}
-			if prepare := message.PrepareRender(view); prepare != nil {
-				r.waiting = true
-				return func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, prepared: prepare()} }
-			}
-		}
-		if block, ok := m.views[i].(*reasoningblock.Model); ok {
-			block.SetSelected(false)
-			if r.preparedReasoning != nil && r.preparedIndex == i {
-				block.ApplyPreparedReasoning(r.preparedReasoning)
-				r.preparedReasoning = nil
-			}
-			if prepare := block.PrepareReasoning(); prepare != nil {
-				r.waiting = true
-				return func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, reasoning: prepare()} }
-			}
-		}
-		item := m.renderItem(i, m.views[i])
-		if view, ok := m.views[i].(message.Model); ok {
-			message.ReleasePreparedRender(view)
-		}
-		lines := item.lines
-		if item.segments != nil {
-			lines = append(append(append([]string(nil), item.segments.Header...), item.segments.Stable...), item.segments.Tail...)
-		}
-		if item.height > 0 && m.needsSeparator(i) {
-			lines = append(lines, "")
-		}
-		prefix = append(prefix, historyItem{index: i, lines: lines, height: item.height})
+		prefix = append(prefix, m.historyStart-len(prefix)-1)
 		if time.Now().After(deadline) {
 			break
 		}
 	}
+	m.prependHistory(prefix)
 	return nil
 }
 
@@ -360,94 +362,87 @@ func (m *model) invalidateHistoryStep() {
 	m.workProjectionDirty = true
 	m.invalidateFrameContent()
 	if last := len(m.views) - 1; last >= 0 {
-		m.renderedItems.Delete(last)
+		m.dropSlot(last)
 	}
 	m.activeSegments = nil
-	m.lineOffsets = nil
+	m.slotsStale = true
+	m.layoutFull = false
 	m.urlSpans.clear()
 	m.renderDirty = true
 	m.invalidateView()
 }
 
-// prependRenderedLines writes a batch in front of renderedLines using front
-// headroom, so each batch copies only its own rows.
-func (m *model) prependRenderedLines(prefix []historyItem, delta int) {
-	current := len(m.renderedLines)
-	if !m.renderedLinesOwnBacking() || m.renderedHead < delta {
-		room := max(delta, current)
-		backing := make([]string, room+current)
-		copy(backing[room:], m.renderedLines)
-		m.renderedBacking, m.renderedHead = backing, room
+// seedHistoryEstimate gives an older item its O(1) placeholder height. The estimate
+// is never marked known: the viewport measures the body when it shows the item.
+func (m *model) seedHistoryEstimate(i int) {
+	if i < 0 || i >= len(m.views) || m.hiddenSlot(i) {
+		return
 	}
-	head := m.renderedHead - delta
-	pos := head
-	for _, item := range slices.Backward(prefix) {
-		pos += copy(m.renderedBacking[pos:], item.lines)
-	}
-	m.renderedHead = head
-	m.renderedLines = m.renderedBacking[head:]
+	base := m.placeholderRows(i)
+	m.slotBase[i] = base
+	m.slotKnown[i] = false
+	m.geom.Set(i, base+b2i(m.slotSep[i]))
+	m.markFacade()
 }
 
-// renderedLinesOwnBacking reports whether renderedLines is still the window of renderedBacking.
-func (m *model) renderedLinesOwnBacking() bool {
-	n := len(m.renderedLines)
-	if m.renderedHead < 0 || m.renderedHead > len(m.renderedBacking) || len(m.renderedBacking)-m.renderedHead != n {
-		return false
+// storeReplayBody keeps the suffix body the replay rendered, so the first frame
+// reuses it instead of rendering the same visible item again. The body is stored
+// as flattened lines even for a segmented tail: a replayed item is finished, and
+// the layout index drops segmented entries at every rebuild. A live tail is still
+// measured by View.
+func (m *model) storeReplayBody(i int, item renderedItem) {
+	lines := m.renderedItemLines(item)
+	m.setEntry(i, renderedItemRange{height: len(lines), lines: lines, cacheable: m.cacheableSlot(i)})
+}
+
+// replayPrepareCmd hands a message prepare to a worker. Only the atomic executed
+// count is touched off the model goroutine.
+func (m *model) replayPrepareCmd(r *sessionReplay, index int, prepare func() *message.PreparedRender) tea.Cmd {
+	if m.prepareCounts == nil {
+		m.prepareCounts = &replayPrepareCounts{}
 	}
-	return n == 0 || &m.renderedBacking[m.renderedHead] == &m.renderedLines[0]
-}
-
-// releaseRenderedHeadroom compacts the window to an exact-size transcript.
-func (m *model) releaseRenderedHeadroom() {
-	if m.renderedLinesOwnBacking() && m.renderedHead > 0 {
-		m.renderedLines = slices.Clone(m.renderedLines)
+	counts := m.prepareCounts
+	m.stats.prepareScheduled++
+	return func() tea.Msg {
+		counts.prepareExecuted.Add(1)
+		return ReplayRenderedMsg{replay: r, index: index, prepared: prepare()}
 	}
-	m.dropRenderedBacking()
 }
 
-// dropRenderedBacking must run wherever renderedLines is replaced or cleared.
-func (m *model) dropRenderedBacking() { m.renderedBacking, m.renderedHead = nil, 0 }
-
-type historyItem struct {
-	index, height int
-	lines         []string
+// replayReasoningCmd is replayPrepareCmd for reasoning blocks.
+func (m *model) replayReasoningCmd(r *sessionReplay, index int, prepare func() *reasoningblock.PreparedReasoning) tea.Cmd {
+	if m.prepareCounts == nil {
+		m.prepareCounts = &replayPrepareCounts{}
+	}
+	counts := m.prepareCounts
+	m.stats.reasoningScheduled++
+	return func() tea.Msg {
+		counts.reasoningExecuted.Add(1)
+		return ReplayRenderedMsg{replay: r, index: index, reasoning: prepare()}
+	}
 }
 
-func (m *model) prependHistory(prefix []historyItem) {
+func (m *model) prependHistory(prefix []int) {
 	if len(prefix) == 0 {
 		return
 	}
-	delta := 0
-	for _, item := range prefix {
-		delta += len(item.lines)
+	m.syncSlots()
+	before := m.geom.Total()
+	m.historyStart = prefix[len(prefix)-1]
+	for _, i := range prefix {
+		m.seedHistoryEstimate(i)
 	}
-	m.prependRenderedLines(prefix, delta)
-	for i := m.historyStart; i < len(m.lineOffsets); i++ {
-		m.lineOffsets[i] += delta
-	}
-	for i, cached := range m.renderedItems {
-		cached.start += delta
-		m.renderedItems[i] = cached
-	}
-	offset := 0
-	for i := len(prefix) - 1; i >= 0; i-- {
-		item := prefix[i]
-		m.lineOffsets[item.index] = offset
-		if m.shouldCacheMessage(item.index) {
-			m.renderedItems[item.index] = renderedItemRange{start: offset, height: item.height}
-		}
-		offset += len(item.lines)
-	}
-	m.historyStart = prefix[len(prefix)-1].index
+	// Separators at the new boundary and the materialized rows (now shifted)
+	// are rebuilt by the next layout pass; only the visible slots re-render.
+	m.slotsStale = true
+	m.syncSlots()
+	delta := m.geom.Total() - before
 	if m.historyStart == 0 {
 		m.historyReplay = nil
-		m.releaseRenderedHeadroom()
 	}
-	if m.activeSegments != nil {
-		m.activeSegments.start += delta
-	}
-	m.totalHeight += delta
+	m.publishFacade(false)
 	m.scrollOffset += delta
+	m.consumeGeometryDelta(delta)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	if m.selection.active {
 		m.selection.startLine += delta

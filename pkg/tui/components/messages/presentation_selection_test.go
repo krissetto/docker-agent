@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
@@ -51,8 +52,25 @@ func TestClearPresentationSelectionPreservesReaderAndDraft(t *testing.T) {
 	require.Nil(t, cmd, "released drag cannot autoscroll")
 	m.View()
 	require.Equal(t, 7, m.scrollOffset)
-	_, _, after := m.ResizeCacheStats()
-	require.Equal(t, renders+1, after, "only the previously selected item rerenders")
+	// The cleared item is offscreen, so clearing renders nothing: the viewport only
+	// measures what it shows. It is rendered once, on its first demand, when the
+	// reader wheels it into view through the real input path.
+	_, _, afterClear := m.ResizeCacheStats()
+	require.Equal(t, renders, afterClear, "clearing renders nothing offscreen")
+	cleared := m.views[9].(*countedHistoryView)
+	clearedRenders := cleared.renders
+	for range 20 {
+		if m.slotOffset(9) < m.scrollOffset+m.height {
+			break
+		}
+		_, _ = m.Update(messages.WheelCoalescedMsg{X: 5, Y: 5, Delta: 1})
+	}
+	require.Less(t, m.slotOffset(9), m.scrollOffset+m.height, "the wheel must reveal the cleared item")
+	require.Contains(t, m.View(), "history 9")
+	require.Equal(t, clearedRenders+1, cleared.renders, "the first demand renders the cleared item exactly once")
+	m.View()
+	require.Equal(t, clearedRenders+1, cleared.renders, "a visible item is not rendered again")
+	require.Equal(t, -1, m.selectedMessageIndex)
 }
 
 func TestClearPresentationSelectionIdleKeepsWarmTranscript(t *testing.T) {

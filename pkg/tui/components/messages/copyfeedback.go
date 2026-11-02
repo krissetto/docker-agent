@@ -57,10 +57,10 @@ func (m *model) handleCopiedFlashExpired(msg copiedFlashExpiredMsg) {
 // own once the flash state is cleared.
 func (m *model) applyCopiedFlash(lines []string, viewportStartLine int) []string {
 	f := m.copiedFlash
-	if f == nil || f.msgIdx < 0 || f.msgIdx >= len(m.lineOffsets) {
+	if f == nil || f.msgIdx < 0 || (len(m.views) > 0 && f.msgIdx >= len(m.views)) || (m.legacyFacadeMode() && f.msgIdx >= m.legacyOffsetCount()) {
 		return lines
 	}
-	idx := m.lineOffsets[f.msgIdx] + f.localLine - viewportStartLine
+	idx := m.slotOffset(f.msgIdx) + f.localLine - viewportStartLine
 	if idx < 0 || idx >= len(lines) {
 		return lines
 	}

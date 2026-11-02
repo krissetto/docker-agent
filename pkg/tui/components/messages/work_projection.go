@@ -20,6 +20,73 @@ type workExchange struct {
 type workProjection struct {
 	exchanges []workExchange
 	bySource  map[int]int
+	// owner maps each work or response source to its first owning exchange, and
+	// byBoundary maps a boundary message (nil for orphans) to its exchanges. Both are
+	// built with the projection, so handoff lookups never scan the exchanges.
+	owner      map[int]int
+	byBoundary map[*types.Message][]int
+	// workOwner maps each work source to the exchange that holds it as work (first
+	// owner wins). It is the published work-exchange index; retention moves keep it in step.
+	workOwner map[int]int
+}
+
+// indexProjectionOwners builds the source and boundary indices of a projection.
+// Only the projection builders call it: membership is fixed once a projection exists.
+func indexProjectionOwners(projection *workProjection, messages []*types.Message) {
+	projection.owner = make(map[int]int)
+	projection.byBoundary = make(map[*types.Message][]int)
+	for e, exchange := range projection.exchanges {
+		for _, source := range exchange.work {
+			if _, taken := projection.owner[source]; !taken {
+				projection.owner[source] = e
+			}
+		}
+		for _, source := range exchange.response {
+			if _, taken := projection.owner[source]; !taken {
+				projection.owner[source] = e
+			}
+		}
+		var boundary *types.Message
+		if exchange.boundary >= 0 && exchange.boundary < len(messages) {
+			boundary = messages[exchange.boundary]
+		}
+		projection.byBoundary[boundary] = append(projection.byBoundary[boundary], e)
+	}
+}
+
+// indexExchange records one finished exchange in the owner, work-owner and boundary
+// indices. It also builds the work-exchange index that indexWorkExchanges used to
+// rebuild in a separate pass.
+// finishExchange calls it once per exchange, in exchange order, after the
+// exchange's work and response are final (later edits move sources only inside
+// the same exchange, which leaves owner and boundary unchanged). The result equals
+// indexProjectionOwners over the final exchanges.
+func indexExchange(projection *workProjection, messages []*types.Message, e int) {
+	exchange := &projection.exchanges[e]
+	for _, source := range exchange.work {
+		if _, taken := projection.workOwner[source]; !taken {
+			projection.workOwner[source] = e
+		}
+		if _, taken := projection.owner[source]; !taken {
+			projection.owner[source] = e
+		}
+	}
+	for _, source := range exchange.response {
+		if _, taken := projection.owner[source]; !taken {
+			projection.owner[source] = e
+		}
+	}
+	var boundary *types.Message
+	if exchange.boundary >= 0 && exchange.boundary < len(messages) {
+		boundary = messages[exchange.boundary]
+	}
+	projection.byBoundary[boundary] = append(projection.byBoundary[boundary], e)
+}
+
+// emptyWorkProjection is the projection with no exchanges. Its indices are
+// allocated, so every published projection carries non-nil indices.
+func emptyWorkProjection() workProjection {
+	return workProjection{owner: make(map[int]int), byBoundary: make(map[*types.Message][]int)}
 }
 
 // projectWork maps source messages into human-input-bounded display exchanges.
@@ -95,6 +162,7 @@ func projectWork(messages []*types.Message, responseGroups map[*types.Message]ui
 			projection.bySource[source] = exchangeIndex
 		}
 	}
+	indexProjectionOwners(&projection, messages)
 	return projection
 }
 
@@ -132,8 +200,23 @@ func resolveSessionOpener(messages []*types.Message, current *types.Message) *ty
 // projectWorkWithVisibleReplies applies the normalized logical prose-retention policy.
 // The opener source row is placed in response directly, so it stays above Work
 // and outside the retention limit; only that row is pinned, not its later siblings.
+// projectWorkWithVisibleReplies is the canonical projection: indexed and ready to
+// publish. Every publishing caller uses it.
 func projectWorkWithVisibleReplies(messages []*types.Message, responseGroups map[*types.Message]uint64, visible tuimessages.VisibleReplies, opener *types.Message) workProjection {
+	return projectWorkWith(messages, responseGroups, visible, opener, true)
+}
+
+// projectWorkWith is the projection body. indexed=false skips the owner and
+// boundary indices. Only SetWorkStatus's local identity read may use it, and its
+// result is never stored or published (see TestVKIDUnindexedProjectionStaysLocal).
+func projectWorkWith(messages []*types.Message, responseGroups map[*types.Message]uint64, visible tuimessages.VisibleReplies, opener *types.Message, indexed bool) workProjection {
 	projection := workProjection{bySource: make(map[int]int)}
+	if indexed {
+		// Grown from the emitted topology: a presize by message count over-allocates.
+		projection.owner = make(map[int]int)
+		projection.byBoundary = make(map[*types.Message][]int)
+		projection.workOwner = make(map[int]int)
+	}
 	limit := visibleReplyLimit(visible)
 	openerIndex := slices.Index(messages, opener)
 	if opener == nil {
@@ -180,6 +263,9 @@ func projectWorkWithVisibleReplies(messages []*types.Message, responseGroups map
 		slices.Sort(exchange.response)
 		for _, source := range exchange.work {
 			projection.bySource[source] = current
+		}
+		if indexed {
+			indexExchange(&projection, messages, current)
 		}
 	}
 	appendWork := func(source int) {

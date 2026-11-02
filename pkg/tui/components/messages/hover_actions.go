@@ -63,13 +63,53 @@ func (m *model) containsMessagePointer(target *types.Message) bool {
 	return m.messagePointerIndex(target) >= 0
 }
 
+// messagePointerIndex returns the position of target in messages, or -1. It reads
+// the identity index: O(1), with no scan of the transcript.
+// Every production write re-indexes its changed tail through its hook, so a miss
+// means the message is not in the transcript, or it was appended without a hook. The
+// only repair is the append-only catch-up of that unindexed tail. A shrink or a
+// same-length change is not repaired: it resolves to -1.
 func (m *model) messagePointerIndex(target *types.Message) int {
-	for i, msg := range m.messages {
-		if msg == target {
+	m.stats.identityLookups++
+	if i, ok := m.messageIndex[target]; ok && i < len(m.messages) && m.messages[i] == target {
+		return i
+	}
+	if len(m.messages) > m.messageIndexLen {
+		m.indexAppendedSuffix()
+		if i, ok := m.messageIndex[target]; ok && i < len(m.messages) && m.messages[i] == target {
 			return i
 		}
 	}
 	return -1
+}
+
+// indexAppendedSuffix indexes the unindexed tail [messageIndexLen, len) of messages,
+// once. It starts at messageIndexLen, never at 0, and leaves every existing entry as
+// it is. Only messagePointerIndex calls it, and it touches only the map.
+func (m *model) indexAppendedSuffix() {
+	if m.messageIndex == nil {
+		m.messageIndex = make(map[*types.Message]int, len(m.messages))
+	}
+	for i := m.messageIndexLen; i < len(m.messages); i++ {
+		m.stats.identityCatchupEntries++
+		m.messageIndex[m.messages[i]] = i
+	}
+	m.messageIndexLen = len(m.messages)
+}
+
+// indexMessages records the position of every message from index from onward. Each
+// change to messages calls it with its first changed position, so the cost is the
+// changed tail (O(1) for an append). It is never called from View, hover or epoch.
+func (m *model) indexMessages(from int) {
+	if m.messageIndex == nil {
+		m.messageIndex = make(map[*types.Message]int, len(m.messages))
+		from = 0
+	}
+	for i := max(from, 0); i < len(m.messages); i++ {
+		m.stats.identityEntries++
+		m.messageIndex[m.messages[i]] = i
+	}
+	m.messageIndexLen = len(m.messages)
 }
 
 func (m *model) hoverActionMoving() bool {

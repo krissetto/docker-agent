@@ -162,17 +162,19 @@ func (m *model) extractSelectedText() string {
 	}
 
 	m.updateScrollState()
+	m.settleSelection()
 	startLine, startCol, endLine, endCol := m.selection.normalized()
 
-	if startLine < 0 || startLine >= m.totalHeight {
+	total := m.layoutTotal()
+	if startLine < 0 || startLine >= total {
 		return ""
 	}
-	if endLine >= m.totalHeight {
-		endLine = m.totalHeight - 1
+	if endLine >= total {
+		endLine = total - 1
 	}
 
 	var selected []string
-	for i := startLine; i <= endLine && i < m.totalHeight; i++ {
+	for i := startLine; i <= endLine && i < total; i++ {
 		originalLine := m.renderedLine(i)
 		// Strip ANSI codes first to get the displayed text with borders
 		plainLine := ansi.Strip(originalLine)

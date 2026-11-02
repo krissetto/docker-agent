@@ -26,11 +26,14 @@ func TestDirtyRebuildReservesFlattenedHistoryCapacity(t *testing.T) {
 	m.ensureAllItemsRendered()
 	require.NotNil(t, m.activeSegments)
 	before := append([]string(nil), m.renderedLines...)
+	// The flattened mirror grows geometrically and is then reused: rebuilding an
+	// unchanged history must allocate no new rows (layoutWorkStats counts them).
+	allocated := m.layoutWorkStats().rowsAllocated
 	for range 3 {
 		m.invalidateItem(len(m.messages) - 1)
 		m.ensureAllItemsRendered()
 		require.Equal(t, before, m.renderedLines)
-		require.Equal(t, len(before), cap(m.renderedLines), "unchanged flattened history needs no append-growth headroom")
+		require.Equal(t, allocated, m.layoutWorkStats().rowsAllocated, "unchanged flattened history reallocates no rows")
 		require.Equal(t, len(before), m.activeSegments.start)
 		require.Equal(t, m.totalHeight, m.activeSegments.start+m.activeSegments.height())
 	}

@@ -12,9 +12,12 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
-// Plain history prepends keep front headroom in renderedBacking. Every path that
-// replaces or clears renderedLines must drop it; otherwise the old transcript
-// stays reachable and a later replay can alias stale rows.
+// Plain history prepends used to keep front headroom in renderedBacking. The
+// slot layout keeps no flattened prepend buffer: rows are measured lazily and
+// the mirror is rewritten per slot. What must hold is the same retention rule:
+// every path that replaces or clears the transcript drops its materialized
+// entries and their rows, so the old transcript stays unreachable. Retained
+// state is checked through layoutWorkStats instead of the removed buffer.
 
 func fixesLinesText(lines []string) string {
 	stripped := make([]string, len(lines))
@@ -48,9 +51,11 @@ func newPartialPlainHistory(t *testing.T) (*model, string) {
 	drainCoverageReplay(t, m)
 	require.True(t, HistoryPending(m), "fixture must leave older history to page in")
 	runReplayCommand(m, ContinueHistory(m))
-	require.NotNil(t, m.renderedBacking, "precondition: plain prepend created live front headroom")
+	// The full transcript is materialized only here, as an explicit test step.
+	m.ensureAllItemsRendered()
 	marker := fixesFindingMarker(t, m.renderedLines)
 	require.Contains(t, fixesLinesText(m.renderedLines), marker, "precondition: marker is in the canonical transcript")
+	require.Positive(t, m.layoutWorkStats().entries, "precondition: history holds materialized entries")
 	return m, marker
 }
 
@@ -58,7 +63,7 @@ func TestRenderedBackingDroppedOnEmptyReplayReset(t *testing.T) {
 	m, marker := newPartialPlainHistory(t)
 	BeginReplay(m, PrepareReplay(session.New(session.WithID("empty-reset"))), nil)
 	drainCoverageReplay(t, m)
-	require.Nil(t, m.renderedBacking, "replay reset must drop the previous transcript's headroom")
+	require.Zero(t, m.layoutWorkStats().entries, "replay reset must drop the previous transcript's entries")
 	require.NotContains(t, fixesLinesText(m.renderedLines), marker, "canonical transcript holds no old rows after reset")
 	require.NotContains(t, fixesLinesText(m.renderedLines), "Finding", "no heading of the previous transcript survives")
 	require.NotContains(t, ansi.Strip(m.View()), "Finding", "viewport shows no old rows after reset")
@@ -67,14 +72,14 @@ func TestRenderedBackingDroppedOnEmptyReplayReset(t *testing.T) {
 func TestRenderedBackingDroppedOnInvalidateAndReload(t *testing.T) {
 	m, marker := newPartialPlainHistory(t)
 	m.invalidateAllItems()
-	require.Nil(t, m.renderedBacking, "invalidation clears renderedLines and must drop headroom")
+	require.Zero(t, m.layoutWorkStats().entries, "invalidation drops every materialized entry")
+	require.Empty(t, strings.Join(m.renderedLines, ""), "invalidation clears the mirror rows; its length is kept until the next layout")
 	m.ensureAllItemsRendered()
-	require.Nil(t, m.renderedBacking, "a rebuild replaces the window without headroom")
 	require.Contains(t, fixesLinesText(m.renderedLines), marker, "rebuild keeps the same transcript content")
 
 	m, marker = newPartialPlainHistory(t)
 	_ = m.LoadFromSession(session.New(session.WithID("reloaded")), nil)
-	require.Nil(t, m.renderedBacking, "session reload must drop the previous transcript's headroom")
+	require.Zero(t, m.layoutWorkStats().entries, "session reload must drop the previous transcript's entries")
 	require.NotContains(t, fixesLinesText(m.renderedLines), marker, "reload holds no old canonical rows")
 	require.NotContains(t, ansi.Strip(m.View()), "Finding", "reload shows no old rows in the viewport")
 }
@@ -84,6 +89,6 @@ func TestRenderedBackingDroppedOnReplayReconcile(t *testing.T) {
 	m.renderDirty = true
 	require.True(t, ReconcileReplay(m), "a render-only replay runs after geometry invalidation")
 	drainCoverageReplay(t, m)
-	require.Nil(t, m.renderedBacking, "render-only replay replaces renderedLines and must drop headroom")
+	m.ensureAllItemsRendered()
 	require.Contains(t, fixesLinesText(m.renderedLines), marker, "reconciled canonical transcript keeps its content")
 }

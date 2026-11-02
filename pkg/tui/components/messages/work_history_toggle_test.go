@@ -49,6 +49,11 @@ func workHistoryLongExchange() *session.Session {
 
 func replayWorkHistory(t *testing.T, height int) (*model, *session.Session) {
 	t.Helper()
+	return replayWorkHistorySession(t, height, workHistoryLongExchange())
+}
+
+func replayWorkHistorySession(t *testing.T, height int, sess *session.Session) (*model, *session.Session) {
+	t.Helper()
 	ar := animation.NewRuntime()
 	state := &service.SessionState{}
 	state.SetExpandThinking(false)
@@ -56,14 +61,34 @@ func replayWorkHistory(t *testing.T, height int) (*model, *session.Session) {
 	t.Cleanup(func() { m.StopAnimations(); ar.Stop() })
 	m.SetCompactWorkLog(true)
 	m.SetVisibleReplies(msgtypes.VisibleRepliesLatest)
-	sess := workHistoryLongExchange()
 	BeginReplay(m, PrepareReplay(sess), nil)
 	finishPreparedReplay(t, m)
 	return m, sess
 }
 
+// workHistoryTallFinal is workHistoryLongExchange with a final answer of twelve
+// paragraphs. Its rows alone cover the first frame, so the older 81 items are a
+// real prefix to page in. The marker stays on the last paragraph.
+func workHistoryTallFinal() *session.Session {
+	sess := workHistoryLongExchange()
+	paragraphs := make([]string, 0, 12)
+	for i := range 11 {
+		paragraphs = append(paragraphs, fmt.Sprintf("FINAL_ANSWER_PARAGRAPH_%02d keeps the latest answer several rows tall.", i))
+	}
+	paragraphs = append(paragraphs, "FINAL_ANSWER_REMAINS_VISIBLE")
+	content := strings.Join(paragraphs, "\n\n")
+	last := sess.Messages[len(sess.Messages)-1].Message
+	last.Message.Content = content
+	last.Message.Presentation = []chat.AssistantPart{{Type: chat.AssistantPartContent, Text: content}}
+	return sess
+}
+
 func TestContinueHistoryKeepsLongHumanExchangeGroupedAndSourceLossless(t *testing.T) {
-	m, sess := replayWorkHistory(t, 8)
+	m, sess := replayWorkHistorySession(t, 8, workHistoryTallFinal())
+	tail := len(m.messages) - 1
+	require.Positive(t, tail, "the transcript holds the human request, the grouped tool activity and the final answer")
+	require.GreaterOrEqual(t, m.slotBase[tail]+b2i(m.slotSep[tail]), m.height, "the final answer alone covers the first frame")
+	require.Equal(t, tail, m.historyStart, "the older transcript items are the prefix paged in by ContinueHistory")
 	require.True(t, m.HistoryPending(), "fixture must leave an older prefix to page in")
 	initialStart := m.historyStart
 	initialWork := len(m.workHeaderBySource)
