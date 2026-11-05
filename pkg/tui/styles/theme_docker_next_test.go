@@ -1,6 +1,7 @@
 package styles
 
 import (
+	"bytes"
 	"io/fs"
 	"path"
 	"reflect"
@@ -42,6 +43,24 @@ func TestDockerNextPalettesDefineEveryKey(t *testing.T) {
 		}
 		assertAllFieldsSet(t, ref, raw.Chroma)
 		assertAllFieldsSet(t, ref, raw.Markdown)
+	}
+}
+
+// Every built-in palette must decode strictly: an unknown key would be dropped
+// silently, so a typo would leave its colour on the Old School base.
+func TestEveryBuiltinPaletteDecodesStrictly(t *testing.T) {
+	t.Parallel()
+
+	refs, err := listBuiltinThemeRefs()
+	require.NoError(t, err)
+	require.NotEmpty(t, refs)
+	for _, ref := range refs {
+		data, ok := readThemeData(builtinThemes, ref)
+		require.True(t, ok, ref)
+
+		var raw Theme
+		dec := yaml.NewDecoder(bytes.NewReader(data), yaml.DisallowUnknownField())
+		assert.NoError(t, dec.Decode(&raw), "%s has a key that is not a known theme key", ref)
 	}
 }
 

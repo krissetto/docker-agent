@@ -338,3 +338,36 @@ func TestThemeWatcher_FileReplacement(t *testing.T) {
 		})
 	}
 }
+
+// A user file named like a bare built-in ref is listed as user:<name>. The bare
+// built-in refs must not follow it, while the user: ref does.
+func TestThemeWatcher_BuiltinRefIgnoresSameNamedUserFile(t *testing.T) {
+	t.Parallel()
+	for _, ref := range []string{DefaultThemeRef, DockerNextLightThemeRef} {
+		t.Run(ref, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ref+".yaml"), []byte("name: x\n"), 0o644))
+			watcher := &ThemeWatcher{themesDir: dir}
+
+			require.NoError(t, watcher.Run(t.Context(), ref, func() {
+				t.Error("bare built-in ref followed a user file")
+			}))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			ready := make(chan struct{})
+			done := make(chan error, 1)
+			go func() {
+				done <- watcher.Run(ctx, UserThemePrefix+ref, func() { close(ready) })
+			}()
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				t.Fatal("user: ref was not watched")
+			}
+			cancel()
+			require.NoError(t, <-done)
+		})
+	}
+}

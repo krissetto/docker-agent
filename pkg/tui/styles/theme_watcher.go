@@ -33,9 +33,9 @@ func (tw *ThemeWatcher) Run(ctx context.Context, themeRef string, ready func()) 
 	if ctx.Err() != nil {
 		return nil
 	}
-	// Built-in themes have no file to watch. The legacy default is built-in too.
-	baseRef := strings.TrimPrefix(themeRef, UserThemePrefix)
-	if (baseRef == DefaultThemeRef || baseRef == LegacyDefaultThemeRef) && !strings.HasPrefix(themeRef, UserThemePrefix) {
+	// Bare built-in refs have no file to follow. A same-named user file is listed
+	// as "user:<name>", so it must not be watched for the built-in.
+	if !strings.HasPrefix(themeRef, UserThemePrefix) && isBuiltinWatchExempt(themeRef) {
 		return nil
 	}
 
@@ -69,6 +69,16 @@ func (tw *ThemeWatcher) getThemesDir() string {
 		return tw.themesDir
 	}
 	return ThemesDir()
+}
+
+// isBuiltinWatchExempt reports whether a bare ref names a built-in palette. The
+// Docker Next pair and the legacy default are built-in.
+func isBuiltinWatchExempt(themeRef string) bool {
+	switch themeRef {
+	case DefaultThemeRef, DockerNextLightThemeRef, LegacyDefaultThemeRef:
+		return true
+	}
+	return false
 }
 
 func (tw *ThemeWatcher) findThemePath(themeRef string) (string, error) {
