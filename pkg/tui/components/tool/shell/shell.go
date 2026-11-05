@@ -197,6 +197,50 @@ func (m *shellModel) setHover(line, col int, hovered, positional bool) bool {
 	return m.scroll().SetScrollbarPointer(x, y) || changed
 }
 
+// MouseAt routes the expanded body's scrollbar gutter to its scrollview: a left
+// press there starts a thumb drag, and an active drag keeps capturing motion and
+// release even outside the body. Coordinates are card-local, as for WheelAt.
+// Outside a drag, only a press on the gutter is claimed, so body text still
+// reaches the transcript.
+func (m *shellModel) MouseAt(line, col int, msg tea.MouseMsg) (bool, tea.Cmd) {
+	dragging := m.IsBodyDragging()
+	if !dragging {
+		if _, press := msg.(tea.MouseClickMsg); !press || m.width < 12 || !m.disclosure.Expanded() || !m.disclosure.Visible() || m.disclosure.NeedsTick() {
+			return false, nil
+		}
+	}
+	bodyRows := len(m.detailsLines())
+	first, last := shellBodyOutputRows(bodyRows)
+	x, y := col-shellCardBodyLeft(), line-first
+	if !dragging && (shellBodyMaxOffset(bodyRows) == 0 || line < first || line > last || x != m.scroll().ScrollbarX()) {
+		return false, nil
+	}
+	scroll := m.scroll()
+	_, cmd := scroll.UpdateMouse(shellLocalMouse(msg, x, y))
+	m.bodyOffset = scroll.ScrollOffset()
+	return true, cmd
+}
+
+// IsBodyDragging reports whether the body scrollbar thumb holds the pointer.
+func (m *shellModel) IsBodyDragging() bool { return m.bodyScroll != nil && m.bodyScroll.IsDragging() }
+
+// shellLocalMouse restates a mouse message in the body scrollview's own coordinates.
+func shellLocalMouse(msg tea.MouseMsg, x, y int) tea.MouseMsg {
+	button := msg.Mouse().Button
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		return tea.MouseClickMsg{X: x, Y: y, Button: button}
+	case tea.MouseMotionMsg:
+		return tea.MouseMotionMsg{X: x, Y: y, Button: button}
+	case tea.MouseReleaseMsg:
+		return tea.MouseReleaseMsg{X: x, Y: y, Button: button}
+	}
+	return msg
+}
+
+// cardInnerWidth is the usable width inside the shell card frame.
+func cardInnerWidth(width int) int { return max(agentmessage.InnerWidth(width), 1) }
+
 // shellCardBodyLeft is the card column where body rows begin, after the border and padding.
 func shellCardBodyLeft() int {
 	return styles.UserMessageStyle.GetBorderLeftSize() + styles.UserMessageStyle.GetPaddingLeft()
@@ -475,7 +519,7 @@ func (m *shellModel) details() string {
 	if len(lines) == 0 {
 		return ""
 	}
-	inner := max(agentmessage.InnerWidth(m.width), 1)
+	inner := cardInnerWidth(m.width)
 	visibleBodyRows := shellBodyVisibleRows(len(lines))
 	start := min(m.bodyOffset, shellBodyMaxOffset(len(lines)))
 	bodyScroll := m.scroll()

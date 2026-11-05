@@ -236,6 +236,13 @@ type renderedItem struct {
 	height   int // Height in lines
 }
 
+// bodyMouseView is an item with an inner scrollable body (an expanded shell
+// card). It takes card-local presses and owns the drag until release.
+type bodyMouseView interface {
+	MouseAt(line, col int, msg tea.MouseMsg) (bool, tea.Cmd)
+	IsBodyDragging() bool
+}
+
 type workBlockRange struct {
 	block  *workblock.Model
 	anchor int
@@ -446,6 +453,8 @@ type model struct {
 	workRetained       map[*types.Message]struct{}
 	workScrollbarBound bool
 	scrollbarsActive   bool
+	// bodyDragIdx is the item whose inner body scrollbar holds the pointer (-1 = none).
+	bodyDragIdx int
 
 	// Message selection state
 	selectedMessageIndex int // Index of selected message (-1 = no selection)
@@ -567,6 +576,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 		workSourceToHeader:      make(map[int]int),
 		workProjectionDirty:     true,
 		workAnchorSource:        -1,
+		bodyDragIdx:             -1,
 		workRetained:            make(map[*types.Message]struct{}),
 		workDurations:           make(map[*types.Message]time.Duration),
 		visibleReplies:          messages.VisibleRepliesThree,
@@ -819,6 +829,16 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 	msgIdx, localLine, interactionCmd := m.globalLineToMessageLine(line)
 	materializeCmd = tea.Batch(materializeCmd, interactionCmd)
 	if msgIdx >= 0 {
+		// Inner body scrollbars (an expanded shell card) take the press first.
+		if view, ok := m.views[msgIdx].(bodyMouseView); ok && m.targetWorkBlock(msgIdx) == nil {
+			if handled, bodyCmd := view.MouseAt(localLine, col, msg); handled {
+				if view.IsBodyDragging() {
+					m.bodyDragIdx = msgIdx
+				}
+				m.invalidateItem(msgIdx)
+				return m, bodyCmd
+			}
+		}
 		interactionCol := col
 		if block := m.targetWorkBlock(msgIdx); block != nil {
 			blockLine := m.workBlockLineAt(line, msgIdx)
@@ -1134,6 +1154,9 @@ func (m *model) refreshPointerHover() {
 }
 
 func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd) {
+	if handled, cmd := m.routeBodyDrag(msg); handled {
+		return m, cmd
+	}
 	m.pointerX, m.pointerY, m.pointerKnown = msg.X, msg.Y, true
 	inside := msg.X >= m.xPos && msg.X < m.xPos+m.contentWidth() && msg.Y >= m.yPos && msg.Y < m.yPos+m.height
 	if !inside && !m.IsSelecting() && !m.scrollview.IsDragging() {
@@ -1175,6 +1198,9 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 }
 
 func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
+	if handled, cmd := m.routeBodyDrag(msg); handled {
+		return m, cmd
+	}
 	if cmd, handled := m.releaseImageClick(msg); handled {
 		return m, cmd
 	}
@@ -4377,6 +4403,38 @@ func (m *model) SetScrollbarDecorator(decorator scrollview.ScrollbarDecorator) {
 		m.lastFrameOutput = ""
 		m.visualGeneration++
 	}
+}
+
+// routeBodyDrag keeps an inner body thumb drag captured by its item: motion and
+// release reach it in item-local coordinates even outside the item. Every
+// release while captured is consumed, so it never becomes a copy or URL click.
+func (m *model) routeBodyDrag(msg tea.MouseMsg) (bool, tea.Cmd) {
+	if m.bodyDragIdx < 0 {
+		return false, nil
+	}
+	idx := m.bodyDragIdx
+	view, ok := m.viewAt(idx).(bodyMouseView)
+	if !ok || !view.IsBodyDragging() {
+		m.bodyDragIdx = -1
+		return false, nil
+	}
+	m.updateScrollState()
+	mouse := msg.Mouse()
+	line := m.scrollOffset + mouse.Y - m.yPos - m.slotOffset(idx)
+	col := mouse.X - m.xPos
+	_, cmd := view.MouseAt(line, col, msg)
+	if !view.IsBodyDragging() {
+		m.bodyDragIdx = -1
+	}
+	m.invalidateItem(idx)
+	return true, cmd
+}
+
+func (m *model) viewAt(idx int) layout.Model {
+	if idx < 0 || idx >= len(m.views) {
+		return nil
+	}
+	return m.views[idx]
 }
 
 func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
