@@ -249,6 +249,8 @@ func TestLunaAstraPublishedCostBoundary(t *testing.T) {
 		{"Astra fast", "openai", "gpt-6-astra", "fast", modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 100}, modelsdev.Rates{Input: 40, CacheRead: 4, CacheWrite: 50, Output: 150}},
 		{"Astra priority", "openai", "gpt-6-astra", "priority", modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 100}, modelsdev.Rates{Input: 40, CacheRead: 4, CacheWrite: 50, Output: 150}},
 		{"Astra ultrafast", "openai", "gpt-6-astra", "ultrafast", modelsdev.Rates{Input: 60, CacheRead: 6, CacheWrite: 75, Output: 300}, modelsdev.Rates{Input: 120, CacheRead: 12, CacheWrite: 150, Output: 450}},
+		{"gateway Astra", "vercel", "openai/gpt-6-astra", "default", modelsdev.Rates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}, modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 75}},
+		{"gateway Astra fast", "vercel", "openai/gpt-6-astra-fast", "fast", modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 100}, modelsdev.Rates{Input: 40, CacheRead: 4, CacheWrite: 50, Output: 150}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
