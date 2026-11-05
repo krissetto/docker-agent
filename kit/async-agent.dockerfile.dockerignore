@@ -15,6 +15,7 @@
 !pkg/creator/instructions.txt
 !pkg/evaluation/Dockerfile.template
 !pkg/evaluation/Dockerfile.custom.template
+!pkg/model/provider/catalog/providers.json
 !pkg/modelsdev/snapshot.json
 !pkg/modelsdev/snapshot_date.txt
 !pkg/safety/safety_patterns.json
