@@ -75,6 +75,7 @@ func (w *Writer) SetSupported(supported bool) {
 	defer w.mu.Unlock()
 	if w.supported != supported {
 		w.supported = supported
+		w.overlays = w.policyOverlays(w.overlays)
 		w.dirty = true
 	}
 }
@@ -106,6 +107,7 @@ func (w *Writer) SetEnabled(enabled bool) {
 	defer w.mu.Unlock()
 	if w.enabled != enabled {
 		w.enabled = enabled
+		w.overlays = w.policyOverlays(w.overlays)
 		w.dirty = true
 	}
 }
@@ -122,16 +124,26 @@ func (w *Writer) SetContent(content string) string {
 	clean, overlays := extractOverlays(content)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.supported {
-		overlays = nil
-	} else if !w.enabled {
-		overlays = slices.DeleteFunc(overlays, func(image overlay) bool { return !image.explicit })
-	}
+	overlays = w.policyOverlays(overlays)
 	if !sameOverlays(w.overlays, overlays) {
 		w.overlays = overlays
 		w.dirty = true
 	}
 	return clean
+}
+
+// policyOverlays drops the overlays that the current capability and display
+// preference forbid. It must run whenever either changes, because a pane that
+// hides can keep its previous frame without calling SetContent again.
+// Explicit previews bypass the automatic preference but never capability.
+func (w *Writer) policyOverlays(overlays []overlay) []overlay {
+	if !w.supported {
+		return nil
+	}
+	if !w.enabled {
+		return slices.DeleteFunc(overlays, func(image overlay) bool { return !image.explicit })
+	}
+	return overlays
 }
 
 // RequestFlush coalesces a graphics-only repaint until the output writer runs.
