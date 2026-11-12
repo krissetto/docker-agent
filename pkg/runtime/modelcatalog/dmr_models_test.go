@@ -323,3 +323,16 @@ func TestConfiguredContextIntegerBounds(t *testing.T) {
 		})
 	}
 }
+
+// A model-level context_window sets the picker's window for a configured model,
+// with no provider_opts involved.
+func TestConfiguredContextFromModelLevelContextWindow(t *testing.T) {
+	t.Parallel()
+	size := int64(4096)
+	r := dmrRuntime(func(context.Context) ([]string, error) { return nil, errors.New("unavailable") }, stubStore{}, map[string]latest.ModelConfig{
+		"local": {Provider: "dmr", Model: "ai/qwen3", ContextWindow: &size},
+	})
+	choices := r.AvailableModels(t.Context(), "")
+	require.Len(t, choices, 1)
+	assert.Equal(t, 4096, choices[0].ContextLimit)
+}

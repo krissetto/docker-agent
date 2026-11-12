@@ -1,0 +1,39 @@
+# Model Context Size Example
+#
+# This example declares the context window of models the models.dev catalogue
+# does not describe: a custom OpenAI Responses endpoint, and a dedicated
+# compaction model on a local Docker Model Runner (DMR) engine.
+#
+# `context_window` on a model is metadata. It drives context-usage accounting,
+# the compaction threshold (including a dedicated `compaction_model`) and
+# max_tokens clamping. It is never sent to the provider and never configures
+# the DMR engine.
+#
+# To also size the DMR engine, set `provider_opts.context_size` instead (or as
+# well, to the same value). The two must agree when both are set.
+
+providers:
+  gateway:
+    api_type: openai_responses
+    base_url: https://gateway.example.com/v1
+    token_key: GATEWAY_API_KEY
+
+models:
+  primary:
+    provider: gateway
+    model: my-hosted-model
+    # Window of the hosted model, unknown to models.dev.
+    context_window: 200000
+    compaction_model: summarizer
+
+  summarizer:
+    provider: dmr
+    model: ai/qwen3
+    # Metadata only: the DMR engine keeps its own allocation.
+    context_window: 32768
+
+agents:
+  root:
+    model: primary
+    description: An assistant on a custom endpoint whose context window is declared.
+    instruction: You are a helpful assistant.

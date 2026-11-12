@@ -237,7 +237,7 @@ func (r *Catalog) AvailableModels(ctx context.Context, agentName string) []Model
 			choice.CacheReadCost = cfg.Cost.CacheRead
 			choice.CacheWriteCost = cfg.Cost.CacheWrite
 		}
-		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+		if n := cfg.EffectiveContextWindow(); n > 0 {
 			if n > math.MaxInt {
 				choice.ContextLimit = math.MaxInt
 			} else {

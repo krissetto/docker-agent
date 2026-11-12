@@ -1,6 +1,7 @@
 package latest
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net"
@@ -49,6 +50,9 @@ func (t *Config) Validate() error {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
 		if err := m.Cost.validate(); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
+		}
+		if err := m.validateContextWindow(t.Providers); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
 		if err := m.Auth.Validate(EffectiveProviderType(m, t.Providers)); err != nil {
@@ -190,6 +194,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
 	}
+	if m.ContextWindow != nil {
+		return errors.New("first_available cannot be combined with context_window (set it on the candidate models instead)")
+	}
 	if m.OutputCapabilities != nil {
 		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
 	}
@@ -203,6 +210,53 @@ func (m *ModelConfig) validateFirstAvailable() error {
 
 // validateCompactionThreshold rejects a compaction_threshold outside (0, 1].
 // nil (unset) is valid and means "use the default".
+// validateContextWindow checks a model's context window declarations. A
+// model-level context_window must be positive. provider_opts.context_size (on the
+// model or inherited from its custom provider) is DMR-only: on any other
+// provider it is rejected with a pointer to context_window, and on DMR it must
+// agree with a model-level context_window. The provider is judged by what it
+// runs, so custom providers and aliases resolve first.
+func (m *ModelConfig) validateContextWindow(providers map[string]ProviderConfig) error {
+	if m.ContextWindow != nil && *m.ContextWindow <= 0 {
+		return fmt.Errorf("context_window must be greater than 0, got %d", *m.ContextWindow)
+	}
+	providerType := effectiveProviderType(m, providers)
+	owner := "provider_opts"
+	raw, present := m.ProviderOpts["context_size"]
+	if !present {
+		if p, ok := providers[m.Provider]; ok {
+			raw, present = p.ProviderOpts["context_size"]
+			owner = fmt.Sprintf("providers.%s.provider_opts", m.Provider)
+		}
+	}
+	if !present {
+		return nil
+	}
+	if providerType != "dmr" {
+		return fmt.Errorf("%s.context_size is only used by the dmr provider, not %q; move it to context_window on this model", owner, providerType)
+	}
+	if m.ContextWindow == nil {
+		return nil
+	}
+	if declared := ContextSizeFromProviderOpts(map[string]any{"context_size": raw}); declared > 0 && declared != *m.ContextWindow {
+		return fmt.Errorf("context_window %d conflicts with %s.context_size %d; set only one, or make them equal", *m.ContextWindow, owner, declared)
+	}
+	return nil
+}
+
+// effectiveProviderType returns the provider type a model runs on, following
+// the same order as the provider factory: a model-level api_type, then a
+// custom provider's api_type or provider, then the model's own provider name.
+func effectiveProviderType(m *ModelConfig, providers map[string]ProviderConfig) string {
+	if api, ok := m.ProviderOpts["api_type"].(string); ok && api != "" {
+		return api
+	}
+	if p, ok := providers[m.Provider]; ok {
+		return cmp.Or(p.APIType, p.Provider, "openai")
+	}
+	return m.Provider
+}
+
 func validateCompactionThreshold(v *float64) error {
 	if v == nil {
 		return nil

@@ -387,6 +387,9 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	if modelsStore != nil {
 		config.ResolveModelAliases(ctx, cfg, modelsStore)
 	}
+	if err := config.ValidateContextWindowCaps(ctx, cfg, modelsStore); err != nil {
+		return nil, err
+	}
 
 	evaluatorOpts := []options.Opt{
 		options.WithGateway(runConfig.ModelsGateway), options.WithEncryptedConfig(runConfig.EncryptedConfig),

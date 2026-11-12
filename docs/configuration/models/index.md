@@ -47,6 +47,7 @@ models:
       output: float # Optional: price per 1M output tokens
       cache_read: float # Optional: price per 1M cached input tokens
       cache_write: float # Optional: price per 1M cache-write tokens
+    context_window: integer # Optional: context window in tokens (metadata; never sent to the provider)
     provider_opts: # Optional: provider-specific options
       key: value
     title_model: string # Optional: model used for session-title generation
@@ -78,6 +79,7 @@ models:
 | `capabilities`        | object     | ✗        | Override attachment (input) capabilities for this model. See [Attachment Capability Overrides](#attachment-capability-overrides). |
 | `output_capabilities` | object     | ✗        | Override generative output capabilities for this model, e.g. image generation. Omitted flags are detected from models.dev; explicit values take precedence. Cannot be combined with `first_available`. See [Output Capabilities](#output-capabilities). |
 | `cost`                | object     | ✗        | Explicit token pricing in USD per 1M tokens, overriding the built-in catalogue. See [Custom Token Pricing](#custom-token-pricing). |
+| `context_window`        | int        | ✗        | Context window of the model in tokens. Metadata for accounting, compaction and `max_tokens` clamping; never sent to the provider. Must not exceed the models.dev window for the model. Cannot be combined with `first_available`. See [Context Window](#context-window). |
 | `provider_opts`       | object     | ✗        | Provider-specific options (see provider pages)                                        |
 | `title_model`         | string     | ✗        | Model used for session-title generation. Can be a named model from the `models:` section or an inline `provider/model` string. When omitted, the agent's primary model generates titles. Cannot be combined with `first_available`. |
 | `compaction_model`    | string     | ✗        | Model used for session compaction (summary generation). Can be a named model or an inline `provider/model` string. The agent-level `compaction_model` takes precedence over this value, which in turn takes precedence over a provider-level default. When none is set, the primary model compacts. Cannot be combined with `first_available`. See the [Context & Compaction guide](../../guides/compaction/index.md). |
@@ -253,6 +255,94 @@ table means "priced, free" — distinct from omitting `cost` entirely
 models instead).
 
 See [`examples/custom-pricing.yaml`](https://github.com/docker/docker-agent/blob/main/examples/custom-pricing.yaml) for a complete example.
+
+## Context Window
+
+A model's context window drives context-usage accounting, the automatic
+compaction threshold, and `max_tokens` clamping. Hosted models get it from the
+[models.dev](https://models.dev/) catalogue. Custom endpoints (for example an
+`openai_responses` or `openai_chatcompletions` provider with a `base_url`) and
+local models often are not in the catalogue, so declare the window yourself:
+
+```yaml
+providers:
+  gateway:
+    api_type: openai_responses
+    base_url: https://gateway.example.com/v1
+    token_key: GATEWAY_API_KEY
+
+models:
+  gateway_model:
+    provider: gateway
+    model: my-hosted-model
+    context_window: 200000      # context window in tokens
+```
+
+`context_window` is **metadata only**. It is never forwarded as a request
+parameter, and it never configures the Docker Model Runner engine.
+
+Precedence for the context window of a model, highest first:
+
+1. The model-level `context_window`. This is the window for every provider.
+2. For the `dmr` provider only, `provider_opts.context_size`. It also sizes the
+   DMR engine (see [Docker Model Runner](../../providers/dmr/index.md#context-size)),
+   so it must equal `context_window` when both are set.
+3. The window discovered at runtime (for example from the Docker Model Runner
+   API).
+4. The models.dev catalogue.
+
+`provider_opts.context_size` is **not** read for any other provider. Setting it
+on a model that runs on a non-DMR provider (including a `providers:` alias
+backed by `openai_responses`, `openai_chatcompletions` or `anthropic`) fails
+validation with a message pointing to `context_window`. Move the value to the
+model's `context_window` instead.
+
+If none applies, the window is unknown: context usage cannot be shown as a
+percentage and compaction cannot run. Compaction then reports a session warning
+naming the model and asking for `context_window`. Pair a dedicated
+`compaction_model` with its own `context_window` when its window is unknown. The
+effective compaction limit is capped by the smaller of the primary and
+compaction windows, as described in the [Context & Compaction guide](../../guides/compaction/index.md).
+
+### How the window interacts with compaction thresholds
+
+`context_window` is **capacity only**. It sets the number that compaction
+thresholds are fractions of; it never adds a fixed-token trigger:
+
+- `compaction_threshold` (model or agent, default `0.9`) compacts once estimated
+  usage exceeds `threshold × effective window`. With `context_window: 200000` and
+  the default, compaction fires above 180,000 tokens.
+- The background compaction threshold (user setting, a percentage, default `70`)
+  works the same way against the same window.
+- The context gauge and `/context` report the window as their limit, so the
+  gauge fills to the threshold as compaction fires.
+
+A dedicated `compaction_model` caps the effective window at the smaller of the
+primary and compaction windows, because the summary call must be able to ingest
+the whole conversation. For example, a primary with `context_window: 200000` and a
+compaction model with `context_window: 32000` compacts above 28,800 tokens (90% of
+32,000), not 180,000. A compaction model with a larger window never raises the
+limit above the primary's, and the thresholds keep applying to the primary window.
+If only one of the two windows is known, the known one is used.
+
+Validation rejects:
+
+- a `context_window` that is not a positive integer;
+- a DMR `provider_opts.context_size` that conflicts with the model-level value;
+- `provider_opts.context_size` on a non-DMR provider. Custom providers and
+  aliases are judged by the provider they run (an alias backed by
+  `openai_responses` is non-DMR). The error names the field to move;
+- a `context_window` above the context window the models.dev catalogue declares
+  for the model. The check uses the same model identity as the runtime (the
+  canonical provider and the name you wrote, before alias resolution) and
+  compares the raw catalogue limit, so the declared value cannot hide a
+  conflict. The error names the model, `models.<name>.context_window`, and the
+  catalogue maximum.
+
+A model the catalogue has no context limit for (custom endpoints, local models,
+uncatalogued names) accepts any positive `context_window`; no cap is guessed. Dedicated
+`compaction_model` entries are checked the same way as any other model entry. A `context_window` also cannot
+be set on a `first_available` selector; set it on the candidate models instead.
 
 ## Delegating Session-Title Generation
 
