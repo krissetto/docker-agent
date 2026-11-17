@@ -124,10 +124,13 @@ type Message struct {
 }
 
 func Agent(typ MessageType, agentName, content string) *Message {
+	if typ != MessageTypeAssistant {
+		content = strings.ReplaceAll(content, "\t", "    ")
+	}
 	return &Message{
 		Type:    typ,
 		Sender:  agentName,
-		Content: strings.ReplaceAll(content, "\t", "    "),
+		Content: content,
 	}
 }
 
@@ -183,11 +186,18 @@ func Input(input *session.Message) *Message {
 		msg.ReceivedBody = input.Message.Content
 	case session.InputOriginRuntime:
 		msg.Type, msg.Content = MessageTypeRuntimeNotice, ""
-		if input.InputMode == "steer" && input.SenderID != "" {
+		if input.InputMode == "steer" && (input.SenderID != "" || isClassifiedRuntimeNotice(input.Message.Content)) {
 			msg.ReceivedBody = input.Message.Content
 		}
 	}
 	return msg
+}
+
+// isClassifiedRuntimeNotice keeps sender-less notices expandable only when the
+// runtime event is recognized; unknown bodies are never retained for display.
+func isClassifiedRuntimeNotice(body string) bool {
+	_, ok := lifecycle.RuntimeNoticeLabel(body)
+	return ok
 }
 
 // IsSubagentReply excludes parent instructions and unresolved/generic notices.

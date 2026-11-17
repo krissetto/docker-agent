@@ -61,6 +61,7 @@ type Agent struct {
 	subAgents               []*Agent
 	asyncSubagents          []latest.SubagentRef
 	asyncHarnessPrompt      string
+	sharedHarnessPrompt     string
 	handoffs                []*Agent
 	forceHandoff            *Agent
 	parents                 []*Agent
@@ -226,6 +227,12 @@ func (a *Agent) HasAsyncSubagents() bool {
 // declare async subagents.
 func (a *Agent) AsyncHarnessPrompt() string {
 	return a.asyncHarnessPrompt
+}
+
+// SharedHarnessPrompt returns the team-wide guidance for this agent. Session
+// assembly decides where it is injected.
+func (a *Agent) SharedHarnessPrompt() string {
+	return a.sharedHarnessPrompt
 }
 
 // Handoffs returns the list of handoff agents

@@ -426,6 +426,13 @@ func (h *replyHandoff) reflowRows(progress float64) []replyHandoffFrameRow {
 			})
 			continue
 		}
+		// A Work anchor can move across retained replies when a response joins
+		// the block. Its header is not prose: keep it at its destination rather
+		// than sweeping across (and stealing hits from) those retained rows.
+		if target.Composite != nil && target.Source == nil {
+			rows = append(rows, handoffFrameRow(target, 1, false))
+			continue
+		}
 		old, existed := oldByKey[key]
 		if !existed {
 			row := target

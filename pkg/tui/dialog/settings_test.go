@@ -82,6 +82,8 @@ func TestSettingsDialogTabSwitching(t *testing.T) {
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.Equal(t, settingsControls, d.focus)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.Equal(t, rowScrollOnSend, d.selected[d.tab])
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	require.Equal(t, rowYOLO, d.selected[d.tab])
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	require.Equal(t, settingsActions, d.focus)

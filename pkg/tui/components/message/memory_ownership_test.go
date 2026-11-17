@@ -43,7 +43,7 @@ func TestStaticHistoryDoesNotAllocateSpinnerAndPendingTransitionsRelease(t *test
 	_ = m.Init()
 	require.EqualValues(t, 1, ar.ActiveCount())
 	_ = m.SetMessage(types.Agent(types.MessageTypeAssistant, "root", ""))
-	require.NotNil(t, m.spinner, "empty assistant still has its fallback spinner")
+	require.Nil(t, m.spinner, "empty assistant is not a pending-response spinner")
 	_ = m.AppendContent("first token")
 	require.Nil(t, m.spinner)
 	require.Zero(t, ar.ActiveCount())

@@ -314,7 +314,7 @@ func TestActualFullTUIMultipleProviderChunks(t *testing.T) {
 					continue
 				}
 				if variant.mode == "compact" && index < 2 {
-					awaitCompactHidden(t, probe, stream, int32(index+1), marker)
+					awaitCompactPreview(t, probe, stream, int32(index+1), marker)
 					continue
 				}
 				deadline := time.NewTimer(6 * time.Second)
@@ -350,17 +350,18 @@ func TestActualFullTUIMultipleProviderChunks(t *testing.T) {
 	}
 }
 
-// awaitCompactHidden is the compact-Work counterpart of the visibility wait: reasoning chunks
-// are processed by the UI and stay hidden inside the active collapsed Work header until the
-// turn completes. Noncompact variants keep the original visibility wait.
-func awaitCompactHidden(t *testing.T, probe *fullUIFrameProbe, stream *fullUIChunkStream, processed int32, marker string) {
+// awaitCompactPreview is the compact-Work counterpart of the visibility wait: reasoning chunks
+// are processed by the UI and appear in the active collapsed Work preview (the newest reasoning
+// lines), without nested thinking headers. Noncompact variants keep the original visibility wait.
+func awaitCompactPreview(t *testing.T, probe *fullUIFrameProbe, stream *fullUIChunkStream, processed int32, marker string) {
 	t.Helper()
 	deadline := time.NewTimer(6 * time.Second)
 	defer deadline.Stop()
 	for {
 		frame := probe.lastFrame()
-		if probe.chunks.Load() >= processed && strings.Contains(frame, "Working [+]") {
-			require.NotContains(t, frame, marker, "reasoning chunk must stay inside the collapsed Work group")
+		if probe.chunks.Load() >= processed && strings.Contains(frame, "Working [+]") && strings.Contains(frame, marker) {
+			require.Contains(t, frame, marker, "reasoning chunk must appear in the collapsed Work preview")
+			require.NotContains(t, frame, "Thinking", "collapsed Work shows reasoning lines, not nested thinking headers")
 			require.False(t, probe.stopped.Load(), "chunk must be processed before stream completion")
 			return
 		}

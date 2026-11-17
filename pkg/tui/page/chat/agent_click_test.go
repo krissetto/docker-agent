@@ -11,28 +11,14 @@ import (
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 )
 
-func TestAgentClickCmd_LeftClickSwitches(t *testing.T) {
+func TestAgentClickCmd_LeftClickOpensPicker(t *testing.T) {
 	t.Parallel()
-
-	cmd := (&chatPage{}).agentClickCmd("helper", tea.MouseLeft, 0)
-	require.NotNil(t, cmd)
-
-	msg, ok := cmd().(msgtypes.SwitchAgentMsg)
-	require.True(t, ok, "a plain left-click switches to the agent")
-	assert.Equal(t, "helper", msg.AgentName)
-}
-
-// TestAgentClickCmd_LeftClickOnCurrentAgentStillSwitches documents the routing
-// change: left-click now always switches, even on the already-current agent (a
-// harmless no-op switch). Details are reached via right-click / Ctrl+click.
-func TestAgentClickCmd_LeftClickOnCurrentAgentStillSwitches(t *testing.T) {
-	t.Parallel()
-
-	cmd := (&chatPage{}).agentClickCmd("root", tea.MouseLeft, 0)
-	require.NotNil(t, cmd)
-
-	_, ok := cmd().(msgtypes.SwitchAgentMsg)
-	assert.True(t, ok, "left-click always switches, never opens details")
+	for _, name := range []string{"helper", "root"} {
+		cmd := (&chatPage{}).agentClickCmd(name, tea.MouseLeft, 0)
+		require.NotNil(t, cmd)
+		_, ok := cmd().(msgtypes.OpenAgentPickerMsg)
+		assert.True(t, ok)
+	}
 }
 
 func TestAgentClickCmd_RightClickOpensDetails(t *testing.T) {

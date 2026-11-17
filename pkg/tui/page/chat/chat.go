@@ -229,6 +229,8 @@ type chatPage struct {
 	working                   bool
 	leanMode                  bool
 	compactWorkLog            bool
+	scrollOnSend              bool
+	scrolledSends             map[string]bool
 	visibleReplies            msgtypes.VisibleReplies
 	rootScrollbarsActive      bool
 	mainContentInset          int
@@ -261,6 +263,9 @@ type chatPage struct {
 	ownedSkillStream    bool
 	teamAgentNames      []string // last team roster; a change re-renders cached messages with fresh agent colors
 	streamStartTime     time.Time
+	// pendingInteractions are the human interactions blocking the root turn,
+	// keyed by session and interaction ID, with the Work label they imply.
+	pendingInteractions map[lifecycle.InteractionKey]string
 	contentSessionID    string
 	contentIdentity     streamcontent.Tracker
 
@@ -496,6 +501,7 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 	if p.toolRenderers != nil {
 		p.messages.SetToolRenderers(p.toolRenderers)
 	}
+	p.SetScrollOnSend(p.scrollOnSend)
 	if compact, ok := p.messages.(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
 		compact.SetCompactWorkLog(p.compactWorkLog && !p.leanMode)
 	}
@@ -523,6 +529,11 @@ func WithLeanMode() PageOption {
 	return func(p *chatPage) {
 		p.leanMode = true
 	}
+}
+
+// WithScrollOnSend enables reply room for immediately accepted local new turns.
+func WithScrollOnSend(enabled bool) PageOption {
+	return func(p *chatPage) { p.scrollOnSend = enabled }
 }
 
 // WithCompactWorkLog selects the grouped transcript presentation. Lean pages
@@ -930,6 +941,10 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		return p, nil
 
+	case localSendAcceptedMsg:
+		p.scrollToAcceptedSend(msg)
+		return p, nil
+
 	case steerSentMsg:
 		return p, notification.InfoCmd("Message steered into the working agent")
 
@@ -1171,6 +1186,14 @@ func (p *chatPage) renderSidebarHandle(height int) string {
 // SetAgentContextReadings toggles the sidebar's per-agent context readings.
 func (p *chatPage) SetAgentContextReadings(enabled bool) {
 	p.sidebar.SetAgentContextReadings(enabled)
+}
+
+// SetScrollOnSend updates the local-send viewport preference without scrolling history.
+func (p *chatPage) SetScrollOnSend(enabled bool) {
+	p.scrollOnSend = enabled
+	if owner, ok := p.messages.(interface{ SetScrollOnSend(bool) }); ok {
+		owner.SetScrollOnSend(enabled)
+	}
 }
 
 // SetCompactWorkLog toggles grouped transcript presentation; lean mode always disables it.
@@ -1731,6 +1754,7 @@ func (p *chatPage) processResolvedMessage(input resolvedSend) tea.Cmd {
 	var ctx context.Context
 	ctx, p.msgCancel = context.WithCancel(p.ctx())
 
+	scrollOnSend := p.scrollOnSend && !p.working
 	// Start working state immediately to show the user something is happening.
 	// This provides visual feedback while the runtime loads tools and prepares the stream.
 	spinnerCmd := p.setWorking(true)
@@ -1745,7 +1769,17 @@ func (p *chatPage) processResolvedMessage(input resolvedSend) tea.Cmd {
 	}
 
 	// Run the already-resolved input; no second discovery occurs here.
-	go p.app.Run(ctx, p.msgCancel, resolved.Content, msg.Attachments)
+	scope, application, cancel := p.inputScope, p.app, p.msgCancel
+	go func() {
+		submission, err := application.RunWithSubmission(ctx, cancel, resolved.Content, msg.Attachments)
+		if err != nil {
+			application.SendPresentationEvent(ctx, runtime.Error(err.Error()))
+			return
+		}
+		if scrollOnSend && scope.live() {
+			application.SendPresentationEvent(ctx, localSendAcceptedMsg{inputResult: inputResult{scope}, submission: submission})
+		}
+	}()
 
 	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, loadingCmd)
 }

@@ -91,6 +91,7 @@ type appModel struct {
 	// toolRenderers is this application's own registry; embedders register into it.
 	toolRenderers      *tool.Registry
 	treeAttention      map[string][]app.TreeAttention // per routed owner; union drives notices and /attention
+	treeAttentionSeen  map[string]struct{}            // real occurrences already observed during this UI lifetime
 	metadataGeneration uint64
 	metadataApp        *app.App
 	metadataSessionID  string
@@ -260,6 +261,9 @@ type appModel struct {
 	panePicker               *panePickerRequest
 	hostedLoad               *hostedLoadRequest
 	opening                  *sessionOpening
+	openingSeq               uint64
+	openingNotices           []tea.Cmd
+	retainedOpeningInput     map[string]string
 	legacyPresentationOnly   bool
 	compatScope              *supervisor.ViewOwnerScope
 	compatResolve            func(context.Context, string) (supervisor.ViewOwnerIdentity, error)
@@ -466,6 +470,7 @@ type appModel struct {
 	// conversation. Shared by every tab and managed via /settings.
 	showBanner     bool
 	compactWorkLog bool
+	scrollOnSend   bool
 	// agentContextReadings shows each sidebar agent's context fill. Managed via /settings.
 	agentContextReadings bool
 	visibleReplies       messages.VisibleReplies
@@ -757,6 +762,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		gitDiffSplit:                  messages.ParseGitDiffLayout(userSettings.GetGitDiffLayout()) == messages.GitDiffSplit,
 		showBanner:                    userSettings.GetShowBanner(),
 		compactWorkLog:                userSettings.GetCompactWorkLog(),
+		scrollOnSend:                  userSettings.GetScrollOnSend(),
 		agentContextReadings:          userSettings.GetShowAgentContext(),
 		visibleReplies:                messages.ParseVisibleReplies(userSettings.GetVisibleReplies()),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
@@ -953,6 +959,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithSendMode(m.sendMode),
 		chat.WithShowBanner(m.showBanner),
 		chat.WithCompactWorkLog(m.compactWorkLog),
+		chat.WithScrollOnSend(m.scrollOnSend),
 		chat.WithAgentContextReadings(m.agentContextReadings),
 		chat.WithVisibleReplies(m.visibleReplies),
 	}
@@ -1007,6 +1014,10 @@ func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *sessi
 		opts = append(opts, editor.WithReadOnly())
 	}
 	ed := editor.New(m.history, opts...)
+	if text := m.retainedOpeningInput[tabID]; text != "" {
+		ed.SetValue(text)
+		delete(m.retainedOpeningInput, tabID)
+	}
 	m.chatPages[tabID], m.sessionStates[tabID], m.editors[tabID] = cp, ss, ed
 }
 
@@ -1124,6 +1135,9 @@ func (m *appModel) init() tea.Cmd {
 // even on pointer-wrapper and other early returns.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.updateWithLifecycle(msg)
+	if notices := m.takeOpeningNotices(); len(notices) > 0 {
+		cmd = tea.Batch(append([]tea.Cmd{cmd}, notices...)...)
+	}
 	cmd = tea.Batch(cmd, m.preparePanel(), m.prepareCommandMetadata())
 	m.syncNotificationAvoidance()
 	if m.ar != nil {
@@ -1895,6 +1909,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetValue(msg.Content)
 		return m, m.focusReviewComposer()
 
+	case openingInputReplayMsg:
+		return m.handleOpeningInputReplay(msg)
+
 	case messages.SendMsg:
 		// Forward send messages to the active content view.
 		if m.history != nil && !msg.BypassQueue {
@@ -1912,6 +1929,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, notification.SuccessCmd("File attached: " + msg.FilePath)
 
 	// --- Agent management ---
+
+	case messages.OpenAgentPickerMsg:
+		return m.handleOpenAgentPicker()
+
+	case messages.NewAgentSessionMsg:
+		return m.handleNewAgentSession(msg)
 
 	case messages.SwitchAgentMsg:
 		return m.handleSwitchAgent(msg.AgentName)
@@ -3895,11 +3918,6 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		}
 		return m.forwardChat(msg)
 
-	default:
-		// Handle ctrl+1 through ctrl+9 for quick agent switching
-		if index := parseCtrlNumberKey(msg); index >= 0 {
-			return m.handleSwitchToAgentByIndex(index)
-		}
 	}
 
 	// Focus-based routing
@@ -3911,36 +3929,6 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	}
 
 	return m, nil
-}
-
-// lockModifiers are the keyboard lock states (Caps/Num/Scroll Lock). They ride
-// along in a key event's modifier set under the Kitty protocol but must be
-// ignored when matching shortcuts, since whether Caps Lock is on has no bearing
-// on whether the user pressed ctrl+1.
-const lockModifiers = tea.ModCapsLock | tea.ModNumLock | tea.ModScrollLock
-
-// parseCtrlNumberKey checks if msg is ctrl+1 through ctrl+9 and returns the index (0-8), or -1 if not matched.
-//
-// It inspects the key's modifiers and code directly rather than msg.String():
-// terminals with keyboard enhancements (e.g. the Kitty protocol) populate the
-// key's Text field, which makes String() return the bare digit ("1") instead of
-// "ctrl+1", silently breaking string-based matching.
-func parseCtrlNumberKey(msg tea.KeyPressMsg) int {
-	// Require Ctrl and no other active modifier. Lock states (Caps/Num/Scroll)
-	// are masked out first so the shortcut still fires when, e.g., Caps Lock is on.
-	if msg.Mod&^lockModifiers != tea.ModCtrl {
-		return -1
-	}
-	// Prefer BaseCode (the PC-101 layout key) when present so the shortcut
-	// works on international keyboards; fall back to Code otherwise.
-	code := msg.Code
-	if msg.BaseCode != 0 {
-		code = msg.BaseCode
-	}
-	if code >= '1' && code <= '9' {
-		return int(code - '1')
-	}
-	return -1
 }
 
 // switchFocus toggles between content and editor panels.

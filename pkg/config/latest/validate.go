@@ -59,11 +59,17 @@ func (t *Config) Validate() error {
 		}
 	}
 	for name, p := range t.Providers {
+		if _, ok := p.ProviderOpts["image_generation"]; ok {
+			return fmt.Errorf("providers.%s.provider_opts.image_generation is unsupported; configure image_generation on the model", name)
+		}
 		if err := p.Auth.Validate(p.Provider); err != nil {
 			return fmt.Errorf("providers.%s: %w", name, err)
 		}
 	}
 	for name, m := range t.Models {
+		if err := m.ValidateImageGeneration(t.Providers); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
+		}
 		if err := m.validateFirstAvailable(); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
@@ -71,6 +77,9 @@ func (t *Config) Validate() error {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
 		if err := m.Cost.validate(); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
+		}
+		if err := m.validateContextWindow(); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
 		if err := m.Auth.Validate(EffectiveProviderType(m, t.Providers)); err != nil {
@@ -104,6 +113,15 @@ func (t *Config) Validate() error {
 
 	for i := range t.Agents {
 		agent := &t.Agents[i]
+		if model, ok := t.Models[agent.Model]; ok {
+			imageOnly := model.IsImageOnly()
+			if provider, ok := t.Providers[model.Provider]; ok && model.ProviderOpts["api_type"] == nil {
+				imageOnly = provider.APIType == "openai_images"
+			}
+			if imageOnly && (len(agent.Toolsets) > 0 || len(agent.UseToolsets) > 0 || agent.StructuredOutput != nil) {
+				return fmt.Errorf("agents.%s: openai_images requires no toolsets or structured_output", agent.Name)
+			}
+		}
 
 		// Validate fallback config
 		if err := agent.validateFallback(); err != nil {
@@ -200,6 +218,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.BypassModelsGateway {
 		return errors.New("first_available cannot be combined with bypass_models_gateway (set it on the candidate models instead)")
 	}
+	if m.ImageGeneration != nil {
+		return errors.New("first_available cannot be combined with image_generation (set it on candidate models instead)")
+	}
 	if len(m.ProviderOpts) > 0 {
 		return errors.New("first_available cannot be combined with provider_opts")
 	}
@@ -233,6 +254,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
 	}
+	if m.ContextWindow != nil {
+		return errors.New("first_available cannot be combined with context_window (set it on the candidate models instead)")
+	}
 	if m.OutputCapabilities != nil {
 		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
 	}
@@ -240,6 +264,13 @@ func (m *ModelConfig) validateFirstAvailable() error {
 		if strings.TrimSpace(ref) == "" {
 			return fmt.Errorf("first_available[%d] must not be empty", i)
 		}
+	}
+	return nil
+}
+
+func (m *ModelConfig) validateContextWindow() error {
+	if m.ContextWindow != nil && *m.ContextWindow <= 0 {
+		return fmt.Errorf("context_window must be greater than 0, got %d", *m.ContextWindow)
 	}
 	return nil
 }

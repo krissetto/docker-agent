@@ -71,7 +71,7 @@ func agentCard(m *model, name string) []string {
 }
 
 // agentLines returns the first two ANSI-stripped content lines owned by the
-// named agent: line1 (name + shortcut) and line2 (provider/model).
+// named agent: line1 (name) and line2 (provider/model).
 func agentLines(m *model, name string) (line1, line2 string) {
 	card := agentCard(m, name)
 	switch len(card) {
@@ -116,7 +116,7 @@ func TestClassifyThinking(t *testing.T) {
 }
 
 // TestAgentEntryLayout verifies an agent renders as a labeled mini-card:
-// line 1 carries the name and "^N" shortcut (no description), line 2 the
+// line 1 carries the name (no description), line 2 the
 // provider/model, and the metric lines the labeled effort gauge, context and
 // cost. Rendered wide enough (56) for the full metric vocabulary.
 func TestAgentEntryLayout(t *testing.T) {
@@ -129,7 +129,6 @@ func TestAgentEntryLayout(t *testing.T) {
 	line1, line2 := agentLines(m, "root")
 	require.NotEmpty(t, line1)
 	assert.Contains(t, line1, "root", "line 1 shows the agent name")
-	assert.Contains(t, line1, "^1", "line 1 shows the switch shortcut")
 	assert.NotContains(t, line1, "Executive assistant", "description is not shown")
 	assert.Contains(t, line2, "anthropic/claude-opus-4-8", "line 2 shows the provider/model")
 
@@ -176,49 +175,6 @@ func TestCurrentAgentMarker(t *testing.T) {
 		assert.GreaterOrEqualf(t, counts[name], 3, "agent %q renders at least name, model and one metric line", name)
 	}
 	assert.Positive(t, blanks, "entries are separated by blank, unowned lines")
-}
-
-// TestShortcutAtRightmost verifies the "^N" shortcut is the last visible content
-// on the name line: nothing is rendered to the right of it.
-func TestShortcutAtRightmost(t *testing.T) {
-	t.Parallel()
-
-	m := newAgentPanelSidebar(t, 40,
-		runtime.AgentDetails{Name: "root", Provider: "anthropic", Model: "opus", Thinking: "high"},
-		runtime.AgentDetails{Name: "alpha", Provider: "openai", Model: "gpt-5.4-mini", Thinking: "8192"},
-	)
-
-	for _, name := range []string{"root", "alpha"} {
-		line1, _ := agentLines(m, name)
-		line := strings.TrimRight(line1, " ")
-		require.NotEmpty(t, line)
-		assert.Truef(t, strings.HasSuffix(line, "^1") || strings.HasSuffix(line, "^2"),
-			"line for %q must end with its shortcut, got %q", name, line)
-	}
-}
-
-// TestShortcutColumnAlignment verifies the shortcuts align at a single right
-// column across name lines regardless of name length or badge width.
-func TestShortcutColumnAlignment(t *testing.T) {
-	t.Parallel()
-
-	m := newAgentPanelSidebar(t, 40,
-		runtime.AgentDetails{Name: "root", Provider: "anthropic", Model: "opus", Thinking: "high"},
-		runtime.AgentDetails{Name: "a", Provider: "openai", Model: "gpt-4o", Thinking: "off"},
-		runtime.AgentDetails{Name: "longer-name", Provider: "openai", Model: "gpt-5.4", Thinking: "8192"},
-	)
-
-	end := -1
-	for _, name := range []string{"root", "a", "longer-name"} {
-		line1, _ := agentLines(m, name)
-		line := strings.TrimRight(line1, " ")
-		w := len([]rune(line))
-		if end == -1 {
-			end = w
-		} else {
-			assert.Equalf(t, end, w, "shortcuts for %q must end in a single column", name)
-		}
-	}
 }
 
 // TestEffortVocabularyOnCard verifies the effort vocabulary renders on the
@@ -268,29 +224,6 @@ func TestModelLineLeftTruncated(t *testing.T) {
 	require.NotEmpty(t, line2)
 	assert.Contains(t, line2, "…", "overflowing model is left-truncated with an ellipsis")
 	assert.Contains(t, line2, "-4-6", "informative model tail survives left-truncation")
-}
-
-// TestMoreThanNineAgentsNoShortcutBeyond9 verifies agents past the 9th get no
-// "^N" shortcut hint.
-func TestMoreThanNineAgentsNoShortcutBeyond9(t *testing.T) {
-	t.Parallel()
-
-	agents := []runtime.AgentDetails{
-		{Name: "root", Provider: "anthropic", Model: "opus", Thinking: "high"},
-	}
-	for i := 2; i <= 12; i++ {
-		agents = append(agents, runtime.AgentDetails{
-			Name:     "agent" + string(rune('a'+i)),
-			Provider: "openai",
-			Model:    "gpt-4o",
-			Thinking: "off",
-		})
-	}
-	m := newAgentPanelSidebar(t, 40, agents...)
-
-	body := strings.Join(renderAgentPanel(m), "\n")
-	assert.Contains(t, body, "^9", "the 9th agent keeps its shortcut")
-	assert.NotContains(t, body, "^10", "agents beyond the 9th have no shortcut")
 }
 
 // TestDetailedCardWidthThreshold pins the adaptive compact/wide boundary of

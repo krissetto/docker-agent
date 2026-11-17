@@ -225,7 +225,7 @@ func (m *appModel) updateReviewCommentKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			return true, m.finishReviewComment(true)
 		}
 		return true, nil
-	case "ctrl+n", "ctrl+p", "ctrl+t", "ctrl+w", "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9":
+	case "ctrl+n", "ctrl+p", "ctrl+t", "ctrl+w":
 		return true, nil
 	default:
 		cmd := m.updateEditorCmd(msg)

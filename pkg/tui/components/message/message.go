@@ -212,8 +212,7 @@ func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
 // Pending messages retain the same spinner instance across visibility changes.
 func (mv *messageModel) syncSpinner() {
 	msg := mv.message
-	needed := msg != nil && (msg.Type == types.MessageTypeSpinner || msg.Type == types.MessageTypeLoading ||
-		(msg.Type == types.MessageTypeAssistant && msg.Content == "" && len(msg.AssistantMedia) == 0))
+	needed := msg != nil && (msg.Type == types.MessageTypeSpinner || msg.Type == types.MessageTypeLoading)
 	if needed {
 		mv.ensureSpinner()
 	} else if mv.spinner != nil {
@@ -528,7 +527,7 @@ func (mv *messageModel) replyHeader(width int) string {
 		icon = styles.ToolPendingIcon.Render("○")
 		status = "accepted · awaiting consumption"
 	}
-	if mv.message.Type == types.MessageTypeRuntimeNotice && !mv.message.Pending {
+	if mv.message.Type == types.MessageTypeRuntimeNotice && (!mv.message.Pending || mv.message.SenderID == "") {
 		return subagenttool.RuntimeNoticeHeader(mv.message, mv.disclosure.Chevron(), width)
 	}
 	return mv.disclosure.Header(icon+" From ", ref, " "+status, width)
@@ -586,6 +585,10 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 		return AssistantSegments{}, false
 	}
 	mv.ensureTheme()
+	if mv.message.PresentationHidden() {
+		mv.codeBlocks = nil
+		return AssistantSegments{}, true
+	}
 	if mv.finalized {
 		defer func() {
 			mv.mdRenderer = nil
@@ -681,8 +684,8 @@ func (mv *messageModel) Render(width int) string {
 	mv.ensureTheme()
 	msg := mv.message
 
-	// Spinner-driven types (MessageTypeSpinner, MessageTypeLoading, and an empty
-	// MessageTypeAssistant placeholder) animate on every tick, so the result is
+	// Spinner-driven types (MessageTypeSpinner and MessageTypeLoading)
+	// animate on every tick, so the result is
 	// not cacheable. Everything else is a pure function of the inputs tracked in
 	// renderCache below.
 	// Finalized messages skip writing into renderCache so the per-view
@@ -750,8 +753,6 @@ func (mv *messageModel) isSpinnerDriven() bool {
 	switch mv.message.Type {
 	case types.MessageTypeSpinner, types.MessageTypeLoading:
 		return true
-	case types.MessageTypeAssistant:
-		return mv.message.InputOrigin != session.InputOriginAgent && mv.message.Content == "" && len(mv.message.AssistantMedia) == 0
 	}
 	return false
 }
@@ -773,6 +774,10 @@ func formatReferenceContent(content string, expanded bool) string {
 func (mv *messageModel) render(width int) string {
 	msg := mv.message
 	mv.attachmentRows = nil
+	if msg.PresentationHidden() {
+		mv.codeBlocks = nil
+		return ""
+	}
 	if mv.isAgentMessage() {
 		header := mv.replyHeader(width)
 		if !mv.disclosure.Visible() {
@@ -880,10 +885,6 @@ func (mv *messageModel) render(width int) string {
 		}
 		return rendered
 	case types.MessageTypeAssistant:
-		if msg.Content == "" && len(msg.AssistantMedia) == 0 {
-			return mv.ensureSpinner().View()
-		}
-
 		messageStyle := styles.AssistantMessageStyle
 		if mv.selected {
 			messageStyle = styles.SelectedMessageStyle
@@ -1207,6 +1208,9 @@ func (mv *messageModel) sameAgentAsPrevious(msg *types.Message) bool {
 // invoked for the same inputs.
 func (mv *messageModel) Height(width int) int {
 	content := mv.Render(width)
+	if content == "" {
+		return 0
+	}
 	return strings.Count(content, "\n") + 1
 }
 

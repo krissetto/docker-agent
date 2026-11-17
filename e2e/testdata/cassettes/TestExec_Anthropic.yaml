@@ -8,7 +8,7 @@ interactions:
         proto_minor: 1
         content_length: 0
         host: api.anthropic.com
-        body: '{"max_tokens":64000,"messages":[{"content":[{"text":"What''s 2+2?","cache_control":{"type":"ephemeral"},"type":"text"}],"role":"user"}],"model":"claude-sonnet-4-0","system":[{"text":"You are a knowledgeable assistant that helps users with various tasks.\nBe helpful, accurate, and concise in your responses.","cache_control":{"type":"ephemeral"},"type":"text"}],"tools":[],"stream":true}'
+        body: '{"max_tokens":64000,"messages":[{"content":[{"text":"What''s 2+2?","cache_control":{"type":"ephemeral"},"type":"text"}],"role":"user"}],"model":"claude-sonnet-4-0","system":[{"text":"Keep replies short and friendly, with the detail that matters. Skip routine progress, recaps, and roleplay.\n\nFollow the user''s requirements and safety boundaries. Never expose, repeat, log, or report secrets, and take no external or destructive action without authorization. Work within the requested scope, and ask before a meaningful change of scope.\n\nReviews happen only when the user explicitly asks for one.","type":"text"},{"text":"You are a knowledgeable assistant that helps users with various tasks.\nBe helpful, accurate, and concise in your responses.","cache_control":{"type":"ephemeral"},"type":"text"}],"tools":[],"stream":true}'
         url: https://api.anthropic.com/v1/messages
         method: POST
       response:

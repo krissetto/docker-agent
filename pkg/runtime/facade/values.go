@@ -94,6 +94,7 @@ type TreeNode struct {
 	State          string
 	NeedsAttention bool
 	WaitingOn      string
+	AttentionID    string
 	Error          string
 	Children       []TreeNode
 }

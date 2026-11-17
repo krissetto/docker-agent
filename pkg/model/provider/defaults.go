@@ -128,7 +128,7 @@ func defaultOpenAIAPIType(model string) string {
 // isOpenAICompatibleProvider returns true if the provider type uses the OpenAI API protocol.
 func isOpenAICompatibleProvider(providerType string) bool {
 	switch providerType {
-	case "openai", "openai_chatcompletions", "openai_responses":
+	case "openai", "openai_chatcompletions", "openai_responses", "openai_images":
 		return true
 	}
 	// Otherwise, the type is OpenAI-compatible iff it's an alias that maps to OpenAI.
@@ -220,6 +220,9 @@ func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig)
 	// we deliberately do not merge field-by-field across the levels.
 	setIfNil(&dst.Auth, src.Auth)
 
+	if src.APIType != "" {
+		setProviderOptIfAbsent(dst, "api_type", src.APIType)
+	}
 	// Merge provider_opts from provider config (model opts take precedence).
 	for k, v := range src.ProviderOpts {
 		setProviderOptIfAbsent(dst, k, v)
@@ -231,6 +234,8 @@ func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig)
 	switch {
 	case src.APIType != "":
 		setProviderOptIfAbsent(dst, "api_type", src.APIType)
+	case resolveEffectiveProvider(src) == "openai" && dst.ExplicitImageOutputEnabled():
+		setProviderOptIfAbsent(dst, "api_type", "openai_responses")
 	case isOpenAICompatibleProvider(resolveEffectiveProvider(src)):
 		setProviderOptIfAbsent(dst, "api_type", defaultOpenAIAPIType(dst.Model))
 	}

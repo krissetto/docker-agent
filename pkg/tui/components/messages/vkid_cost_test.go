@@ -185,7 +185,8 @@ func TestVKIDUnindexedProjectionMatchesCanonicalExchanges(t *testing.T) {
 }
 
 // AST guard: the unindexed projection is called only from SetWorkStatus, and only
-// into a local variable. Nothing can store or publish it.
+// into a local variable. Nothing can store or publish it. Settled labels no longer
+// need it, so it must not be called at all.
 func TestVKIDUnindexedProjectionStaysLocal(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
@@ -240,7 +241,7 @@ func TestVKIDUnindexedProjectionStaysLocal(t *testing.T) {
 			})
 		}
 	}
-	require.Equal(t, 1, localCalls, "exactly one unindexed projection call, in SetWorkStatus")
+	require.Zero(t, localCalls, "settled durations come from turn timing, so no unindexed projection is needed")
 	require.Equal(t, 0, indexedOutside, "projectWorkWith(..., true) may only be the canonical wrapper")
 }
 

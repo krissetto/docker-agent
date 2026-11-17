@@ -128,22 +128,6 @@ func TestActiveAgentsOnly_TransferParticipantsVisibleWhileRelevant(t *testing.T)
 		"once the presentation clears, an evidence-less participant drops off")
 }
 
-// TestActiveAgentsOnly_PreservesShortcutIndices verifies a filtered roster
-// keeps each agent's original team index for the ^N switch shortcut, so the
-// shortcuts keep addressing the same team positions.
-func TestActiveAgentsOnly_PreservesShortcutIndices(t *testing.T) {
-	t.Parallel()
-
-	m := newCompactPanelSidebar(t, 40, activeAgentsRoster()...)
-	recordAgentUsageWithCost(m, "s-reviewer", "reviewer", 10_000, 100_000, 0.01)
-	m.SetActiveAgentsOnly(true)
-
-	require.Equal(t, []string{"root", "reviewer"}, rosterOwners(m))
-	line1, _ := agentLines(m, "reviewer")
-	assert.Contains(t, line1, "^3", "reviewer keeps its original team shortcut")
-	assert.NotContains(t, line1, "^2")
-}
-
 // TestActiveAgentsOnly_CollapsedBandFiltered verifies the top/bottom band's
 // agent summary honors the filter like the vertical panel.
 func TestActiveAgentsOnly_CollapsedBandFiltered(t *testing.T) {

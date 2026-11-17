@@ -4,11 +4,18 @@ import "github.com/docker/docker-agent/pkg/runtime"
 
 // Agent messages control agent switching, commands, and model selection.
 type (
+	OpenAgentPickerMsg struct{}
+
+	NewAgentSessionMsg struct {
+		AgentName  string
+		WorkingDir string
+	}
+
 	// SwitchAgentMsg switches to a different agent.
 	SwitchAgentMsg struct{ AgentName string }
 
 	// ShowAgentDetailsMsg opens the read-only agent-details dialog for the
-	// named agent (clicking the current agent's card or Ctrl+clicking any agent).
+	// named agent (right-clicking or Ctrl+clicking any agent).
 	// SessionID, when set, selects that session's usage and cost (a subagent row);
 	// empty keeps the agent-name fallback for agent cards.
 	ShowAgentDetailsMsg struct {

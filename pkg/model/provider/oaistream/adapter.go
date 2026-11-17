@@ -6,7 +6,10 @@ This is a shared adapter for OpenAI-compatible streams.
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/ssestream"
@@ -17,18 +20,20 @@ import (
 
 // StreamAdapter adapts the OpenAI stream to our interface
 type StreamAdapter struct {
-	stream           *ssestream.Stream[openai.ChatCompletionChunk]
-	lastFinishReason chat.FinishReason
-	toolCalls        map[int]string
-	trackUsage       bool
-	serviceTier      string
+	stream             *ssestream.Stream[openai.ChatCompletionChunk]
+	lastFinishReason   chat.FinishReason
+	toolCalls          map[int]string
+	trackUsage         bool
+	serviceTier        string
+	imageOutputEnabled bool
 }
 
-func NewStreamAdapter(stream *ssestream.Stream[openai.ChatCompletionChunk], trackUsage bool) *StreamAdapter {
+func NewStreamAdapter(stream *ssestream.Stream[openai.ChatCompletionChunk], trackUsage bool, imageOutput ...bool) *StreamAdapter {
 	return &StreamAdapter{
-		stream:     stream,
-		toolCalls:  make(map[int]string),
-		trackUsage: trackUsage,
+		stream:             stream,
+		toolCalls:          make(map[int]string),
+		trackUsage:         trackUsage,
+		imageOutputEnabled: len(imageOutput) > 0 && imageOutput[0],
 	}
 }
 
@@ -106,6 +111,28 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 				Content:          choice.Delta.Content,
 				ReasoningContent: reasoningContent,
 			},
+		}
+
+		// OpenRouter-compatible image output is an array of inline image URLs.
+		if field, ok := choice.Delta.JSON.ExtraFields["images"]; ok && a.imageOutputEnabled {
+			var images []struct {
+				ImageURL struct {
+					URL string `json:"url"`
+				} `json:"image_url"`
+			}
+			if err := json.Unmarshal([]byte(field.Raw()), &images); err != nil {
+				return chat.MessageStreamResponse{}, fmt.Errorf("invalid chat image output: %w", err)
+			}
+			for _, image := range images {
+				if !strings.HasPrefix(image.ImageURL.URL, "data:") {
+					return chat.MessageStreamResponse{}, errors.New("chat image output requires inline image data URLs")
+				}
+				media, err := DecodeImage(image.ImageURL.URL)
+				if err != nil {
+					return chat.MessageStreamResponse{}, err
+				}
+				response.Choices[i].Delta.Media = append(response.Choices[i].Delta.Media, media)
+			}
 		}
 
 		// Convert function call if present

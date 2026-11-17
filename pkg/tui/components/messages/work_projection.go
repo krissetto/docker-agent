@@ -2,7 +2,6 @@ package messages
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/docker/docker-agent/pkg/session"
 	tuimessages "github.com/docker/docker-agent/pkg/tui/messages"
@@ -118,7 +117,7 @@ func projectWork(messages []*types.Message, responseGroups map[*types.Message]ui
 	}
 
 	for i, msg := range messages {
-		if msg == nil {
+		if msg == nil || msg.PresentationHidden() {
 			continue
 		}
 		if msg.Type == types.MessageTypeUser {
@@ -170,14 +169,14 @@ func projectWork(messages []*types.Message, responseGroups map[*types.Message]ui
 // a non-pending human, incoming-agent input, or assistant reply with prose.
 // Pending receipts, runtime notices, and empty assistant prefixes never qualify.
 func sessionOpenerEligible(msg *types.Message) bool {
-	if msg == nil || msg.Pending {
+	if msg == nil || msg.Pending || msg.PresentationHidden() {
 		return false
 	}
 	switch msg.Type {
 	case types.MessageTypeUser, types.MessageTypeAgentInput:
 		return true
 	case types.MessageTypeAssistant:
-		return strings.TrimSpace(msg.Content) != ""
+		return types.HasVisibleProse(msg.Content)
 	}
 	return false
 }
@@ -276,7 +275,7 @@ func projectWorkWith(messages []*types.Message, responseGroups map[*types.Messag
 	}
 
 	for i, msg := range messages {
-		if msg == nil {
+		if msg == nil || msg.PresentationHidden() {
 			continue
 		}
 		if msg.Type == types.MessageTypeUser {
@@ -314,7 +313,7 @@ func projectWorkWith(messages []*types.Message, responseGroups map[*types.Messag
 					groups = append(groups, group)
 				}
 				group.sources = append(group.sources, i)
-				group.hasProse = group.hasProse || strings.TrimSpace(msg.Content) != ""
+				group.hasProse = group.hasProse || types.HasVisibleProse(msg.Content)
 				continue
 			}
 			if fallback == nil {
@@ -322,7 +321,7 @@ func projectWorkWith(messages []*types.Message, responseGroups map[*types.Messag
 				groups = append(groups, fallback)
 			}
 			fallback.sources = append(fallback.sources, i)
-			fallback.hasProse = fallback.hasProse || strings.TrimSpace(msg.Content) != ""
+			fallback.hasProse = fallback.hasProse || types.HasVisibleProse(msg.Content)
 		case types.MessageTypeAssistantReasoningBlock:
 			fallback = nil
 			appendWork(i)

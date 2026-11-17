@@ -29,6 +29,13 @@ func dialogReferenceSections() []help.Section {
 			{ID: "dialog.attachment-preview.scroll-read-only-content", Keys: []string{"up", "k", "down", "j", "pgup", "pgdown", "home", "end", "mouse wheel", "scrollbar click/drag"}, Description: "Scroll read-only content", Condition: "content"},
 			{ID: "dialog.attachment-preview.dismiss", Keys: []string{"esc", "enter", "q"}, Description: "Dismiss", Condition: "content"},
 		}},
+		{ID: "dialog.image-preview", Title: "Image preview", Entries: []help.Entry{
+			{ID: "dialog.image-preview.zoom", Keys: []string{"+", "=", "-", "_", "mouse wheel"}, Description: "Zoom relative to fitted image", Condition: "Image preview; mouse wheel only over the image canvas; zoom bounded to 1–16× fit."},
+			{ID: "dialog.image-preview.fit", Keys: []string{"0", "home"}, Description: "Fit image and center it", Condition: "Image preview"},
+			{ID: "dialog.image-preview.pan", Keys: []string{"left", "h", "right", "l", "up", "k", "down", "j", "image drag"}, Description: "Pan zoomed image", Condition: "Image preview; hold left mouse button on image to drag; edges are clamped."},
+			{ID: "dialog.image-preview.maximize", Keys: []string{"m", "f11"}, Description: "Maximize or restore image preview", Condition: "Image preview; preserves zoom and pan."},
+			{ID: "dialog.image-preview.dismiss", Keys: []string{"esc", "enter", "q"}, Description: "Dismiss", Condition: "Image preview"},
+		}},
 		{ID: "dialog.permissions", Title: "Permissions", Entries: []help.Entry{
 			{ID: "dialog.permissions.scroll-read-only-content", Keys: []string{"up", "k", "down", "j", "pgup", "pgdown", "home", "end", "mouse wheel", "scrollbar click/drag"}, Description: "Scroll read-only content", Condition: "content"},
 			{ID: "dialog.permissions.dismiss", Keys: []string{"esc", "enter", "q"}, Description: "Dismiss", Condition: "content"},

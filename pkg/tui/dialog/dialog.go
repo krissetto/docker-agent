@@ -397,6 +397,10 @@ func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 	u, cmd := d.stack[top].dialog.Update(msg)
 	cmd = tea.Batch(cmd, footerCmd)
 	d.stack[top].dialog = u.(Dialog)
+	if maximized, ok := d.stack[top].dialog.(interface{ DialogMaximized() bool }); ok && maximized.DialogMaximized() {
+		d.stack[top].offsetX, d.stack[top].offsetY = 0, 0
+		d.drag.active = false
+	}
 	switch msg.(type) {
 	case animation.TickMsg, tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
 		// Registered viewports publish actual visual changes below; boundary input stays warm.
@@ -433,6 +437,9 @@ func (d *manager) handleDragStart(x, y int) bool {
 	}
 	top := len(d.stack) - 1
 	e := &d.stack[top]
+	if maximized, ok := e.dialog.(interface{ DialogMaximized() bool }); ok && maximized.DialogMaximized() {
+		return false
+	}
 
 	row, col := e.position(d.width, d.height)
 	row += e.offsetY

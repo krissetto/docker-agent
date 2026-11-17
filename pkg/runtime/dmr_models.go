@@ -9,7 +9,6 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
@@ -226,7 +225,7 @@ func (r *LocalRuntime) populateDMRChoices(ctx context.Context, config *ModelSwit
 			meta = metadata[cfg.Model+":latest"]
 		}
 		applyDMRMetadata(choice, meta)
-		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+		if n := configuredContextWindow(cfg, config.Providers); n > 0 {
 			choice.ContextLimit = int(n)
 		}
 	}

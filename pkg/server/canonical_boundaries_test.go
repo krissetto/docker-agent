@@ -49,7 +49,7 @@ func newCanonicalLocalServer(t *testing.T, store session.Store, agents ...*agent
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(owner.Runtime()))
-	return NewWithManager(sm, ""), owner
+	return NewWithManager(sm, "", WithCacheWarmup(false)), owner
 }
 
 func TestCanonicalAuthorSafetyDefaultConsumedOnceAcrossAgentSwitch(t *testing.T) {

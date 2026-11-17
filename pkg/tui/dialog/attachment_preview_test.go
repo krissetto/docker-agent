@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/docker/docker-agent/pkg/tui/image"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,4 +197,131 @@ func TestUserImageAttachmentPreviewHonorsGraphicsAndCorruptData(t *testing.T) {
 	bad.SetSize(90, 28)
 	assert.Contains(t, ansi.Strip(bad.View()), "invalid or unsupported")
 	CleanupDialog(bad)
+}
+
+func TestImagePreviewZoomPanMaximizeAndRestore(t *testing.T) {
+	d := NewImageAttachmentPreviewDialog(nil, "photo.png", "image/png", previewPNG(t), true).(*imageAttachmentPreviewDialog)
+	t.Cleanup(d.Cleanup)
+	d.SetSize(100, 40)
+	initialWidth, initialHeight := lipgloss.Width(d.View()), lipgloss.Height(d.View())
+	assert.Equal(t, 90, initialWidth)
+	assert.Equal(t, 36, initialHeight)
+	assert.Contains(t, ansi.Strip(d.View()), "Maximize")
+	assert.Contains(t, ansi.Strip(d.View()), "wheel")
+
+	d.Update(tea.KeyPressMsg{Code: '+'})
+	assert.Greater(t, d.viewport.Zoom, 1.0)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Positive(t, d.viewport.PanX)
+	assert.Positive(t, d.viewport.PanY)
+	assert.Equal(t, initialWidth, lipgloss.Width(d.View()))
+	assert.Equal(t, initialHeight, lipgloss.Height(d.View()), "zoom and pan do not resize the card")
+
+	beforeMaximize := d.viewport
+	d.Update(tea.KeyPressMsg{Code: 'm'})
+	assert.True(t, d.DialogMaximized())
+	assert.Equal(t, 100, lipgloss.Width(d.View()))
+	assert.Equal(t, 40, lipgloss.Height(d.View()))
+	assert.Contains(t, ansi.Strip(d.View()), "Restore")
+	assert.Equal(t, beforeMaximize, d.viewport)
+	d.Update(tea.KeyPressMsg{Code: 'm'})
+	assert.False(t, d.DialogMaximized())
+	assert.Equal(t, initialWidth, lipgloss.Width(d.View()))
+	d.Update(tea.KeyPressMsg{Code: '0'})
+	assert.Equal(t, image.Viewport{Zoom: 1}, d.viewport)
+	for range 100 {
+		d.Update(tea.KeyPressMsg{Code: '+'})
+		d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	}
+	assert.Equal(t, maxImagePreviewZoom, d.viewport.Zoom)
+	assert.Equal(t, 1.0, d.viewport.PanX)
+}
+
+func TestImagePreviewMouseControlsStayInsideCanvasAndRequireHeldDrag(t *testing.T) {
+	d := NewImageAttachmentPreviewDialog(nil, "photo.png", "image/png", previewPNG(t), true).(*imageAttachmentPreviewDialog)
+	t.Cleanup(d.Cleanup)
+	d.SetSize(100, 40)
+	row, col := d.Position()
+	x, y := col+d.imageX+d.imageCols/2, row+d.imageY+d.imageRows/2
+	outside := d.viewport
+	d.Update(tea.MouseWheelMsg{X: 0, Y: 0, Button: tea.MouseWheelUp})
+	assert.Equal(t, outside, d.viewport)
+	d.Update(messages.WheelCoalescedMsg{X: x, Y: row, Delta: -2})
+	assert.Equal(t, outside, d.viewport, "title is not the zoom target")
+	d.Update(tea.MouseWheelMsg{X: x, Y: y, Button: tea.MouseWheelUp})
+	assert.Greater(t, d.viewport.Zoom, 1.0)
+	assert.True(t, d.TakeVisualDirty())
+	d.Update(messages.WheelCoalescedMsg{X: x, Y: y, Delta: -2})
+	assert.Greater(t, d.viewport.Zoom, 1.25)
+
+	d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	d.Update(tea.MouseMotionMsg{X: x - 3, Y: y - 2, Button: tea.MouseLeft})
+	assert.Positive(t, d.viewport.PanX)
+	assert.Positive(t, d.viewport.PanY)
+	afterDrag := d.viewport
+	d.Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	d.Update(tea.MouseMotionMsg{X: x + 5, Y: y + 5, Button: tea.MouseLeft})
+	assert.Equal(t, afterDrag, d.viewport)
+	d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	d.Update(tea.MouseMotionMsg{X: x + 5, Y: y + 5})
+	assert.False(t, d.panning)
+	assert.Equal(t, afterDrag, d.viewport)
+}
+
+func TestImagePreviewFooterHitboxesAndResizeBounds(t *testing.T) {
+	d := NewImageAttachmentPreviewDialog(nil, "photo.png", "image/png", previewPNG(t), true).(*imageAttachmentPreviewDialog)
+	t.Cleanup(d.Cleanup)
+	d.SetSize(100, 40)
+	view := d.View()
+	row, col := d.Position()
+	dl := NewDialogLayout(view, row, col)
+	found := map[rune]bool{}
+	for y := row; y < row+dl.Height; y++ {
+		for x := col; x < col+dl.Width; x++ {
+			if key, hit := d.ActionKeyAt(x, y, dl); hit {
+				found[key.Code] = true
+				assert.False(t, d.imageHit(x, y), "footer buttons never overlap image")
+			}
+		}
+	}
+	for _, code := range []rune{'-', '+', '0', 'm'} {
+		assert.True(t, found[code], "control %q is clickable", code)
+	}
+	d.Update(tea.KeyPressMsg{Code: '+'})
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	state := d.viewport
+	for _, maximized := range []bool{false, true} {
+		d.maximized = maximized
+		for _, size := range [][2]int{{160, 50}, {40, 12}, {10, 7}, {8, 4}, {1, 1}, {100, 40}} {
+			d.SetSize(size[0], size[1])
+			assert.LessOrEqual(t, lipgloss.Width(d.View()), size[0])
+			assert.LessOrEqual(t, lipgloss.Height(d.View()), size[1])
+			assert.Equal(t, state, d.viewport, "terminal resize preserves image navigation")
+		}
+	}
+	d.Cleanup()
+	d.Cleanup()
+	assert.Nil(t, d.preview)
+}
+
+func TestImagePreviewManagerMaximizeClearsDragOffset(t *testing.T) {
+	runtime := newDialogRuntime()
+	mgr := New(runtime).(*manager)
+	t.Cleanup(mgr.Cleanup)
+	mgr.SetSize(100, 40)
+	d := NewImageAttachmentPreviewDialog(nil, "photo.png", "image/png", previewPNG(t), true).(*imageAttachmentPreviewDialog)
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration))
+	mgr.stack[0].offsetX, mgr.stack[0].offsetY = 3, 2
+	mgr.Update(tea.KeyPressMsg{Code: 'm'})
+	assert.Zero(t, mgr.stack[0].offsetX)
+	assert.Zero(t, mgr.stack[0].offsetY)
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogResizeDuration+dialogOpenDuration))
+	row, col := mgr.stack[0].position(100, 40)
+	assert.False(t, mgr.handleDragStart(col+5, row+1), "maximized title cannot move card offscreen")
+	mgr.Update(tea.KeyPressMsg{Code: 'm'})
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogResizeDuration+dialogOpenDuration))
+	row, col = mgr.stack[0].position(100, 40)
+	assert.True(t, mgr.handleDragStart(col+5, row+1), "restored card retains ordinary title dragging")
 }

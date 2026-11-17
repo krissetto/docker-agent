@@ -468,6 +468,13 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		config.ResolveModelAliases(ctx, cfg, modelsStore)
 	}
 
+	if err := config.ValidateContextWindows(cfg); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateContextWindowCaps(ctx, cfg, modelsStore, env); err != nil {
+		return nil, err
+	}
+
 	if err := config.CheckRequiredEnvVars(ctx, cfg, runConfig.ModelsGateway, env); err != nil {
 		return nil, err
 	}
@@ -661,6 +668,9 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 				agent.WithAsyncHarnessPrompt(subagent.HarnessPrompt(allowed)),
 			)
 		}
+		// Every configured agent gets the shared guidance. Session assembly adds it only
+		// to top-level sessions without subagents; children and parents already carry it.
+		opts = append(opts, agent.WithSharedHarnessPrompt(subagent.SharedGuidance()))
 
 		ag := agent.New(agentConfig.Name, expander.Expand(ctx, agentConfig.Instruction, nil), opts...)
 

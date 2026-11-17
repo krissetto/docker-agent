@@ -61,6 +61,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, errors.New("model configuration is required")
 	}
 
+	if err := cfg.ValidateResolvedImageGeneration(); err != nil {
+		return nil, err
+	}
+
 	globalOptions := options.Apply(opts...)
 	resolvedBaseURL := "https://api.openai.com/v1"
 	if globalOptions.Gateway() == "" {
@@ -108,7 +112,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				return nil, fmt.Errorf("%s environment variable is required", tokenKey)
 			}
 			clientOptions = append(clientOptions, option.WithAPIKey(authToken))
-		case isCustomProvider(cfg):
+		case isCustomProvider(cfg) && !usesBuiltinImageAuth(cfg):
 			// Custom provider (has api_type in ProviderOpts) without token_key - no auth
 			slog.DebugContext(ctx, "Custom provider with no token_key, sending requests without authentication",
 				"provider", cfg.Provider, "base_url", cfg.BaseURL)
@@ -324,13 +328,13 @@ func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	return catalog.Lookup(cfg.Provider).MergeConsecutiveMessages
 }
 
-// contextLimit returns this model's context window in tokens, preferring an
-// explicit provider_opts.context_size (authoritative for self-hosted
-// endpoints) and falling back to the models.dev catalogue. It returns 0 when
-// the window cannot be determined, in which case [clampMaxTokens] leaves
-// max_tokens untouched.
+// contextLimit returns this model's context window in tokens, preferring the
+// declared model-level context_window (authoritative for self-hosted endpoints)
+// and falling back to the models.dev catalogue. It returns 0 when the window
+// cannot be determined, in which case [clampMaxTokens] leaves max_tokens
+// untouched.
 func (c *Client) contextLimit(ctx context.Context) int64 {
-	if n := latest.ContextSizeFromProviderOpts(c.ModelConfig.ProviderOpts); n > 0 {
+	if n := c.ModelConfig.DeclaredContextWindow(); n > 0 {
 		return n
 	}
 	return modelinfo.ContextLimit(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), 0)
@@ -379,6 +383,9 @@ func (c *Client) CreateChatCompletionStream(
 	// Check api_type from ProviderOpts to determine which schema to use.
 	// This allows custom providers to explicitly choose the API schema.
 	apiType := getAPIType(&c.ModelConfig)
+	if c.ModelConfig.ExplicitImageOutputEnabled() && apiType == "" && c.ModelConfig.Provider == "openai" {
+		apiType = "openai_responses"
+	}
 
 	// The ChatGPT Codex backend only serves /responses; there is no
 	// chat-completions endpoint to fall back to, so the provider always
@@ -391,6 +398,8 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	switch apiType {
+	case "openai_images":
+		return c.createImageStream(ctx, messages, requestTools)
 	case "openai_responses":
 		// Force Responses API
 		slog.DebugContext(ctx, "Using Responses API", "api_type", apiType, "model", c.ModelConfig.Model)
@@ -571,7 +580,7 @@ func (c *Client) CreateChatCompletionStream(
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "OpenAI chat completion stream created successfully", "model", c.ModelConfig.Model)
-	return newStreamAdapter(stream, trackUsage), nil
+	return oaistream.NewStreamAdapter(stream, trackUsage, c.imageOutputEnabled()), nil
 }
 
 // warnThinkingBudgetIgnored logs, once per client, that a configured and
@@ -745,6 +754,10 @@ func (c *Client) CreateResponseStream(
 				params.ParallelToolCalls = param.NewOpt(*c.ModelConfig.ParallelToolCalls)
 			}
 		}
+	}
+
+	if err := c.addImageGenerationTool(ctx, &params); err != nil {
+		return nil, err
 	}
 
 	// Configure reasoning for models that support it (o-series, gpt-5).
@@ -1392,8 +1405,11 @@ func extractOpenAIContentAsString(msg openai.ChatCompletionMessage) (string, err
 // getAPIType extracts the api_type from ProviderOpts if present.
 // Returns the api_type string or empty string if not set.
 func getAPIType(cfg *latest.ModelConfig) string {
-	if cfg == nil || cfg.ProviderOpts == nil {
+	if cfg == nil {
 		return ""
+	}
+	if cfg.IsImageOnly() {
+		return "openai_images"
 	}
 	if apiType, ok := cfg.ProviderOpts["api_type"].(string); ok {
 		slog.Debug("Using api_type from the provider options set in the model config", "api_type", apiType)

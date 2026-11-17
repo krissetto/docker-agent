@@ -286,6 +286,7 @@ type Preferences struct {
 	GitDiffLayout         GitDiffLayout
 	ExpandThinking        bool
 	CompactWorkLog        bool
+	ScrollOnSend          bool
 	ShowAgentContext      bool
 	VisibleReplies        VisibleReplies
 	HideToolResults       bool

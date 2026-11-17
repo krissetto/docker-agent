@@ -153,6 +153,14 @@ func WithAsyncHarnessPrompt(prompt string) Opt {
 	}
 }
 
+// WithSharedHarnessPrompt sets the team-wide guidance for this agent. Session
+// assembly decides where it is injected.
+func WithSharedHarnessPrompt(prompt string) Opt {
+	return func(a *Agent) {
+		a.sharedHarnessPrompt = prompt
+	}
+}
+
 func WithHandoffs(handoffs ...*Agent) Opt {
 	return func(a *Agent) {
 		a.handoffs = handoffs

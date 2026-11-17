@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -87,6 +88,50 @@ func (r *LocalRuntime) resolveModelProviders(ctx context.Context, agentName, mod
 }
 
 func (r *LocalRuntime) resolveSessionModelBinding(ctx context.Context, sess *session.Session, modelRef string) (string, []provider.Provider, error) {
+	ref, providers, err := r.resolveSessionModelProviders(ctx, sess, modelRef)
+	if err != nil || !r.SupportsModelSwitching() {
+		return ref, providers, err
+	}
+	return ref, r.applyStoredThinkingLevel(ctx, sess, providers), nil
+}
+
+// applyStoredThinkingLevel re-applies the effort the user picked for the
+// session's agent onto freshly built providers. A level the resolved model no
+// longer supports is ignored so the YAML default applies instead.
+func (r *LocalRuntime) applyStoredThinkingLevel(ctx context.Context, sess *session.Session, providers []provider.Provider) []provider.Provider {
+	level := effort.Level(sess.AgentThinkingLevel(sess.AgentName))
+	if level == "" || len(providers) == 0 {
+		return providers
+	}
+	supported, _, err := r.resolveThinkingLevelsForModels(ctx, providers)
+	if err != nil || !slices.Contains(supported, level) {
+		return providers
+	}
+	applied, err := r.withThinkingLevel(ctx, providers, level)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to re-apply stored thinking level; using configured default", "agent", sess.AgentName, "level", level, "error", err)
+		return providers
+	}
+	return applied
+}
+
+// withThinkingLevel re-creates each model with level as its thinking budget.
+func (r *LocalRuntime) withThinkingLevel(ctx context.Context, models []provider.Provider, level effort.Level) ([]provider.Provider, error) {
+	updated := make([]provider.Provider, 0, len(models))
+	for _, model := range models {
+		baseCfg := model.BaseConfig().ModelConfig
+		cfg := baseCfg.Clone()
+		cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: string(level)}
+		p, err := r.createProviderFromConfig(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		updated = append(updated, p)
+	}
+	return updated, nil
+}
+
+func (r *LocalRuntime) resolveSessionModelProviders(ctx context.Context, sess *session.Session, modelRef string) (string, []provider.Provider, error) {
 	cfg, err := r.modelSwitcherConfigForContext(ctx)
 	if err != nil {
 		if errors.Is(err, ErrUnsupported) && modelRef == "" {
@@ -532,7 +577,7 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 			choice.CacheReadCost = cfg.Cost.CacheRead
 			choice.CacheWriteCost = cfg.Cost.CacheWrite
 		}
-		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+		if n := configuredContextWindow(cfg, modelConfig.Providers); n > 0 {
 			choice.ContextLimit = int(n)
 		}
 		choices = append(choices, choice)
@@ -908,4 +953,20 @@ func WithModelSwitcherConfig(cfg *ModelSwitcherConfig) Opt {
 		}
 		r.modelSwitcherCfg = cfg
 	}
+}
+
+// configuredContextWindow resolves aliases and inherited DMR sizing without mutating config.
+func configuredContextWindow(cfg latest.ModelConfig, providers map[string]latest.ProviderConfig) int64 {
+	resolved := cfg
+	resolved.Provider = provider.ResolveType(&cfg, providers)
+	resolved.ProviderOpts = maps.Clone(cfg.ProviderOpts)
+	if _, present := resolved.ProviderOpts["context_size"]; !present {
+		if size, inherited := providers[cfg.Provider].ProviderOpts["context_size"]; inherited {
+			if resolved.ProviderOpts == nil {
+				resolved.ProviderOpts = make(map[string]any)
+			}
+			resolved.ProviderOpts["context_size"] = size
+		}
+	}
+	return resolved.EffectiveContextWindow()
 }

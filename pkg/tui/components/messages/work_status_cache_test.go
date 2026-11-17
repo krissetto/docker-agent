@@ -23,6 +23,9 @@ import (
 // buildWorkStatusHistory builds turns of finalized markdown history followed by
 // one tool exchange, so compact Work has a block to report status on. Building
 // it may leave a reply handoff in flight.
+// statusCacheFinalTurn owns the final exchange's settled timing in these fixtures.
+const statusCacheFinalTurn = "status-cache-final"
+
 func buildWorkStatusHistory(tb testing.TB, workEnabled bool, turns int) *model {
 	tb.Helper()
 	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
@@ -33,7 +36,9 @@ func buildWorkStatusHistory(tb testing.TB, workEnabled bool, turns int) *model {
 		m.addMessage(types.Agent(types.MessageTypeAssistant, "root", fmt.Sprintf("answer %d\n\n```go\nfunc answer%d() {}\n```", i, i)))
 	}
 	call := tools.ToolCall{ID: "status-cache-call", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"true"}`}}
-	m.addMessage(types.User("final request"))
+	final := types.User("final request")
+	final.TurnID = statusCacheFinalTurn
+	m.addMessage(final)
 	m.addMessage(types.ToolCallMessage("root", call, tools.Tool{Name: "shell"}, types.ToolStatusCompleted))
 	m.addMessage(types.Agent(types.MessageTypeAssistant, "root", "final answer"))
 	_ = m.View()
@@ -106,7 +111,8 @@ func TestSetWorkStatusDoesNotRerenderHistory(t *testing.T) {
 
 			m.SetWorkStatus(true, 0)
 			_ = m.View()
-			m.SetWorkStatus(false, 2*time.Second)
+			m.SetWorkStatus(false, 0)
+			m.SetTurnTiming(statusCacheFinalTurn, settledTiming(statusCacheFinalTurn, 2*time.Second, "completed"))
 			_ = m.View()
 
 			_, _, after := m.ResizeCacheStats()
@@ -159,7 +165,8 @@ func TestSetWorkStatusDuringLiveHandoffRepaintsWithoutRerender(t *testing.T) {
 	require.Contains(t, ansi.Strip(m.View()), "Working", "the header repaints mid-handoff")
 	require.True(t, m.replyHandoff.Active())
 
-	m.SetWorkStatus(false, 2*time.Second)
+	m.SetWorkStatus(false, 0)
+	m.SetTurnTiming(statusCacheFinalTurn, settledTiming(statusCacheFinalTurn, 2*time.Second, "completed"))
 	require.True(t, m.replyHandoff.Active(), "settling must not finish the fade")
 	requireHandoffGeometry(t, before, m.replyHandoffFrameRows)
 	frame := ansi.Strip(m.View())
@@ -385,7 +392,9 @@ func buildWorkStatusSessionHistory(tb testing.TB, workEnabled bool, turns int) *
 	m.LoadFromSession(sess, nil)
 	m.SetCompactWorkLog(workEnabled)
 	call := tools.ToolCall{ID: "status-cache-call", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"true"}`}}
-	m.addMessage(types.User("final request"))
+	final := types.User("final request")
+	final.TurnID = statusCacheFinalTurn
+	m.addMessage(final)
 	m.addMessage(types.ToolCallMessage("root", call, tools.Tool{Name: "shell"}, types.ToolStatusCompleted))
 	m.addMessage(types.Agent(types.MessageTypeAssistant, "root", "final answer"))
 	_ = m.View()

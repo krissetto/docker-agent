@@ -257,3 +257,19 @@ func TestStoppedSessionViewConcurrentFreshSubmission(t *testing.T) {
 	}
 	assert.EqualValues(t, 1, calls.Load())
 }
+
+func TestStoppedSessionViewColdRestartFreshSubmission(t *testing.T) {
+	store := coordinationSQLite(t)
+	stoppedViewFixture(t, store)
+	var calls atomic.Int32
+	_, owner := stoppedViewRuntime(t, store, &calls)
+	_ = openStoppedView(t, owner, "target")
+	require.NoError(t, owner.Shutdown(t.Context()))
+	_, restarted := stoppedViewRuntime(t, store, &calls)
+	target := openStoppedView(t, restarted, "target")
+	submission, err := target.Submit(t.Context(), TurnInput{Content: "fresh after restart", RequestID: "fresh-after-restart"})
+	require.NoError(t, err)
+	coordinationAwait(t, target, submission.TurnID)
+	assert.EqualValues(t, 1, calls.Load())
+	assert.False(t, target.(*sessionHandle).driver.Status().Stopped)
+}

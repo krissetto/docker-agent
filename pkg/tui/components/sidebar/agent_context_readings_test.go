@@ -222,8 +222,8 @@ func TestParticipantLineReadingFollowsNameAndDropsFirst(t *testing.T) {
 	require.Equal(t, rest, ansi.Strip(m.participantLine("worker", 40)), "hover cannot move the reading")
 }
 
-// A roster line puts the reading directly after the name on line 1, keeps the
-// shortcut right-aligned, and drops the reading before truncating the name.
+// A roster line puts the reading directly after the name on line 1 and drops
+// the reading before truncating the name.
 func TestRosterLineReadingFollowsNameAndDropsFirst(t *testing.T) {
 	t.Parallel()
 
@@ -231,12 +231,11 @@ func TestRosterLineReadingFollowsNameAndDropsFirst(t *testing.T) {
 	recordAgentUsage(m, "s-d", "developer", 42_000, 100_000)
 	agent := runtime.AgentDetails{Name: "developer", Provider: "openai", Model: "gpt-5.4"}
 
-	wide := m.renderAgentLine(agent, 0, 40, 30, 0, false, false)
+	wide := m.renderAgentLine(agent, 40, 30, 0, false, false)
 	require.Contains(t, ansi.Strip(wide[0]), "developer 42% ", "the reading follows the name")
-	require.True(t, strings.HasSuffix(strings.TrimRight(ansi.Strip(wide[0]), " "), "^1"), "the shortcut stays right-aligned")
 	require.NotContains(t, ansi.Strip(wide[1]), "%", "line 2 carries no reading")
 
-	narrow := m.renderAgentLine(agent, 0, 40, 12, 0, false, false)
+	narrow := m.renderAgentLine(agent, 40, 12, 0, false, false)
 	require.NotContains(t, ansi.Strip(narrow[0]), "%", "a name that cannot hold the reading drops it")
 	require.Contains(t, ansi.Strip(narrow[0]), "developer", "the name stays whole: the reading drops first")
 }

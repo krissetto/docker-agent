@@ -79,7 +79,7 @@ agents:
 | Property              | Type       | Description                                                                           | Default                  |
 | --------------------- | ---------- | ------------------------------------------------------------------------------------- | ------------------------ |
 | `provider`            | string     | Underlying provider type: `openai`, `anthropic`, `google`, `amazon-bedrock`, `dmr`, etc. | `openai`                 |
-| `api_type`            | string     | API schema: `openai_chatcompletions` or `openai_responses`. Only for OpenAI-compatible providers. When omitted, the API type is selected automatically based on the model name: newer models (gpt-4.1, o-series, gpt-5, Codex) default to `openai_responses`; all others default to `openai_chatcompletions`. | `auto (model-dependent)` |
+| `api_type`            | string     | API schema: `openai_chatcompletions`, `openai_responses`, or explicit `openai_images`. Only for OpenAI-compatible providers. When omitted, the API type is selected automatically based on the model name: newer models (gpt-4.1, o-series, gpt-5, Codex) default to `openai_responses`; all others default to `openai_chatcompletions`. | `auto (model-dependent)` |
 | `base_url`            | string     | Base URL for the API endpoint. Required for OpenAI-compatible providers, optional for native providers. | —                        |
 | `token_key`           | string     | Environment variable name containing the API token.                                   | —                        |
 | `unload_api`          | string     | Optional path (or absolute URL) to the provider's model-unload endpoint. Used by the [`unload`](../../configuration/hooks/index.md#available-built-ins) built-in hook to release model resources between agent switches. Relative paths resolve against `base_url`'s scheme + host; absolute URLs are used verbatim. Today only Docker Model Runner ships a provider that calls this endpoint; cloud providers don't implement the underlying interface and the hook silently skips them. | —                        |
@@ -144,8 +144,11 @@ Only applicable for OpenAI-compatible providers (when `provider` is `openai` or 
 
 - **`openai_chatcompletions`** — Standard OpenAI Chat Completions API. Works with most OpenAI-compatible endpoints.
 - **`openai_responses`** — OpenAI Responses API. For newer models that require the Responses API format.
+- **`openai_images`** — OpenAI Images generation API (`/images/generations`). Explicit selection only; see [Image generation endpoints](#image-generation-endpoints).
 
 > If `api_type` is not set, Docker Agent automatically selects the API type based on the model name. You only need to set `api_type` explicitly to override the detected default.
+
+A provider's `api_type` takes precedence over an `api_type` inside the same provider's `provider_opts`. An existing model-level `provider_opts.api_type` of `openai_chatcompletions` or `openai_responses` still overrides the provider; select `openai_images` only on a provider.
 
 ## Examples
 
@@ -165,6 +168,70 @@ agents:
 > **Reasoning tokens from OpenAI-compatible providers**
 >
 > Models that stream reasoning under `delta.reasoning` (e.g. Qwen3 served via OVHcloud AI Endpoints, OpenRouter, or a self-hosted vLLM / SGLang deployment) are fully supported. Docker Agent reads both the `delta.reasoning_content` and `delta.reasoning` fields from the stream, so thinking blocks are captured and shown in the TUI regardless of which field the server uses.
+
+### Image generation endpoints
+
+An image-only server needs the Images API, even if the same host also serves
+chat models. Declare a separate named provider with `api_type: openai_images`;
+do not change a shared chat provider's API type.
+
+```yaml
+providers:
+  local-images:
+    api_type: openai_images
+    base_url: http://localhost:8000/v1
+
+models:
+  image:
+    provider: local-images
+    model: flux2-klein-4b
+    output_capabilities:
+      image: true # Required for openai_images
+    image_generation:
+      size: 512x512
+      response_format: b64_json
+
+agents:
+  root:
+    model: image
+    description: Generate images with a local Images API.
+    instruction: Follow the user's requested subject and style closely.
+```
+
+Replace the URL and model with your deployment's values. The server must
+implement `POST /v1/images/generations` for that model; OpenAI compatibility for
+chat alone is not enough. The FLUX model name does not imply a serving API.
+`api_type: openai_images` selects the Images API contract for this provider;
+`base_url` only locates the deployment. Every model using it must set
+`output_capabilities.image: true`; omitting it or setting `false` is a
+configuration error.
+
+The model's top-level `image_generation` object holds native Images request
+options, such as `size`, `quality`, `n`, `output_format`, or server-specific
+fields such as `steps`. It never enables image output by itself. Only use
+fields and values your endpoint supports. `model` comes from the model
+configuration; the options cannot override `model`, `prompt`, `stream`, or
+`type`. Non-GPT image models default to `response_format: b64_json`; GPT Image
+models omit that field because their API returns base64 natively. A server
+returning only a remote image URL fails with an error: Docker Agent does not
+fetch it. See
+[Migrating earlier image settings](../openai/index.md#migrating-earlier-image-settings)
+if your configuration still uses `provider_opts.image_generation`.
+
+This path supports text-to-image generation only. The prompt includes system
+instructions and the latest user text, including text multiparts, not older
+user messages or assistant replies. Latest-user attachments and image edits
+are unsupported. Use a dedicated agent without function tools, subagent tools,
+or structured output. Chat token limits and reasoning settings are not image
+size or quality controls.
+
+Image-only models are not used for automatic titles, compaction, or warmup.
+Configure a separate text `title_model` or `compaction_model` if you need those
+features. Generated images use the normal
+[workspace and session persistence](../../features/sessions/index.md#generated-media-files).
+See [`examples/openai_compatible_image_output.yaml`](https://github.com/docker/docker-agent/blob/main/examples/openai_compatible_image_output.yaml)
+and [OpenAI's hosted Responses image tool](../openai/index.md#responses-image-generation-tool)
+for the separate chat-model path.
 
 ### Replaying reasoning on later turns
 

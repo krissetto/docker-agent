@@ -107,7 +107,8 @@ func TestWorkSpacingExpandedKeepsHeaderBreathingRowAndParagraphs(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, work, 0)
 	require.Empty(t, strings.TrimSpace(rows[work+1]), "one breathing row under the expanded Work header")
-	require.Contains(t, rows[work+2], "Thinking")
+	require.NotContains(t, rows[work+2], "Thinking", "hosted reasoning has no nested header")
+	require.Contains(t, rows[work+2], "planning the work", "reasoning content starts directly under the breathing row")
 
 	para := -1
 	for i, row := range rows {

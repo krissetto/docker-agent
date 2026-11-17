@@ -21,6 +21,9 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		if original.GitDiffLayout != draft.GitDiffLayout {
 			latest.GitDiffLayout = draft.GitDiffLayout
 		}
+		if original.ScrollOnSend != draft.ScrollOnSend {
+			latest.ScrollOnSend = draft.ScrollOnSend
+		}
 		if original.CompactWorkLog != draft.CompactWorkLog {
 			latest.CompactWorkLog = draft.CompactWorkLog
 		}

@@ -108,7 +108,7 @@ func TestRootStreamWorkStatusTracksOnlyOuterLifecycle(t *testing.T) {
 	p.handleRuntimeEvent(runtime.StreamStopped(sess.ID, "root", "normal"))
 	active, elapsed = workStatus(t, p)
 	require.False(t, active)
-	require.GreaterOrEqual(t, elapsed, 3*time.Second)
+	require.Zero(t, elapsed, "a settled duration is never inferred from the page clock; it comes from turn timing")
 }
 
 func TestResumedRootWorkUsesWorkingHeaderWithoutDuplicatePendingSpinner(t *testing.T) {
@@ -173,7 +173,8 @@ func TestDefaultGroupedWorkPreservesHumanBoundaryAndExpandsSourceChildren(t *tes
 	frame := ansi.Strip(p.messages.View())
 	require.Contains(t, frame, "human request stays visible", "actual user input remains a top-level boundary")
 	require.Contains(t, frame, "Work", "full TUI groups source-owned work by default")
-	require.NotContains(t, frame, "collapsed reasoning details", "child content is hidden until the Work block expands")
+	require.NotContains(t, frame, "collapsed reasoning details", "settled collapsed Work retires its reasoning preview")
+	require.NotContains(t, frame, "Thinking", "nested thinking headers stay hidden inside collapsed Work")
 
 	owner, ok := p.messages.(interface {
 		WorkBlockAtSource(source int) *workblock.Model

@@ -191,6 +191,11 @@ func (d *sessionDriver) commitExecutionEvent(ctx context.Context, generation uin
 		case *TokenUsageEvent:
 			if effect.Usage != nil {
 				d.sess.SetTokensAndCost(effect.Usage.InputTokens, effect.Usage.OutputTokens, effect.Usage.Cost)
+				// Auxiliary spend can settle while this turn uses a private snapshot.
+				// Publish the owner's aggregate, never that stale worker total.
+				current := SessionUsage(d.sess, effect.Usage.ContextLimit, effect.Usage.CompactionThreshold)
+				current.LastMessage = effect.Usage.LastMessage
+				effect.Usage = current
 			}
 		case *SessionTitleEvent:
 			d.sess.SetTitle(effect.Title)
@@ -236,6 +241,7 @@ func refreshExecutionInput(ctx context.Context, scratch *session.Session) error 
 			}
 		}
 	}
+	scratch.SetAuxiliaryUsage(fresh.AuxiliaryUsageSnapshot())
 	approved, policy, permissions := fresh.SafetySettings()
 	scratch.SetSafetyPolicy(policy)
 	scratch.SetToolsApproved(approved)
@@ -441,6 +447,7 @@ func (d *sessionDriver) registerElicitation(ctx context.Context, id string, even
 			return ErrSessionStopped
 		}
 		d.interactions[id] = sessionInteraction{kind: InteractionElicitation, turnID: d.activeRequestID, generation: d.generation, event: event, waiter: waiter}
+		d.openTurnWaitLocked(id)
 		d.events.Publish(d.identityID, event)
 		return nil
 	})
@@ -506,6 +513,7 @@ func (d *sessionDriver) abandonElicitation(id string, waiter *elicitationWaiter)
 				return nil
 			}
 			delete(d.interactions, id)
+			d.closeTurnWaitLocked(id)
 			reason := InteractionCanceled
 			if d.stopped {
 				reason = InteractionStopped
@@ -565,6 +573,7 @@ func (d *sessionDriver) registerResumeInteraction(ctx context.Context, id string
 		}
 		channel = make(chan ResumeRequest, 1)
 		d.interactions[id] = sessionInteraction{kind: kind, turnID: d.activeRequestID, generation: d.generation, resume: channel, event: payload}
+		d.openTurnWaitLocked(id)
 		d.events.Publish(d.identityID, payload)
 		return nil
 	})
@@ -586,6 +595,7 @@ func (d *sessionDriver) registerResume(ctx context.Context, id string) (<-chan R
 		}
 		channel = make(chan ResumeRequest, 1)
 		d.interactions[id] = sessionInteraction{kind: InteractionConfirmation, turnID: d.activeRequestID, generation: d.generation, resume: channel}
+		d.openTurnWaitLocked(id)
 		return nil
 	})
 	return channel, err
@@ -915,6 +925,7 @@ func (d *sessionDriver) pinCurrentTeamEnvironment(ctx context.Context) error {
 		old, d.teamEnvironment = d.teamEnvironment, lease
 		d.sess.AgentName, d.sess.AgentID, d.sess.MaxIterations = next.AgentName, next.AgentID, next.MaxIterations
 		d.modelRef, d.modelProviders = modelRef, slices.Clone(models)
+		d.harnessEffort = harnessEffortFromSession(d.sess, d.sess.AgentName)
 		d.bindingVersion++
 		return nil
 	})

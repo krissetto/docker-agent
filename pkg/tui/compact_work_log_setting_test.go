@@ -95,7 +95,8 @@ func TestCompactWorkLogPreviewReprojectsAllPagesAndNewPages(t *testing.T) {
 			require.Contains(t, view, "Final response", id)
 			if compact {
 				require.Contains(t, view, "Work", id)
-				require.NotContains(t, view, "Intermediate detail", id)
+				require.NotContains(t, view, "Intermediate detail", id, "settled collapsed Work keeps reasoning in expanded history only")
+				require.NotContains(t, view, "Thinking", id, "collapsed Work shows no nested thinking headers")
 			} else {
 				require.NotContains(t, view, "Work", id)
 				require.Contains(t, view, "Intermediate detail", id)

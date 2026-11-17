@@ -84,6 +84,11 @@ func (s *appProjectionSink) Reset(snapshot runtime.SessionSnapshot) {
 	s.position = snapshot.TranscriptPosition
 	s.setConnection(ConnectionConnected, nil)
 	s.app.sendBridgedEventFrom(s.ctx, "", &SessionResetEvent{Snapshot: snapshot}, true, s.sessionID, s.epoch)
+	if snapshot.Session != nil {
+		if tree := snapshot.Session.GetSubagentTree(); tree != nil {
+			s.app.sendBridgedEventFrom(s.ctx, "", runtime.SubagentTree(*tree), true, s.sessionID, s.epoch)
+		}
+	}
 	s.app.refreshSubagentTreeView(s.ctx, s.epoch)
 }
 
@@ -268,6 +273,9 @@ func (a *App) projectTranscript(event runtime.Event) {
 		if e.Usage != nil {
 			if e.SessionID == "" || e.SessionID == sess.ID {
 				sess.SetUsage(e.Usage.InputTokens, e.Usage.OutputTokens)
+				if e.Usage.Auxiliary != nil {
+					sess.SetAuxiliaryUsage(e.Usage.Auxiliary)
+				}
 			}
 			if usage := e.Usage.LastMessage; usage != nil {
 				sess.AddMessageUsageRecord(e.AgentName, usage.Model, usage.Cost, &usage.Usage)

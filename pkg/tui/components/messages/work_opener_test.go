@@ -161,7 +161,7 @@ func TestWorkOpenerSkipsRuntimeNoticeAndEmptyAssistantPrefix(t *testing.T) {
 	}
 	projection := projectWorkWithVisibleReplies(items, nil, msgtypes.VisibleRepliesLatest, resolveSessionOpener(items, nil))
 	exchange := projection.exchanges[0]
-	require.Equal(t, []int{1, 2, 3}, exchange.response, "the assignment is the pinned opener; the empty prefix keeps its normal non-Work placement")
+	require.Equal(t, []int{2, 3}, exchange.response, "the assignment is the pinned opener; the empty prefix has no presentation")
 	require.Equal(t, []int{0}, exchange.work)
 }
 

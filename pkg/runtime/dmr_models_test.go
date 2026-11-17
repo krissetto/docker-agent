@@ -291,3 +291,25 @@ func TestConfiguredContextWithoutDiscovery(t *testing.T) {
 	require.Len(t, choices, 1)
 	assert.Equal(t, 4096, choices[0].ContextLimit)
 }
+
+func TestConfiguredContextWindowProviderDefaults(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		window   *int64
+		opts     map[string]any
+		provider latest.ProviderConfig
+		want     int64
+	}{
+		{name: "custom capacity", window: new(int64(256000)), provider: latest.ProviderConfig{APIType: "openai_responses"}, want: 256000},
+		{name: "DMR alias inherited engine size", provider: latest.ProviderConfig{Provider: "dmr", ProviderOpts: map[string]any{"context_size": 8192}}, want: 8192},
+		{name: "DMR model size precedes provider size", opts: map[string]any{"context_size": 16384}, provider: latest.ProviderConfig{Provider: "dmr", ProviderOpts: map[string]any{"context_size": 8192}}, want: 16384},
+		{name: "non-DMR legacy ignored", provider: latest.ProviderConfig{APIType: "openai_chatcompletions", ProviderOpts: map[string]any{"context_size": 8192}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := latest.ModelConfig{Provider: "custom", Model: "model", ContextWindow: tc.window, ProviderOpts: tc.opts}
+			assert.Equal(t, tc.want, configuredContextWindow(cfg, map[string]latest.ProviderConfig{"custom": tc.provider}))
+			assert.Equal(t, tc.opts, cfg.ProviderOpts)
+		})
+	}
+}

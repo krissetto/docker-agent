@@ -1000,6 +1000,14 @@ func (a *App) EmitStartupInfo(ctx context.Context, events chan runtime.Event) {
 
 // Run one agent loop
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
+	if _, err := a.RunWithSubmission(ctx, cancel, message, attachments); err != nil {
+		a.sendEvent(ctx, runtime.Error(err.Error()))
+	}
+}
+
+// RunWithSubmission runs a local input and returns its canonical admission receipt.
+// Unlike Run, the caller owns reporting any submission error.
+func (a *App) RunWithSubmission(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) (runtime.Submission, error) {
 	a.cancel = cancel
 	a.runCancelled.Store(false)
 	state := a.state()
@@ -1009,15 +1017,14 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 		msg.MultiContent = a.buildUserMultiContent(ctx, state.session, message, attachments)
 	}
 	if state.handle == nil {
-		a.sendEvent(ctx, runtime.Error(state.operationError("submit").Error()))
-		return
+		return runtime.Submission{}, state.operationError("submit")
 	}
 	submission, err := state.handle.Submit(ctx, msg)
 	if err != nil {
-		a.sendEvent(ctx, runtime.Error(err.Error()))
-		return
+		return runtime.Submission{}, err
 	}
 	a.recordSubmission(submission.TurnID)
+	return submission, nil
 }
 
 // buildUserMultiContent assembles the MultiContent parts for a user message

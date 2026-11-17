@@ -1,10 +1,11 @@
 # Gemini image-output model: the model can generate an image directly as
 # part of its reply, instead of only describing one.
 #
-# The `gemini-image` model below relies on the exact models.dev record's
-# `Modalities.Output=image`. An explicit `output_capabilities.image` value can
-# override catalogue data; unknown or unavailable catalogue metadata stays off.
-# Capability is never guessed from the model name.
+# Declare image output explicitly so this example does not depend on
+# models.dev catalogue availability. For Gemini, an omitted flag still falls
+# back to the exact models.dev record (OpenAI image paths always need explicit
+# true). This selects Gemini's native text AND image response modalities, not
+# an OpenAI-compatible image endpoint.
 #
 # On the models gateway, direct Gemini API, and Vertex AI, Docker Agent
 # requests text AND image output for this image-capable model. It attempts
@@ -51,6 +52,8 @@ models:
   gemini-image:
     provider: google
     model: gemini-2.5-flash-image
+    output_capabilities:
+      image: true
 
 agents:
   root:

@@ -1,0 +1,24 @@
+# Native OpenAI Responses image generation. Requires OPENAI_API_KEY and a
+# Responses model/account with access to the hosted image_generation tool.
+# The model chooses whether to invoke the tool; image output is not guaranteed.
+# Live generation may be billed.
+#
+# docker agent run examples/openai_image_output.yaml \
+#   "Generate an image of a red panda working at a terminal"
+models:
+  image-assistant:
+    provider: openai
+    model: gpt-4.1
+    output_capabilities:
+      image: true # Explicit opt-in: uses Responses and adds the hosted tool.
+    # Optional tool settings; they never enable image output on their own.
+    # image_generation:
+    #   quality: high
+
+agents:
+  root:
+    model: image-assistant
+    description: Generate images using OpenAI's native Responses image tool.
+    instruction: |
+      When asked to generate an image, use your native image-generation tool.
+      Follow the requested subject and style, then briefly describe the result.

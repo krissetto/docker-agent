@@ -42,6 +42,7 @@ type Server struct {
 	// transport. SSE comments are invisible to EventSource clients and carry
 	// no id, so they never interfere with the sequenced stream or its replay.
 	heartbeatInterval time.Duration
+	cacheWarmup       bool
 }
 
 func New(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string, maxRequestBytes int64, opts ...SessionManagerOpt) (*Server, error) {
@@ -63,10 +64,17 @@ const defaultMaxRequestBytes int64 = 1 << 20 // 1 MiB
 type Option func(*serverOptions)
 
 type serverOptions struct {
+	cacheWarmup     *bool
 	serverInfo      api.ServerInfo
 	maxRequestBytes int64
 	corsOrigin      string
 	sourceRegistrar SourceRegistrar
+}
+
+// WithCacheWarmup controls best-effort prefix warming on initial session
+// observation. Enabled by default; scripted embedders may opt out.
+func WithCacheWarmup(enabled bool) Option {
+	return func(o *serverOptions) { o.cacheWarmup = &enabled }
 }
 
 // WithMaxRequestBytes sets the maximum request body size in bytes. Requests
@@ -123,7 +131,7 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 			return next(c)
 		}
 	})
-	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, sourceRegistrar: o.sourceRegistrar, heartbeatInterval: defaultEventsHeartbeatInterval}
+	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, sourceRegistrar: o.sourceRegistrar, heartbeatInterval: defaultEventsHeartbeatInterval, cacheWarmup: o.cacheWarmup == nil || *o.cacheWarmup}
 	s.registerRoutes()
 	return s
 }

@@ -9,11 +9,6 @@ const (
 	// agents pad this column so their names stay aligned.
 	agentMarkerWidth = 2
 
-	// agentShortcutWidth is the fixed width of an agent line's trailing "^N"
-	// switch-shortcut column, kept constant so the shortcuts align at the right
-	// edge whether or not a given agent has one.
-	agentShortcutWidth = 2
-
 	// rowGlyphOnlyMinWidth is the content-column breakpoint (near MinWidth) below
 	// which a compact agent line's thinking gauge collapses to a single cell so
 	// the name column keeps usable room.

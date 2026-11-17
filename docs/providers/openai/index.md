@@ -57,6 +57,125 @@ Starting with GPT-5.6, OpenAI renamed the `-mini`/`-nano` size tiers to `-terra`
 
 Find more model names at [modelnames.ai](https://modelnames.ai/) or in the [official OpenAI docs](https://platform.openai.com/docs/models).
 
+## Generated Images
+
+OpenAI image generation is opt-in per model with an explicit
+[`output_capabilities.image: true`](../../configuration/models/index.md#output-capabilities).
+On OpenAI paths, models.dev metadata never turns it on. The provider's
+`api_type` selects the API contract: request and response schema, streaming,
+and endpoint conventions. `base_url`, the model name, and the capability do not
+select it, except that the built-in `openai` provider uses Responses for
+`image: true` when no `api_type` is set.
+
+| API selection | With `output_capabilities.image: true` |
+| --- | --- |
+| Built-in `openai`, no `api_type` | Uses the Responses API and adds OpenAI's hosted `image_generation` tool |
+| `api_type: openai_responses` | Adds the hosted `image_generation` tool; the endpoint must implement it |
+| `api_type: openai_images` | Uses the separate Images API contract (non-streaming `POST /images/generations`); `image: true` is required |
+| `api_type: openai_chatcompletions` | Stays on Chat Completions; no image request fields are sent, and `image_generation` settings are rejected |
+
+Without `image: true`, Responses requests do not include the image tool, and
+an `openai_images` model is rejected as misconfigured. Image *input* support is
+configured separately with `capabilities`.
+
+### Image-generation settings
+
+Optional request settings go in the model's top-level `image_generation`
+object, not in `provider_opts`. The object tunes a path that `image: true`
+already enabled; it never enables image output by itself. Use settings for the
+selected API, not a mix of both:
+
+| Settings | Responses hosted tool | Images endpoint |
+| --- | --- | --- |
+| `size`, `quality`, `background`, `output_format`, `output_compression`, `moderation` | Native tool fields | Native request fields |
+| `model` | Optional hosted image-model selection | Not allowed here; use the model's top-level `model` field |
+| `partial_images` | Native tool option | Not supported by this non-streaming path |
+| `n`, `response_format` | Not tool options | Native request options; omit `response_format` for GPT Image models |
+| Server-specific fields, such as `steps` | Only if the gateway implements them | Only if the image server implements them |
+
+Valid values and combinations depend on the endpoint and model; this table
+does not imply that every model accepts every field. The settings cannot
+override `type`, `prompt`, or `stream`.
+
+### Responses image-generation tool
+
+Use a text model with access to OpenAI's hosted `image_generation` tool, not
+an image-only model as the main Responses model:
+
+```yaml
+models:
+  image-assistant:
+    provider: openai
+    model: gpt-4.1
+    output_capabilities:
+      image: true # Adds the hosted image_generation tool
+    image_generation: # Optional tool settings
+      quality: high
+```
+
+For an OpenAI-compatible gateway, select `api_type: openai_responses` on a
+[named provider](../custom/index.md). The gateway must implement this tool and
+its output events, not merely the Responses chat schema. The model decides
+whether to call the tool, so a text-only reply is possible. This does not claim
+hosted image-tool support through other OpenAI-based providers such as
+`chatgpt` or `github-copilot`.
+
+See [OpenAI's image-generation guide](https://platform.openai.com/docs/guides/image-generation)
+and [`examples/openai_image_output.yaml`](https://github.com/docker/docker-agent/blob/main/examples/openai_image_output.yaml).
+
+### Images endpoint
+
+For an image-only model, select `api_type: openai_images` on a dedicated named
+provider so chat models keep their API:
+
+```yaml
+providers:
+  openai-images:
+    provider: openai
+    api_type: openai_images
+    base_url: https://api.openai.com/v1
+    token_key: OPENAI_API_KEY
+
+models:
+  image:
+    provider: openai-images
+    model: gpt-image-1
+    output_capabilities:
+      image: true # Required for openai_images
+    image_generation:
+      size: 1024x1024
+      quality: medium
+```
+
+This sends a non-streaming `POST /images/generations` request relative to the
+base URL; it does not send Chat Completions or Responses requests. Do not set
+`response_format` for GPT Image models. Account access, options, and model
+availability depend on OpenAI. Ordinary text models need no configuration
+changes. See
+[OpenAI-compatible image servers](../custom/index.md#image-generation-endpoints)
+for a complete configuration and its limitations.
+
+### Migrating earlier image settings
+
+Earlier image-generation forms are rejected when the configuration loads:
+
+| Earlier form | Replacement |
+| --- | --- |
+| `provider_opts.image_generation: {}` | `output_capabilities.image: true` |
+| `provider_opts.image_generation: {...}` | `output_capabilities.image: true` plus top-level `image_generation: {...}` |
+| Model `provider_opts.api_type: openai_images`, or `provider: openai_images` | A named provider with `api_type: openai_images` |
+
+Other `provider_opts` are unchanged, including an existing model-level
+`provider_opts.api_type` of `openai_responses` or `openai_chatcompletions`.
+
+Both image paths return generated-media attachments that Docker Agent saves in
+the workspace and session store. Remote image URLs are rejected, not
+automatically fetched; configure the server to return base64 image data. Files
+and TUI rendering use the same
+[generated-media handling](../../features/sessions/index.md#generated-media-files)
+as Gemini. Generation may be billed; settings do not guarantee that a model or
+endpoint supports image generation.
+
 ## Service Tier (Fast and Ultrafast Modes)
 
 Set `provider_opts.service_tier` to request OpenAI's [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode):

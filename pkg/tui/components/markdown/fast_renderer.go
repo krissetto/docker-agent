@@ -2935,12 +2935,8 @@ func (p *parser) wrapUncached(text string, width int) string {
 		}
 		word := text[wordStart:i]
 
-		// Styles in effect where a long word starts; its breaks restart from here.
-		var before []string
-		if wordWidth > width {
-			before = slices.Clone(active)
-		}
-		active = updateActiveStyles(active, wordAnsi)
+		// Break with the styles open at the end of the previous line; the word's own
+		// codes travel with the word, so folding them in first would drop the reopen.
 		haveLine := lineWidth > 0
 		needsWrap := haveLine && (lineWidth+1+wordWidth > width || wordWidth > width)
 		if needsWrap {
@@ -2952,8 +2948,9 @@ func (p *parser) wrapUncached(text string, width int) string {
 		}
 
 		if wordWidth > width {
-			active, lineWidth = writeBrokenWord(&out, word, width, before)
+			active, lineWidth = writeBrokenWord(&out, word, width, active)
 		} else {
+			active = updateActiveStyles(active, wordAnsi)
 			out.WriteString(word)
 			lineWidth += wordWidth
 		}

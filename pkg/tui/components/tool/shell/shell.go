@@ -384,7 +384,7 @@ func (m *shellModel) renderHeader(showPreview bool) string {
 		if m.hovered {
 			previewStyle = styles.ToolDescription
 		}
-		line += " " + previewStyle.Render(shownPreview)
+		line += " " + styles.RenderComposite(previewStyle, shownPreview)
 	}
 	line += strings.Repeat(" ", max(0, previewWidth-ansi.StringWidth(shownPreview)))
 	if status != "" {

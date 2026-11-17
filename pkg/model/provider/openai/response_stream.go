@@ -53,7 +53,9 @@ type ResponseStreamAdapter struct {
 	// by a non-empty function_call_arguments.done. Distinct from itemHasArgs,
 	// which only means some argument bytes were emitted: any later arguments
 	// delta for such an item is stale and must be dropped.
-	itemArgsFinal map[string]bool
+	itemArgsFinal      map[string]bool
+	imageItems         map[string]bool
+	imageOutputEnabled bool
 }
 
 func newResponseStreamAdapter(stream responseEventStream, trackUsage bool) *ResponseStreamAdapter {
@@ -122,6 +124,8 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 				},
 			}
 		}
+	case "response.image_generation_call.partial_image", "response.image_generation_call.in_progress", "response.image_generation_call.generating", "response.image_generation_call.completed":
+		// Previews are not complete artifacts. Never log their base64 payload.
 	case "response.output_text.done":
 		slog.Debug("Output text done", "item_id", event.ItemID)
 	case "response.created", "response.in_progress", "response.content_part.done":
@@ -454,6 +458,13 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		slog.Debug("Unhandled stream event payload", "type", event.Type, "raw", redactEncryptedContent([]byte(event.RawJSON())))
 	}
 
+	media, err := a.responseImages(event)
+	if err != nil {
+		return chat.MessageStreamResponse{}, err
+	}
+	if len(media) > 0 {
+		response.Choices = append(response.Choices, chat.MessageStreamChoice{Delta: chat.MessageDelta{Role: "assistant", Media: media}})
+	}
 	a.captureResponseState(event, &response)
 	if a.onResponseDone != nil && (event.Type == "response.completed" || event.Type == "response.done") {
 		a.onResponseDone(event.Response)

@@ -32,6 +32,7 @@ func TestRecordAssistantMessageEmptyTurns(t *testing.T) {
 		wantItems int
 	}{
 		{name: "billed empty stop persists a usage-only item", res: streamResult{Usage: usage, FinishReason: chat.FinishReasonStop}, wantItems: 1},
+		{name: "billed whitespace stop retains raw bytes and identity", res: streamResult{Content: " \t\n", MessageID: "whitespace-turn", Usage: usage, FinishReason: chat.FinishReasonStop}, wantItems: 1},
 		{name: "billed empty cancelled turn persists nothing", res: streamResult{Usage: usage}, cancelled: true, wantItems: 0},
 		{name: "empty turn without usage is skipped", res: streamResult{}, wantItems: 0},
 	} {
@@ -54,7 +55,12 @@ func TestRecordAssistantMessageEmptyTurns(t *testing.T) {
 			assert.Equal(t, "test/m", msg.Model)
 			assert.InDelta(t, cost, msg.Cost, 1e-12)
 			require.NotNil(t, sess.Messages[0].Message)
-			assert.Empty(t, sess.Messages[0].Message.Message.Content)
+			assert.Equal(t, tc.res.Content, sess.Messages[0].Message.Message.Content)
+			if tc.res.MessageID != "" {
+				assert.Equal(t, tc.res.MessageID, sess.Messages[0].Message.Message.MessageID)
+			}
+			require.NotNil(t, sess.Messages[0].Message.Message.Usage)
+			assert.Equal(t, *usage, *sess.Messages[0].Message.Message.Usage)
 			assert.Empty(t, sess.Messages[0].Message.Message.ToolCalls)
 		})
 	}

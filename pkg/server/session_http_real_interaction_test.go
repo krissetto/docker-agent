@@ -77,7 +77,7 @@ func realInteractionHTTP(t *testing.T, maximum int) (*runtime.SessionTransport, 
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	store := session.NewInMemorySessionStore()
 	sm := NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(owner.Runtime()))
-	httpSrv := httptest.NewServer(NewWithManager(sm, "").e)
+	httpSrv := httptest.NewServer(NewWithManager(sm, "", WithCacheWarmup(false)).e)
 	client, err := runtime.NewClient(httpSrv.URL, runtime.WithHTTPClient(httpSrv.Client()))
 	require.NoError(t, err)
 	transport, err := runtime.NewSessionTransport(client)

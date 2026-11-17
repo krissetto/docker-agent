@@ -66,6 +66,7 @@ const (
 
 const (
 	rowInterruptConfirmation = iota
+	rowScrollOnSend
 	rowYOLO
 	rowSnapshot
 	rowCacheStablePrompts
@@ -582,6 +583,9 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 		return d.preview()
 	case tabBehavior:
 		switch d.selected[d.tab] {
+		case rowScrollOnSend:
+			d.current.ScrollOnSend = !d.current.ScrollOnSend
+			return d.preview()
 		case rowYOLO:
 			switch {
 			case d.current.YOLO:
@@ -884,6 +888,8 @@ func (d *settingsDialog) renderBehaviorTab(body *settingsBody) {
 	body.section("Interaction")
 	body.add(styles.MutedStyle.Render("While working: Enter steers into the active turn; Alt+Enter queues for the next turn."))
 	d.addControl(body, rowInterruptConfirmation, "Interrupt confirmation", interruptConfirmationLabels[d.current.InterruptConfirmation], false, false)
+	d.addToggle(body, rowScrollOnSend, "Scroll new prompt to top", d.current.ScrollOnSend)
+	body.add(styles.MutedStyle.Render("Leaves room below for the reply; new turns only."))
 	body.section("Automation")
 	d.addToggle(body, rowYOLO, "Auto-approve tools by default", d.current.YOLO)
 	warning := "Tools require permission unless approved."

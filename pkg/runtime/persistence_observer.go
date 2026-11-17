@@ -314,6 +314,8 @@ func (p *PersistenceObserver) OnRunStart(ctx context.Context, sess *session.Sess
 		latest := sess.OwnSnapshot()
 		if p.owner != nil {
 			if d := p.owner(sess.ID); d != nil {
+				// writeEffect already holds the owner's durable I/O lane, so
+				// this snapshot cannot precede an unacknowledged accounting save.
 				var err error
 				latest, err = d.ownerSnapshot(ctx)
 				if err != nil {

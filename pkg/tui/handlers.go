@@ -979,6 +979,7 @@ func preferencesFromConfig(settings *userconfig.Settings) messages.Preferences {
 		GitDiffLayout:         messages.ParseGitDiffLayout(settings.GetGitDiffLayout()),
 		ExpandThinking:        settings.GetExpandThinking(),
 		CompactWorkLog:        settings.GetCompactWorkLog(),
+		ScrollOnSend:          settings.GetScrollOnSend(),
 		ShowAgentContext:      settings.GetShowAgentContext(),
 		VisibleReplies:        messages.ParseVisibleReplies(settings.GetVisibleReplies()),
 		HideToolResults:       settings.HideToolResults,
@@ -1081,6 +1082,7 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 	}
 	s.ExpandThinking = boolPreference(p.ExpandThinking, false)
 	s.CompactWorkLog = boolPreference(p.CompactWorkLog, true)
+	s.ScrollOnSend = p.ScrollOnSend
 	s.ShowAgentContext = p.ShowAgentContext
 	visibleReplies := messages.ParseVisibleReplies(string(p.VisibleReplies))
 	if visibleReplies == messages.VisibleRepliesThree {

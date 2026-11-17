@@ -27,7 +27,9 @@ type SubagentTarget struct {
 type TreeAttention struct {
 	SubagentTarget
 
-	WaitingOn string
+	WaitingOn    string
+	OccurrenceID string
+	Error        string
 }
 
 // Matches runtime.sessionDriver.refreshAttention so local and remote trees read alike.
@@ -169,8 +171,21 @@ func DescendantAttention(snapshot subagent.Snapshot, sessionID string) []TreeAtt
 	var walk func([]subagent.NodeSnapshot)
 	walk = func(nodes []subagent.NodeSnapshot) {
 		for _, child := range nodes {
-			if child.Node.NeedsAttention && child.Node.SessionID != "" {
-				out = append(out, TreeAttention{SubagentTarget: targetOf(child.Node), WaitingOn: child.Node.WaitingOn})
+			node := child.Node
+			if node.NeedsAttention && node.SessionID != "" && node.State != subagent.NodeStopped {
+				waitingOn := node.WaitingOn
+				if node.State == subagent.NodeFailed && node.Error != "" {
+					waitingOn = "failed"
+				}
+				if waitingOn == waitingOnApproval || waitingOn == waitingOnAnswer || waitingOn == "failed" && node.Error != "" {
+					ids := subagent.AttentionOccurrences(node.AttentionID)
+					if len(ids) == 0 {
+						ids = []string{""}
+					}
+					for _, id := range ids {
+						out = append(out, TreeAttention{SubagentTarget: targetOf(node), WaitingOn: waitingOn, Error: node.Error, OccurrenceID: id})
+					}
+				}
 			}
 			walk(child.Children)
 		}
@@ -294,7 +309,11 @@ func (w *treeWatch) session(id string) *watchedSession {
 func (w *treeWatch) reset(snapshots []runtime.SessionSnapshot) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	previous := w.sessions
 	w.sessions = map[string]*watchedSession{}
+	for id, s := range previous {
+		w.session(id).resolved = s.resolved
+	}
 	for _, snapshot := range snapshots {
 		w.addLocked(snapshot)
 	}
@@ -426,7 +445,7 @@ func (w *treeWatch) apply(envelope runtime.SessionEvent) bool {
 			return false
 		}
 		s := w.session(key.SessionID)
-		if _, exists := s.interactions[key.InteractionID]; exists {
+		if _, exists := s.interactions[key.InteractionID]; exists || s.resolved[key.InteractionID] {
 			return false
 		}
 		s.interactions[key.InteractionID] = interactionKind("", e)
@@ -587,11 +606,16 @@ func overlay(nodes []subagent.NodeSnapshot, sessions map[string]*watchedSession)
 				node.State = subagent.NodeIdle
 			}
 			if node.State == subagent.NodeStopped {
-				node.NeedsAttention, node.WaitingOn = false, ""
+				node.NeedsAttention, node.WaitingOn, node.AttentionID = false, "", ""
 			} else if node.State == subagent.NodeFailed {
 				node.NeedsAttention, node.WaitingOn = true, "failed"
 			} else {
 				node.WaitingOn = s.waitingOn()
+				var ids []string
+				for id := range s.interactions {
+					ids = append(ids, "interaction:"+id)
+				}
+				node.AttentionID = subagent.AttentionIdentity(ids...)
 				node.NeedsAttention = node.WaitingOn != ""
 			}
 		}
@@ -628,6 +652,11 @@ func (a *App) startSubagentTreeWatch(ctx context.Context, handle runtime.Session
 	if previous := a.treeWatch; previous != nil && previous.rootSessionID == rootSessionID {
 		previous.mu.Lock()
 		watch.created, watch.order = previous.created, previous.order
+		for id, s := range previous.sessions {
+			for resolved := range s.resolved {
+				watch.session(id).resolved[resolved] = true
+			}
+		}
 		previous.mu.Unlock()
 	}
 	a.treeWatch = watch

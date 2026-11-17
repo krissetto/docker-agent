@@ -183,8 +183,10 @@ type sessionDriver struct {
 	pauseGeneration      uint64
 	pausePublished       uint64
 	interactions         map[string]sessionInteraction
-	events               *sessionEventHub
-	lastError            string
+	// turnClock measures the active root turn for TurnSettled timing; nil when unmeasured.
+	turnClock *turnClock
+	events    *sessionEventHub
+	lastError string
 	// unidentifiedUncertain is set when a write for a queue head without a
 	// request ID failed ambiguously. Automatic wakes and promotion stop until an
 	// explicit retry is admitted; a write that actually committed may be repeated.
@@ -202,6 +204,7 @@ type sessionDriver struct {
 	onSettled             map[int]func()
 	nextHookID            int
 	settled               chan struct{}
+	cacheWarmups          map[string]bool
 	titleStatus           string
 	backgroundProcesses   map[string]tools.BackgroundProcess
 	titleGeneration       uint64
@@ -854,6 +857,7 @@ func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Pr
 	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
 		d.modelRef = modelRef
 		d.modelProviders = slices.Clone(providers)
+		d.harnessEffort = harnessEffortFromSession(d.sess, d.AgentNameLocked())
 		d.bindingVersion++
 		return nil
 	})
@@ -864,24 +868,45 @@ func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Pr
 // stays untouched and the binding version advances so cached projections refresh.
 // The binding guard rejects a choice made against an agent the session no longer runs.
 func (d *sessionDriver) setHarnessEffort(ctx context.Context, binding activeSessionBinding, level effort.Level) error {
-	return d.ownerCall(ctx, func() error {
+	return d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if err := d.validateBindingLocked(binding); err != nil {
-			return err
+			return sessionIOReservation{}, err
 		}
 		if d.stopped || d.sess == nil {
-			return ErrSessionStopped
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-		d.harnessEffort = harnessEffortOverride{agentName: binding.agentName, level: level, set: true}
-		d.bindingVersion++
-		return nil
+		next := d.sess.OwnSnapshot()
+		next.SetAgentThinkingLevel(binding.agentName, string(level))
+		return sessionIOReservation{
+			write: func(ctx context.Context) error {
+				if d.r.sessionStore != nil {
+					return d.r.sessionStore.UpdateSession(ctx, next)
+				}
+				return nil
+			},
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				if err := d.validateBindingLocked(binding); err != nil {
+					return err
+				}
+				d.sess.SetAgentThinkingLevel(binding.agentName, string(level))
+				d.harnessEffort = harnessEffortOverride{agentName: binding.agentName, level: level, set: true}
+				d.bindingVersion++
+				return nil
+			},
+		}, nil
 	})
 }
 
 func (d *sessionDriver) SetModelOverride(ctx context.Context, agentName, modelRef string, providers []provider.Provider) error {
-	return d.setModelOverride(ctx, d.activeBinding(), agentName, modelRef, providers)
+	return d.setModelOverride(ctx, d.activeBinding(), agentName, modelRef, providers, "")
 }
 
-func (d *sessionDriver) setModelOverride(ctx context.Context, binding activeSessionBinding, agentName, modelRef string, providers []provider.Provider) error {
+// setModelOverride installs providers as the agent's model. thinking is the
+// effort the providers were built with; "" means the model's configured default.
+func (d *sessionDriver) setModelOverride(ctx context.Context, binding activeSessionBinding, agentName, modelRef string, providers []provider.Provider, thinking effort.Level) error {
 	return d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if err := d.validateBindingLocked(binding); err != nil {
 			return sessionIOReservation{}, err
@@ -894,6 +919,7 @@ func (d *sessionDriver) setModelOverride(ctx context.Context, binding activeSess
 		}
 		next := d.sess.OwnSnapshot()
 		next.SetAgentModelOverride(agentName, modelRef)
+		next.SetAgentThinkingLevel(agentName, string(thinking))
 		return sessionIOReservation{
 			write: func(ctx context.Context) error {
 				if d.r.sessionStore != nil {
@@ -909,6 +935,7 @@ func (d *sessionDriver) setModelOverride(ctx context.Context, binding activeSess
 					return err
 				}
 				d.sess.SetAgentModelOverride(agentName, modelRef)
+				d.sess.SetAgentThinkingLevel(agentName, string(thinking))
 				d.modelRef = modelRef
 				d.modelProviders = slices.Clone(providers)
 				d.bindingVersion++
@@ -1257,15 +1284,17 @@ func (d *sessionDriver) refreshAttention() {
 	}
 	d.mu.Lock()
 	waitingOn := ""
-	for _, interaction := range d.interactions {
+	var attentionIDs []string
+	for id, interaction := range d.interactions {
+		attentionIDs = append(attentionIDs, "interaction:"+id)
 		if interaction.kind == InteractionConfirmation || interaction.kind == InteractionMaxIterations {
 			waitingOn = "approve tool"
-			break
+		} else if waitingOn == "" {
+			waitingOn = "answer question"
 		}
-		waitingOn = "answer question"
 	}
 	d.mu.Unlock()
-	d.r.subagents.setAttention(d.sessionID(), waitingOn)
+	d.r.subagents.setAttention(d.sessionID(), waitingOn, subagent.AttentionIdentity(attentionIDs...))
 }
 
 func (d *sessionDriver) RegisterInteraction(requestID string, kind InteractionKind, event ...Event) {
@@ -1288,6 +1317,7 @@ func (d *sessionDriver) RegisterInteraction(requestID string, kind InteractionKi
 		}
 		interaction.kind, interaction.turnID, interaction.generation, interaction.event = kind, d.activeRequestID, d.generation, payload
 		d.interactions[requestID] = interaction
+		d.openTurnWaitLocked(requestID)
 		return nil
 	})
 	if d.r != nil && d.r.subagents != nil {
@@ -1355,6 +1385,18 @@ func (d *sessionDriver) Respond(response InteractionResponse) error {
 func (d *sessionDriver) LastError() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.lastError
+}
+
+// settledFailureError is the failure a settled turn exposes to the root
+// projection. A cancelled turn's stream error is cancellation residue, so it
+// settles as idle rather than as an actionable failure.
+func (d *sessionDriver) settledFailureError() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.canceledOutcome {
+		return ""
+	}
 	return d.lastError
 }
 
@@ -1962,6 +2004,11 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		}
 		d.generation++
 		generation = d.generation
+		if next.RequestID != "" && next.RequestID == d.activeRequestID {
+			d.startTurnClockLocked(d.activeRequestID, next.InputOrigin)
+		} else {
+			d.startTurnClockLocked("", "")
+		}
 		// Only a start whose head is ID-less reserves one, and only for its own
 		// generation; an ID'd or empty start binds none, so a later ID-less post
 		// waits for the successor instead of being absorbed by this run.
@@ -2188,10 +2235,26 @@ func (d *sessionDriver) finishRunContextOpts(ctx context.Context, generation uin
 		}
 	}
 	if completionErr == nil && d.r.subagents != nil {
-		completionErr = d.r.subagents.completeExecutedSessionTurnContext(ctx, d, turnID, runErr)
+		// A cancelled turn settles without execution-failure state: its stream
+		// error is cancellation residue, not an actionable child failure.
+		completionRunErr := runErr
+		if outcome == TurnCanceled {
+			completionRunErr = ""
+		}
+		completionErr = d.r.subagents.completeExecutedSessionTurnContext(ctx, d, turnID, completionRunErr)
+	}
+	// Timing freezes at the durable commit point; persistence retries reuse it.
+	var timing *session.TurnTiming
+	if completionErr == nil && turnID != "" {
+		_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+			if measured, ok := d.finishTurnClockLocked(turnID, outcome); ok {
+				timing = &measured
+			}
+			return nil
+		})
 	}
 	if completionErr == nil && (turnID != "" || hasConsumedInputs) {
-		completionErr = d.persistTurnOutcome(ctx, turnID, outcome)
+		completionErr = d.persistTurnOutcome(ctx, turnID, outcome, timing)
 	}
 	if completionErr == nil && turnID != "" && d.r.subagents != nil {
 		d.authorizeCompletionReportAfterSettlement(turnID)
@@ -2219,7 +2282,10 @@ func (d *sessionDriver) finishRunContextOpts(ctx context.Context, generation uin
 		d.settledGeneration, d.completionErr, d.persistenceFailure, d.lastFailureKey = generation, nil, nil, ""
 		d.resolveInteractionsLocked()
 		if turnID != "" {
-			d.events.PublishForRequest(d.identityID, turnID, &TurnSettledEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "turn_settled", SessionID: d.identityID, TurnID: turnID, Outcome: outcome})
+			d.events.PublishForRequest(d.identityID, turnID, &TurnSettledEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "turn_settled", SessionID: d.identityID, TurnID: turnID, Outcome: outcome, Timing: timing})
+		}
+		if d.turnClock != nil && d.turnClock.turnID == turnID {
+			d.turnClock = nil
 		}
 		d.completeTurnLocked(turnID)
 		successor = allowSuccessor && !d.unidentifiedUncertain && !teamEditStop && !d.stopped && d.r.lifetime().Err() == nil && len(d.pending) > 0

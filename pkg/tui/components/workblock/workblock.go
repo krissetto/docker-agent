@@ -18,7 +18,21 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-const foldPreviewLines = 3
+const (
+	foldPreviewLines = 3
+	// workPreviewLines is how many of the most recent reasoning lines a collapsed
+	// Work block shows, matching the compact thinking preview.
+	workPreviewLines = 3
+)
+
+// nestedReasoning is a reasoning child. Its tail previews the collapsed Work
+// block. While hosted here it renders its full text with no header or disclosure.
+type nestedReasoning interface {
+	PreviewLines() (lines []string, truncated bool)
+	ReasoningActive() bool
+	AdoptWorkOwner(owner any)
+	ReleaseWorkOwner(owner any)
+}
 
 // SourceContentWidth reserves an inset on both sides of expanded Work rows.
 func SourceContentWidth(width int) int {
@@ -46,8 +60,23 @@ type Item struct {
 type Status struct {
 	Active    bool
 	ToolCount int
-	Elapsed   time.Duration
+	// Elapsed is the authoritative turn duration (settled turns only); zero means unknown.
+	Elapsed time.Duration
+	// Outcome is the settled turn's outcome: "" (completed), "stopped" or "failed".
+	Outcome string
+	// Waiting replaces the active label while a human interaction blocks the turn,
+	// e.g. "Waiting for approval". The spinner pauses while it is set.
+	Waiting string
 }
+
+// Turn outcomes shown in the settled header.
+const (
+	OutcomeStopped = "stopped"
+	OutcomeFailed  = "failed"
+)
+
+// minSettledLabel hides sub-second durations: they are noise in a header.
+const minSettledLabel = time.Second
 
 // Row is a block-local line range occupied by one source child; End is exclusive.
 type Row struct {
@@ -68,19 +97,28 @@ type cachedItem struct {
 
 // Model is a thin display composite; source views remain owned and updated by the caller.
 type Model struct {
-	ar         *animation.Runtime
-	spinner    spinner.Spinner
-	disclosure agentmessage.Disclosure
-	fold       animation.Transition
-	items      []cachedItem
-	status     Status
-	width      int
-	height     int
-	expanded   bool
-	foldLines  []string
-	foldRows   int
-	foldFrom   int
-	foldSource int
+	ar               *animation.Runtime
+	spinner          spinner.Spinner
+	disclosure       agentmessage.Disclosure
+	fold             animation.Transition
+	previewFade      animation.Transition
+	previewRetire    animation.Transition
+	previewActive    bool
+	previewRetired   bool
+	previewLines     []string
+	previewFading    []bool
+	previewTruncated bool
+	previewSuspended bool
+	previewRows      int
+	items            []cachedItem
+	status           Status
+	width            int
+	height           int
+	expanded         bool
+	foldLines        []string
+	foldRows         int
+	foldFrom         int
+	foldSource       int
 
 	bodyValid        bool
 	body             string
@@ -98,7 +136,7 @@ func New(ar *animation.Runtime) *Model {
 	}
 	return &Model{
 		ar: ar, spinner: spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsAccentStyle),
-		disclosure: agentmessage.New(ar), fold: ar.Transition(), width: 80,
+		disclosure: agentmessage.New(ar), fold: ar.Transition(), previewFade: ar.Transition(), previewRetire: ar.Transition(), previewRetired: true, width: 80,
 	}
 }
 
@@ -117,7 +155,21 @@ func (m *Model) SetItems(items []Item) {
 			next[i].item = item
 			next[i].sourceWidth = -1
 		}
+		if child, ok := item.View.(nestedReasoning); ok {
+			child.AdoptWorkOwner(m)
+		}
 		m.sizeSource(&next[i])
+	}
+	// A child that left this block stops being hosted here. One that moved into
+	// another block was adopted there and keeps that host.
+	current := make(map[int]bool, len(items))
+	for _, item := range items {
+		current[item.SourceIndex] = true
+	}
+	for _, old := range m.items {
+		if child, ok := old.item.View.(nestedReasoning); ok && !current[old.item.SourceIndex] {
+			child.ReleaseWorkOwner(m)
+		}
 	}
 	m.items = next
 	m.invalidateBody()
@@ -183,6 +235,7 @@ func (m *Model) InvalidateSource(sourceIndex int) {
 }
 
 func (m *Model) invalidateBody() {
+	m.refreshPreview()
 	m.bodyValid = false
 	m.body = ""
 	m.bodyRows = 0
@@ -205,17 +258,24 @@ func (m *Model) clearBody() {
 
 // SetStatus updates compact header data and registers/unregisters its spinner as needed.
 func (m *Model) SetStatus(status Status) tea.Cmd {
-	wasActive := m.status.Active
-	m.status = status
-	m.invalidateView()
-	if status.Active && !wasActive {
-		return m.spinner.Init()
+	if m.status == status {
+		return nil
 	}
-	if !status.Active && wasActive {
+	wasSpinning := m.spinning()
+	m.status = status
+	m.refreshPreview()
+	m.invalidateView()
+	if spinning := m.spinning(); spinning && !wasSpinning && !m.previewSuspended {
+		return m.spinner.Init()
+	} else if !spinning && wasSpinning {
 		m.spinner.Stop()
 	}
 	return nil
 }
+
+// spinning reports whether the header spinner should run: an active turn that
+// is not blocked on a human interaction.
+func (m *Model) spinning() bool { return m.status.Active && m.status.Waiting == "" }
 
 func (m *Model) Status() Status { return m.status }
 
@@ -232,6 +292,7 @@ func (m *Model) SetExpandedImmediately(expanded bool) {
 		m.disclosure.Toggle()
 	}
 	m.expanded = expanded
+	m.snapPreview()
 	m.fold.Cancel()
 	m.foldLines = nil
 	m.foldRows = 0
@@ -245,6 +306,7 @@ func (m *Model) SetExpanded(expanded bool) {
 		return
 	}
 	m.expanded = expanded
+	m.snapPreview()
 	m.fold.Cancel()
 	m.foldLines = nil
 	m.foldRows = 0
@@ -298,7 +360,7 @@ func boundedExcerpt(excerpt string, width int) []string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	if m.status.Active {
+	if m.spinning() && !m.previewSuspended {
 		return m.spinner.Init()
 	}
 	return nil
@@ -306,12 +368,14 @@ func (m *Model) Init() tea.Cmd {
 
 // NeedsTick reports animation work owned by the composite.
 func (m *Model) NeedsTick() bool {
-	return m.status.Active || m.disclosure.NeedsTick() || m.fold.Running()
+	return (!m.previewSuspended && m.spinning()) || m.disclosure.NeedsTick() || m.fold.Running() || m.previewFade.Running() || m.previewRetire.Running()
 }
 
 // ResumeAnimation reacquires the composite's status spinner after a pause.
 func (m *Model) ResumeAnimation() tea.Cmd {
-	if m.status.Active {
+	m.previewSuspended = false
+	m.snapPreview()
+	if m.spinning() {
 		return m.spinner.Init()
 	}
 	return nil
@@ -319,6 +383,20 @@ func (m *Model) ResumeAnimation() tea.Cmd {
 
 func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if tick, ok := msg.(animation.TickMsg); ok {
+		if m.previewRetire.Running() {
+			m.previewRetire.Tick()
+			if !m.previewRetire.Running() {
+				m.previewRetired = true
+				m.previewRows = 0
+			}
+			tick.MarkDirty()
+			m.invalidateView()
+		}
+		if m.previewFade.Running() {
+			m.previewFade.Tick()
+			tick.MarkDirty()
+			m.invalidateView()
+		}
 		before := m.foldRows
 		if m.fold.Running() {
 			m.fold.Tick()
@@ -341,7 +419,7 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			}
 		}
 	}
-	if m.status.Active {
+	if m.spinning() && !m.previewSuspended {
 		_, cmd := m.spinner.Update(msg)
 		if _, ok := msg.(animation.TickMsg); ok {
 			m.invalidateView()
@@ -362,6 +440,7 @@ func (m *Model) SetSize(width, height int) tea.Cmd {
 		m.foldRows = 0
 		m.foldLines = nil
 		m.Invalidate()
+		m.snapPreview()
 	}
 	m.height = height
 	return nil
@@ -462,12 +541,127 @@ func (m *Model) View() string {
 			}
 		}
 	}
+	if !m.expanded && !m.disclosure.Visible() {
+		if preview := m.collapsedPreview(); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
 	if m.foldRows > 0 && len(m.foldLines) > 0 {
 		parts = append(parts, m.foldLines[:min(m.foldRows, len(m.foldLines))]...)
 	}
 	m.view = strings.Join(parts, "\n")
 	m.viewValid = true
 	return m.view
+}
+
+// refreshPreview runs on authoritative source mutations, never on View or ticks.
+// Running reveal/retirement transitions keep their deadlines across projection
+// rebuilds. Only live reasoning can reserve preview rows; history stays expanded-only.
+func (m *Model) refreshPreview() {
+	var lines []string
+	truncated := false
+	active := false
+	for i := range m.items {
+		if child, ok := m.items[i].item.View.(nestedReasoning); ok {
+			active = active || child.ReasoningActive()
+			childLines, childTruncated := child.PreviewLines()
+			lines = append(lines, childLines...)
+			truncated = truncated || childTruncated
+		}
+	}
+	if len(lines) > workPreviewLines {
+		truncated = true
+		lines = lines[len(lines)-workPreviewLines:]
+	}
+	fading := make([]bool, len(lines))
+	// Match the old tail against the new head. A growing last line is the
+	// same row, not a fresh arrival; shifted rows retain their opacity.
+	matched := 0
+	for n := min(len(m.previewLines), len(lines)); n > 0; n-- {
+		start := len(m.previewLines) - n
+		ok := true
+		for i := range n {
+			old := m.previewLines[start+i]
+			if lines[i] != old && !(start+i == len(m.previewLines)-1 && strings.HasPrefix(lines[i], old)) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			matched = n
+			for i := range n {
+				fading[i] = m.previewFade.Running() && m.previewFading[start+i]
+			}
+			break
+		}
+	}
+	wasActive := m.previewActive
+	m.previewActive = active && m.status.Active
+	if m.previewActive {
+		m.previewRetire.Cancel()
+		m.previewRetired = false
+		if len(lines) > 0 {
+			m.previewRows = workPreviewLines
+		}
+	} else if wasActive && !m.previewRetired {
+		m.previewFade.Cancel()
+		if !m.expanded && !m.disclosure.Visible() && !m.previewSuspended && m.previewRows > 0 {
+			m.previewRetire.Start(animation.ShortDuration, animation.EaseOutCubic)
+		} else {
+			m.previewRetired = true
+			m.previewRows = 0
+		}
+	}
+	live := m.previewActive && !m.expanded && !m.disclosure.Visible() && !m.previewSuspended
+	if live && matched < len(lines) {
+		for i := matched; i < len(lines); i++ {
+			fading[i] = true
+		}
+		if !m.previewFade.Running() {
+			m.previewFade.Start(animation.ShortDuration, animation.EaseOutCubic)
+		}
+	} else if !live || len(lines) == 0 {
+		m.previewFade.Cancel()
+	}
+	m.previewLines, m.previewFading, m.previewTruncated = lines, fading, truncated
+}
+
+func (m *Model) snapPreview() {
+	m.previewFade.Cancel()
+	if m.previewRetire.Running() {
+		m.previewRetire.Cancel()
+		m.previewRetired = true
+		m.previewRows = 0
+	}
+	clear(m.previewFading)
+	m.invalidateView()
+}
+
+func (m *Model) collapsedPreview() string {
+	if m.previewRetired || (len(m.previewLines) == 0 && m.previewRows == 0) {
+		return ""
+	}
+	lines := make([]string, len(m.previewLines))
+	for i, line := range m.previewLines {
+		style := styles.MutedStyle.Italic(true)
+		if i == 0 && m.previewTruncated {
+			style = style.Faint(true)
+		}
+		lines[i] = style.Render(ansi.Truncate(line, SourceContentWidth(m.width), ""))
+		if m.previewRetire.Running() {
+			lines[i] = styles.FadeLine(lines[i], 1-m.previewRetire.Value())
+		} else if m.previewFade.Running() && m.previewFading[i] {
+			lines[i] = styles.FadeLine(lines[i], m.previewFade.Value())
+		}
+	}
+	// Reserve the bounded live budget once, instead of repeatedly growing and
+	// shrinking the transcript (and its bottom-slack animation) between chunks.
+	if m.previewActive || m.previewRetire.Running() {
+		for len(lines) < m.previewRows {
+			lines = append(lines, "")
+		}
+	}
+	return strings.Join(m.insetBody(strings.Join(lines, "\n")), "\n")
 }
 
 func (m *Model) Height() int { return lipgloss.Height(m.View()) }
@@ -627,7 +821,19 @@ func (m *Model) ToggleAt(line, col int) {
 	}
 }
 
+// Release detaches the nested reasoning children this block still references,
+// so they render standalone again once the block is dropped.
+func (m *Model) Release() {
+	for _, item := range m.items {
+		if child, ok := item.item.View.(nestedReasoning); ok {
+			child.ReleaseWorkOwner(m)
+		}
+	}
+}
+
 func (m *Model) StopAnimation() {
+	m.previewSuspended = true
+	m.snapPreview()
 	m.spinner.Stop()
 	m.disclosure.Settle()
 	m.fold.Cancel()
@@ -636,17 +842,51 @@ func (m *Model) StopAnimation() {
 	m.invalidateView()
 }
 
+// settledLabel is the settled-turn label. A duration is shown only when it is
+// known and at least a second. A stopped or failed outcome stays explicit even
+// without a usable duration; a completed turn with no usable duration is unlabelled.
+func (m *Model) settledLabel() string {
+	if m.status.Active {
+		return ""
+	}
+	if m.status.Elapsed < minSettledLabel {
+		switch m.status.Outcome {
+		case OutcomeStopped:
+			return "Stopped"
+		case OutcomeFailed:
+			return "Failed"
+		default:
+			return ""
+		}
+	}
+	duration := m.status.Elapsed.Round(time.Second).String()
+	switch m.status.Outcome {
+	case OutcomeStopped:
+		return "Stopped after " + duration
+	case OutcomeFailed:
+		return "Failed after " + duration
+	default:
+		return duration
+	}
+}
+
+// HeaderView renders only the disclosure/status row, without materializing its body.
+func (m *Model) HeaderView() string { return m.header() }
+
 func (m *Model) header() string {
 	label := "Work"
 	if m.status.Active {
 		label = "Working"
+	}
+	if m.status.Waiting != "" {
+		label = m.status.Waiting
 	}
 	indicator := "[+]"
 	if m.expanded {
 		indicator = "[-]"
 	}
 	prefix := "  "
-	if m.status.Active {
+	if m.spinning() {
 		prefix += m.spinner.View() + " "
 	}
 	parts := []string{prefix + styles.WorkHeaderStyle.Render(label) + styles.MutedStyle.Bold(true).Render(" "+indicator)}
@@ -657,8 +897,8 @@ func (m *Model) header() string {
 		}
 		parts = append(parts, styles.MutedStyle.Render("("+strconv.Itoa(m.status.ToolCount)+" "+unit+")"))
 	}
-	if !m.status.Active && m.status.Elapsed > 0 {
-		parts = append(parts, styles.MutedStyle.Render("· "+m.status.Elapsed.Round(time.Second).String()))
+	if text := m.settledLabel(); text != "" {
+		parts = append(parts, styles.MutedStyle.Render("· "+text))
 	}
 	return ansi.Truncate(strings.Join(parts, " "), max(0, m.width), "")
 }

@@ -26,8 +26,12 @@ func b2i(b bool) int {
 	return 0
 }
 
-// hiddenSlot reports whether slot i is a work child shown inside its block.
+// hiddenSlot reports a source with no top-level rows: empty presentation or
+// a Work child shown inside its block.
 func (m *model) hiddenSlot(i int) bool {
+	if i >= 0 && i < len(m.messages) && m.messages[i].PresentationHidden() {
+		return true
+	}
 	if _, ok := m.workSourceToHeader[i]; !ok {
 		return false
 	}
@@ -86,6 +90,10 @@ func (m *model) dropEntry(i int) {
 // have changed, so the slot is measured again when the next layout pass runs.
 func (m *model) dropSlot(i int) {
 	m.dropEntry(i)
+	if i >= 0 && i < len(m.slotBase) && m.hiddenSlot(i) {
+		m.setSlotBase(i, 0)
+		return
+	}
 	if i >= 0 && i < len(m.slotKnown) && m.slotKnown[i] {
 		m.slotKnown[i] = false
 		m.slotPending = append(m.slotPending, i)
@@ -190,6 +198,9 @@ func (m *model) slotHeightSeed(i int) (base int, known bool) {
 // renders: a placeholder that is close to the real height keeps the total
 // close to exact until the slot is shown and measured.
 func (m *model) placeholderRows(i int) int {
+	if m.hiddenSlot(i) {
+		return 0
+	}
 	// Separator and the message's own padding rows, which the text does not count.
 	const chrome = 2
 	if i < 0 || i >= len(m.messages) || m.messages[i] == nil {
@@ -229,7 +240,7 @@ func (m *model) appendSlots(oldN, n int) {
 			m.slotPending = append(m.slotPending, i)
 		}
 	}
-	m.refreshSeparators(max(oldN-1, 0), n)
+	m.refreshSeparators(m.separatorOwnerFrom(max(oldN-1, 0)), n)
 	if oldN > 0 {
 		if e, ok := m.entryFor(oldN - 1); ok && e.virtual {
 			// A segmented entry is only valid for the last slot.
@@ -250,8 +261,23 @@ func (m *model) truncateSlots(n int) {
 	m.slotKnown = m.slotKnown[:n]
 	m.slotSep = m.slotSep[:n]
 	m.slotTheme = m.slotTheme[:n]
-	m.refreshSeparators(max(n-1, 0), n)
+	m.refreshSeparators(m.separatorOwnerFrom(max(n-1, 0)), n)
 	m.markFacade()
+}
+
+// separatorOwnerFrom returns the first slot whose separator can change when
+// index i is the tail: a hidden Work child defers to its header, and the
+// visible items before it take their separator from the next visible row.
+func (m *model) separatorOwnerFrom(i int) int {
+	if m.workEnabled {
+		if anchor, hidden := m.workSourceToHeader[i]; hidden && anchor != i {
+			return anchor
+		}
+	}
+	for i > 0 && m.hiddenSlot(i) {
+		i--
+	}
+	return i
 }
 
 // refreshSeparators recomputes separator rows for slots [from, to).

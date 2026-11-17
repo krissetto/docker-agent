@@ -433,6 +433,9 @@ func sessionModelCosts(sess *session.Session) map[string]float64 {
 	costs := make(map[string]float64)
 	var walk func(*session.Session)
 	walk = func(current *session.Session) {
+		for _, record := range current.AuxiliaryUsageSnapshot() {
+			costs[record.Model] += record.Cost
+		}
 		for _, item := range current.Clone().Messages {
 			if item.Message != nil {
 				costs[item.Message.Message.Model] += item.Message.Message.Cost

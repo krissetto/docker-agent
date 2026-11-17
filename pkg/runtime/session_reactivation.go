@@ -83,7 +83,7 @@ func (h *sessionHandle) reactivateStoppedView(ctx context.Context, msg QueuedMes
 				}
 				wanted := expected
 				wanted.Revision++
-				wanted.Node.State, wanted.Node.NeedsAttention, wanted.Node.WaitingOn = subagent.NodeIdle, false, ""
+				wanted.Node.State, wanted.Node.NeedsAttention, wanted.Node.WaitingOn, wanted.Node.AttentionID = subagent.NodeIdle, false, "", ""
 				wanted.ReactivationTurnID = msg.RequestID
 				matched := false
 				for _, candidate := range records {

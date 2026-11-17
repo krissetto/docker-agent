@@ -49,7 +49,7 @@ func TestTeam(t *testing.T) {
 		{"dev-team", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", []string{"greppy", "planner", "engineer", "designer", "technical-reviewer"}, []string{"shell"}, false},
 		{"greppy", "anthropic", "claude-haiku-5-5", "haiku-5.5", "adaptive/medium", nil, []string{"shell", "todo"}, false},
 		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"shell", "todo"}, false},
-		{"engineer", "anthropic", "claude-haiku-5-5", "haiku-5.5-high", "adaptive/high", []string{"designer", "greppy"}, []string{"shell", "todo"}, false},
+		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", []string{"designer", "greppy"}, []string{"shell", "todo"}, false},
 		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"shell", "filesystem", "todo"}, true},
 		{"review-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer", "designer"}, []string{"shell", "todo"}, false},
 		{"technical-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell", "todo"}, false},
@@ -152,36 +152,32 @@ func TestTeamModelPoolsResolve(t *testing.T) {
 func TestTeamGuidance(t *testing.T) {
 	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
-	// Keep this prompt budget tied to the pre-shortening working-tree snapshot.
-	// orchestrator postdates that snapshot, so it is checked for guidance only.
-	baselineWords := map[string]int{
-		"root": 649, "dev-team": 369, "greppy": 175, "planner": 231,
-		"engineer": 430, "designer": 398, "review-team": 319,
-		"technical-reviewer": 200, "security-reviewer": 177, "edge-case-reviewer": 180,
-	}
 	guidance := map[string][]string{
-		"root":               {"warm makerspace counter", "default: 1–3 short bullets/sentences", "no routine progress, recap, or roleplay", "always delegate tasks of meaningful size to `orchestrator`", "reviews happen only on explicit request", "fresh children lack parent chat", "essential facts/constraints", "safety first"},
-		"orchestrator":       {"own delegation and coordination, never implementation", "dev team owns substantial development", "engineer handles bounded implementation/debugging/general tasks", "review team handles reviews only when the user explicitly requests one", "one owner per task", "fresh children lack parent chat", "default: 1–3 short friendly bullets/sentences", "distinguish verified results from assumptions"},
-		"dev-team":           {"lead the crew", "direct, don't implement", "engineer implements", "technical reviewer is optional on larger tasks, never routine", "user-requested reviews go to `review-team`", "fresh children lack parent chat", "one owner; parallelize, avoid polling/duplicates", "default: 1–3 short friendly bullets/sentences"},
-		"greppy":             {"greppy scouts the workshop shelves", "trace assigned questions", "don't edit/write tests", "default: 1–3 friendly bullets", "finding, evidence/paths, uncertainty", "no routine progress or recap"},
-		"planner":            {"planner maps the bench", "don't edit", "own routes, trade-offs, checks", "engineer implements", "designer offers targeted ux, never required", "default: 1–3 short friendly bullets/sentences"},
-		"engineer":           {"steady bench maker", "default for implementation, debugging, general work", "own integration", "work autonomously", "safety/correctness first", "only recruit declared designer for targeted ux/bounded frontend", "fresh children lack parent chat", "smallest complete change", "run focused checks", "default: 1–3 short friendly bullets/sentences", "no routine progress or recap"},
-		"designer":           {"engineer is default", "designer owns assigned ux/frontend work", "advice means no edits", "requested reviews are read-only", "accessible layouts/interactions", "don't recruit, widen, or redesign neighbors", "default: 1–3 brief friendly bullets/sentences", "no routine progress or recap"},
-		"review-team":        {"review lead keeps the makerspace side bench", "review only on explicit request, never routinely", "development lead owns fixes", "choose a small team", "designer only for requested ux review, read-only", "fresh children lack parent chat", "default: 1–3 short friendly bullets/sentences", "no routine progress or recap"},
-		"technical-reviewer": {"technical reviewer checks the measuring bench", "review assigned user requests", "never routine/dev", "read-only", "default: 1–3 short friendly bullets", "no routine progress/recap"},
-		"security-reviewer":  {"key keeper", "review assigned scope; no routine", "never expose, repeat, log, or report secrets", "read-only", "default: 1–3 friendly bullets", "no progress/recap"},
-		"edge-case-reviewer": {"edge case reviewer tests awkward corners", "review assigned scope; no routine/dev", "cancellation/retry", "recovery", "read-only", "default: 1–3 friendly bullets", "no progress/recap"},
+		"root":               {"a small bot named shelly keeps the front counter", "handles these at the counter, including quick edits and checks", "hand substantial or multi-team work to `orchestrator`", "explicitly asks for a review", "trust, but verify", "say why, suggest a better option", "flattery and appeasement don't help anyone", "help carry it out within safety limits", "disagreement isn't a reason to refuse or stall"},
+		"orchestrator":       {"orchestrator is the shop lead", "dev team takes substantial development and investigations", "engineer, the steady bench maker", "designer offers targeted ux advice", "review team runs independent reviews", "only when the maker explicitly asks for a review", "choose the lightest useful route", "answer or coordinate directly when that is quicker than a handoff", "make each work card concrete", "challenge weak assumptions in requests and plans with reasons", "verify factual claims before passing them on as settled", "escalate destructive or scope decisions to shelly", "disagreement isn't a reason to stall"},
+		"dev-team":           {"dev team is the development crew behind the orchestrator", "greppy, the scout", "planner, the mapmaker", "engineer, the default doer", "technical reviewer, the one optional check", "never a routine gate", "use the shell yourself for brief orientation and checks", "ask greppy when the search area is genuinely unknown", "which routes them to review team", "challenge weak assumptions with reasons", "verify facts before endorsing them", "separate evidence from preference", "carry it out within safety limits"},
+		"greppy":             {"greppy is the makerspace scout", "carrying a small lantern and a pocket full of labels", "read-only by default", "stop as soon as the evidence supports the decision", "verify claims against sources", "separate evidence from uncertainty", "flag shaky assumptions", "a few bullets with the strongest findings"},
+		"planner":            {"planner is the makerspace mapmaker", "analysis is the default", "state the intended outcome in practical terms", "separate established context, working assumptions, and open choices", "recommend one approach", "break the work into ordered steps", "match validation checkpoints to the actual risk", "challenge weak assumptions with reasons", "verify facts before relying on them", "separate evidence from preference", "offer alternatives", "engineer can proceed with minimal rediscovery"},
+		"engineer":           {"engineer is the steady bench maker", "the default for implementation, debugging, general work, and clear ui", "owns integration and works autonomously within the agreed scope", "the smallest complete change that solves the parcel", "preserve the project's architecture", "run the checks that fit it", "edit surgically", "mention it as a follow-up instead", "bring designer in only for targeted ux or bounded frontend help", "send scope changes and material surprises back to your lead", "challenge weak assumptions in the task with reasons", "once the maker chooses, carry it out within safety limits", "disagreement isn't a reason to stall", "a small edit deserves a small report"},
+		"designer":           {"designer is the less frequent specialist", "owns the assigned ux or frontend work", "engineer remains the default doer", "advises by default", "requested reviews are read-only", "start from the user's goal and the existing design language", "make accessible layouts and interactions", "covering keyboard use, focus, responsive layout, and loading and error states", "preserve existing patterns", "don't redesign neighbors", "separate evidence from taste", "offer alternatives", "help build the maker's chosen direction within safety limits"},
+		"review-team":        {"review team works at the bright side table", "owns the review scope and the verdict", "runs a review only when the maker explicitly asks for it", "reviews are read-only", "pick a small, complementary team from technical, security, and edge", "add designer only for a requested ux review", "challenge the scope and the evidence with reasons", "verify claims", "separate defects from uncertainty", "offer alternatives", "lead with one verdict: pass, pass with caveats, or fail"},
+		"technical-reviewer": {"technical reviewer checks the measuring bench", "reviews only the scope a user explicitly requests", "stays read-only", "behavior, contracts, and integration", "send gaps and open questions to your lead", "challenge claims with reasons", "verify them against evidence", "separate defects from uncertainty"},
+		"security-reviewer":  {"security reviewer keeps the keys", "review the assigned scope", "trace its inputs through authentication, authorization, injection, privacy, secrets handling, and dependency abuse", "stay read-only", "never expose, repeat, log, or report secrets", "take no external or destructive action without authorization", "challenge risky assumptions with reasons", "separate evidence from speculation"},
+		"edge-case-reviewer": {"edge case reviewer tests the awkward corners", "boundaries, failures, cancellation and retry, concurrency, recovery, and state", "stay read-only", "leave security and integration to the peers", "challenge untested assumptions with reasons", "separate evidence from speculation"},
 	}
 	require.Len(t, cfg.Agents, len(guidance))
 	for name, semantics := range guidance {
 		a, ok := cfg.Agents.Lookup(name)
 		require.True(t, ok, "missing agent %s", name)
-		if baseline, ok := baselineWords[name]; ok {
-			assert.LessOrEqual(t, len(strings.Fields(a.Instruction)), baseline/4, "%s prompt must be at least 75%% shorter", name)
-		}
+		words := len(strings.Fields(a.Instruction))
+		assert.GreaterOrEqual(t, words, 60, "%s prompt must keep its narrative guidance", name)
 		instruction := strings.Join(strings.Fields(strings.ToLower(a.Instruction)), " ")
 		for _, semantic := range semantics {
 			assert.Contains(t, instruction, semantic, "%s prompt", name)
+		}
+		// Team-wide rules live in the harness prompts (pkg/subagent), not team YAML.
+		for _, shared := range []string{"skip routine progress", "keep replies short", "result, checks", "reversible", "focused checks", "plain commit", "stop subagents once", "fresh children", "separate verified results", "explicitly asks for one"} {
+			assert.NotContains(t, instruction, shared, "%s prompt", name)
 		}
 	}
 	root, ok := cfg.Agents.Lookup("root")

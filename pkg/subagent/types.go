@@ -61,7 +61,9 @@ type Node struct {
 	State          NodeState `json:"state"`
 	NeedsAttention bool      `json:"needs_attention"`
 	WaitingOn      string    `json:"waiting_on,omitempty"`
-	Error          string    `json:"error,omitempty"`
+	// AttentionID is an opaque canonical encoding of real interaction or failed-turn identities.
+	AttentionID string `json:"attention_id,omitempty"`
+	Error       string `json:"error,omitempty"`
 	// Metrics are cumulative for this node/session only; callers may sum a
 	// returned subtree for aggregate totals.
 	Cost         float64 `json:"cost,omitempty"`

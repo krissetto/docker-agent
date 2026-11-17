@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -40,6 +41,10 @@ type sessionOpening struct {
 	started                    time.Duration
 	phase                      openingPhase
 	installed                  bool
+	id                         uint64
+	queued                     []tea.Msg
+	queuedBytes                int
+	overflowed                 bool
 }
 type openingPhase uint8
 
@@ -83,6 +88,8 @@ func (m *appModel) beginSubagentOpening(nodeID subagent.NodeID, target, title, a
 	// Fade the complete loader from its first frame within the existing minimum
 	// loading interval, without delaying acquisition or adding another hold.
 	r.transition.Start(animation.LoadingMinDuration, animation.EaseOutCubic)
+	m.openingSeq++
+	r.id = m.openingSeq
 	m.opening = r
 	m.editor.Blur()
 	owner := m.supervisor
@@ -174,6 +181,7 @@ func (m *appModel) cancelSessionOpening() {
 	r.spinner.Stop()
 	r.transition.Cancel()
 	m.viewCacheValid = false
+	m.retainOpeningInput(r.target, r.title, r.takeQueued())
 	tabs, active := m.supervisor.GetTabs()
 	m.setTabs(tabs, active)
 }
@@ -204,8 +212,10 @@ func (m *appModel) tickSessionOpening(tick animation.TickMsg) tea.Cmd {
 	case openingChatIn:
 		r.transition.Tick()
 		if !r.transition.Running() {
+			queued := r.takeQueued()
 			m.cancelSessionOpening()
-			return m.editor.Focus()
+			focus := m.editor.Focus()
+			return tea.Batch(focus, m.replayOpeningInput(r, queued))
 		}
 	}
 	return nil
@@ -260,9 +270,19 @@ func (m *appModel) openingInput(msg tea.Msg) (bool, tea.Cmd) {
 			m.cancelSessionOpening()
 			return false, nil
 		default:
-			return true, nil
+			return true, m.bufferOpeningInput(msg)
 		}
-	case tea.PasteMsg, messages.SendMsg:
+	case tea.PasteMsg:
+		return true, m.bufferOpeningInput(msg)
+	case messages.RoutedMsg:
+		send, ok := msg.Inner.(messages.SendMsg)
+		if !ok {
+			return false, nil
+		}
+		return true, m.restoreOpeningRoutedSend(msg.SessionID, send)
+	case messages.SendMsg:
+		// Origin-stamped sends must not be replayed into the opening target.
+		m.openingNotices = append(m.openingNotices, notification.WarningCmd("Message not sent while the subagent view is opening"))
 		return true, nil
 	case tea.MouseClickMsg:
 		if m.opening.phase == openingChatIn {
@@ -289,4 +309,165 @@ func fadeOpeningContent(content string, alpha float64) string {
 		lines[i] = styles.FadeLineCtx(lines[i], alpha, &fade)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// openingInputLimit bounds the input kept while a subagent view is opening.
+const openingInputLimit = 4 << 10
+
+// openingInputReplayMsg replays input buffered for one opening, only if it still
+// addresses the same target after the overlay has closed.
+type openingInputReplayMsg struct {
+	id     uint64
+	target string
+	title  string
+	msgs   []tea.Msg
+}
+
+func (r *sessionOpening) takeQueued() []tea.Msg {
+	queued := r.queued
+	r.queued, r.queuedBytes = nil, 0
+	return queued
+}
+
+func openingInputSize(msg tea.Msg) int {
+	switch msg := msg.(type) {
+	case tea.PasteMsg:
+		return len(msg.Content)
+	case tea.KeyPressMsg:
+		switch {
+		case msg.Text != "":
+			return len(msg.Text)
+		case msg.String() == "enter", msg.String() == "backspace":
+			return 1
+		}
+	}
+	return 0
+}
+
+func (m *appModel) bufferOpeningInput(msg tea.Msg) tea.Cmd {
+	r := m.opening
+	size := openingInputSize(msg)
+	if r == nil || size == 0 {
+		return nil
+	}
+	if r.queuedBytes+size > openingInputLimit {
+		if r.overflowed {
+			return nil
+		}
+		r.overflowed = true
+		return notification.WarningCmd("Input typed while opening is limited to 4 KB; the rest was not kept")
+	}
+	r.queued = append(r.queued, msg)
+	r.queuedBytes += size
+	return nil
+}
+
+// openingInputText renders buffered keys as plain draft text. Enter becomes a
+// newline, so nothing is submitted by retention.
+func openingInputText(msgs []tea.Msg) string {
+	text := ""
+	for _, msg := range msgs {
+		switch msg := msg.(type) {
+		case tea.PasteMsg:
+			text += msg.Content
+		case tea.KeyPressMsg:
+			switch msg.String() {
+			case "enter":
+				text += "\n"
+			case "backspace":
+				if _, size := utf8.DecodeLastRuneInString(text); size > 0 {
+					text = text[:len(text)-size]
+				}
+			default:
+				text += msg.Text
+			}
+		}
+	}
+	return text
+}
+
+func (m *appModel) replayOpeningInput(r *sessionOpening, msgs []tea.Msg) tea.Cmd {
+	if len(msgs) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		return openingInputReplayMsg{id: r.id, target: r.target, title: r.title, msgs: msgs}
+	}
+}
+
+func (m *appModel) handleOpeningInputReplay(msg openingInputReplayMsg) (tea.Model, tea.Cmd) {
+	if m.opening != nil || msg.id != m.openingSeq || m.contextClosed || m.supervisor.ActiveID() != msg.target || m.paneFocus() != msg.target || m.application == nil || m.application.Session() == nil || m.application.Session().ID != msg.target {
+		m.retainOpeningInput(msg.target, msg.title, msg.msgs)
+		return m, nil
+	}
+	var cmds []tea.Cmd
+	for _, input := range msg.msgs {
+		_, cmd := m.updateWithLifecycle(input)
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// retainOpeningInput keeps unsent text as a draft of its intended target only.
+// A composer receives the text directly. Otherwise it is held per target, and the
+// held text itself is the budget: consuming it at composer creation releases it.
+func (m *appModel) retainOpeningInput(target, title string, msgs []tea.Msg) {
+	text := openingInputText(msgs)
+	if text == "" {
+		return
+	}
+	if title == "" {
+		title = target
+	}
+	if ed := m.editors[target]; ed != nil {
+		ed.SetValue(ed.Value() + text)
+		m.openingNotices = append(m.openingNotices, notification.InfoCmd("Unsent input kept for "+title+"; it was not sent"))
+		return
+	}
+	held := m.retainedOpeningInput[target]
+	room := openingInputLimit - len(held)
+	if room <= 0 {
+		m.openingNotices = append(m.openingNotices, notification.WarningCmd("Unsent input for "+title+" was not kept: the 4 KB limit is reached"))
+		return
+	}
+	kept, dropped := text, ""
+	if len(text) > room {
+		cut := room
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		kept, dropped = text[:cut], text[cut:]
+	}
+	if m.retainedOpeningInput == nil {
+		m.retainedOpeningInput = map[string]string{}
+	}
+	m.retainedOpeningInput[target] = held + kept
+	if dropped != "" {
+		m.openingNotices = append(m.openingNotices, notification.WarningCmd("Unsent input kept for "+title+" up to the 4 KB limit; the rest was not kept"))
+		return
+	}
+	m.openingNotices = append(m.openingNotices, notification.InfoCmd("Unsent input kept for "+title+"; it was not sent"))
+}
+
+// restoreOpeningRoutedSend keeps an origin-stamped composer submission in its origin
+// draft. It is never dispatched during opening and never reaches the opening target.
+func (m *appModel) restoreOpeningRoutedSend(origin string, send messages.SendMsg) tea.Cmd {
+	ed := m.editors[origin]
+	if origin == "" || origin == m.opening.target || ed == nil {
+		m.openingNotices = append(m.openingNotices, notification.WarningCmd("Message not sent while the subagent view is opening"))
+		return nil
+	}
+	ed.SetValue(ed.Value() + send.Content)
+	text := "Message not sent while the subagent view is opening; its text was kept in the origin draft"
+	if len(send.Attachments) > 0 {
+		text += ", attachments were not kept"
+	}
+	m.openingNotices = append(m.openingNotices, notification.WarningCmd(text))
+	return nil
+}
+
+func (m *appModel) takeOpeningNotices() []tea.Cmd {
+	notices := m.openingNotices
+	m.openingNotices = nil
+	return notices
 }

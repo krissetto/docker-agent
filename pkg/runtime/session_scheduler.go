@@ -154,6 +154,11 @@ func (g *sessionDriverRegistry) maintainDriver(d *sessionDriver) bool {
 		completion = d.settling() && d.completionErr != nil
 		generation, runErr = d.generation, d.completionRunErr
 		wake = d.pendingWakeableLocked() && !d.stopped && !d.running() && !d.starting() && !d.settling()
+		// A retry is only meaningful while input remains wakeable; a stop or a
+		// drained queue must release it or the driver stays protected forever.
+		if d.retryRunning && (d.stopped || !d.pendingWakeableLocked()) {
+			d.retryRunning = false
+		}
 		if completion {
 			d.wg.Add(1)
 		}

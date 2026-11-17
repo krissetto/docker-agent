@@ -231,12 +231,14 @@
           "description": "The API schema type to use. Only applicable for OpenAI-compatible providers.",
           "enum": [
             "openai_chatcompletions",
-            "openai_responses"
+            "openai_responses",
+            "openai_images"
           ],
           "default": "openai_chatcompletions",
           "examples": [
             "openai_chatcompletions",
-            "openai_responses"
+            "openai_responses",
+            "openai_images"
           ]
         },
         "base_url": {
@@ -1650,7 +1652,7 @@
         },
         "max_tokens": {
           "type": "integer",
-          "description": "Maximum output tokens per response (the completion budget), NOT the context window. OpenAI-compatible servers require prompt_tokens + max_tokens to fit the context window, so a value close to the window leaves no room for the prompt. Set provider_opts.context_size to declare the window.",
+          "description": "Maximum output tokens per response (the completion budget), NOT the context window. OpenAI-compatible servers require prompt_tokens + max_tokens to fit the context window, so a value close to the window leaves no room for the prompt. Set context_window on the model to declare the window.",
           "minimum": 1
         },
         "top_p": {
@@ -1695,6 +1697,10 @@
         "bypass_models_gateway": {
           "type": "boolean",
           "description": "When true, this model connects directly to its provider, ignoring any configured models gateway (--models-gateway / DOCKER_AGENT_MODELS_GATEWAY). The model then authenticates with the provider's own credentials (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY, or token_key) instead of routing through the gateway. A custom base_url (set on the model or inherited from a custom provider definition) implies this bypass even when the flag is false."
+        },
+        "image_generation": {
+          "type": "object",
+          "description": "Native image request settings. Requires output_capabilities.image: true; does not enable images."
         },
         "provider_opts": {
           "type": "object",
@@ -1857,6 +1863,15 @@
         "cost": {
           "$ref": "#/definitions/CostConfig",
           "description": "Explicit token pricing (USD per 1M tokens), overriding the models.dev catalogue. Used for per-turn cost computation, session cost tracking, the /model picker, and the after_llm_call hook's cost field. Makes an uncatalogued model (custom base_url provider, local or private deployment) 'priced' instead of billing $0. Prices must not be negative; an all-zero table means 'priced, free'. Cannot be combined with first_available."
+        },
+        "context_window": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Context window of this model in tokens. Metadata only: it drives context accounting, compaction thresholds (including a dedicated compaction_model) and max_tokens clamping for models the models.dev catalogue does not describe (custom openai_responses or openai_chatcompletions endpoints, self-hosted models). It is never sent as a request parameter and never configures the Docker Model Runner engine; use provider_opts.context_size for that. This is the only context-window setting for non-DMR providers; provider_opts.context_size is accepted only by the dmr provider, where it also sizes the engine and must equal this value when both are set. Otherwise the runtime-discovered window applies, then models.dev. It must not exceed the context window the models.dev catalogue declares for the model, when it declares one (the error names the catalogue maximum); models the catalogue does not describe accept any positive value. Cannot be combined with first_available (set it on the candidate models instead).",
+          "examples": [
+            32768,
+            200000
+          ]
         }
       },
       "additionalProperties": false

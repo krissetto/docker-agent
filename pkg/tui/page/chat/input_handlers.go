@@ -316,11 +316,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 	return p, cmd
 }
 
-// agentClickCmd resolves a sidebar agent click to its command: a right-click or
-// Ctrl+left-click on any agent opens the read-only details dialog; a plain
-// left-click switches to it (switching to the already-current agent is a
-// harmless no-op). Returns nil when no agent was resolved or the gesture isn't
-// one we handle.
+// agentClickCmd preserves the inspector gesture and opens the team picker on a plain click.
 func (p *chatPage) agentClickCmd(agentName string, button tea.MouseButton, mod tea.KeyMod) tea.Cmd {
 	if agentName == "" {
 		return nil
@@ -329,7 +325,7 @@ func (p *chatPage) agentClickCmd(agentName string, button tea.MouseButton, mod t
 	case button == tea.MouseRight, button == tea.MouseLeft && mod == tea.ModCtrl:
 		return core.CmdHandler(msgtypes.ShowAgentDetailsMsg{AgentName: agentName})
 	case button == tea.MouseLeft:
-		return core.CmdHandler(msgtypes.SwitchAgentMsg{AgentName: agentName})
+		return core.CmdHandler(msgtypes.OpenAgentPickerMsg{})
 	default:
 		return nil
 	}

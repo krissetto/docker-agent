@@ -1,0 +1,186 @@
+{
+  "model": "flux2-klein-4b",
+  "endpoint": "http://192.168.50.205:8731/v1/images/generations",
+  "started_at": "2026-11-17T16:23:47.839223+00:00",
+  "concurrency": 1,
+  "settings": {
+    "size": "1024x1024",
+    "n": 1,
+    "response_format": "b64_json"
+  },
+  "timing_definition": "perf_counter immediately before urlopen until the entire HTTP response body has been read; excludes JSON/base64 decoding and file writing",
+  "note": "Server-default steps, quality and seed; existing server load is uncontrolled. Eight distinct prompts, sequential requests; no automatic retries.",
+  "results": [
+    {
+      "title": "Hyper-realistic portrait",
+      "slug": "01-hyperreal-portrait",
+      "prompt": "A hyper-realistic editorial photographic portrait of a fictional 45-year-old woman ceramic artist in her sunlit pottery studio, waist-up at a wooden workbench, both hands gently holding a small handmade ceramic bowl. Natural skin pores, faint freckles, fine wrinkles around the eyes, loose silver-streaked dark hair, worn linen apron dusted with clay, believable hands and fingers. Soft overcast window light from camera left, subtle reflected light on her face, beautiful but unretouched documentary realism. 85mm portrait lens, shallow depth of field, softly blurred shelves of pottery, accurate materials and skin color, quiet warm expression, premium medium-format photograph. Square composition, no lettering, no watermark, not an illustration.",
+      "http_status": 200,
+      "api_seconds": 13.4689,
+      "headers_seconds": 13.3159,
+      "response_bytes": 3228029,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/01-hyperreal-portrait.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2420941,
+      "sha256": "f81bb726badd1184dd20444e0598d58dd5f2334b571b11f851b6df865e594f5f",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Hyper-realistic macro",
+      "slug": "02-hyperreal-macro",
+      "prompt": "Extreme macro wildlife photograph of a small emerald jumping spider standing on the edge of a dew-covered fern leaf at dawn. Its eight eyes have realistic lens-like reflections, intricate individual hairs on the legs, minute water droplets bead along the serrated leaf edge, a tiny round droplet magnifies the leaf veins. Natural anatomy and physically plausible scale, sharply focused face and front legs with creamy emerald and amber bokeh behind, gentle backlit sun rays, subtle translucent leaf tissue, exceptionally detailed true-to-life nature photography, 100mm macro lens, square framing, no text, no watermark.",
+      "http_status": 200,
+      "api_seconds": 13.0848,
+      "headers_seconds": 12.9306,
+      "response_bytes": 3177945,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/02-hyperreal-macro.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2383379,
+      "sha256": "5f819f856a46c9f33c5a4d5aefa0a571118b660a3ce75f33a3bef8e0f297e4d9",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Hyper-realistic rainy street",
+      "slug": "03-hyperreal-night-street",
+      "prompt": "Hyper-realistic architectural street photograph of a narrow Lisbon side street immediately after heavy rain at blue hour, old yellow tram rounding a gentle curve, wet cobblestones reflecting amber cafe windows and cool dusk sky, intricate chipped blue-and-white ceramic tiles on an old facade in the foreground, two people sharing a dark red umbrella in the middle distance, fine droplets on parked bicycle spokes. Convincing perspective, natural subdued cinematic colors, realistic puddles, no impossible reflections, authentic weathered stone and wood, full-frame 35mm lens, detailed but not oversharpened, square composition, no prominent writing, no watermark.",
+      "http_status": 200,
+      "api_seconds": 12.8117,
+      "headers_seconds": 12.6805,
+      "response_bytes": 3721565,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/03-hyperreal-night-street.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2791093,
+      "sha256": "68fa07ee4a7f628bfb3c69eaa9877aad659f7327b95f45e2a4fc27d543a60759",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Watercolor",
+      "slug": "04-watercolor-lighthouse",
+      "prompt": "A delicate traditional watercolor painting on visible cold-pressed cotton paper of a white lighthouse on a rocky island after a storm. Small red-roofed keeper cottage, wind-bent grasses, seabirds and a narrow winding footpath, pale morning light breaking between lavender clouds, turquoise water washing around ochre rocks. Transparent pigment washes, beautiful granulation, soft wet-on-wet sky, purposeful drybrush accents in the grass, sparse confident detail, restrained palette of ultramarine, burnt sienna and sage, luminous untouched paper highlights, clearly handmade watercolor rather than a photograph, square composition, no text, no signature.",
+      "http_status": 200,
+      "api_seconds": 12.5144,
+      "headers_seconds": 12.4025,
+      "response_bytes": 2952469,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/04-watercolor-lighthouse.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2214271,
+      "sha256": "1e0cc58accc27f130543c8c4c03c373bec23bafc5fc3d175deb0df5da689eddf",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Japanese woodblock",
+      "slug": "05-woodblock-cranes",
+      "prompt": "A traditional Japanese woodblock print composition of two red-crowned cranes wading in a still marsh beneath a distant snow-capped mountain, reeds in the foreground and a single curling pine branch framing the upper right. Flat carefully separated color blocks, fine dark keyblock outlines, subtle ink texture and woodgrain, warm cream handmade paper, deep indigo water, muted vermilion sunrise, elegant negative space, rhythmic ripples, deliberately simplified forms and asymmetrical balance, clear unmistakable relief-print craftsmanship, square composition, no calligraphy, no signature, no watermark.",
+      "http_status": 200,
+      "api_seconds": 12.4247,
+      "headers_seconds": 12.2684,
+      "response_bytes": 3070525,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/05-woodblock-cranes.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2302814,
+      "sha256": "e0386986021f4574773f51585a4fb67a717b7cc60b18ec1984651347e37c69f3",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Art Nouveau botanical",
+      "slug": "06-art-nouveau-botanical",
+      "prompt": "An elaborate Art Nouveau decorative botanical panel with a graceful barn owl at its center, surrounded by flowing iris stems, ginkgo leaves, stylized moths and sweeping organic whiplash curves. Symmetrical ornamental border with small geometric corners, pale ivory background, muted teal, moss green, dusty violet and warm gold accents. Elegant flattened shapes, fine hand-inked contour lines, exquisite feather pattern, subtle aged lithographic paper texture, cohesive flowing composition, sophisticated early twentieth-century poster aesthetic without any text or lettering. Square decorative panel, no watermark.",
+      "http_status": 200,
+      "api_seconds": 12.0736,
+      "headers_seconds": 11.9176,
+      "response_bytes": 3449173,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/06-art-nouveau-botanical.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2586801,
+      "sha256": "9dbf8e4eb5e4ebca640e8e703627ccfc706e2a30aeb9609f8403b1ee69537059",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Cinematic sci-fi",
+      "slug": "07-cinematic-orbital-greenhouse",
+      "prompt": "A visually spectacular cinematic science-fiction scene inside a vast orbital greenhouse above a blue ocean planet. A lone gardener in a utilitarian orange jumpsuit walks across a narrow suspended bridge between terraced hydroponic gardens, translucent domed windows reveal the curved planet and distant sunlit rings, maintenance robots tend luminous green vines, hanging condensation beads sparkle along steel cables. Monumental yet believable engineering, clear scale and strong foreground-middle-background depth, physically plausible metal and glass, shafts of warm sunlight through humid atmosphere, richly detailed production-design concept art, controlled teal and amber palette, square composition, no captions, no watermark.",
+      "http_status": 200,
+      "api_seconds": 11.7081,
+      "headers_seconds": 11.5785,
+      "response_bytes": 3801501,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/07-cinematic-orbital-greenhouse.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 2851045,
+      "sha256": "ee820ef0855f7306cb2095cf61ad1c0e5462702522b94edeaa6819462e9798e3",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    },
+    {
+      "title": "Isometric 3D miniature",
+      "slug": "08-isometric-robot-cafe",
+      "prompt": "An exquisitely crafted isometric 3D miniature diorama of a friendly robot-run corner cafe and workshop on a small square urban plot, seen from above at a precise three-quarter isometric angle. One cutaway wall exposes a cozy cafe counter with tiny espresso machine, shelves of colorful mugs, two miniature maintenance robots repairing a bicycle at a bench, an upstairs rooftop greenhouse, outside a little yellow delivery scooter and a planter of ferns. Tactile clay and painted wood materials, soft rounded design, tiny believable mechanical details, warm lights glowing inside, clean mint background and gentle ambient occlusion, polished high-end miniature product render, square composition, no words or signage, no watermark.",
+      "http_status": 200,
+      "api_seconds": 11.4408,
+      "headers_seconds": 11.3457,
+      "response_bytes": 2127641,
+      "status": "ok",
+      "path": "/Users/krissetto/dev/ai-dev/docker-agent/generated-images/flux-bench-20261117-162347-755861/08-isometric-robot-cafe.png",
+      "width": 1024,
+      "height": 1024,
+      "bytes": 1595650,
+      "sha256": "b568081042bef67017c5b85cc96595f96ca28d42ed121d7cb9f3e1c2b546d4ba",
+      "server_metadata": {
+        "size": "1024x1024",
+        "quality": "high",
+        "output_format": "png"
+      }
+    }
+  ],
+  "finished_at": "2026-11-17T16:25:27.477396+00:00",
+  "summary": {
+    "requested": 8,
+    "successful": 8,
+    "batch_wall_seconds": 99.6376,
+    "mean_api_seconds": 12.4409,
+    "median_api_seconds": 12.4695,
+    "min_api_seconds": 11.4408,
+    "max_api_seconds": 13.4689,
+    "total_api_seconds": 99.527
+  }
+}

@@ -55,12 +55,16 @@ func (g *Generator) WithPreparation(prepare func(context.Context, provider.Provi
 }
 
 // New creates a title Generator from the ordered candidate models. Nil
-// providers are skipped. Image-output-capable providers remain eligible
+// and image-only providers are skipped. Multimodal providers remain eligible
 // because title-generation calls are explicitly text-only.
 func New(models ...provider.Provider) *Generator {
 	usable := make([]provider.Provider, 0, len(models))
 	for _, model := range models {
-		if model != nil {
+		if model == nil {
+			continue
+		}
+		config := model.BaseConfig().ModelConfig
+		if !config.IsImageOnly() {
 			usable = append(usable, model)
 		}
 	}

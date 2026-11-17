@@ -164,6 +164,8 @@ type Model interface {
 	// FinalizeStream materializes any offscreen active tail before stream
 	// completion/cancellation makes message content externally observable.
 	FinalizeStream() tea.Cmd
+	SetScrollOnSend(enabled bool)
+	ScrollToSentInput(turnID string)
 	AdjustBottomSlack(delta int)
 	// VisualGeneration increments only when Update changes rendered output.
 	VisualGeneration() uint64
@@ -215,6 +217,9 @@ type visualSelectionKey struct {
 }
 
 type transcriptFrameKey struct {
+	stickyWorkHeader                    string
+	stickyWorkBlock                     *workblock.Model
+	stickyWorkGeneration                uint64
 	scrollbarDragging                   bool
 	contentGeneration, segmentsRevision uint64
 	width, height, offset, total, slack int
@@ -320,6 +325,9 @@ type streamedReasoningTail struct {
 }
 
 type model struct {
+	scrollOnSend                  sentInputScroll
+	stickyWorkLatch               stickyWorkLatch
+	stickyWorkPressed             bool
 	toolRenderers                 *tool.Registry
 	groupStart                    int // Earliest message eligible for same-stream appends.
 	imageClick                    *imageClick
@@ -412,6 +420,7 @@ type model struct {
 	deferredTailIndex         int
 	deferredTail              []string
 	tailDirty                 bool // the live tail's own content changed since its last measure
+	workReasoningActive       bool
 	streamedReasoning         *streamedReasoningTail
 	uncommittedBlockTools     map[*reasoningblock.Model]map[string]struct{}
 	workEnabled               bool
@@ -430,7 +439,9 @@ type model struct {
 	suppressReplyHandoff           bool
 	workActive                     bool
 	workElapsed                    time.Duration
-	workDurations                  map[*types.Message]time.Duration
+	workTimings                    map[string]workTiming
+	workTimingOwners               map[string]int
+	workWaiting                    string
 	responseGroups                 map[*types.Message]uint64
 	nextResponseGroup              uint64
 	workProjectionDirty            bool
@@ -578,7 +589,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 		workAnchorSource:        -1,
 		bodyDragIdx:             -1,
 		workRetained:            make(map[*types.Message]struct{}),
-		workDurations:           make(map[*types.Message]time.Duration),
+		workTimings:             make(map[string]workTiming),
 		visibleReplies:          messages.VisibleRepliesThree,
 		replyHandoffGeneration:  1,
 		replyHandoff:            newReplyHandoff(ar),
@@ -683,6 +694,9 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 
 	case scrollToBottomMsg:
+		if m.scrollOnSend.target != nil || len(m.scrollOnSend.pending) > 0 {
+			return m, nil
+		}
 		if !m.userHasScrolled {
 			cmd := m.scrollToBottom()
 			return m, cmd
@@ -818,10 +832,19 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 		return m, nil
 	}
 	if m.isMouseOnScrollbar(msg.X, msg.Y) {
+		m.cancelSentInputScroll()
 		// Grabbing the thumb interrupts any text selection still held down.
 		// A selection begun after the grab is untouched by its release.
 		m.selection.end()
 		return m.handleScrollviewUpdate(msg)
+	}
+
+	if _, block, ok := m.stickyWorkAt(msg.X, msg.Y); ok {
+		m.selection.end()
+		m.stickyWorkPressed = true
+		m.clearPointerHoverTargets()
+		m.activateStickyWork(block)
+		return m, nil
 	}
 
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
@@ -1177,8 +1200,9 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 	}
 
 	if m.selection.mouseButtonDown && m.selection.active {
+		m.cancelSentInputScroll()
 		m.CancelReferenceHover()
-		line, col := m.mouseToLineCol(msg.X, msg.Y)
+		line, col := m.selectionMouseToLineCol(msg.X, msg.Y)
 		// Any real movement turns a multi-click into a drag: the copy now
 		// belongs to the release handler, not the debounced word copy.
 		if line != m.selection.lastClickLine || col != m.selection.lastClickCol {
@@ -1198,6 +1222,10 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 }
 
 func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
+	if m.stickyWorkPressed && msg.Button == tea.MouseLeft {
+		m.stickyWorkPressed = false
+		return m, nil
+	}
 	if handled, cmd := m.routeBodyDrag(msg); handled {
 		return m, cmd
 	}
@@ -1215,7 +1243,7 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.C
 
 	if msg.Button == tea.MouseLeft && m.selection.mouseButtonDown {
 		if m.selection.active {
-			line, col := m.mouseToLineCol(msg.X, msg.Y)
+			line, col := m.selectionMouseToLineCol(msg.X, msg.Y)
 
 			// If the mouse didn't move since the press, this wasn't a drag.
 			if !m.selection.dragged && line == m.selection.lastClickLine && col == m.selection.lastClickCol {
@@ -1326,8 +1354,11 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 		if m.focused && m.selectedMessageIndex >= 0 {
 			if block := m.workHeaderBySource[m.selectedMessageIndex]; block != nil {
-				block.Toggle()
-				m.invalidateItem(m.selectedMessageIndex)
+				if _, sticky, ok := m.stickyWork(); ok && sticky == block {
+					m.activateStickyWork(block)
+				} else {
+					m.toggleWork(block)
+				}
 				return m, nil
 			}
 			if view, ok := m.views[m.selectedMessageIndex].(toggleableView); ok {
@@ -1363,6 +1394,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		m.scrollToTop()
 		return m, nil
 	case key.Matches(msg, core.UIKeys.End, core.UIKeys.VimBottom):
+		m.cancelSentInputScroll()
 		cmd := m.scrollToBottom()
 		return m, cmd
 	}
@@ -1411,7 +1443,7 @@ func (m *model) View() string {
 
 	// Use virtual total height; a segmented active suffix is intentionally not
 	// flattened into renderedLines.
-	totalLines := m.displayTotalHeight() + m.bottomSlack
+	totalLines := m.totalScrollableHeight()
 	if totalLines == 0 {
 		return ""
 	}
@@ -1437,6 +1469,11 @@ func (m *model) View() string {
 	m.applyReferenceHover(visibleLines, startLine)
 	visibleLines = m.applyURLUnderline(visibleLines, startLine)
 	visibleLines = m.applyCopiedFlash(visibleLines, startLine)
+	// Replace, never insert: the overlay owns one painted row, not geometry.
+	// Removing the underlying row also clips any inline-image placement markers.
+	if frameKey.stickyWorkHeader != "" && len(visibleLines) > 0 {
+		visibleLines[0] = frameKey.stickyWorkHeader
+	}
 
 	// Sync scroll state and delegate rendering to scrollview which guarantees
 	// fixed-width padding, pinned scrollbar, and exact height. Selection and
@@ -1467,7 +1504,7 @@ func (m *model) transcriptFrameKey() transcriptFrameKey {
 		referenceHoverGeneration: m.referenceHoverGeneration,
 		contentGeneration:        m.contentGeneration, segmentsRevision: m.segmentsRevision,
 		width: m.width, height: m.height, offset: m.scrollOffset,
-		total: m.layoutTotal(), slack: m.bottomSlack,
+		total: m.totalScrollableHeight(), slack: m.bottomSlack,
 		hoverActionGeneration:  m.hoverActionGeneration,
 		replyHandoffPhase:      m.replyHandoff.Phase(),
 		replyHandoffGeneration: m.replyHandoffSerial,
@@ -1475,6 +1512,10 @@ func (m *model) transcriptFrameKey() transcriptFrameKey {
 			active: m.selection.active, startLine: m.selection.startLine,
 			startCol: m.selection.startCol, endLine: m.selection.endLine, endCol: m.selection.endCol,
 		},
+	}
+	if _, block, ok := m.stickyWork(); ok {
+		frame.stickyWorkHeader = block.HeaderView()
+		frame.stickyWorkBlock, frame.stickyWorkGeneration = block, block.VisualGeneration()
 	}
 	if m.hoveredURL != nil {
 		frame.hoveredURL, frame.hasHoveredURL = *m.hoveredURL, true
@@ -1526,6 +1567,7 @@ func (m *model) updateScrollState() {
 			m.CancelReferenceHover()
 		}
 	}()
+	m.prepareSentInputScroll()
 	prevTotalHeight := m.followBaseline()
 	if m.legacyFacadeMode() {
 		// Direct-write harness: the caller wrote the facade total before this pass, so
@@ -1545,7 +1587,8 @@ func (m *model) updateScrollState() {
 		m.bottomSlack = m.settledBottomSlack(prevTotalHeight, m.layoutTotal(), wasAtBottom)
 	}
 
-	scrollableHeight := m.displayTotalHeight() + m.bottomSlack
+	m.placeSentInputScroll()
+	scrollableHeight := m.totalScrollableHeight()
 	maxScrollOffset := max(0, scrollableHeight-m.height)
 
 	// Auto-scroll when content grows beyond any slack.
@@ -1559,7 +1602,8 @@ func (m *model) updateScrollState() {
 	// out yet. Lay out again at the settled offset until both agree.
 	for range 3 {
 		m.layoutViewport()
-		maxOff := max(0, m.displayTotalHeight()+m.bottomSlack-m.height)
+		m.placeSentInputScroll()
+		maxOff := max(0, m.totalScrollableHeight()-m.height)
 		target := min(m.scrollOffset, maxOff)
 		if wasAtBottom {
 			target = maxOff
@@ -1916,6 +1960,7 @@ const (
 )
 
 func (m *model) scrollUp() {
+	m.cancelSentInputScroll()
 	if m.scrollOffset > 0 {
 		m.userHasScrolled = true
 		m.bottomSlack = 0
@@ -1924,6 +1969,7 @@ func (m *model) scrollUp() {
 }
 
 func (m *model) scrollDown() tea.Cmd {
+	m.cancelSentInputScroll()
 	cmd := m.materializeDeferredTailForRange(m.scrollOffset, m.scrollOffset+m.height+defaultScrollAmount)
 	m.setScrollOffset(m.scrollOffset + defaultScrollAmount)
 	if m.isAtBottom() {
@@ -1933,12 +1979,14 @@ func (m *model) scrollDown() tea.Cmd {
 }
 
 func (m *model) scrollPageUp() {
+	m.cancelSentInputScroll()
 	m.userHasScrolled = true
 	m.bottomSlack = 0
 	m.setScrollOffset(max(0, m.scrollOffset-m.height))
 }
 
 func (m *model) scrollPageDown() tea.Cmd {
+	m.cancelSentInputScroll()
 	cmd := m.materializeDeferredTailForRange(m.scrollOffset, m.scrollOffset+m.height*2)
 	m.setScrollOffset(m.scrollOffset + m.height)
 	if m.isAtBottom() {
@@ -1949,6 +1997,7 @@ func (m *model) scrollPageDown() tea.Cmd {
 }
 
 func (m *model) scrollToTop() {
+	m.cancelSentInputScroll()
 	m.userHasScrolled = true
 	m.bottomSlack = 0
 	m.setScrollOffset(0)
@@ -1966,7 +2015,7 @@ func (m *model) materializeDeferredTail() tea.Cmd {
 		b.WriteString(chunk)
 	}
 	content := b.String()
-	firstProse := m.workEnabled && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(content) != ""
+	firstProse := m.workEnabled && !types.HasVisibleProse(msg.Content) && types.HasVisibleProse(content)
 	if firstProse {
 		m.snapshotPendingReplyHandoff(msg)
 	}
@@ -2054,6 +2103,7 @@ func (m *model) scrollByWheel(delta int) tea.Cmd {
 	if delta == 0 {
 		return nil
 	}
+	m.cancelSentInputScroll()
 	var cmd tea.Cmd
 	if delta > 0 {
 		requestedEnd := m.scrollOffset + m.height + delta*wheelScrollAmount*defaultScrollAmount
@@ -2102,7 +2152,7 @@ func (m *model) isAtBottom() bool {
 
 // Message selection methods
 func (m *model) isSelectableMessage(index int) bool {
-	if index < m.historyStart || index >= len(m.messages) {
+	if index < m.historyStart || index >= len(m.messages) || m.hiddenSlot(index) {
 		return false
 	}
 	msg := m.messages[index]
@@ -2138,7 +2188,7 @@ func (m *model) findLastSelectableMessage() int {
 func (m *model) findLastAssistantMessage() int {
 	for i := range slices.Backward(m.messages) {
 		msg := m.messages[i]
-		if msg.Type == types.MessageTypeAssistant || msg.Type == types.MessageTypeAssistantReasoningBlock {
+		if (msg.Type == types.MessageTypeAssistant || msg.Type == types.MessageTypeAssistantReasoningBlock) && m.isSelectableMessage(i) {
 			return i
 		}
 	}
@@ -2164,6 +2214,7 @@ func (m *model) findNextSelectableMessage(fromIndex int) int {
 }
 
 func (m *model) selectPreviousMessage() {
+	m.cancelSentInputScroll()
 	if len(m.messages) == 0 {
 		return
 	}
@@ -2180,6 +2231,7 @@ func (m *model) selectPreviousMessage() {
 }
 
 func (m *model) selectNextMessage() {
+	m.cancelSentInputScroll()
 	if len(m.messages) == 0 {
 		return
 	}
@@ -2196,6 +2248,7 @@ func (m *model) selectNextMessage() {
 }
 
 func (m *model) scrollToSelectedMessage() {
+	m.cancelSentInputScroll()
 	if m.selectedMessageIndex < 0 || m.selectedMessageIndex >= len(m.messages) {
 		return
 	}
@@ -2467,11 +2520,15 @@ func (m *model) refreshRenderedItem(index int) bool {
 	m.invalidateFrameContent()
 	wasAtBottom := m.isAtBottom()
 	m.syncSlots()
+	if index >= 0 && index < len(m.views) {
+		m.refreshSeparators(m.separatorOwnerFrom(max(index-1, 0)), index+1)
+	}
 	if index < 0 || index >= len(m.views) {
 		m.invalidateItem(index)
 		return false
 	}
 	if !m.materialized(index) {
+		m.dropSlot(index)
 		// Not materialized: the slot is measured when it next becomes visible.
 		m.renderDirty = true
 		m.layoutFull = false
@@ -2526,6 +2583,9 @@ func (m *model) invalidateItem(index int) { m.invalidateItemWith(index, true) }
 func (m *model) invalidateItemPaint(index int) { m.invalidateItemWith(index, false) }
 
 func (m *model) invalidateItemWith(index int, measure bool) {
+	if measure && index >= 0 && index < len(m.slotSep) && len(m.slotSep) == len(m.views) {
+		m.refreshSeparators(m.separatorOwnerFrom(max(index-1, 0)), index+1)
+	}
 	m.markTailChanged(index)
 	m.noteAnchorContentChange(index)
 	if block := m.workBlockForSource(index); block != nil {
@@ -2954,7 +3014,11 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 }
 
 func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, toolResults map[string]string) {
+	m.cancelSentInputScroll()
+	m.scrollOnSend.seen = nil
+	m.scrollOnSend.padding = 0
 	m.inputParentSessionID = sess.ParentID
+	m.restoreTurnTimings(sess)
 	if m.subagents == nil {
 		m.subagents = subagentindex.New()
 	}
@@ -3006,7 +3070,6 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 	m.historyStart = 0
 	m.workActive = false
 	m.workElapsed = 0
-	m.workDurations = make(map[*types.Message]time.Duration)
 	m.messages = nil
 	m.liveTailMsg = nil
 	m.messageIndex = nil
@@ -3028,6 +3091,9 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 	m.streamedReasoning = nil
 	m.uncommittedBlockTools = nil
 	m.responseGroups = make(map[*types.Message]uint64)
+	for _, block := range m.workBlocks {
+		block.Release()
+	}
 	m.workBlocks = make(map[*types.Message]*workblock.Model)
 	m.workProjectionDirty = true
 	m.sessionOpener = nil
@@ -3097,6 +3163,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 						}
 						block = nil
 						msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, part.Text)
+						msg.SessionID, msg.MessageID = sess.ID, smsg.Message.MessageID
 						m.responseGroups[msg] = replayResponseGroup
 						appendSessionMessage(msg, m.createMessageView(msg))
 						contentIdx = len(m.messages) - 1
@@ -3160,6 +3227,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			hasReasoning := smsg.Message.ReasoningContent != ""
 			// Tool-call XML is hidden exactly as the live stream hides it.
 			visibleContent := chat.VisibleAssistantContent(smsg.Message.Content)
+			// Keep legacy text/tool topology, even when the prose surface is hidden.
 			hasContent := visibleContent != ""
 			hasToolCalls := len(smsg.Message.ToolCalls) > 0
 			var reasoningBlock *reasoningblock.Model
@@ -3186,7 +3254,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			// (or forms a media-only one), mirroring AppendAssistantMedia's
 			// live behavior.
 			restoredMedia := generatedMedia[pos]
-			if hasContent || len(restoredMedia) > 0 {
+			if visibleContent != "" || len(restoredMedia) > 0 {
 				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, visibleContent)
 				msg.SessionID, msg.MessageID = sess.ID, smsg.Message.MessageID
 				m.responseGroups[msg] = replayResponseGroup
@@ -3240,6 +3308,8 @@ func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]
 }
 
 func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status types.ToolStatus) tea.Cmd {
+	// Tool execution pauses reasoning, but its preview belongs to the active
+	// turn and stays visible until prose arrives or the turn settles.
 	// First check if this tool call exists in any reasoning block
 	for i := range slices.Backward(m.messages) {
 		if m.messages[i].Type == types.MessageTypeAssistantReasoningBlock {
@@ -3398,6 +3468,10 @@ func (m *model) LoadedItemCount() int { return m.loadedItemCount }
 // are never touched, even when adjacent. Standalone tool bubbles are keyed by
 // tool-call id and update themselves, so they are never part of the tail.
 func (m *model) FinalizeStreamedAssistant(agentName, content, reasoning string, alreadyShown bool) tea.Cmd {
+	return m.finalizeStreamedAssistant(agentName, content, reasoning, alreadyShown, true)
+}
+
+func (m *model) finalizeStreamedAssistant(agentName, content, reasoning string, alreadyShown, reconcileText bool) tea.Cmd {
 	defer func() {
 		if m.streamedReasoning != nil && m.streamedReasoning.agentName == agentName {
 			m.streamedReasoning = nil
@@ -3497,7 +3571,7 @@ scan:
 			cmds = append(cmds, m.addReasoningBlock(agentName, reasoning))
 		}
 	}
-	if content != "" {
+	if reconcileText && (textIdx != -1 || content != "") {
 		if textIdx != -1 {
 			m.messages[textIdx].Content = content
 			m.views[textIdx].(message.Model).SetMessage(m.messages[textIdx])
@@ -3536,6 +3610,17 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 	cmd := m.CommitAssistant(event.GetAgentName(), event.CommittedToolCallIDs())
 	m.committedMessageCount = min(start, len(m.messages))
 	if event.Message != nil && event.Message.Message.Presentation != nil {
+		// Ordered whitespace parts still own their original boundaries, but a
+		// canonical answer without prose must also clear any stale streamed text.
+		var committedText strings.Builder
+		for _, part := range event.Message.Message.Presentation {
+			if part.Type == chat.AssistantPartContent {
+				committedText.WriteString(part.Text)
+			}
+		}
+		if id := event.Message.Message.MessageID; id != "" && !streamcontent.IsLegacy(id) && !types.HasVisibleProse(committedText.String()) {
+			cmd = tea.Batch(cmd, m.ReconcileAssistantContent(event.SessionID, id, event.GetAgentName(), committedText.String()))
+		}
 		var committedTail string
 		for _, part := range slices.Backward(event.Message.Message.Presentation) {
 			if part.Type == chat.AssistantPartReasoning && part.Text != "" {
@@ -3568,13 +3653,23 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 			// as before; the canonical text then joins the row with that
 			// identity, or starts one, so a repeated completion adds no copy.
 			cmd = tea.Batch(cmd,
-				m.FinalizeStreamedAssistant(agentName, "", event.Message.Message.ReasoningContent, false),
+				m.finalizeStreamedAssistant(agentName, "", event.Message.Message.ReasoningContent, false, false),
 				m.ReconcileAssistantContent(event.SessionID, messageID, agentName, content))
 		} else {
 			cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(agentName, content, event.Message.Message.ReasoningContent, false))
 		}
 	}
 	m.committedMessageCount = len(m.messages)
+	messageID := ""
+	if event.Message != nil {
+		messageID = event.Message.Message.MessageID
+	}
+	// A tool-bearing commit closes a model message, not the turn's reasoning
+	// preview. Keep it through tool execution, including rounds with no new
+	// reasoning. Visible prose and turn settlement still retire it.
+	if len(event.CommittedToolCallIDs()) == 0 {
+		m.finishReasoningPreview(event.GetAgentName(), event.SessionID, messageID)
+	}
 	// A completion never pins: its reconcile path appends through the stream entry, so the
 	// stream's own pin is restored, or released when this completion settles that stream.
 	m.liveTailMsg = pinnedBefore
@@ -3657,6 +3752,13 @@ func (m *model) BreakMessageGroup() {
 }
 
 func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
+	return m.appendToLastMessage(agentName, content, true)
+}
+
+func (m *model) appendToLastMessage(agentName, content string, finishPreview bool) tea.Cmd {
+	if types.HasVisibleProse(content) && finishPreview {
+		m.finishReasoningPreview(agentName, "", "")
+	}
 	// Only a non-empty chunk pins, so an empty append never re-pins a completed reply.
 	if content != "" {
 		defer m.markLiveTail()
@@ -3678,7 +3780,7 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 		// A reader pinned to the end keeps following what it streams. The reader is read
 		// before the append, because the append itself moves totalHeight.
 		followTail := !m.userHasScrolled && m.scrollOffset >= max(0, m.totalScrollableHeight()-m.height)
-		if m.userHasScrolled {
+		if m.userHasScrolled && m.scrollOnSend.target == nil {
 			var materializeCmd tea.Cmd
 			if len(m.deferredTail) == 0 || m.deferredTailIndex != lastIdx {
 				// Flush the previous owner before buffering a different message.
@@ -3690,13 +3792,13 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 			return materializeCmd
 		}
 		materializeCmd := m.materializeDeferredTail()
-		wasProse := strings.TrimSpace(lastMsg.Content) != ""
-		if !wasProse && strings.TrimSpace(content) != "" && m.workEnabled {
+		wasProse := types.HasVisibleProse(lastMsg.Content)
+		if !wasProse && types.HasVisibleProse(content) && m.workEnabled {
 			m.snapshotPendingReplyHandoff(lastMsg)
 		}
 		cmd := m.views[lastIdx].(message.Model).AppendContent(content)
 		m.refreshRenderedItem(lastIdx)
-		if !wasProse && strings.TrimSpace(content) != "" && m.workEnabled {
+		if !wasProse && types.HasVisibleProse(content) && m.workEnabled {
 			m.workProjectionDirty = true
 			m.layoutViewport()
 			m.beginPendingReplyHandoff()
@@ -3780,16 +3882,24 @@ func (m *model) UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd {
 }
 
 func (m *model) trackStreamedReasoning(agentName string, block *reasoningblock.Model, text string) {
+	if text != "" {
+		m.workReasoningActive = true
+		block.SetReasoningActive(true)
+	}
 	if m.streamedReasoning == nil || m.streamedReasoning.block != block || m.streamedReasoning.agentName != agentName {
 		m.streamedReasoning = &streamedReasoningTail{agentName: agentName, block: block}
 	}
 	m.streamedReasoning.text += text
+	if source := len(m.views) - 1; source >= 0 && m.views[source] == block {
+		m.invalidateItem(source)
+	}
 }
 
 func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
-	if content != "" {
-		defer m.markLiveTail()
+	if content == "" {
+		return nil
 	}
+	defer m.markLiveTail()
 	m.removeSpinner()
 
 	if len(m.messages) == 0 {
@@ -3958,6 +4068,7 @@ func (m *model) toolCallSource(toolCallID string) int {
 // NavigateToToolCall selects and reveals a unique tool card without changing
 // transcript contents or auto-scrolling the rest of the conversation.
 func (m *model) NavigateToToolCall(toolCallID string) bool {
+	m.cancelSentInputScroll()
 	index := m.toolCallSource(toolCallID)
 	if index < 0 {
 		return false
@@ -4033,7 +4144,7 @@ func (m *model) contentWidth() int {
 // totalScrollableHeight is the painted document height, including rows an active
 // reply handoff still displays; it must match View and the scrollview clamp.
 func (m *model) totalScrollableHeight() int {
-	return m.displayTotalHeight() + m.bottomSlack
+	return m.displayTotalHeight() + m.bottomSlack + m.scrollOnSend.padding
 }
 
 // Helper methods
@@ -4212,6 +4323,9 @@ func (m *model) actionRowEligible(index int) bool {
 		return false
 	}
 	msg := m.messages[index]
+	if msg.PresentationHidden() {
+		return false
+	}
 	switch msg.Type {
 	case types.MessageTypeUser:
 		return true
@@ -4352,6 +4466,9 @@ func (m *model) copyMessageToClipboard(msgIdx int) tea.Cmd {
 
 func (m *model) mouseToLineCol(x, y int) (line, col int) {
 	m.updateScrollState()
+	if _, _, ok := m.stickyWorkAt(x, y); ok {
+		return -1, -1
+	}
 	adjustedX := max(0, x-m.xPos)
 	adjustedY := max(0, y-m.yPos)
 	return m.scrollOffset + adjustedY, adjustedX
@@ -4366,7 +4483,7 @@ func (m *model) SubagentNodeAt(x, y int) (subagent.NodeID, bool) {
 }
 
 func (m *model) isMouseOnScrollbar(x, y int) bool {
-	if m.layoutTotal() <= m.height {
+	if m.totalScrollableHeight() <= m.height {
 		return false
 	}
 	return x == m.scrollview.ScrollbarX() && y >= m.yPos && y < m.yPos+m.height

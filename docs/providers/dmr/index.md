@@ -106,7 +106,7 @@ Use only flags your Model Runner backend allows (see `docker model configure --h
 
 ## Context size
 
-`max_tokens` controls the **maximum output tokens** per chat completion request. To set the engine's **total context window**, use `provider_opts.context_size`:
+`max_tokens` controls the **maximum output tokens** per chat completion request. To set the engine's **total context window**, use `provider_opts.context_size`. This is the only setting that reconfigures the engine; the model-level [`context_window`](../../configuration/models/index.md#context-window) is metadata for docker-agent's accounting and never changes the engine:
 
 ```yaml
 models:
@@ -118,14 +118,16 @@ models:
       context_size: 32768       # total context window (sent via _configure)
 ```
 
-If `context_size` is omitted, Docker Agent picks the first available window from this
+`models.<name>.context_window` can declare capacity metadata without reconfiguring the engine. It takes precedence for accounting and compaction; when both it and `provider_opts.context_size` are set, they must agree. Only `provider_opts.context_size` sizes the DMR engine.
+
+If neither declaration is present, Docker Agent picks the first available window from this
 order: a context limit set in the provider configuration, the window the running runner
 reports, the models.dev value, and otherwise unknown. Packaged model metadata is used only
 when the runner reports no limit, or as a minimum alongside the runner's limit. A runner
 that answers with a non-200 status on the configuration query is treated as unknown, not
 as packaged. The runner is only queried, never reconfigured, and each query has a 5-second
 timeout. Discovered DMR context windows are briefly cached (one minute) per endpoint, gateway, model and provider options; failures are retried after that window. The window drives
-context usage and automatic compaction. An explicit `context_size` always takes precedence;
+context usage and automatic compaction. An explicit `context_window` (or DMR `context_size`) takes precedence;
 `max_tokens` is **not** used as the context window.
 
 Discovery is best-effort. Older or unreachable runners, gateways, and runtime

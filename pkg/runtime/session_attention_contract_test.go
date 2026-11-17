@@ -110,3 +110,38 @@ func TestAttentionAbandonedElicitationClearsExactWaiter(t *testing.T) {
 	node, _ = m.tree.Node(id)
 	assert.False(t, node.NeedsAttention)
 }
+
+func TestAttentionOccurrenceTracksRealPendingInteractions(t *testing.T) {
+	m, d, h, id := attentionFixture(t)
+	d.RegisterInteraction("first", InteractionConfirmation)
+	first, _ := m.tree.Node(id)
+	require.Equal(t, []string{"interaction:first"}, subagent.AttentionOccurrences(first.AttentionID))
+	// The second identical-reason interaction arrives before the first resolves.
+	d.RegisterInteraction("second", InteractionConfirmation)
+	both, _ := m.tree.Node(id)
+	require.Equal(t, []string{"interaction:first", "interaction:second"}, subagent.AttentionOccurrences(both.AttentionID))
+	for range 20 {
+		d.refreshAttention()
+		repeated, _ := m.tree.Node(id)
+		require.Equal(t, both.AttentionID, repeated.AttentionID)
+	}
+	resolveConfirmation(t, d, h, "first")
+	second, _ := m.tree.Node(id)
+	require.Equal(t, []string{"interaction:second"}, subagent.AttentionOccurrences(second.AttentionID))
+	resolveConfirmation(t, d, h, "second")
+	done, _ := m.tree.Node(id)
+	require.Empty(t, done.AttentionID)
+}
+
+func TestAttentionDistinctFailedTurnsHaveDistinctStableOccurrences(t *testing.T) {
+	m, _, _, id := attentionFixture(t)
+	m.reportTurn(t, id, subagent.NodeFailed, "same failure")
+	first, _ := m.tree.Node(id)
+	require.NotEmpty(t, first.AttentionID)
+	m.reportTurn(t, id, subagent.NodeFailed, "same failure")
+	second, _ := m.tree.Node(id)
+	require.NotEqual(t, first.AttentionID, second.AttentionID)
+	m.markChildRunning(id)
+	running, _ := m.tree.Node(id)
+	require.Empty(t, running.AttentionID)
+}

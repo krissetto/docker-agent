@@ -213,14 +213,7 @@ func RenderInput(msg *types.Message, width int) string {
 		if msg.ReportOutcome == "" {
 			icon = styles.ToolCompletedIcon.Render("·")
 		}
-		label = "Runtime update received"
-		switch msg.ReportOutcome {
-		case session.ReportOutcomeFinished:
-			label = "Subagent turn finished"
-		case session.ReportOutcomeFailed:
-			label = "Subagent turn failed"
-		}
-		return wrappedNotice(icon+" ", lifecycle.InputReference{}, styles.MutedStyle.Render(label), width)
+		return wrappedNotice(icon+" ", lifecycle.InputReference{}, styles.MutedStyle.Render(genericNoticeLabel(msg)), width)
 	}
 	if ref.Name == "" {
 		ref.Name = "subagent"
@@ -228,9 +221,30 @@ func RenderInput(msg *types.Message, width int) string {
 	return wrappedNotice(icon+" From ", ref, styles.MutedStyle.Render(" · "+label), width)
 }
 
+// genericNoticeLabel names a sender-less notice by the runtime event that
+// produced it. Unrecognized events keep the neutral fallback.
+func genericNoticeLabel(msg *types.Message) string {
+	if label, ok := lifecycle.RuntimeNoticeLabel(msg.ReceivedBody); ok {
+		return label
+	}
+	switch msg.ReportOutcome {
+	case session.ReportOutcomeFinished:
+		return "Subagent turn finished"
+	case session.ReportOutcomeFailed:
+		return "Subagent turn failed"
+	}
+	return "Runtime update received"
+}
+
 // RuntimeNoticeHeader builds the expandable runtime completion header. Narrow
 // wrapped lines stay aligned with the shared two-cell tool icon gutter.
 func RuntimeNoticeHeader(msg *types.Message, chevron string, width int) string {
+	gutter := min(2, max(0, width-1))
+	innerWidth := max(1, width-gutter)
+	if msg.SenderID == "" {
+		header := agentmessage.CompactHeader(styles.ToolCompletedIcon.Render("·")+" ", lifecycle.InputReference{}, genericNoticeLabel(msg), chevron, innerWidth)
+		return alignContinuation(header, gutter, width)
+	}
 	icon, label := CompletionPresentation(msg.ReportOutcome)
 	if msg.ReportOutcome == "" {
 		icon = styles.ToolCompletedIcon.Render("·")
@@ -239,8 +253,6 @@ func RuntimeNoticeHeader(msg *types.Message, chevron string, width int) string {
 	if ref.Name == "" {
 		ref.Name = "subagent"
 	}
-	gutter := min(2, max(0, width-1))
-	innerWidth := max(1, width-gutter)
 	header := agentmessage.CompactHeader(icon+" From ", ref, styles.MutedStyle.Render(" · "+label), chevron, innerWidth)
 	return alignContinuation(header, gutter, width)
 }
@@ -249,8 +261,11 @@ func RuntimeNoticeHeader(msg *types.Message, chevron string, width int) string {
 // the model-only system_info framing. A report status without a response or
 // error detail is a summary, not an expandable message.
 func RuntimeNoticeBody(msg *types.Message) string {
-	if msg == nil || msg.Type != types.MessageTypeRuntimeNotice || msg.InputMode != "steer" || msg.SenderID == "" {
+	if msg == nil || msg.Type != types.MessageTypeRuntimeNotice || msg.InputMode != "steer" {
 		return ""
+	}
+	if msg.SenderID == "" {
+		return classifiedNoticeBody(msg.ReceivedBody)
 	}
 	body := strings.TrimSpace(msg.ReceivedBody)
 	framed := strings.HasPrefix(body, "<system_info>")
@@ -276,6 +291,15 @@ func RuntimeNoticeBody(msg *types.Message) string {
 		return ansi.Strip(body)
 	}
 	return ""
+}
+
+// classifiedNoticeBody exposes a sender-less body only for a recognized runtime
+// event; any other envelope or payload stays model-only.
+func classifiedNoticeBody(body string) string {
+	if _, ok := lifecycle.RuntimeNoticeLabel(body); !ok {
+		return ""
+	}
+	return strings.TrimSpace(ansi.Strip(strings.ReplaceAll(body, "\t", "    ")))
 }
 
 func reportSummary(body string) (string, bool) {

@@ -102,7 +102,7 @@ func TestPendingAssistantHoverDoesNotChangeFrameGeometry(t *testing.T) {
 		hovered := m.View()
 		require.Equal(t, lineWidths(before), lineWidths(hovered))
 		require.Equal(t, strings.Count(before, "\n"), strings.Count(hovered, "\n"))
-		require.NotEmpty(t, strings.TrimSpace(ansi.Strip(hovered)), "pending spinner must remain visible")
+		require.Empty(t, strings.TrimSpace(ansi.Strip(hovered)), "empty assistant must not become a hover target or spinner")
 		_, _ = m.handleMouseMotion(tea.MouseMotionMsg{X: 12, Y: m.height + 2})
 		require.Equal(t, before, m.View(), "same elapsed animation state must be hover-isolated")
 		require.Equal(t, beforeTotal, m.totalHeight)

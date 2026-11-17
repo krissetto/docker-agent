@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 // harnessEffortOverride is one session's effort choice for a harness agent. It
@@ -58,6 +59,21 @@ func harnessEffortState(a *agent.Agent, o harnessEffortOverride) ([]effort.Level
 		current = o.level
 	}
 	return slices.Clone(harnessEffortLevels), current, nil
+}
+
+// harnessEffortFromSession returns the harness effort the session stored for
+// agentName. Only harness levels qualify: a model-only value such as "none" or a
+// level the harness does not expose is not a harness choice, so the configured
+// effort applies instead.
+func harnessEffortFromSession(sess *session.Session, agentName string) harnessEffortOverride {
+	if sess == nil {
+		return harnessEffortOverride{}
+	}
+	level := effort.Level(sess.AgentThinkingLevel(agentName))
+	if !slices.Contains(harnessEffortLevels, level) {
+		return harnessEffortOverride{}
+	}
+	return harnessEffortOverride{agentName: agentName, level: level, set: true}
 }
 
 // harnessConfigFor returns the harness configuration a session run uses: the

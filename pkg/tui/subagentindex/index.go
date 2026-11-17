@@ -73,10 +73,7 @@ func (i *Index) Reset(snapshot subagent.Snapshot) bool {
 			i.identities = append(i.identities, identity{
 				id: node.ID, parent: node.Parent, sessionID: node.SessionID,
 				name: node.Name, agent: node.Agent, children: len(item.Children),
-				ref: lifecycle.InputReference{
-					Kind: lifecycle.InputReferenceNode, ID: string(node.ID),
-					Name: node.DisplayName(), Agent: node.Agent, DisplayID: subagent.ShortID(string(node.ID)),
-				},
+				ref: lifecycle.NodeReference(string(node.ID), node.DisplayName(), node.Agent),
 			})
 			// Last depth-first match wins, just as in ResolveInputReference.
 			i.byID[node.ID] = position

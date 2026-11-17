@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -32,7 +33,7 @@ func (p tuiModelProvider) ID() modelsdev.ID        { return modelsdev.NewID(p.cf
 func (p tuiModelProvider) BaseConfig() base.Config { return base.Config{ModelConfig: p.cfg} }
 func (tuiModelProvider) MaxTokens() int            { return 0 }
 func (tuiModelProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
-	return nil, nil
+	return nil, errors.New("metadata-only test provider does not support chat completion")
 }
 
 func newModelSwitchHandlerTest(t *testing.T) (*appModel, *agent.Agent) {

@@ -177,7 +177,6 @@ func (m *appModel) helpDocument() help.Document {
 	} else {
 		navigation = append(navigation, helpEntry("transcript.clear-selection", []string{"esc"}, "Clear transcript selection"))
 	}
-	navigation = append(navigation, agentIndexHelp())
 	add(helpSection("navigation", "Navigation and response", "", navigation...))
 	if m.focusedPanel == PanelEditor {
 		add(composerEarlyInputHelp())
@@ -252,10 +251,6 @@ func (m *appModel) tabHelp(closeEnabled, reference bool) help.Section {
 		entries = append(entries, help.Entry{ID: "tab.close", Keys: k.CloseTab.Keys(), Description: "Close focused session only (last session asks to exit)", Condition: "Outside composer, inline/title editing and history search"})
 	}
 	return helpSection("tabs", "Workspaces", "Non-lean layout; outside history search and local edits; background dialogs allow navigation", entries...)
-}
-
-func agentIndexHelp() help.Entry {
-	return helpEntry("agent.index", []string{"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9"}, "Switch agent by index (not session tab)")
 }
 
 // The composer handles rich paste and grapheme backspace before configurable
@@ -341,7 +336,7 @@ func (m *appModel) referenceHelp() []help.Section {
 			bindingHelp("app.quit", k.Quit, "Request exit confirmation; repeat on confirmation to exit"), bindingHelp("app.help", k.Help, "Contextual help (only F1 over a dialog)"),
 			bindingHelp("app.external-editor", k.EditExternal, "Edit composer externally (composer or content focus)"), bindingHelp("history.search", k.HistorySearch, "Search input history (composer, not recording)"),
 			bindingHelp("sidebar.toggle", k.ToggleSidebar, "Toggle sidebar (unless hidden or lean layout)"), bindingHelp("focus.next", k.SwitchFocus, "Complete argument, accept suggestion, then cycle composer/context/messages/actions focus"),
-			helpEntry("agent.thinking", []string{"shift+tab"}, "Cycle model thinking effort when supported"), agentIndexHelp(),
+			helpEntry("agent.thinking", []string{"shift+tab"}, "Cycle model thinking effort when supported"),
 			helpEntry("response.cancel", []string{"esc then esc"}, "Working response: confirm cancellation within 3 seconds for the same response"),
 			helpEntry("transcript.clear-selection", []string{"esc"}, "Idle transcript: clear selection")),
 		globalHelp(), m.tabHelp(true, true), composerHelp(m.keyboardEnhancementsSupported, true), inputHelp("composer", true), completionHelp(), historySearchHelp(), inputHelp("search", false), transcriptHelp(), inlineHelp(m.keyboardEnhancementsSupported), inputHelp("inline", true), titleHelp(), inputHelp("title", false), contextBarHelp(), messageActionHelp(),

@@ -422,6 +422,7 @@ var providerAPITypes = map[string]bool{
 	"":                       true, // empty is allowed (defaults to openai_chatcompletions)
 	"openai_chatcompletions": true,
 	"openai_responses":       true,
+	"openai_images":          true,
 }
 
 // validateProviders validates all provider configurations
@@ -443,6 +444,9 @@ func validateProviders(cfg *latest.Config) error {
 // found in the `providers` section of an agent file or in the user-level
 // config.
 func ValidateProviderConfig(name string, provCfg latest.ProviderConfig) error {
+	if _, ok := provCfg.ProviderOpts["image_generation"]; ok {
+		return fmt.Errorf("provider %q: provider_opts.image_generation is unsupported; configure image_generation on the model", name)
+	}
 	// Validate provider name
 	if err := validateProviderName(name); err != nil {
 		return fmt.Errorf("provider '%s': %w", name, err)
@@ -450,7 +454,7 @@ func ValidateProviderConfig(name string, provCfg latest.ProviderConfig) error {
 
 	// Validate api_type if set
 	if !providerAPITypes[provCfg.APIType] {
-		return fmt.Errorf("provider '%s': invalid api_type '%s' (must be one of: openai_chatcompletions, openai_responses)", name, provCfg.APIType)
+		return fmt.Errorf("provider '%s': invalid api_type '%s' (must be one of: openai_chatcompletions, openai_responses, openai_images)", name, provCfg.APIType)
 	}
 
 	// base_url is required for OpenAI-compatible providers (the default)

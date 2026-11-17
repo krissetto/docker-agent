@@ -8,7 +8,7 @@ interactions:
         proto_minor: 1
         content_length: 0
         host: api.mistral.ai
-        body: '{"messages":[{"content":"You are a knowledgeable assistant that helps users with various tasks.\nBe helpful, accurate, and concise in your responses.\n","role":"system"},{"content":"What''s 2+2?","role":"user"}],"model":"mistral-small","stream_options":{"include_usage":true},"stream":true}'
+        body: '{"messages":[{"content":"Keep replies short and friendly, with the detail that matters. Skip routine progress, recaps, and roleplay.\n\nFollow the user''s requirements and safety boundaries. Never expose, repeat, log, or report secrets, and take no external or destructive action without authorization. Work within the requested scope, and ask before a meaningful change of scope.\n\nReviews happen only when the user explicitly asks for one.","role":"system"},{"content":"You are a knowledgeable assistant that helps users with various tasks.\nBe helpful, accurate, and concise in your responses.\n","role":"system"},{"content":"What''s 2+2?","role":"user"}],"model":"mistral-small","stream_options":{"include_usage":true},"stream":true}'
         url: https://api.mistral.ai/v1/chat/completions
         method: POST
       response:

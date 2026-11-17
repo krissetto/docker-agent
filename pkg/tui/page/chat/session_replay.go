@@ -109,6 +109,11 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 			return true, p.replayCommand(cmd)
 		}
 		return true, p.continueHistoryCmd()
+	case list.HistoryProgressedMsg:
+		// ContinueHistory paged a bounded batch of older history into the geometry
+		// and more remains. Re-arm the paging tick; without this case the tick chain
+		// dies here and the older prefix is never measured.
+		return true, p.continueHistoryCmd()
 	case replayPreparedMsg:
 		if p.replay == nil || p.replay.generation != msg.generation {
 			return true, nil

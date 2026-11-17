@@ -466,6 +466,7 @@ type ProviderConfig struct {
 	// Supported values:
 	// - "openai_chatcompletions" (default for openai): Use the OpenAI Chat Completions API
 	// - "openai_responses": Use the OpenAI Responses API
+	// - "openai_images": Use the OpenAI Images generation API
 	APIType string `json:"api_type,omitempty"`
 	// BaseURL is the base URL for the provider's API endpoint
 	BaseURL string `json:"base_url,omitempty"`
@@ -1329,7 +1330,9 @@ type ModelConfig struct {
 	BypassModelsGateway bool `json:"bypass_models_gateway,omitempty"`
 	// ProviderOpts allows provider-specific options.
 	ProviderOpts map[string]any `json:"provider_opts,omitempty"`
-	TrackUsage   *bool          `json:"track_usage,omitempty"`
+	// ImageGeneration configures native image requests; it does not enable image output.
+	ImageGeneration map[string]any `json:"image_generation,omitzero" yaml:"image_generation,omitzero"`
+	TrackUsage      *bool          `json:"track_usage,omitempty"`
 	// ThinkingBudget controls reasoning effort/budget.
 	// Accepts an integer token count or a string effort level.
 	// See [effort.ValidNames] for the full list of accepted strings.
@@ -1400,6 +1403,13 @@ type ModelConfig struct {
 	// Cost optionally declares the model's token pricing explicitly,
 	// overriding the models.dev catalogue. See [CostConfig].
 	Cost *CostConfig `json:"cost,omitempty"`
+	// ContextWindow declares the model's context window in tokens. It is
+	// metadata only: it drives context accounting, compaction thresholds and
+	// max_tokens clamping, and is never sent as a request parameter nor used
+	// to configure the DMR engine. It is the only context-window setting for
+	// non-DMR providers; provider_opts.context_size is DMR-only. See
+	// [ModelConfig.ContextWindow] for the precedence rules.
+	ContextWindow *int64 `json:"context_window,omitempty"`
 }
 
 // CostConfig declares a model's token pricing explicitly, in USD per one
@@ -1504,6 +1514,37 @@ func (m *ModelConfig) DisplayOrModel() string {
 func (m *ModelConfig) UnloadAPI() string {
 	v, _ := m.ProviderOpts["unload_api"].(string)
 	return v
+}
+
+// DeclaredContextWindow returns the model-level context_window, or 0 when unset or
+// non-positive. It is the window every non-DMR consumer (max_tokens clamping,
+// catalogue pickers) may use: provider_opts.context_size is never read there.
+func (m *ModelConfig) DeclaredContextWindow() int64 {
+	if m == nil || m.ContextWindow == nil || *m.ContextWindow <= 0 {
+		return 0
+	}
+	return *m.ContextWindow
+}
+
+// EffectiveContextWindow returns the context window the runtime plans against for this
+// model, or 0 when none is declared. Precedence, highest first:
+//
+//  1. Model-level context_window.
+//  2. provider_opts.context_size, only for the dmr provider. The DMR engine is
+//     sized from the same value, so accounting and engine agree.
+//
+// Validation rejects a provider_opts.context_size on any other provider and a
+// model-level value that conflicts with the DMR one. The runtime then falls
+// back to discovery and the models.dev catalogue. m.Provider must be the
+// resolved provider type (after custom-provider and alias defaults).
+func (m *ModelConfig) EffectiveContextWindow() int64 {
+	if n := m.DeclaredContextWindow(); n > 0 {
+		return n
+	}
+	if m == nil || m.Provider != "dmr" {
+		return 0
+	}
+	return ContextSizeFromProviderOpts(m.ProviderOpts)
 }
 
 // ContextSizeFromProviderOpts reads a positive `context_size` from a
@@ -1633,6 +1674,7 @@ func (f *FlexibleModelConfig) isShorthandOnly() bool {
 	return f.Description == "" &&
 		f.Temperature == nil &&
 		f.MaxTokens == nil &&
+		f.ContextWindow == nil &&
 		f.TopP == nil &&
 		f.FrequencyPenalty == nil &&
 		f.PresencePenalty == nil &&
@@ -1641,6 +1683,7 @@ func (f *FlexibleModelConfig) isShorthandOnly() bool {
 		f.TokenKey == "" &&
 		!f.BypassModelsGateway &&
 		len(f.ProviderOpts) == 0 &&
+		f.ImageGeneration == nil &&
 		f.TrackUsage == nil &&
 		f.ThinkingBudget == nil &&
 		f.TaskBudget == nil &&

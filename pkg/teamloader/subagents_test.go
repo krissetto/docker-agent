@@ -106,6 +106,26 @@ func TestLoadWithConfig_SubagentsAreAvailableOnAgent(t *testing.T) {
 	worker, err := result.Team.Agent("worker")
 	require.NoError(t, err)
 	assert.Empty(t, worker.AsyncHarnessPrompt())
+	// Shared guidance reaches every configured agent, leaves included.
+	assert.Equal(t, subagent.SharedGuidance(), root.SharedHarnessPrompt())
+	assert.Equal(t, subagent.SharedGuidance(), worker.SharedHarnessPrompt())
+}
+
+func TestPlainTeamGetsSharedGuidance(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: do work
+`)
+	result, err := LoadWithConfig(t.Context(), config.NewBytesSource("plain.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
+	require.NoError(t, err)
+	root, err := result.Team.Agent("root")
+	require.NoError(t, err)
+	assert.Equal(t, subagent.SharedGuidance(), root.SharedHarnessPrompt())
+	assert.Empty(t, root.AsyncHarnessPrompt())
 }
 
 func TestLoadRetainsCredentialSafeAuthoredDefinitionSnapshot(t *testing.T) {

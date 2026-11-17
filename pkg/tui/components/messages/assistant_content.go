@@ -55,8 +55,11 @@ func identityChanged(lastSession, lastMessage, sessionID, messageID string) bool
 
 // AppendAssistantContent keeps separate attempts and interleaved sessions distinct.
 func (m *model) AppendAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd {
+	if types.HasVisibleProse(content) {
+		m.finishReasoningPreview(agentName, sessionID, "")
+	}
 	m.trackMessageIdentity(sessionID, messageID)
-	cmd := m.AppendToLastMessage(agentName, content)
+	cmd := m.appendToLastMessage(agentName, content, false)
 	if last := m.lastMessage(); last != nil {
 		last.SessionID, last.MessageID = sessionID, messageID
 	}
@@ -65,6 +68,9 @@ func (m *model) AppendAssistantContent(sessionID, messageID, agentName, content 
 
 // AppendReasoningContent uses the same logical boundary as assistant content.
 func (m *model) AppendReasoningContent(sessionID, messageID, agentName, content string) tea.Cmd {
+	if content == "" {
+		return nil
+	}
 	m.trackMessageIdentity(sessionID, messageID)
 	cmd := m.AppendReasoning(agentName, content)
 	if last := m.lastMessage(); last != nil {
@@ -132,9 +138,6 @@ func (m *model) removeReasoningBlockAt(i int, block *reasoningblock.Model) {
 
 // ReconcileAssistantContent replaces incomplete streamed text with the saved answer.
 func (m *model) ReconcileAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd {
-	if content == "" {
-		return nil
-	}
 	materialize := m.materializeDeferredTail()
 	var indices []int
 	var streamed strings.Builder
@@ -144,8 +147,10 @@ func (m *model) ReconcileAssistantContent(sessionID, messageID, agentName, conte
 			streamed.WriteString(msg.Content)
 		}
 	}
-	content = strings.ReplaceAll(content, "\t", "    ")
 	if len(indices) == 0 {
+		if content == "" {
+			return materialize
+		}
 		return tea.Batch(materialize, m.AppendAssistantContent(sessionID, messageID, agentName, content))
 	}
 	if streamed.String() == content {
@@ -230,6 +235,30 @@ func (m *model) AdoptAssistantMediaIdentity(sessionID, messageID, agentName stri
 		}) {
 			msg.MessageID = messageID
 			return
+		}
+	}
+}
+
+// finishReasoningPreview retires live previews only at a semantic boundary, never
+// on tool arguments or execution (which can be followed by more reasoning).
+// A reasoning-only canonical commit is identity-scoped so an older commit
+// cannot end a newer tail.
+func (m *model) finishReasoningPreview(agentName, sessionID, messageID string) {
+	if !m.workReasoningActive {
+		return
+	}
+	m.workReasoningActive = false
+	for i, msg := range m.messages {
+		if msg.Sender != agentName || (sessionID != "" && msg.SessionID != "" && msg.SessionID != sessionID) ||
+			(messageID != "" && msg.MessageID != "" && msg.MessageID != messageID) {
+			if block, ok := m.views[i].(*reasoningblock.Model); ok && block.ReasoningActive() {
+				m.workReasoningActive = true
+			}
+			continue
+		}
+		if block, ok := m.views[i].(*reasoningblock.Model); ok && block.ReasoningActive() {
+			block.SetReasoningActive(false)
+			m.invalidateItem(i)
 		}
 	}
 }

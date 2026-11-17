@@ -55,7 +55,7 @@ type AgentInfoMode int
 
 const (
 	// AgentInfoCompact renders each agent as a two-line entry: name with
-	// thinking badge and shortcut, then provider/model with the context
+	// thinking badge, then provider/model with the context
 	// percentage. This is the default.
 	AgentInfoCompact AgentInfoMode = iota
 	// AgentInfoDetailed renders each agent as a mini-card with labeled
@@ -3486,8 +3486,7 @@ func (m *model) ClearSubagentHover() tea.Cmd {
 
 // agentInfo renders the Agents panel: every agent as a two-line entry, with a
 // blank separator line between entries. Line 1 shows the agent's name (in its
-// accent color), the thinking badge right-aligned, and the "^N" switch shortcut
-// flush against the right edge; line 2 shows the indented provider/model with
+// accent color) and the thinking badge right-aligned; line 2 shows the indented provider/model with
 // the agent's latest context usage percentage right-aligned once known. The
 // current agent is marked with ▶ (or the spinner while it works); the other
 // agents pad that marker column so their names stay aligned. Descriptions are
@@ -3496,7 +3495,7 @@ func (m *model) ClearSubagentHover() tea.Cmd {
 // the roster itself stays uninterrupted (see renderTransferPanel). Each
 // content line is owned by its agent (agentLineOwners) so click zones can be
 // registered explicitly (see buildAgentClickZones) and a click on either line
-// switches to that agent; separators and the transfer box carry an empty owner
+// opens the team picker; separators and the transfer box carry an empty owner
 // so they stay unclickable.
 func (m *model) agentInfo(contentWidth int) string {
 	// Read current agent from session state so sidebar updates when agent is switched
@@ -3531,7 +3530,7 @@ func (m *model) agentInfo(contentWidth int) string {
 			add("", "")
 		}
 		current := entry.agent.Name == currentAgent
-		for _, line := range renderAgent(entry.agent, entry.index, current) {
+		for _, line := range renderAgent(entry.agent, current) {
 			add(line, entry.agent.Name)
 		}
 	}
@@ -3551,28 +3550,25 @@ func (m *model) agentInfo(contentWidth int) string {
 
 // agentRenderer renders one roster agent's content lines at a layout
 // precomputed for the whole panel.
-type agentRenderer func(agent runtime.AgentDetails, index int, current bool) []string
+type agentRenderer func(agent runtime.AgentDetails, current bool) []string
 
-// rosterAgent is one Agents-roster entry: the agent's details plus its
-// original team index, preserved under filtering so the ^N switch shortcut
-// keeps addressing the same team position.
+// rosterAgent is one Agents-roster entry: the agent's details.
 type rosterAgent struct {
 	agent runtime.AgentDetails
-	index int
 }
 
-// rosterAgents returns the agents the Agents section presents, each with its
-// original team index. With the active-agents-only filter off this is the
+// rosterAgents returns the agents the Agents section presents.
+// With the active-agents-only filter off this is the
 // whole team; with it on, only agents active in the current session (see
 // agentActiveInSession). Filtering is presentation-only: agent cycling and
 // switching still operate on the full team.
 func (m *model) rosterAgents() []rosterAgent {
 	roster := make([]rosterAgent, 0, len(m.availableAgents))
-	for i, agent := range m.availableAgents {
+	for _, agent := range m.availableAgents {
 		if m.activeAgentsOnly && !m.agentActiveInSession(agent.Name) {
 			continue
 		}
-		roster = append(roster, rosterAgent{agent: agent, index: i})
+		roster = append(roster, rosterAgent{agent: agent})
 	}
 	return roster
 }
@@ -3607,9 +3603,9 @@ func (m *model) agentActiveInSession(name string) bool {
 func (m *model) compactAgentRenderer(roster []rosterAgent, contentWidth int) agentRenderer {
 	glyphOnly := contentWidth < rowGlyphOnlyMinWidth
 	badgeWidth := badgeColumnWidth(roster, glyphOnly)
-	nameWidth := max(1, contentWidth-agentMarkerWidth-minGap-badgeWidth-1-agentShortcutWidth)
-	return func(agent runtime.AgentDetails, index int, current bool) []string {
-		return m.renderAgentLine(agent, index, contentWidth, nameWidth, badgeWidth, glyphOnly, current)
+	nameWidth := max(1, contentWidth-agentMarkerWidth-minGap-badgeWidth)
+	return func(agent runtime.AgentDetails, current bool) []string {
+		return m.renderAgentLine(agent, contentWidth, nameWidth, badgeWidth, glyphOnly, current)
 	}
 }
 
@@ -3632,9 +3628,9 @@ func (m *model) detailedAgentRenderer(roster []rosterAgent, contentWidth int) ag
 			break
 		}
 	}
-	nameWidth := max(1, contentWidth-agentMarkerWidth-minGap-agentShortcutWidth)
-	return func(agent runtime.AgentDetails, index int, current bool) []string {
-		return m.renderAgentCard(agent, index, contentWidth, nameWidth, narrow, current)
+	nameWidth := max(1, contentWidth-agentMarkerWidth)
+	return func(agent runtime.AgentDetails, current bool) []string {
+		return m.renderAgentCard(agent, contentWidth, nameWidth, narrow, current)
 	}
 }
 
@@ -3818,19 +3814,17 @@ func padLeft(s string, width int) string {
 
 // renderAgentLine renders a single agent in the compact roster as two lines:
 //
-//	▶ name 30%        <thinking> ^N
+//	▶ name 30%        <thinking>
 //	  provider/model
 //
 // Line 1: the name is left-aligned in its accent color, followed by the agent's
 // latest known context reading when the whole name fits beside it (dropped
 // before the name is truncated). The thinking badge is right-aligned in a
-// shared column, and the "^N" switch shortcut sits flush against the right
-// edge. The current agent is marked with ▶ (or the spinner while it — or any
+// shared column. The current agent is marked with ▶ (or the spinner while it — or any
 // agent — is working); other agents pad the marker column so the names stay
 // aligned. Line 2: the indented provider/model, left-truncated so its
-// informative tail survives. The description is omitted. Agents past the 9th
-// have no shortcut.
-func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth, nameWidth, badgeWidth int, glyphOnly, current bool) []string {
+// informative tail survives. The description is omitted.
+func (m *model) renderAgentLine(agent runtime.AgentDetails, contentWidth, nameWidth, badgeWidth int, glyphOnly, current bool) []string {
 	agentStyle := styles.AgentAccentStyleFor(agent.Name)
 
 	var marker string
@@ -3850,12 +3844,7 @@ func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth,
 		badge = compact
 	}
 
-	var shortcut string
-	if index >= 0 && index < 9 {
-		shortcut = styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
-	}
-
-	right := padLeft(badge, badgeWidth) + " " + padLeft(shortcut, agentShortcutWidth)
+	right := padLeft(badge, badgeWidth)
 	gap := max(1, contentWidth-lipgloss.Width(left)-lipgloss.Width(right))
 	line1 := left + strings.Repeat(" ", gap) + right
 
@@ -3872,14 +3861,13 @@ func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth,
 // renderAgentCard renders a single agent in the detailed roster as a
 // borderless mini-card:
 //
-//	▶ name                             ^N
+//	▶ name
 //	  provider/model
 //	  Effort ▰▰▰▰▱▱ high · Context 30% · Cost $0.13
 //
-// Line 1: the name is left-aligned in its accent color and the "^N" switch
-// shortcut sits flush against the right edge. The current agent is marked
-// with ▶ (or the spinner while it — or any agent — is working); other agents
-// pad the marker column so the names stay aligned. Line 2: the indented
+// Line 1: the name is left-aligned in its accent color. The current agent is
+// marked with ▶ (or the spinner while it — or any agent — is working); other
+// agents pad the marker column so the names stay aligned. Line 2: the indented
 // provider/model, left-truncated so its informative tail survives. The
 // remaining line(s) carry the labeled metrics, flowed to the width (see
 // flowMetricLines): wide cards label effort with the full six-cell gauge
@@ -3887,8 +3875,8 @@ func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth,
 // effort value in place of the gauge — a roster-wide adaptive choice (see
 // detailedAgentRenderer) — context keeps the warning/critical coloring, and
 // cost is the agent's cumulative attributed cost. The description is
-// omitted. Agents past the 9th have no shortcut.
-func (m *model) renderAgentCard(agent runtime.AgentDetails, index, contentWidth, nameWidth int, narrow, current bool) []string {
+// omitted.
+func (m *model) renderAgentCard(agent runtime.AgentDetails, contentWidth, nameWidth int, narrow, current bool) []string {
 	agentStyle := styles.AgentAccentStyleFor(agent.Name)
 
 	var marker string
@@ -3900,13 +3888,7 @@ func (m *model) renderAgentCard(agent runtime.AgentDetails, index, contentWidth,
 	}
 	left := padRight(marker, agentMarkerWidth) + agentStyle.Render(toolcommon.TruncateText(agent.Name, nameWidth))
 
-	var shortcut string
-	if index >= 0 && index < 9 {
-		shortcut = styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
-	}
-	right := padLeft(shortcut, agentShortcutWidth)
-	gap := max(1, contentWidth-lipgloss.Width(left)-lipgloss.Width(right))
-	line1 := left + strings.Repeat(" ", gap) + right
+	line1 := left
 
 	modelText := agent.Model
 	if agent.Provider != "" {

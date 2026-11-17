@@ -475,7 +475,7 @@ agents:
 | Field                 | Description                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------- |
 | `provider`            | Underlying provider type: `openai` (default), `anthropic`, `google`, `amazon-bedrock`, etc. |
-| `api_type`            | API schema: `openai_chatcompletions` (default) or `openai_responses`. OpenAI-only.        |
+| `api_type`            | API schema: `openai_chatcompletions`, `openai_responses`, or explicit `openai_images`. OpenAI-only; chat API selection is model-dependent.        |
 | `base_url`            | Base URL for the API endpoint. Required for OpenAI-compatible providers.                  |
 | `token_key`           | Environment variable name for the API token.                                              |
 | `temperature`         | Default sampling temperature.                                                             |

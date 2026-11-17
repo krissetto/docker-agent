@@ -25,49 +25,6 @@ func TestKeyboardEnhancementsUpdateCompleteHelp(t *testing.T) {
 	require.Equal(t, []string{"shift+enter", "ctrl+j"}, helpKeys(m.helpDocument().Current, "composer.newline"))
 }
 
-func TestParseCtrlNumberKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		msg  tea.KeyPressMsg
-		want int
-	}{
-		{name: "ctrl+1", msg: tea.KeyPressMsg{Code: '1', Mod: tea.ModCtrl}, want: 0},
-		{name: "ctrl+2", msg: tea.KeyPressMsg{Code: '2', Mod: tea.ModCtrl}, want: 1},
-		{name: "ctrl+5", msg: tea.KeyPressMsg{Code: '5', Mod: tea.ModCtrl}, want: 4},
-		{name: "ctrl+9", msg: tea.KeyPressMsg{Code: '9', Mod: tea.ModCtrl}, want: 8},
-		{name: "ctrl+0 (out of range)", msg: tea.KeyPressMsg{Code: '0', Mod: tea.ModCtrl}, want: -1},
-		{name: "no ctrl modifier", msg: tea.KeyPressMsg{Code: '1'}, want: -1},
-		{name: "letter key", msg: tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl}, want: -1},
-		{name: "empty key", msg: tea.KeyPressMsg{}, want: -1},
-		{name: "ctrl+alt+a", msg: tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl | tea.ModAlt}, want: -1},
-		{name: "alt+1", msg: tea.KeyPressMsg{Code: '1', Mod: tea.ModAlt}, want: -1},
-		// Kitty keyboard protocol populates Text, which makes String() report
-		// the bare digit instead of "ctrl+1". The parser must still match.
-		{name: "ctrl+1 with kitty text", msg: tea.KeyPressMsg{Code: '1', Text: "1", Mod: tea.ModCtrl}, want: 0},
-		// International layout: BaseCode carries the PC-101 digit.
-		{name: "ctrl+3 via BaseCode", msg: tea.KeyPressMsg{Code: '"', BaseCode: '3', Mod: tea.ModCtrl}, want: 2},
-		// ctrl+alt+1 must not match (extra modifier).
-		{name: "ctrl+alt+1", msg: tea.KeyPressMsg{Code: '1', Mod: tea.ModCtrl | tea.ModAlt}, want: -1},
-		// Lock states (Caps/Num Lock) ride along under the Kitty protocol but
-		// must be ignored so the shortcut still fires.
-		{name: "ctrl+1 with caps lock", msg: tea.KeyPressMsg{Code: '1', Mod: tea.ModCtrl | tea.ModCapsLock}, want: 0},
-		{name: "ctrl+4 with num lock", msg: tea.KeyPressMsg{Code: '4', Mod: tea.ModCtrl | tea.ModNumLock}, want: 3},
-		// Lock state alone (no Ctrl) must not match.
-		{name: "caps lock only", msg: tea.KeyPressMsg{Code: '1', Mod: tea.ModCapsLock}, want: -1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := parseCtrlNumberKey(tt.msg); got != tt.want {
-				t.Errorf("parseCtrlNumberKey(%+v) = %d, want %d", tt.msg, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestHitTestLeanRegion(t *testing.T) {
 	t.Parallel()
 

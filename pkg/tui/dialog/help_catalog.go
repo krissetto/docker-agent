@@ -418,6 +418,8 @@ func helpDialogFamily(dialog Dialog) (string, *BaseDialog) {
 		return "agent-details", &d.BaseDialog
 	case *attachmentPreviewDialog:
 		return "attachment-preview", &d.BaseDialog
+	case *imageAttachmentPreviewDialog:
+		return "image-preview", nil
 	case *permissionsDialog:
 		return "permissions", &d.BaseDialog
 	case *skillsDialog:

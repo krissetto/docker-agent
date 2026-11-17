@@ -2134,8 +2134,6 @@ This release brings significant new capabilities including a safety-check hook s
 
 - Fixes per-model attachment capability override so custom/aliased OpenAI-compatible providers (Ollama, xai, mistral, etc.) can declare image/PDF support when absent from models.dev
 - Fixes cycling thinking level in the lean TUI via Shift+Tab
-- Fixes `ctrl+1`–`ctrl+9` agent quick-switch shortcuts broken under the Kitty keyboard protocol
-- Fixes lock-state modifiers being incorrectly applied to `ctrl+N` agent switch
 - Fixes MCP OAuth token persistence in sandboxes by falling back to a file-backed keyring when the OS keyring is unavailable, using a per-install random passphrase
 - Fixes data races in scroll state and session store updates
 - Fixes suppression of re-emitted `UserMessageEvent` before `StreamStarted` on retry
@@ -2185,7 +2183,6 @@ This release brings significant new capabilities including a safety-check hook s
 - [#3259](https://github.com/docker/docker-agent/pull/3259) - feat: persist agent failures in the session
 - [#3260](https://github.com/docker/docker-agent/pull/3260) - feat: add tool-scoping for fork-mode skills
 - [#3261](https://github.com/docker/docker-agent/pull/3261) - feat: support URL-opening /commands in agent config
-- [#3265](https://github.com/docker/docker-agent/pull/3265) - fix(tui): restore ctrl+1..ctrl+9 agent quick-switch shortcuts
 - [#3266](https://github.com/docker/docker-agent/pull/3266) - refactor(tui): remove redundant agent-switch and thinking-level toasts
 - [#3267](https://github.com/docker/docker-agent/pull/3267) - feat: return 1M context for Claude Opus 4.6/4.7/4.8 families
 - [#3268](https://github.com/docker/docker-agent/pull/3268) - fix(dmr): prefer local models and surface actionable pull errors
@@ -5255,7 +5252,6 @@ This release improves cost tracking accuracy, enhances session management, and f
 - Fixes token usage percentage display during and after agent transfers
 - Fixes session forking and costs calculation
 - Fixes actual provider display for alloy models in sidebar (was showing wrong provider)
-- Restores ctrl-1, ctrl-2... shortcuts for quick agent selection
 - Fixes NewHandler panic on parameterless tool calls
 
 ## Technical Changes
@@ -5278,7 +5274,6 @@ This release improves cost tracking accuracy, enhances session management, and f
 - [#1811](https://github.com/docker/docker-agent/pull/1811) - Improve sessions dialog
 - [#1812](https://github.com/docker/docker-agent/pull/1812) - Binary e2e tests
 - [#1813](https://github.com/docker/docker-agent/pull/1813) - feat: use docker read write bot
-- [#1816](https://github.com/docker/docker-agent/pull/1816) - fix: restore ctrl-1, ctrl-2... shortcuts for quick agent selection
 - [#1817](https://github.com/docker/docker-agent/pull/1817) - Bump Go dependencies
 - [#1826](https://github.com/docker/docker-agent/pull/1826) - Refactor winget workflow to use wingetcreate CLI
 - [#1827](https://github.com/docker/docker-agent/pull/1827) - get_memories errors on new memories

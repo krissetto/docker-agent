@@ -103,6 +103,10 @@ type Model struct {
 	reasoningVersion int                    // increments when reasoning content changes
 	cache            *renderCache           // cached rendering results
 	animationSub     animation.Subscription // whether we're registered with animation coordinator
+	// workOwner is the Work block currently hosting this block, or nil when it
+	// renders standalone. A hosted block has no header or disclosure of its own.
+	workOwner       any
+	reasoningActive bool
 	// now returns the current time. Defaults to time.Now; tests override it
 	// per-instance for deterministic fade/grace-period behaviour.
 	now func() time.Time
@@ -187,6 +191,11 @@ func (m *Model) ID() string {
 func (m *Model) AgentName() string {
 	return m.agentName
 }
+
+// SetReasoningActive records live reasoning separately from replayed history.
+func (m *Model) SetReasoningActive(active bool) { m.reasoningActive = active }
+
+func (m *Model) ReasoningActive() bool { return m.reasoningActive }
 
 // SetReasoning sets reasoning content (replaces all content items with a single reasoning item).
 func (m *Model) SetReasoning(content string) {
@@ -680,7 +689,7 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 // View renders the block.
 func (m *Model) View() string {
 	var content string
-	if m.expanded {
+	if m.expanded || m.hostedByWork() {
 		content = m.renderExpanded()
 	} else {
 		content = m.renderCollapsed()
@@ -772,12 +781,15 @@ func (m *Model) renderExpandedWithToolRows() (string, []toolRow) {
 		lineCount += strings.Count(part, "\n") + 1
 	}
 
-	appendPart(m.renderHeader(true))
+	hosted := m.hostedByWork()
+	if !hosted {
+		appendPart(m.renderHeader(true))
+	}
 	for i, item := range m.contentItems {
 		switch item.kind {
 		case contentItemReasoning:
 			if item.reasoning != "" {
-				if i == 0 {
+				if i == 0 && !hosted {
 					appendPart("")
 				}
 				appendPart(m.renderReasoningChunk(item.reasoning))
@@ -786,7 +798,7 @@ func (m *Model) renderExpandedWithToolRows() (string, []toolRow) {
 			if item.toolIndex >= len(m.toolEntries) {
 				continue
 			}
-			if i == 0 || m.contentItems[i-1].kind == contentItemReasoning {
+			if (i == 0 && !hosted) || (i > 0 && m.contentItems[i-1].kind == contentItemReasoning) {
 				appendPart("")
 			}
 			entry := m.toolEntries[item.toolIndex]
@@ -968,6 +980,31 @@ func (m *Model) renderReasoningPreviewWithTruncationInfo() (string, bool) {
 	return m.messageStyle().Render(preview), reasoningTruncated
 }
 
+// AdoptWorkOwner marks the block as hosted by a Work block. Hosted reasoning
+// renders its full text without a header, so the Work block owns the disclosure.
+func (m *Model) AdoptWorkOwner(owner any) { m.workOwner = owner }
+
+// ReleaseWorkOwner clears hosting only while owner still hosts the block, so a
+// block that already moved into another Work block keeps that host.
+func (m *Model) ReleaseWorkOwner(owner any) {
+	if m.workOwner == owner {
+		m.workOwner = nil
+	}
+}
+
+func (m *Model) hostedByWork() bool { return m.workOwner != nil }
+
+// PreviewLines returns the compact tail of the reasoning text: at most the
+// last previewLines nonblank lines, ANSI-stripped. truncated reports whether
+// earlier nonblank reasoning precedes them. It is nil without reasoning.
+func (m *Model) PreviewLines() (lines []string, truncated bool) {
+	cache := m.ensureCache()
+	if !cache.hasLines || len(cache.lines) == 0 {
+		return nil, false
+	}
+	return slices.Clone(cache.lines), cache.truncated
+}
+
 // StopAnimation stops all animation subscriptions for this reasoning block.
 // This must be called when the block is removed from the UI to avoid leaked animation subscriptions.
 func (m *Model) StopAnimation() {
@@ -997,6 +1034,9 @@ func (m *Model) ResumeAnimation() tea.Cmd {
 
 // IsHeaderLine includes wrapped disclosure rows at narrow widths.
 func (m *Model) IsHeaderLine(lineIdx int) bool {
+	if m.hostedByWork() {
+		return false
+	}
 	return lineIdx >= 0 && (lineIdx == 0 || lineIdx <= strings.Count(m.renderHeader(m.expanded), "\n"))
 }
 
@@ -1007,7 +1047,7 @@ func (m *Model) IsToggleLine(lineIdx int) bool {
 }
 
 func (m *Model) childViewAt(line int) (layout.Model, int, bool) {
-	if !m.expanded {
+	if !m.expanded && !m.hostedByWork() {
 		return nil, 0, false
 	}
 	_, rows := m.renderExpandedWithToolRows()

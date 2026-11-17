@@ -737,6 +737,11 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		return sessionHTTPError(err)
 	}
 	defer observation.Cancel()
+	if s.cacheWarmup && !tree && since == nil {
+		if warmer, ok := handle.(runtime.SessionCacheWarmer); ok {
+			warmer.WarmSessionCache()
+		}
+	}
 	if projection == "tail" {
 		data, marshalErr := json.Marshal(sessionSnapshotForRequest(observation.Primary(), c))
 		if marshalErr != nil {

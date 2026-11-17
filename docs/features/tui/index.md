@@ -104,7 +104,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 
 Slash commands (both built-in and named) execute immediately when entered. While the agent is working, <kbd>Enter</kbd> steers a regular chat message into the active turn, where it appears in the transcript when the agent picks it up (or queues it for the next turn when `busy_send_mode` is `queue`); <kbd>Alt</kbd>+<kbd>Enter</kbd> queues it for the next turn. Slash commands still execute immediately.
 
-Selecting another top-level agent creates a fresh session identity bound to that agent and clones the current conversation into it. The original session and history remain available, and observers attached to it are not retargeted. Switching is rejected while the source session is active and from an attached sub-agent view.
+Agent-switching slash commands create a fresh session identity bound to the target agent and clone the current conversation into it. The original session and history remain available, and observers attached to it are not retargeted. Switching is rejected while the source session is active and from an attached sub-agent view.
 
 Agent-defined commands (prompts, URL links, agent-switching shortcuts) are configured under `commands:` in the agent YAML — see [Custom Commands](../../configuration/commands/index.md) for the full reference, including how to hide commands with `--disable-commands`.
 
@@ -133,12 +133,12 @@ Editing changes only the plan document. It does not approve a plan, execute its 
 
 The sidebar's **Agents** section lists every agent in the team and has two display modes selectable via **Sidebar info mode** in `/settings`:
 
-- **Compact** (default) — The current agent is shown as a focus **card** (rendered in place at its position in the list) with its name, a wrapped description, its full `provider/model`, and a thinking line. Every other agent is shown as a compact **two-line row** — line 1 is the shortcut/spinner, the agent name (in its accent color), and a right-aligned thinking **gauge**; line 2 is the indented full `provider/model` and, once the agent has run, its latest **context usage** as a right-aligned percentage of its context window.
+- **Compact** (default) — The current agent is shown as a focus **card** (rendered in place at its position in the list) with its name, a wrapped description, its full `provider/model`, and a thinking line. Every other agent is shown as a compact **two-line row** — line 1 is the current-agent marker or spinner, the agent name (in its accent color), and a right-aligned thinking **gauge**; line 2 is the indented full `provider/model` and, once the agent has run, its latest **context usage** as a right-aligned percentage of its context window.
 - **Detailed** — Each agent is shown as a responsive card with labeled **Effort**, **Context**, and **Cost** metrics on a single line (or split across lines at narrow sidebar widths), making cumulative per-agent cost visible at a glance across the team.
 
-Agents are separated by a blank line so rows stay visually distinct. The effort **gauge** is the only visual language for thinking; the focus card and the Agent Inspector spell out the exact level alongside it. Left-click any agent to switch to it.
+Agents are separated by a blank line so rows stay visually distinct. The effort **gauge** is the only visual language for thinking; the focus card and the Agent Inspector spell out the exact level alongside it. Left-click any agent to open a scrollable **team grid**. Choosing an agent starts a new, blank session in the same working directory; the original session is left intact. Agent-switching slash commands retain their separate clone-switch behavior.
 
-On large teams the roster can be trimmed to the agents that matter right now: enable **Active agents only** (nested under **Agents** in `/settings` → Appearance → Sidebar sections, off by default) to list only agents active in the current session — the selected or working agent, participants of an in-flight transfer, and any agent with recorded participation (usage or attributed cost, including agents restored with a reloaded session). The filter also applies to the top/bottom band, is purely presentational — <kbd>Ctrl</kbd>+<kbd>number</kbd> shortcuts keep their original team positions and agent cycling still walks the whole team — and is unavailable while the Agents section itself is hidden.
+On large teams the roster can be trimmed to the agents that matter right now: enable **Active agents only** (nested under **Agents** in `/settings` → Appearance → Sidebar sections, off by default) to list only agents active in the current session — the selected or working agent, participants of an in-flight transfer, and any agent with recorded participation (usage or attributed cost, including agents restored with a reloaded session). The filter also applies to the top/bottom band, is purely presentational — agent cycling still walks the whole team — and is unavailable while the Agents section itself is hidden.
 
 #### Agent inspector
 
@@ -146,7 +146,7 @@ Open a read-only **Agent Inspector** to inspect any agent's full configuration c
 
 - **Right-click any agent** (card or row) to open the inspector without switching to it.
 - **<kbd>Ctrl</kbd>+left-click any agent** does the same — a fallback for terminals that don't forward right-clicks.
-- **Left-click** always switches to the agent.
+- **Left-click** opens the team grid (see above) rather than switching in place.
 
 The title is rendered in the agent's accent color. Sections appear in this order, and any empty section is omitted:
 
@@ -258,6 +258,8 @@ The header reports completed tool calls as `(1 tool)` or `(N tools)`, including 
 Expanded Work content is inset on both sides, with a blank row below the header and consistent spacing between reasoning, replies, and tool activity. This changes only the rendering bounds: nested thinking blocks, tool cards, and other expandable content retain their existing disclosure controls and behavior. Intermediate replies keep their original content without repeated “Earlier reply” headings. Assistant responses and thinking blocks do not repeat agent-name badges; incoming messages still identify their sender.
 
 **Visible replies** under `/settings` → **Appearance** selects **Latest only**, **Last 3** (default), **Last 5**, or **All**. It counts logical assistant prose messages within each human-input exchange, not streaming chunks, tools, reasoning, or coordination notices. Older prose remains accessible inside Work without duplicating the visible replies. When a reply moves into Work, it fades out and the remaining text moves smoothly into place before the incoming reply fades in. A streaming reply fades as one component: new chunks render at its current fade level without restarting the animation. Set `settings.visible_replies` to `latest`, `"3"`, `"5"`, or `all`; this preference has no effect while Compact work log is off.
+
+To leave room for a reply after sending, enable **Scroll new prompt to top** under `/settings` → **Behavior**, or set `settings.scroll_on_send: true`. It is off by default. An immediately accepted local new-turn prompt moves near the top once it enters the transcript; manual scrolling takes control. Busy steering, queued follow-ups, retries, replayed history, and background/child updates do not trigger it.
 
 To restore the previous layout, turn off **Compact work log** under `/settings` → **Appearance**, or set `settings.compact_work_log: false`. The setting is on by default, previews immediately, and does not affect the lean TUI.
 
@@ -536,7 +538,6 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Ctrl+G     | Cancel reverse history search                   |
 | Ctrl+S     | Cycle to next agent in the team                 |
 | Shift+Tab  | Cycle the current model's thinking-effort level (shows a `✻ Thinking: <level>` toast) |
-| Ctrl+1 – 9 | Switch directly to agent _N_ in the team list   |
 | Ctrl+T     | Open a new tab (additional agent session)       |
 | Ctrl+W     | Close the current tab                           |
 | Ctrl+N     | Next tab                                        |

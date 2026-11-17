@@ -53,7 +53,7 @@ func (t *translator) translate(env runtime.SessionEvent) []facade.Event {
 		}
 		payload = facade.Passthrough{Event: env.Event}
 	case *runtime.TurnSettledEvent:
-		payload = facade.TurnSettled{Outcome: t.outcome(env.TurnID, event.Outcome)}
+		payload = facade.TurnSettled{Outcome: t.outcome(env.TurnID, event.Outcome), Timing: event.Timing}
 	case *runtime.ToolCallConfirmationEvent:
 		payload = facade.InteractionRequested{
 			InteractionID: env.InteractionID,

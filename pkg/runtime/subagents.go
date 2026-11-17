@@ -251,7 +251,7 @@ func (m *subagentManager) bindRootDriverLocked(sessionID string, st *sessionSuba
 		if current == nil {
 			return
 		}
-		if lastErr := current.LastError(); lastErr != "" {
+		if lastErr := current.settledFailureError(); lastErr != "" {
 			m.updateRootLifecycle(sessionID, ref, subagent.NodeFailed, lastErr)
 			return
 		}
@@ -361,9 +361,16 @@ func (m *subagentManager) updateRootLifecycle(sessionID string, driver weak.Poin
 		node.Error = errMsg
 		node.NeedsAttention = state == subagent.NodeFailed
 		if state == subagent.NodeFailed {
-			node.WaitingOn = "failed"
+			node.WaitingOn, node.AttentionID = "failed", ""
+			if current := driver.Value(); current != nil {
+				current.mu.Lock()
+				if count := len(current.completedTurns); count > 0 {
+					node.AttentionID = subagent.AttentionIdentity("failure:" + current.completedTurns[count-1])
+				}
+				current.mu.Unlock()
+			}
 		} else {
-			node.WaitingOn = ""
+			node.WaitingOn, node.AttentionID = "", ""
 		}
 	})
 	m.mu.Unlock()
@@ -899,7 +906,14 @@ func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 		m.mu.Unlock()
 		return
 	}
-	_ = m.tree.Update(childID, func(n *subagent.Node) { n.State = subagent.NodeRunning })
+	_ = m.tree.Update(childID, func(n *subagent.Node) {
+		n.State = subagent.NodeRunning
+		// The previous run's failure no longer describes a live turn.
+		n.Error = ""
+		if n.WaitingOn == "failed" {
+			n.WaitingOn, n.NeedsAttention, n.AttentionID = "", false, ""
+		}
+	})
 	m.mu.Unlock()
 	m.persistSnapshot()
 }
@@ -978,7 +992,7 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 			}
 		}
 		record := child.durable
-		record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
+		record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn, record.Node.AttentionID = subagent.NodeStopped, false, "", ""
 		commits = append(commits, session.ChildCommit{ExpectedRevision: record.Revision, Record: record})
 	}
 	if pending, ok := m.pendingStops[id]; ok {
@@ -1006,7 +1020,7 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 			}
 		}
 		_ = m.tree.Update(record.Node.ID, func(n *subagent.Node) {
-			n.State, n.NeedsAttention, n.WaitingOn, n.BackgroundProcesses = subagent.NodeStopped, false, "", 0
+			n.State, n.NeedsAttention, n.WaitingOn, n.BackgroundProcesses, n.AttentionID = subagent.NodeStopped, false, "", 0, ""
 		})
 	}
 	for _, child := range stopped {
@@ -1612,7 +1626,7 @@ func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) e
 	for id, rec := range m.children {
 		if deleting[rec.sessionID] {
 			_ = m.tree.Update(id, func(node *subagent.Node) {
-				node.State, node.NeedsAttention, node.WaitingOn, node.BackgroundProcesses = subagent.NodeStopped, false, "", 0
+				node.State, node.NeedsAttention, node.WaitingOn, node.BackgroundProcesses, node.AttentionID = subagent.NodeStopped, false, "", 0, ""
 			})
 			if rec.unwatch != nil {
 				unwatches = append(unwatches, rec.unwatch)
@@ -1777,7 +1791,7 @@ func (r *LocalRuntime) SubagentTree() *subagent.Tree {
 	return r.subagents.Tree()
 }
 
-func (m *subagentManager) setAttention(sessionID, waitingOn string) {
+func (m *subagentManager) setAttention(sessionID, waitingOn, attentionID string) {
 	m.mu.Lock()
 	var id subagent.NodeID
 	if tracked := m.sessions[sessionID]; tracked != nil {
@@ -1793,11 +1807,15 @@ func (m *subagentManager) setAttention(sessionID, waitingOn string) {
 	}
 	if id != "" {
 		_ = m.tree.Update(id, func(n *subagent.Node) {
+			if n.State == subagent.NodeStopped {
+				n.NeedsAttention, n.WaitingOn, n.AttentionID = false, "", ""
+				return
+			}
 			if n.State == subagent.NodeFailed {
 				n.NeedsAttention, n.WaitingOn = true, "failed"
 				return
 			}
-			n.WaitingOn, n.NeedsAttention = waitingOn, waitingOn != ""
+			n.WaitingOn, n.NeedsAttention, n.AttentionID = waitingOn, waitingOn != "", attentionID
 		})
 	}
 	m.mu.Unlock()

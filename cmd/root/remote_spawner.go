@@ -64,7 +64,7 @@ func (b *remoteBackend) Restorer(services app.Services, sessions runtime.Session
 		if err != nil {
 			return tui.SpawnedSession{}, err
 		}
-		opts := []app.Opt{app.WithRuntimeServices(services)}
+		opts := withTitleGenerator(ctx, services, []app.Opt{app.WithRuntimeServices(services)})
 		if b.flags.sessionReadOnly {
 			opts = append(opts, app.WithReadOnly())
 		}
@@ -94,7 +94,7 @@ func (b *remoteBackend) remoteAttachedApp(ctx context.Context, services app.Serv
 		return tui.SpawnedSession{}, errors.New("child sessions require confirmed session view attachment")
 	}
 	sess.AgentName = handle.AgentName()
-	opts := []app.Opt{app.WithRuntimeServices(services)}
+	opts := withTitleGenerator(ctx, services, []app.Opt{app.WithRuntimeServices(services)})
 	if b.flags.sessionReadOnly {
 		opts = append(opts, app.WithReadOnly())
 	}

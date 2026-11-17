@@ -229,3 +229,25 @@ func TestResolveProviderTypeFromConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestImageProviderProtocolPrecedence(t *testing.T) {
+	for _, tc := range []struct{ name, modelAPI, providerAPI, providerOpt, want string }{
+		{"canonical provider wins", "", "openai_images", "openai_chatcompletions", "openai_images"},
+		{"legacy model wins", "openai_chatcompletions", "openai_images", "openai_responses", "openai_chatcompletions"},
+		{"image opt in selects responses", "", "", "", "openai_responses"},
+		{"explicit chat stays chat", "", "openai_chatcompletions", "", "openai_chatcompletions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &latest.ModelConfig{Provider: "local", Model: "gpt-4o", OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)}}
+			if tc.modelAPI != "" {
+				cfg.ProviderOpts = map[string]any{"api_type": tc.modelAPI}
+			}
+			p := latest.ProviderConfig{APIType: tc.providerAPI}
+			if tc.providerOpt != "" {
+				p.ProviderOpts = map[string]any{"api_type": tc.providerOpt}
+			}
+			got := applyProviderDefaults(cfg, map[string]latest.ProviderConfig{"local": p})
+			assert.Equal(t, tc.want, got.ProviderOpts["api_type"])
+		})
+	}
+}

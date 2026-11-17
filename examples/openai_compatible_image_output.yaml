@@ -1,0 +1,32 @@
+# A local server must implement POST /v1/images/generations for this model.
+# Replace the base URL/model with your deployment's actual values. These
+# settings do not add image support to a chat-only server or model.
+# Set token_key on the provider if your server requires authentication.
+#
+# Requests use system instructions and the latest user text, not full chat
+# history. No function tools, structured output, attachments, or image edits.
+# The server must return base64 image bytes; remote URLs are not fetched.
+# Size and other options depend on your server/model, not the model name.
+#
+# docker agent run examples/openai_compatible_image_output.yaml \
+#   "Draw a red panda working at a terminal"
+providers:
+  local-images:
+    api_type: openai_images
+    base_url: http://localhost:8000/v1
+
+models:
+  image:
+    provider: local-images
+    model: flux2-klein-4b
+    output_capabilities:
+      image: true # Required; api_type above selects the endpoint.
+    image_generation: # Optional request settings for your server.
+      size: 512x512
+      response_format: b64_json
+
+agents:
+  root:
+    model: image
+    description: Generate images with an OpenAI-compatible Images endpoint.
+    instruction: Follow the user's requested subject and style closely.

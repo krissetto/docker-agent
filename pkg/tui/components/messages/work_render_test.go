@@ -78,7 +78,9 @@ func TestWorkHeaderCountsFinishedToolsAcrossLiveStatusUpdates(t *testing.T) {
 			m := NewScrollableView(animation.NewRuntime(), 80, 20, &service.SessionState{}).(*model)
 			t.Cleanup(m.StopAnimations)
 			m.SetCompactWorkLog(true)
-			m.addMessage(types.User("request"))
+			request := types.User("request")
+			request.TurnID = "tools-turn"
+			m.addMessage(request)
 			if embedded {
 				m.AppendReasoning("root", "Private reasoning")
 			}
@@ -117,7 +119,8 @@ func TestWorkHeaderCountsFinishedToolsAcrossLiveStatusUpdates(t *testing.T) {
 			m.AddToolResult(&runtime.ToolCallResponseEvent{ToolCallID: call.ID, Response: "failed"}, types.ToolStatusError)
 			m.ensureAllItemsRendered()
 			require.Equal(t, 2, block.Status().ToolCount, "repeated results do not count twice")
-			m.SetWorkStatus(false, 4*time.Second)
+			m.SetWorkStatus(false, 0)
+			m.SetTurnTiming("tools-turn", settledTiming("tools-turn", 4*time.Second, "completed"))
 			m.ensureAllItemsRendered()
 			require.Contains(t, ansi.Strip(block.View()), "Work [+] (2 tools) · 4s")
 		})
@@ -530,12 +533,11 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 	}
 	require.NotNil(t, reasoningRow)
 	reasoningHeader := m.workRangeList()[0].start + reasoningRow.Start
-	for x := range 2 {
+	// Hosted reasoning has no disclosure: no click on its content collapses it.
+	for x := range 3 {
 		_, _ = m.handleMouseClick(tea.MouseClickMsg{X: x, Y: reasoningHeader - m.scrollOffset, Button: tea.MouseLeft})
-		require.False(t, reasoning.IsExpanded(), "Work margin x=%d does not hit a line-only reasoning header", x)
+		require.Contains(t, ansi.Strip(work.View()), "A second reasoning section", "hosted reasoning stays fully visible (x=%d)", x)
 	}
-	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: reasoningHeader - m.scrollOffset, Button: tea.MouseLeft})
-	require.True(t, reasoning.IsExpanded(), "source column zero still toggles reasoning")
 	require.True(t, work.Expanded())
 
 	nestedLine, ok := reasoning.ToolCallLine(reasoningTool.ID)
@@ -571,7 +573,7 @@ func TestWorkInsetPreservesIncomingReplyAndNestedReasoningToolDisclosures(t *tes
 	work.SetExpandedImmediately(true)
 	m.invalidateAllItems()
 	m.ensureAllItemsRendered()
-	require.True(t, reasoning.IsExpanded(), "reopening Work preserves the independently expanded reasoning source")
+	require.Contains(t, ansi.Strip(work.View()), "A second reasoning section", "reopened Work shows hosted reasoning in full")
 	require.Contains(t, ansi.Strip(work.View()), "nested output line", "reopening Work keeps the tool's own expansion")
 }
 
@@ -609,12 +611,11 @@ func TestWorkRoutesSecondReasoningChildToggleWheelAndInvalidationBySource(t *tes
 	}
 	require.NotNil(t, secondRow)
 	header := m.workRangeStart(3) + secondRow.Start
-	for x := range 2 {
+	// Hosted reasoning has no line toggle at any column; only its nested tool cards do.
+	for x := range 3 {
 		_, _ = m.handleMouseClick(tea.MouseClickMsg{X: x, Y: header - m.scrollOffset, Button: tea.MouseLeft})
-		require.False(t, secondReasoning.IsExpanded(), "Work margin x=%d cannot line-toggle reasoning", x)
+		require.Contains(t, ansi.Strip(work.View()), "second reasoning child", "hosted reasoning stays fully visible (x=%d)", x)
 	}
-	_, _ = m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: header - m.scrollOffset, Button: tea.MouseLeft})
-	require.True(t, secondReasoning.IsExpanded())
 	require.True(t, work.Expanded())
 	toolLine, ok := secondReasoning.ToolCallLine(nestedCall.ID)
 	require.True(t, ok)
@@ -645,7 +646,7 @@ func TestWorkRoutesSecondReasoningChildToggleWheelAndInvalidationBySource(t *tes
 	work.SetExpandedImmediately(true)
 	m.invalidateAllItems()
 	m.ensureAllItemsRendered()
-	require.True(t, secondReasoning.IsExpanded(), "reasoning expansion survives outer collapse")
+	require.Contains(t, ansi.Strip(work.View()), "second reasoning child", "hosted reasoning content survives outer collapse")
 	require.Contains(t, ansi.Strip(work.View()), "nested output", "nested shell expansion survives outer collapse")
 
 	for _, width := range []int{64, 36, 20, 12, 8, 4} {
@@ -656,7 +657,13 @@ func TestWorkRoutesSecondReasoningChildToggleWheelAndInvalidationBySource(t *tes
 		compositeWidth, _ := composite.block.GetSize()
 		childWidth := workblock.SourceContentWidth(compositeWidth)
 		require.True(t, work.Expanded(), "viewport width %d does not alter the outer Work disclosure", width)
-		require.True(t, secondReasoning.IsExpanded(), "viewport width %d does not alter its reasoning disclosure", width)
+		hostedRows := 0
+		for _, row := range work.Rows() {
+			if row.SourceIndex == 3 {
+				hostedRows++
+			}
+		}
+		require.Positive(t, hostedRows, "viewport width %d keeps hosted reasoning visible in Work", width)
 		for _, row := range work.Rows() {
 			for local := row.Start; local < row.End; local++ {
 				line := ansi.Strip(m.renderedLine(composite.start + local))
@@ -676,7 +683,7 @@ func TestWorkRoutesSecondReasoningChildToggleWheelAndInvalidationBySource(t *tes
 				childCol, inside := composite.block.SourceColumnAt(firstChildRow, margin)
 				require.True(t, inside, "width %d exposes the first source cell after both margins", width)
 				require.Zero(t, childCol)
-				require.True(t, composite.block.IsToggleAt(firstChildRow, margin), "width %d preserves the source-owned reasoning disclosure control", width)
+				require.False(t, composite.block.IsToggleAt(firstChildRow, margin), "width %d hosted reasoning exposes no disclosure control", width)
 			}
 		}
 		m.SetSize(100, 80)

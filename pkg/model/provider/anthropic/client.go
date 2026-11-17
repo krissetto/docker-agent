@@ -890,6 +890,9 @@ func contentArray(m map[string]any) []any {
 // falling back to the conservative 200k Claude floor only when no catalogue
 // entry exists.
 func (c *Client) contextLimit(ctx context.Context) int64 {
+	if n := c.ModelConfig.DeclaredContextWindow(); n > 0 {
+		return n
+	}
 	return modelinfo.ContextLimit(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), modelinfo.DefaultAnthropicContextLimit)
 }
 

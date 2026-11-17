@@ -69,11 +69,33 @@ func TestTreeAttentionAggregatesDescendantInteractions(t *testing.T) {
 	assert.Equal(t, "grand-session", grand.SessionID)
 	assert.Equal(t, "reviewer", grand.Agent)
 	assert.Len(t, a.DescendantAttention(), 2)
-	assert.Equal(t, []TreeAttention{{SubagentTarget: grand, WaitingOn: waitingOnAnswer}}, DescendantAttention(snapshot, "child-session"), "a nested view aggregates only its own subtree")
+	assert.Equal(t, []TreeAttention{{SubagentTarget: grand, WaitingOn: waitingOnAnswer, OccurrenceID: "interaction:question"}}, DescendantAttention(snapshot, "child-session"), "a nested view aggregates only its own subtree")
 
+	// A second same-reason interaction arrives while the first is still pending;
+	// the actual observation-to-tree projection must retain both occurrences.
+	tree <- runtime.SessionEvent{SessionID: "child-session", Event: &runtime.ToolCallConfirmationEvent{SessionID: "child-session", RequestID: "approval-two"}}
+	snapshot = next(func(s subagent.Snapshot) bool { return len(DescendantAttention(s, root.ID)) == 3 })
+	var childOccurrences []string
+	for _, item := range DescendantAttention(snapshot, root.ID) {
+		if item.SessionID == "child-session" {
+			childOccurrences = append(childOccurrences, item.OccurrenceID)
+		}
+	}
+	assert.Equal(t, []string{"interaction:approval", "interaction:approval-two"}, childOccurrences)
 	tree <- runtime.SessionEvent{SessionID: "child-session", Event: &runtime.InteractionResolvedEvent{SessionID: "child-session", InteractionID: "approval"}}
+	snapshot = next(func(s subagent.Snapshot) bool { return len(DescendantAttention(s, root.ID)) == 2 })
+	tree <- runtime.SessionEvent{SessionID: "child-session", Event: &runtime.InteractionResolvedEvent{SessionID: "child-session", InteractionID: "approval-two"}}
 	snapshot = next(func(s subagent.Snapshot) bool { return len(DescendantAttention(s, root.ID)) == 1 })
 	assert.Equal(t, "grand-session", DescendantAttention(snapshot, root.ID)[0].SessionID)
+
+	// Replay and the ordered live stream may repeat a resolved prompt. It must
+	// not emit a new tree attention transition or re-open the old dialog.
+	for range 20 {
+		tree <- runtime.SessionEvent{SessionID: "child-session", Event: &runtime.ToolCallConfirmationEvent{SessionID: "child-session", RequestID: "approval"}}
+	}
+	tree <- runtime.SessionEvent{SessionID: "grand-session", Event: &runtime.InteractionResolvedEvent{SessionID: "grand-session", InteractionID: "question"}}
+	snapshot = next(func(s subagent.Snapshot) bool { return len(DescendantAttention(s, root.ID)) == 0 })
+	assert.Empty(t, DescendantAttention(snapshot, root.ID))
 }
 
 func TestTreeAttentionIsNotObservedForInProcessHandles(t *testing.T) {
@@ -221,4 +243,64 @@ func TestTreeWatchOverlaysOnlyCurrentSessionBackgroundProcessCounts(t *testing.T
 	merged = watch.merged(base)
 	require.Zero(t, merged.Nodes[0].Children[0].Node.BackgroundProcesses, "empty reconnect baselines clear stale counts")
 	require.False(t, watch.apply(runtime.SessionEvent{SessionID: "child-session", Event: &runtime.BackgroundProcessesEvent{SessionID: "root-owner", Processes: []tools.BackgroundProcess{{ID: "foreign", SessionID: "root-owner", State: tools.BackgroundProcessRunning}}}}), "event owner and envelope must match")
+}
+
+func TestTreeWatchResolvedInteractionReplayDoesNotResurrectAttention(t *testing.T) {
+	watch := newTreeWatch("root")
+	root := subagent.SessionRootID("root")
+	base := &subagent.Snapshot{Root: root, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: root, SessionID: "root"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", SessionID: "child", Parent: root, State: subagent.NodeRunning}}}}}}
+	watch.add(runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: "child", State: runtime.SessionStateRunning}})
+	approval := runtime.SessionEvent{SessionID: "child", Event: &runtime.ToolCallConfirmationEvent{SessionID: "child", RequestID: "approval"}}
+	require.True(t, watch.apply(approval))
+	require.Len(t, DescendantAttention(*watch.merged(base), "root"), 1)
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: "child", Event: &runtime.InteractionResolvedEvent{SessionID: "child", InteractionID: "approval"}}))
+	for range 20 {
+		require.False(t, watch.apply(approval), "resolved interaction replay must not become actionable again")
+	}
+	require.Empty(t, DescendantAttention(*watch.merged(base), "root"))
+	approval.Event = &runtime.ToolCallConfirmationEvent{SessionID: "child", RequestID: "new-approval"}
+	require.True(t, watch.apply(approval), "a distinct interaction still needs attention")
+	require.Len(t, DescendantAttention(*watch.merged(base), "root"), 1)
+}
+
+func TestDescendantAttentionRequiresActionableReason(t *testing.T) {
+	root := subagent.SessionRootID("root")
+	snapshot := subagent.Snapshot{Root: root, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: root, SessionID: "root"}, Children: []subagent.NodeSnapshot{
+		{Node: subagent.Node{ID: "stopped", SessionID: "stopped", State: subagent.NodeStopped, NeedsAttention: true, WaitingOn: "approve tool"}},
+		{Node: subagent.Node{ID: "unknown", SessionID: "unknown", State: subagent.NodeIdle, NeedsAttention: true}},
+		{Node: subagent.Node{ID: "failed", SessionID: "failed", State: subagent.NodeFailed, NeedsAttention: true, Error: "model unavailable"}},
+	}}}}
+	items := DescendantAttention(snapshot, "root")
+	require.Len(t, items, 1)
+	require.Equal(t, "failed", items[0].SessionID)
+	require.Equal(t, "failed", items[0].WaitingOn)
+}
+
+func TestTreeAttentionSameReasonOccurrencesSurviveReconnect(t *testing.T) {
+	root := subagent.SessionRootID("root")
+	base := &subagent.Snapshot{Root: root, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: root, SessionID: "root"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", SessionID: "child", Parent: root, State: subagent.NodeRunning}}}}}}
+	watch := newTreeWatch("root")
+	pending := func(ids ...string) runtime.SessionSnapshot {
+		snapshot := runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: "child", State: runtime.SessionStateRunning}}
+		for _, id := range ids {
+			snapshot.Interactions = append(snapshot.Interactions, runtime.InteractionSnapshot{InteractionID: id, Kind: runtime.InteractionConfirmation})
+		}
+		return snapshot
+	}
+	watch.reset([]runtime.SessionSnapshot{pending("first")})
+	first := DescendantAttention(*watch.merged(base), "root")
+	require.Len(t, first, 1)
+	require.Equal(t, "interaction:first", first[0].OccurrenceID)
+	second := runtime.SessionEvent{SessionID: "child", Event: &runtime.ToolCallConfirmationEvent{SessionID: "child", RequestID: "second"}}
+	require.True(t, watch.apply(second))
+	both := DescendantAttention(*watch.merged(base), "root")
+	require.Len(t, both, 2, "same reason must not collapse distinct pending interactions")
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: "child", Event: &runtime.InteractionResolvedEvent{SessionID: "child", InteractionID: "first"}}))
+	remaining := DescendantAttention(*watch.merged(base), "root")
+	require.Len(t, remaining, 1)
+	require.Equal(t, "interaction:second", remaining[0].OccurrenceID)
+	watch.reset([]runtime.SessionSnapshot{pending("first", "second")})
+	require.Equal(t, remaining, DescendantAttention(*watch.merged(base), "root"), "reconnect retains live identity and resolved tombstones")
+	require.False(t, watch.apply(second), "same live interaction replay is unchanged")
+	require.False(t, watch.apply(runtime.SessionEvent{SessionID: "child", Event: &runtime.ToolCallConfirmationEvent{SessionID: "child", RequestID: "first"}}), "resolved replay stays nonactionable")
 }

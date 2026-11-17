@@ -399,6 +399,7 @@ func convertTree(snapshot *subagent.Snapshot) facade.Tree {
 				State:          string(n.Node.State),
 				NeedsAttention: n.Node.NeedsAttention,
 				WaitingOn:      n.Node.WaitingOn,
+				AttentionID:    n.Node.AttentionID,
 				Error:          n.Node.Error,
 				Children:       convert(n.Children),
 			})

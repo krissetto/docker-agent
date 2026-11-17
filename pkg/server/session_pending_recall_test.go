@@ -25,7 +25,7 @@ func TestPendingRecallHTTPAuthLocalRemoteParity(t *testing.T) {
 	}}
 	provider := &interactionProvider{streams: []chat.MessageStream{toolCallStream(), stopStream()}}
 	srv, owner := newCanonicalLocalServer(t, store, agent.New("root", "prompt", agent.WithModel(provider), agent.WithToolSets(interactionToolSet{tool})))
-	authenticated := NewWithManager(srv.sm, "secret")
+	authenticated := NewWithManager(srv.sm, "secret", WithCacheWarmup(false))
 	httpServer := httptest.NewServer(authenticated.e)
 	defer httpServer.Close()
 	client, err := runtime.NewClient(httpServer.URL, runtime.WithHTTPClient(httpServer.Client()), runtime.WithAuthToken("secret"))
@@ -143,7 +143,7 @@ func TestPendingRecallHTTPAttachedChildExactRoutingAndErrors(t *testing.T) {
 	registry.registerLive(root.ID, rootOwner)
 	registry.registerLive(child.ID, childOwner)
 	srv.sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: childOwner, registry: registry})
-	authenticated := NewWithManager(srv.sm, "secret")
+	authenticated := NewWithManager(srv.sm, "secret", WithCacheWarmup(false))
 	body := `{"turn_id":"same-turn-id","pending_only":true}`
 	rec := sessionRequest(t, authenticated, http.MethodPost, "/api/v2/sessions/child/cancel", body, "secret")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

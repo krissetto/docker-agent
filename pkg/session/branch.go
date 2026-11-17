@@ -59,6 +59,7 @@ func branchSessionWithTitle(parent *Session, branchAtPosition int, titleFn func(
 	}
 
 	copyRetainedTurnOutcomes(branched, parent)
+	copyRetainedTurnTimings(branched, parent)
 	setParentIDs(branched)
 	recalculateSessionTotals(branched)
 	return branched, nil
@@ -104,6 +105,7 @@ func (s *Session) clone(referencesOnly bool) *Session {
 		ID:                      s.ID,
 		TurnOutcomes:            maps.Clone(s.TurnOutcomes),
 		TurnOutcomeOrder:        slices.Clone(s.TurnOutcomeOrder),
+		TurnTimings:             maps.Clone(s.TurnTimings),
 		Origin:                  s.Origin,
 		InputID:                 s.InputID,
 		Title:                   s.Title,
@@ -128,6 +130,7 @@ func (s *Session) clone(referencesOnly bool) *Session {
 		Permissions:             s.Permissions.Clone(),
 		Attributes:              maps.Clone(s.Attributes),
 		AgentModelOverrides:     cloneStringMap(s.AgentModelOverrides),
+		AgentThinkingLevels:     cloneStringMap(s.AgentThinkingLevels),
 		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
 		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
 		ExcludedTools:           cloneStringSlice(s.ExcludedTools),
@@ -263,6 +266,7 @@ func cloneSubSession(src *Session) (*Session, error) {
 	}
 
 	copyRetainedTurnOutcomes(cloned, src)
+	copyRetainedTurnTimings(cloned, src)
 	recalculateSessionTotals(cloned)
 	return cloned, nil
 }
@@ -276,6 +280,20 @@ func copyRetainedTurnOutcomes(dst, src *Session) {
 		}
 		if outcome := outcomes[msg.TurnID]; outcome != "" {
 			dst.SetTurnOutcome(msg.TurnID, outcome)
+		}
+	}
+}
+
+// copyRetainedTurnTimings keeps timing only for turns whose transcript survived.
+func copyRetainedTurnTimings(dst, src *Session) {
+	timings := src.TurnTimingsSnapshot()
+	for _, item := range dst.Messages {
+		msg := item.Message
+		if msg == nil || !msg.Accepted || msg.TurnID == "" {
+			continue
+		}
+		if timing, ok := timings[msg.TurnID]; ok {
+			dst.SetTurnTiming(msg.TurnID, timing)
 		}
 	}
 }
@@ -310,6 +328,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	dst.Permissions = src.Permissions.Clone()
 	dst.Attributes = src.AttributesSnapshot()
 	dst.AgentModelOverrides = cloneStringMap(src.AgentModelOverrides)
+	dst.AgentThinkingLevels = cloneStringMap(src.AgentThinkingLevels)
 	dst.CustomModelsUsed = cloneStringSlice(src.CustomModelsUsed)
 	dst.AttachedFiles = src.AttachedFilesSnapshot()
 }

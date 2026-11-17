@@ -32,6 +32,7 @@ func DefaultFactories() map[string]provider.Factory {
 		"openai":                 openaiFactory,
 		"openai_chatcompletions": openaiFactory,
 		"openai_responses":       openaiFactory,
+		"openai_images":          openaiFactory,
 		"anthropic":              provider.Adapt(anthropic.NewClient),
 		"google":                 Google,
 		"dmr":                    DMR,

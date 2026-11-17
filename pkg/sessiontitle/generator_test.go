@@ -311,3 +311,23 @@ func TestNew_KeepsUndeclaredAndExplicitFalseCandidates(t *testing.T) {
 	assert.Equal(t, 1, undeclared.calls)
 	assert.Zero(t, declaredFalse.calls)
 }
+
+func TestNewSkipsImageOnlyCandidates(t *testing.T) {
+	t.Parallel()
+	image := &mockProvider{
+		id: modelsdev.NewID("openai", "gpt-image-1"),
+		baseCfgFn: func() base.Config {
+			return base.Config{ModelConfig: latest.ModelConfig{ProviderOpts: map[string]any{"api_type": "openai_images"}}}
+		},
+	}
+	assert.Nil(t, New(image))
+	text := &mockProvider{
+		id:       modelsdev.NewID("openai", "text"),
+		createFn: func() (chat.MessageStream, error) { return streamWithContent("Text title"), nil },
+	}
+	title, err := New(image, text).Generate(t.Context(), "session", []string{"draw a cat"})
+	require.NoError(t, err)
+	assert.Equal(t, "Text title", title)
+	assert.Zero(t, image.calls)
+	assert.Equal(t, 1, text.calls)
+}

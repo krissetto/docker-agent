@@ -136,6 +136,7 @@ func (d *sessionDriver) switchActiveAgent(ctx context.Context, name string, tm *
 				d.sess.AgentID = configuredAgentID(tm, name)
 				d.modelRef = ref
 				d.modelProviders = models
+				d.harnessEffort = harnessEffortFromSession(d.sess, name)
 				d.bindingVersion++
 				for _, event := range infoEvents {
 					d.events.Publish(d.identityID, event)

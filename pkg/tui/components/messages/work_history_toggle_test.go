@@ -112,7 +112,8 @@ func TestContinueHistoryKeepsLongHumanExchangeGroupedAndSourceLossless(t *testin
 			observedWork = true
 		}
 		require.LessOrEqual(t, strings.Count(plain, "Work [+]"), 1, "older source rows never leak into the transcript as peer rows")
-		require.NotContains(t, plain, "PRIVATE_THOUGHT_")
+		// A collapsed Work block previews at most the three most recent reasoning lines.
+		require.LessOrEqual(t, strings.Count(plain, "PRIVATE_THOUGHT_"), 3, "collapsed Work shows only the newest reasoning preview")
 		require.NotContains(t, plain, "PRIVATE_INTERMEDIATE_REPLY_")
 		require.NotContains(t, plain, "PRIVATE_TOOL_RESULT_")
 	}
@@ -126,7 +127,7 @@ func TestContinueHistoryKeepsLongHumanExchangeGroupedAndSourceLossless(t *testin
 	_, inWork := m.workSourceToHeader[finalSource]
 	require.False(t, inWork, "the latest ordinary response stays outside collapsed Work")
 	require.Contains(t, ansi.Strip(m.View()), "FINAL_ANSWER_REMAINS_VISIBLE", "the live segmented tail remains visible beside Work")
-	require.NotContains(t, full, "PRIVATE_THOUGHT_")
+	require.LessOrEqual(t, strings.Count(full, "PRIVATE_THOUGHT_"), 3, "collapsed Work shows only the newest reasoning preview")
 	require.NotContains(t, full, "PRIVATE_INTERMEDIATE_REPLY_")
 	require.NotContains(t, full, "PRIVATE_TOOL_RESULT_")
 	require.Less(t, initialStart, len(m.messages))

@@ -361,6 +361,25 @@ func (d *costDialog) gatherCostData() costData {
 		}
 	}
 
+	var walkAuxiliary func(*session.Session)
+	walkAuxiliary = func(sess *session.Session) {
+		for _, record := range sess.AuxiliaryUsageSnapshot() {
+			data.hasPerMessageData = true
+			data.total.add(record.Cost, &record.Usage)
+			addAgentUsage(record.Agent, record.Cost, &record.Usage)
+			if modelMap[record.Model] == nil {
+				modelMap[record.Model] = &totalUsage{label: record.Model}
+			}
+			modelMap[record.Model].add(record.Cost, &record.Usage)
+		}
+		for _, item := range sess.MessagesSnapshot() {
+			if item.SubSession != nil {
+				walkAuxiliary(item.SubSession)
+			}
+		}
+	}
+	walkAuxiliary(d.session)
+
 	for _, m := range modelMap {
 		data.models = append(data.models, *m)
 	}

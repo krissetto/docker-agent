@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	stdimage "image"
+	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/image"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -84,41 +86,135 @@ func NewCachedImagePreviewDialog(ar *animation.Runtime, preview *image.Preview, 
 
 type ImageCellSizeMsg image.CellSize
 
+const maxImagePreviewZoom = 16.0
+
 type imageAttachmentPreviewDialog struct {
 	BaseDialog
-	title       string
-	preview     *image.Preview
-	cell        image.CellSize
-	content     string
-	dialogWidth int
+	title                                string
+	preview                              *image.Preview
+	cell                                 image.CellSize
+	content                              string
+	dialogWidth                          int
+	maximized                            bool
+	viewport                             image.Viewport
+	imageX, imageY, imageCols, imageRows int
+	panning                              bool
+	panStartX, panStartY                 int
+	panOriginX, panOriginY               float64
 }
+
+func (d *imageAttachmentPreviewDialog) DialogMaximized() bool { return d.maximized }
 
 func (d *imageAttachmentPreviewDialog) Init() tea.Cmd { return nil }
 func (d *imageAttachmentPreviewDialog) SetSize(width, height int) tea.Cmd {
 	d.BaseDialog.SetSize(width, height)
+	d.panning = false
 	d.prepare()
 	return nil
 }
+
 func (d *imageAttachmentPreviewDialog) prepare() {
-	cell := d.cell.Resolved()
-	cols, rows := max(1, d.width-6), max(1, d.height-6)
-	img, err := d.preview.Fit(cols, rows, cell)
-	if err != nil {
-		d.content = "Image preview unavailable: unable to resize image."
+	if d.preview == nil {
 		return
 	}
-	placementCols := (img.Width + cell.Width - 1) / cell.Width
-	d.dialogWidth = min(d.width, max(placementCols, min(ansi.StringWidth(d.title), cols))+6)
-	inner := max(1, d.dialogWidth-6)
-	lines := []string{RenderTitle(d.title, inner, styles.DialogTitleStyle), RenderSeparator(inner)}
-	if d.width >= 7 && d.height >= 7 {
-		for _, marker := range image.RenderNativePreviewMarkers(img, cell) {
-			left := max(0, (inner-placementCols)/2)
-			lines = append(lines, strings.Repeat(" ", left)+marker+strings.Repeat(" ", inner-left))
+	width, height := max(1, d.width), max(1, d.height)
+	if !d.maximized {
+		width = min(width, max(40, width*90/100))
+		height = min(height, max(12, height*90/100))
+	}
+	d.dialogWidth = width
+	style := styles.DialogStyle
+	if d.height < 8 {
+		style = style.PaddingTop(0).PaddingBottom(0)
+	}
+	if width < 10 {
+		style = style.PaddingLeft(0).PaddingRight(0)
+	}
+	inner := max(1, width-style.GetHorizontalFrameSize())
+	available := max(1, height-style.GetVerticalFrameSize())
+	d.actionRows = nil
+	var footer []string
+	if inner >= 34 && available >= 6 {
+		label := "Maximize"
+		if d.maximized {
+			label = "Restore"
+		}
+		actions := d.renderActions(inner, 0, 1, 0,
+			Action{Label: "−", Key: tea.KeyPressMsg{Code: '-'}, HideFocusHint: true},
+			Action{Label: "+", Key: tea.KeyPressMsg{Code: '+'}, HideFocusHint: true},
+			Action{Label: "Fit", Key: tea.KeyPressMsg{Code: '0'}, HideFocusHint: true},
+			Action{Label: label, Key: tea.KeyPressMsg{Code: 'm'}, HideFocusHint: true},
+		)
+		footer = strings.Split(actions, "\n")
+	}
+	zoom := max(1, d.viewport.Zoom)
+	if inner >= 24 && available-len(footer) >= 5 {
+		hint := fmt.Sprintf("%.2g× fit · +/- zoom · arrows pan", zoom)
+		if inner >= 54 {
+			hint = fmt.Sprintf("%.2g× fit · wheel/+/- zoom · drag/arrows pan", zoom)
+		}
+		// Keep actions last so the shared footer hit testing stays exact.
+		footer = append([]string{ansi.Truncate(hint, inner, "")}, footer...)
+	}
+	var lines []string
+	if available-len(footer) >= 3 {
+		lines = append(lines, RenderTitle(d.title, inner, styles.DialogTitleStyle), RenderSeparator(inner))
+	}
+	d.imageX = style.GetBorderLeftSize() + style.GetPaddingLeft()
+	d.imageY = style.GetBorderTopSize() + style.GetPaddingTop() + len(lines)
+	d.imageCols, d.imageRows = inner, max(0, available-len(lines)-len(footer))
+	if d.imageRows > 0 && width >= 7 && height >= 5 {
+		markers, err := d.preview.RenderViewport(inner, d.imageRows, d.cell, d.viewport)
+		if err != nil {
+			lines = append(lines, ansi.Truncate("Image preview unavailable: unable to resize image.", inner, ""))
+		} else {
+			top := max(0, (d.imageRows-len(markers))/2)
+			for range top {
+				lines = append(lines, "")
+			}
+			for _, marker := range markers[:min(len(markers), d.imageRows)] {
+				cols, _ := image.MarkerColumns(marker)
+				left := max(0, (inner-cols)/2)
+				lines = append(lines, strings.Repeat(" ", left)+marker+strings.Repeat(" ", inner-left))
+			}
 		}
 	}
+	for len(lines) < available-len(footer) {
+		lines = append(lines, "")
+	}
+	lines = append(lines, footer...)
 	d.content = strings.Join(lines, "\n")
 }
+
+func (d *imageAttachmentPreviewDialog) imageHit(x, y int) bool {
+	row, col := d.Position()
+	x, y = x-col-d.imageX, y-row-d.imageY
+	return x >= 0 && x < d.imageCols && y >= 0 && y < d.imageRows
+}
+
+func (d *imageAttachmentPreviewDialog) setViewport(view image.Viewport) {
+	view.Zoom = max(1, min(maxImagePreviewZoom, view.Zoom))
+	view.PanX = max(-1, min(1, view.PanX))
+	view.PanY = max(-1, min(1, view.PanY))
+	if view.Zoom == 1 {
+		view.PanX, view.PanY = 0, 0
+	}
+	if d.viewport == view {
+		return
+	}
+	d.viewport = view
+	d.prepare()
+	d.MarkVisualDirty()
+}
+
+func (d *imageAttachmentPreviewDialog) zoomBy(steps int) {
+	if steps != 0 {
+		view := d.viewport
+		view.Zoom = max(1, view.Zoom) * math.Pow(1.25, float64(max(-12, min(12, steps))))
+		d.setViewport(view)
+	}
+}
+
 func (d *imageAttachmentPreviewDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -127,17 +223,83 @@ func (d *imageAttachmentPreviewDialog) Update(msg tea.Msg) (layout.Model, tea.Cm
 		d.cell = image.CellSize(msg)
 		d.prepare()
 	case tea.KeyPressMsg:
-		if msg.Code == tea.KeyEscape || msg.Code == tea.KeyEnter || msg.String() == "q" {
+		view := d.viewport
+		switch msg.String() {
+		case "esc", "enter", "q":
 			return d, d.CancelDialogCmd()
+		case "m", "f11":
+			d.maximized = !d.maximized
+			d.panning = false
+			d.prepare()
+			d.MarkVisualDirty()
+		case "+", "=":
+			d.zoomBy(1)
+		case "-", "_":
+			d.zoomBy(-1)
+		case "0", "home":
+			d.setViewport(image.Viewport{Zoom: 1})
+		case "left", "h":
+			view.PanX -= 0.15
+			d.setViewport(view)
+		case "right", "l":
+			view.PanX += 0.15
+			d.setViewport(view)
+		case "up", "k":
+			view.PanY -= 0.15
+			d.setViewport(view)
+		case "down", "j":
+			view.PanY += 0.15
+			d.setViewport(view)
 		}
+	case tea.MouseWheelMsg:
+		if d.imageHit(msg.X, msg.Y) {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				d.zoomBy(1)
+			case tea.MouseWheelDown:
+				d.zoomBy(-1)
+			}
+		}
+	case messages.WheelCoalescedMsg:
+		if d.imageHit(msg.X, msg.Y) {
+			d.zoomBy(-msg.Delta)
+		}
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft && d.imageHit(msg.X, msg.Y) && d.viewport.Zoom > 1 {
+			d.panning = true
+			d.panStartX, d.panStartY = msg.X, msg.Y
+			d.panOriginX, d.panOriginY = d.viewport.PanX, d.viewport.PanY
+		}
+	case tea.MouseMotionMsg:
+		if msg.Button != tea.MouseLeft {
+			d.panning = false
+		}
+		if d.panning {
+			view := d.viewport
+			view.PanX = d.panOriginX - 2*float64(msg.X-d.panStartX)/float64(max(1, d.imageCols))
+			view.PanY = d.panOriginY - 2*float64(msg.Y-d.panStartY)/float64(max(1, d.imageRows))
+			d.setViewport(view)
+		}
+	case tea.MouseReleaseMsg:
+		d.panning = false
 	}
 	return d, nil
 }
 func (d *imageAttachmentPreviewDialog) View() string {
+	if d.width <= 0 || d.height <= 0 {
+		return ""
+	}
 	return d.RenderCard(styles.DialogStyle, d.dialogWidth, d.content)
 }
 func (d *imageAttachmentPreviewDialog) Position() (int, int) { return d.CenterDialog(d.View()) }
-func (d *imageAttachmentPreviewDialog) Cleanup()             { d.preview.Close(); d.content = "" }
+func (d *imageAttachmentPreviewDialog) Cleanup() {
+	if d.preview != nil {
+		d.preview.Close()
+		d.preview = nil
+	}
+	d.content = ""
+	d.panning = false
+}
 
 func (d *attachmentPreviewDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	_, cmd := d.readOnlyScrollDialog.Update(msg)

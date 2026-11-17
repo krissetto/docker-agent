@@ -724,7 +724,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	for _, entry := range p.nodes {
 		record, ok := known[entry.snapshot.Node.ID]
 		if ok && entry.state == subagent.NodeStopped && record.Node.State != subagent.NodeStopped {
-			record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
+			record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn, record.Node.AttentionID = subagent.NodeStopped, false, "", ""
 			commits = append(commits, session.ChildCommit{ExpectedRevision: record.Revision, Record: record})
 		}
 	}

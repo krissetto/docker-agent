@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"slices"
+
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 func (r *LocalRuntime) lifetime() context.Context {
@@ -19,7 +21,7 @@ const SessionErrorInterrupted SessionErrorKind = "interrupted"
 
 // persistTurnOutcomeLocked commits terminal evidence before publishing settlement.
 // A promoted admission without this evidence is uncertain after a restart.
-func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outcome TurnOutcome) error {
+func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outcome TurnOutcome, timing *session.TurnTiming) error {
 	return d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if d.sess == nil || (id == "" && len(d.consumedSteering) == 0) {
 			return sessionIOReservation{}, nil
@@ -31,6 +33,9 @@ func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outco
 		}
 		for _, steeringID := range consumed {
 			next.SetTurnOutcome(steeringID, string(outcome))
+		}
+		if timing != nil {
+			setPersistedTurnTiming(next, id, consumed, *timing)
 		}
 		var write func(context.Context) error
 		if d.r.sessionStore != nil {
@@ -45,6 +50,9 @@ func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outco
 			}
 			for _, steeringID := range consumed {
 				d.sess.SetTurnOutcome(steeringID, string(outcome))
+			}
+			if timing != nil {
+				setPersistedTurnTiming(d.sess, id, consumed, *timing)
 			}
 			d.consumedSteering = slices.DeleteFunc(d.consumedSteering, func(value string) bool { return slices.Contains(consumed, value) })
 			return nil
@@ -76,6 +84,7 @@ func (d *sessionDriver) resolveInteractionLocked(id string) {
 		return
 	}
 	delete(d.interactions, id)
+	d.closeTurnWaitLocked(id)
 	d.events.Publish(d.sessionIDLocked(), &InteractionResolvedEvent{Type: "interaction_resolved", SessionID: d.sessionIDLocked(), InteractionID: id, Reason: InteractionResponded})
 }
 
@@ -89,6 +98,7 @@ func (d *sessionDriver) resolveInteractionsLocked() {
 			interaction.waiter.tryCancel()
 		}
 		delete(d.interactions, id)
+		d.closeTurnWaitLocked(id)
 		d.events.Publish(d.sessionIDLocked(), &InteractionResolvedEvent{Type: "interaction_resolved", SessionID: d.sessionIDLocked(), InteractionID: id, Reason: reason})
 	}
 }

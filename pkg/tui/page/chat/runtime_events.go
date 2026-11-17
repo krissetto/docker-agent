@@ -89,7 +89,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	case *runtime.BackgroundProcessesEvent:
 		return true, p.setBackgroundProcesses(msg.SessionID, msg.Processes)
 	case *runtime.InteractionResolvedEvent:
-		return true, nil
+		return true, p.trackInteractionResolved(msg)
 	// ===== Error and Warning Events =====
 	case *runtime.SkillOperationEvent:
 		if msg.OperationID != p.ownedSkillOperation {
@@ -116,6 +116,13 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.messages.AddErrorMessage(msg.Error)
 
 	case *runtime.WarningEvent:
+		if p.isSubSessionEvent(msg.SessionID) {
+			label := msg.AgentName
+			if label == "" {
+				label = "sub-agent"
+			}
+			return true, notification.WarningCmd(fmt.Sprintf("%s: %s", label, msg.Message))
+		}
 		return true, notification.WarningCmd(msg.Message)
 
 	case *runtime.ModelFallbackEvent:
@@ -136,21 +143,19 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		if msg.SessionID != p.lifecycle.SessionID || msg.TurnID == "" {
 			return true, nil
 		}
+		// The runtime's timing is the only source of a settled duration label.
+		timingCmd := tea.Batch(p.setTurnTiming(msg.TurnID, msg.Timing), p.setTurnOutcome(msg.TurnID, string(msg.Outcome)))
 		if p.sharedProjection {
 			if msg.TurnID != previousTurnID || p.lifecycle.TurnID != "" || p.lifecycle.Status != runtime.SessionStateSettled {
-				return true, nil
+				return true, timingCmd
 			}
 		} else {
 			if msg.TurnID != p.lifecycle.TurnID {
-				return true, nil
+				return true, timingCmd
 			}
 			p.applyLifecycle(msg)
 		}
-		workElapsed := time.Duration(0)
-		if !p.streamStartTime.IsZero() {
-			workElapsed = time.Since(p.streamStartTime)
-		}
-		cmd := tea.Batch(p.finishTurnPresentation(), p.setWorkStatus(false, workElapsed))
+		cmd := tea.Batch(timingCmd, p.finishTurnPresentation(), p.setWorkStatus(false), p.clearPendingInteractions())
 		p.streamStartTime = time.Time{}
 		return true, cmd
 
@@ -272,7 +277,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.handleToolCall(msg)
 
 	case *runtime.ToolCallConfirmationEvent:
-		return true, p.handleToolCallConfirmation(msg)
+		return true, tea.Batch(p.trackInteractionOpened(msg), p.handleToolCallConfirmation(msg))
 
 	case *runtime.ToolCallOutputEvent:
 		return true, p.handleToolCallOutput(msg)
@@ -391,10 +396,10 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Dialog Events =====
 	case *runtime.MaxIterationsReachedEvent:
-		return true, p.handleMaxIterationsReached(msg)
+		return true, tea.Batch(p.trackInteractionOpened(msg), p.handleMaxIterationsReached(msg))
 
 	case *runtime.ElicitationRequestEvent:
-		return true, p.handleElicitationRequest(msg)
+		return true, tea.Batch(p.trackInteractionOpened(msg), p.handleElicitationRequest(msg))
 	}
 
 	return false, nil
@@ -482,7 +487,7 @@ func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed boo
 	spinnerCmd := p.setWorking(true)
 	var workCmd tea.Cmd
 	if wasRootIdle {
-		workCmd = p.setWorkStatus(true, 0)
+		workCmd = p.setWorkStatus(true)
 	}
 	var pendingCmd tea.Cmd
 	showPending := p.app == nil || p.app.AttachedSubagent() == nil || !seed
@@ -567,13 +572,114 @@ func (p *chatPage) handleAgentSwitching(msg *runtime.AgentSwitchingEvent) tea.Cm
 	return tea.Batch(cmd, returnCmd, p.messages.ScrollToBottom())
 }
 
-func (p *chatPage) setWorkStatus(active bool, elapsed time.Duration) tea.Cmd {
+func (p *chatPage) setWorkStatus(active bool) tea.Cmd {
 	if owner, ok := p.messages.(interface {
 		SetWorkStatus(active bool, elapsed time.Duration) tea.Cmd
 	}); ok {
-		return owner.SetWorkStatus(active, elapsed)
+		// Settled durations are never inferred here; they arrive via setTurnTiming.
+		return owner.SetWorkStatus(active, 0)
 	}
 	return nil
+}
+
+func (p *chatPage) setTurnOutcome(turnID, outcome string) tea.Cmd {
+	if owner, ok := p.messages.(interface {
+		SetTurnOutcome(turnID, outcome string) tea.Cmd
+	}); ok {
+		return owner.SetTurnOutcome(turnID, outcome)
+	}
+	return nil
+}
+
+func (p *chatPage) setTurnTiming(turnID string, timing *session.TurnTiming) tea.Cmd {
+	if owner, ok := p.messages.(interface {
+		SetTurnTiming(turnID string, timing *session.TurnTiming) tea.Cmd
+	}); ok {
+		return owner.SetTurnTiming(turnID, timing)
+	}
+	return nil
+}
+
+// Blocking human interactions. The Work header names what the root turn waits
+// for; the spinner pauses while any is pending.
+const (
+	waitingForApprovalLabel = "Waiting for approval"
+	waitingForAnswerLabel   = "Waiting for your answer"
+)
+
+func interactionWaitLabel(event any) string {
+	switch event.(type) {
+	case *runtime.ToolCallConfirmationEvent:
+		return waitingForApprovalLabel
+	case *runtime.ElicitationRequestEvent, *runtime.MaxIterationsReachedEvent:
+		return waitingForAnswerLabel
+	}
+	return ""
+}
+
+// waitingLabel prefers approval over an answer when both are pending.
+func (p *chatPage) waitingLabel() string {
+	label := ""
+	for _, pending := range p.pendingInteractions {
+		if pending == waitingForApprovalLabel {
+			return pending
+		}
+		label = pending
+	}
+	return label
+}
+
+func (p *chatPage) setWorkWaiting(label string) tea.Cmd {
+	if owner, ok := p.messages.(interface{ SetWorkWaiting(label string) tea.Cmd }); ok {
+		return owner.SetWorkWaiting(label)
+	}
+	return nil
+}
+
+func (p *chatPage) trackInteractionOpened(event any) tea.Cmd {
+	label := interactionWaitLabel(event)
+	key := lifecycle.InteractionIdentity(event)
+	if label == "" || key.InteractionID == "" {
+		return nil
+	}
+	if p.pendingInteractions == nil {
+		p.pendingInteractions = make(map[lifecycle.InteractionKey]string)
+	}
+	p.pendingInteractions[key] = label
+	return p.setWorkWaiting(p.waitingLabel())
+}
+
+// trackInteractionResolved clears one blocking interaction. The turn resumes
+// only when no other interaction is still pending.
+func (p *chatPage) trackInteractionResolved(msg *runtime.InteractionResolvedEvent) tea.Cmd {
+	key := lifecycle.InteractionKey{SessionID: msg.SessionID, InteractionID: msg.InteractionID}
+	if _, ok := p.pendingInteractions[key]; !ok {
+		return nil
+	}
+	delete(p.pendingInteractions, key)
+	label := p.waitingLabel()
+	cmd := p.setWorkWaiting(label)
+	if label == "" && !p.streamStartTime.IsZero() {
+		return tea.Batch(cmd, p.setWorking(true))
+	}
+	return cmd
+}
+
+func (p *chatPage) clearPendingInteractions() tea.Cmd {
+	clear(p.pendingInteractions)
+	return p.setWorkWaiting("")
+}
+
+// replacePendingInteractions makes the snapshot's interactions authoritative.
+func (p *chatPage) replacePendingInteractions(interactions []runtime.InteractionSnapshot) {
+	p.pendingInteractions = make(map[lifecycle.InteractionKey]string)
+	for _, interaction := range interactions {
+		label := interactionWaitLabel(interaction.Event)
+		key := lifecycle.InteractionSnapshotKey(interaction)
+		if label != "" && key.InteractionID != "" {
+			p.pendingInteractions[key] = label
+		}
+	}
 }
 
 func (p *chatPage) finishSkillOperation() tea.Cmd {
@@ -615,11 +721,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	// Outermost stream stopped — fully clean up. This is the exact-content
 	// boundary for the active root response; nested stops leave the parent's
 	// deferred tail intact until the parent itself stops or the user re-enters it.
-	workElapsed := time.Duration(0)
-	if !p.streamStartTime.IsZero() {
-		workElapsed = time.Since(p.streamStartTime)
-	}
-	workCmd := p.setWorkStatus(false, workElapsed)
+	workCmd := tea.Batch(p.setWorkStatus(false), p.clearPendingInteractions())
 	finalizeCmd := p.messages.FinalizeStream()
 	// Only play the success sound when the stream completed normally.
 	// Errors already trigger a failure sound via ErrorEvent, and
@@ -815,6 +917,7 @@ func (p *chatPage) applyProjectionMetadata(snapshot runtime.SessionSnapshot) tea
 
 func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript bool) tea.Cmd {
 	p.lifecycle = lifecycle.FromSnapshot(snapshot)
+	p.replacePendingInteractions(snapshot.Interactions)
 	if snapshot.Status.AgentName != "" {
 		p.sessionState.SetCurrentAgentName(snapshot.Status.AgentName)
 	}
@@ -887,13 +990,20 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 	cmds = append(cmds, p.sidebar.SetTitleRegenerating(snapshot.TitleStatus == "started"))
 	running := snapshot.Status.State == runtime.SessionStateRunning || snapshot.Status.State == runtime.SessionStateQueued || snapshot.Status.State == runtime.SessionStateCancelling
 	p.streamCancelled = false
-	cmds = append(cmds, p.setWorking(running))
-	workElapsed := time.Duration(0)
-	if running && !p.streamStartTime.IsZero() {
-		workElapsed = time.Since(p.streamStartTime)
+	waiting := ""
+	if running {
+		waiting = p.waitingLabel()
+	} else {
+		clear(p.pendingInteractions)
 	}
-	cmds = append(cmds, p.setWorkStatus(running, workElapsed))
-	if !running {
+	cmds = append(cmds, p.setWorking(running && waiting == ""), p.setWorkWaiting(waiting), p.setWorkStatus(running))
+	if running {
+		// Reattach: the snapshot has no start time, so the live timer starts now.
+		// It never labels a settled turn; that comes from the runtime's timing.
+		if p.streamStartTime.IsZero() {
+			p.streamStartTime = time.Now()
+		}
+	} else {
 		p.streamStartTime = time.Time{}
 		p.messages.RemoveSpinner()
 	}

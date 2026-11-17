@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/compaction"
-	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -156,6 +155,18 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	// returned one, otherwise the default LLM strategy.
 	result := summaryFromHook(sess, a, pre, contextLimit)
 	if result == nil {
+		model := a.CompactionModel()
+		if model == nil {
+			model = a.Model(ctx)
+		}
+		if model != nil {
+			config := model.BaseConfig().ModelConfig
+			if config.IsImageOnly() {
+				events.Emit(Warning("Compaction skipped: configure a text-capable compaction_model for an image-only model.", a.Name()))
+				outcome = CompactionOutcomeSkipped
+				return
+			}
+		}
 		// An exhausted budget skips the model call. A hook-supplied summary
 		// above is free and still applies.
 		if breach := r.budgetBreachFor(ctx, sess, a); breach != nil {
@@ -178,9 +189,8 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 			result, err = r.compactNatively(ctx, sess, a, native, additionalPrompt, spend, events)
 		} else {
 			if contextLimit <= 0 {
-				slog.ErrorContext(ctx, "Failed to generate session summary",
-					"error", "model definition unavailable")
-				events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
+				slog.WarnContext(ctx, "Session compaction cannot run: summary model context window unknown", "session_id", sess.ID, "agent", a.Name())
+				events.Emit(WarningForSession(sess.ID, unknownContextWindowMessage(ctx, a), a.Name()))
 				outcome = CompactionOutcomeFailed
 				return
 			}
@@ -321,6 +331,29 @@ func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agen
 	return r.resolveContextLimit(ctx, summaryModel, summaryModel.ID())
 }
 
+// compactionSummaryModel returns the model that makes the summary call: the
+// dedicated compaction model when one is configured, otherwise the agent's own.
+func compactionSummaryModel(ctx context.Context, a *agent.Agent) provider.Provider {
+	if m := a.CompactionModel(); m != nil {
+		return m
+	}
+	return a.Model(ctx)
+}
+
+// unknownContextWindowMessage tells the user which model's context window is
+// missing and how to declare it, without guessing a limit.
+func unknownContextWindowMessage(ctx context.Context, a *agent.Agent) string {
+	const fix = "Define that model in the models section with context_window set to its context window (inline provider/model references cannot set context_window), or point compaction_model at a model with a known context window."
+	model := compactionSummaryModel(ctx, a)
+	if model == nil {
+		return "Session compaction failed: the summary model's context window is unknown. " + fix
+	}
+	if a.CompactionModel() != nil {
+		return fmt.Sprintf("Session compaction failed: the compaction model %q has no known context window. %s", model.ID().String(), fix)
+	}
+	return fmt.Sprintf("Session compaction failed: model %q has no known context window, and it also runs the summary because no compaction_model is set. %s", model.ID().String(), fix)
+}
+
 // effectiveContextLimit returns the context budget the running session
 // operates within: the primary model's window, capped by the dedicated
 // compaction model's (smaller) window when one is configured. It drives both
@@ -378,17 +411,13 @@ func compactionCaps(primaryLimit, compactionLimit int64) bool {
 // resolveContextLimit resolves the effective context window size for a
 // model. Resolution order:
 //
-//  1. The user-supplied [provider_opts.context_size], when set, is
-//     authoritative. Some providers (notably Docker Model Runner) use
-//     it to size the actual inference context, so we plan against the
-//     same number the engine will enforce. This also makes compaction
-//     work for local models that aren't catalogued in models.dev (e.g.
-//     a HuggingFace GGUF).
+//  1. The declared model-level context_window, or DMR-only provider_opts.context_size.
+//     This makes compaction work for uncatalogued custom models.
 //  2. Otherwise, the provider's discovered runtime context window.
 //  3. Otherwise, the models.dev catalogue limit looked up by id.
 //  4. Otherwise, 0 (caller treats this as "can't compact").
 func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provider, id modelsdev.ID) int64 {
-	if n := providerContextLimit(p); n > 0 {
+	if n := declaredContextLimit(p); n > 0 {
 		return n
 	}
 	if n := r.discoveredContextLimit(ctx, p); n > 0 {
@@ -401,20 +430,13 @@ func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provi
 	return 0
 }
 
-// providerContextLimit reads [provider_opts.context_size] from a
-// provider's resolved [latest.ModelConfig], returning 0 when unset or
-// not parseable as an integer. This is the fallback used when the
-// models.dev catalogue does not have an entry for the configured
-// model (typically Docker Model Runner with a HuggingFace GGUF model).
-//
-// The parsing is shared with the provider clients (which clamp max_tokens
-// against the same window) via [latest.ContextSizeFromProviderOpts], so the
-// two never disagree on how context_size is interpreted.
-func providerContextLimit(p provider.Provider) int64 {
+// declaredContextLimit returns configured capacity metadata for the resolved provider.
+func declaredContextLimit(p provider.Provider) int64 {
 	if p == nil {
 		return 0
 	}
-	return latest.ContextSizeFromProviderOpts(p.BaseConfig().ModelConfig.ProviderOpts)
+	cfg := p.BaseConfig()
+	return cfg.ModelConfig.EffectiveContextWindow()
 }
 
 // runCompactionAgent runs an agent against a sub-session for compaction.

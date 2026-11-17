@@ -157,6 +157,11 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 	preview, truncated := subagent.PreviewText(result, subagent.PreviewLen)
 	record.Node.State, record.Node.Error = state, runErr
 	record.Node.NeedsAttention = state == subagent.NodeFailed
+	record.Node.WaitingOn = attentionWaitingOn(state, record.Node.WaitingOn)
+	record.Node.AttentionID = ""
+	if state == subagent.NodeFailed && turnID != "" {
+		record.Node.AttentionID = subagent.AttentionIdentity("failure:" + turnID)
+	}
 	record.Result, record.LastTurnID = preview, turnID
 	parentID, parentAgent := rec.parentSession, rec.parentAgentName
 	report := session.ChildReport{}
@@ -306,6 +311,8 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 		})
 		_ = m.tree.Update(id, func(n *subagent.Node) {
 			n.State, n.Error, n.NeedsAttention = state, runErr, state == subagent.NodeFailed
+			n.WaitingOn = attentionWaitingOn(state, n.WaitingOn)
+			n.AttentionID = record.Node.AttentionID
 		})
 	}
 	m.mu.Unlock()
@@ -735,4 +742,17 @@ func chooseCompletionResult(live, durable string, deferredReplay bool) string {
 		return durable
 	}
 	return live
+}
+
+// attentionWaitingOn keeps WaitingOn consistent with NeedsAttention for a
+// failed completion: a failure is published as "failed" in the same write,
+// and a stale "failed" marker never survives a non-failed settlement.
+func attentionWaitingOn(state subagent.NodeState, current string) string {
+	if state == subagent.NodeFailed {
+		return "failed"
+	}
+	if current == "failed" {
+		return ""
+	}
+	return current
 }

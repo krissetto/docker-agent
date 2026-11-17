@@ -502,7 +502,7 @@ func TestStopAnimationClearsCancelledFoldPreview(t *testing.T) {
 	ar.Stop()
 }
 
-func TestWrappedReasoningDisclosureRemainsClickableInsideWork(t *testing.T) {
+func TestWrappedReasoningInsideExpandedWorkHasNoDisclosure(t *testing.T) {
 	for _, width := range []int{80, 12, 8, 4, 3} {
 		t.Run(strconv.Itoa(width), func(t *testing.T) {
 			ar := animation.NewRuntime()
@@ -513,28 +513,16 @@ func TestWrappedReasoningDisclosureRemainsClickableInsideWork(t *testing.T) {
 			block.SetSize(width, 0)
 			block.SetItems([]Item{{SourceIndex: 7, View: child}})
 			block.SetExpandedImmediately(true)
-			for _, expanded := range []bool{false, true} {
-				require.Equal(t, expanded, child.IsExpanded())
-				rows := block.Rows()
-				require.Len(t, rows, 1)
-				lines := strings.Split(ansi.Strip(block.View()), "\n")
-				found := false
-				for line := rows[0].Start; line < rows[0].End; line++ {
-					offset := strings.Index(lines[line], "[")
-					if offset < 0 {
-						continue
-					}
-					col := ansi.StringWidth(lines[line][:offset])
-					require.True(t, block.IsToggleAt(line, col), "the visible wrapped disclosure at (%d,%d) remains clickable", line, col)
-					block.ToggleAt(line, col)
-					require.Equal(t, !expanded, child.IsExpanded())
-					require.True(t, block.Expanded(), "the outer Work disclosure is independent")
-					block.InvalidateSource(7)
-					found = true
-					break
+			rows := block.Rows()
+			require.Len(t, rows, 1)
+			lines := strings.Split(ansi.Strip(block.View()), "\n")
+			for line := rows[0].Start; line < rows[0].End; line++ {
+				require.NotContains(t, lines[line], "[", "hosted reasoning shows no nested disclosure at width %d", width)
+				for col := range width {
+					require.False(t, block.IsToggleAt(line, col), "hosted reasoning content at (%d,%d) does not toggle", line, col)
 				}
-				require.True(t, found, "the child disclosure remains visible at width %d", width)
 			}
+			require.Equal(t, 12, strings.Count(ansi.Strip(block.View()), "reasoning"), "every wrapped reasoning line stays visible at width %d", width)
 		})
 	}
 }

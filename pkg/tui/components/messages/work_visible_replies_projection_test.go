@@ -226,7 +226,7 @@ func TestProjectWorkVisibleRepliesIgnoresEmptyAndMediaOnlyReplyGroups(t *testing
 	groups := map[*types.Message]uint64{items[1]: 1, items[2]: 2, items[3]: 3}
 	projection := projectWorkWithVisibleReplies(items, groups, messages.VisibleRepliesLatest, resolveSessionOpener(items, nil))
 	require.Empty(t, projection.exchanges[0].work)
-	require.Equal(t, []int{1, 2, 3}, projection.exchanges[0].response, "empty and media-only groups remain outside Work without consuming a prose slot")
+	require.Equal(t, []int{2, 3}, projection.exchanges[0].response, "empty groups have no presentation; media-only groups do not consume a prose slot")
 }
 
 func TestProjectWorkVisibleRepliesKeepsEmptyPartWithItsProseGroup(t *testing.T) {

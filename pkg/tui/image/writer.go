@@ -25,7 +25,8 @@ type overlay struct {
 	x, y                         int
 	cols, rows                   int
 	pixelW, pixelH               int
-	sourceY, sourceH             int
+	sourceX, sourceY             int
+	sourceW, sourceH             int
 }
 
 // Writer adds kitty graphics after Bubble Tea has rendered its text cell buffer.
@@ -231,8 +232,8 @@ func (w *Writer) Write(p []byte) (int, error) {
 		} else if image.cellHeight == 0 {
 			fmt.Fprintf(&b, ",c=%d,r=%d", image.cols, image.rows)
 		}
-		if image.sourceY > 0 || image.sourceH < image.pixelH {
-			fmt.Fprintf(&b, ",x=0,y=%d,w=%d,h=%d", image.sourceY, image.pixelW, image.sourceH)
+		if image.sourceX > 0 || image.sourceY > 0 || image.sourceW < image.pixelW || image.sourceH < image.pixelH {
+			fmt.Fprintf(&b, ",x=%d,y=%d,w=%d,h=%d", image.sourceX, image.sourceY, image.sourceW, image.sourceH)
 		}
 		b.WriteString("\x1b\\")
 	}
@@ -290,7 +291,7 @@ func sameOverlays(a, b []overlay) bool {
 		if a[i].placementCols != b[i].placementCols || a[i].placementRows != b[i].placementRows || a[i].displayHeight != b[i].displayHeight || a[i].cellHeight != b[i].cellHeight || a[i].explicit != b[i].explicit || a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
 			a[i].cols != b[i].cols || a[i].rows != b[i].rows ||
 			a[i].pixelW != b[i].pixelW || a[i].pixelH != b[i].pixelH ||
-			a[i].sourceY != b[i].sourceY || a[i].sourceH != b[i].sourceH {
+			a[i].sourceX != b[i].sourceX || a[i].sourceW != b[i].sourceW || a[i].sourceY != b[i].sourceY || a[i].sourceH != b[i].sourceH {
 			return false
 		}
 	}
@@ -367,6 +368,9 @@ func extractMarkerOverlays(lines []string) []overlay {
 			}
 			stop := start + len(markerPrefix) + stopRel
 			fields := strings.Split(line[start+len(markerPrefix):stop], ";")
+			if len(fields) == 15 && fields[4] == "viewport" {
+				overlays = appendViewportOverlay(overlays, fields, ansi.StringWidth(line[:start]), y)
+			}
 			if len(fields) == 4 || (len(fields) == 5 && fields[4] == "preview") || (len(fields) == 7 && fields[4] == "native") || (len(fields) == 11 && fields[4] == "scaled") {
 				explicit := len(fields) > 4
 				cellHeight := 0
@@ -444,6 +448,6 @@ func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int, explic
 		explicit: explicit, cellHeight: cellHeight, firstRow: row, totalRows: totalRows,
 		id: id, png: img.PNGData, managed: img.registryID != 0, x: x, y: y, cols: cols, rows: 1,
 		pixelW: img.Width, pixelH: img.Height,
-		sourceY: sourceY, sourceH: sourceEnd - sourceY,
+		sourceW: img.Width, sourceY: sourceY, sourceH: sourceEnd - sourceY,
 	}
 }

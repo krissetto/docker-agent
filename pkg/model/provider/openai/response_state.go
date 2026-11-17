@@ -76,6 +76,7 @@ func (c *Client) configureResponseState(ctx context.Context, params *responses.R
 
 func (c *Client) responseAdapter(ctx context.Context, stream responseEventStream) *ResponseStreamAdapter {
 	adapter := newResponseStreamAdapter(stream, c.TrackUsageEnabled())
+	adapter.imageOutputEnabled = c.imageOutputEnabled()
 	if c.preservesResponseState() || c.cacheDiagnosticsEnabled() {
 		adapter.responseState = &chat.OpenAIResponse{
 			Source: c.responseSource(), SessionID: httpclient.SessionIDFromContext(ctx),

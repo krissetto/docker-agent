@@ -159,6 +159,10 @@ func newOwnerProgram(t *testing.T) (*ownerProgramModel, *ownerProgramScheduler, 
 	tabs, active := root.supervisor.GetTabs()
 	initial = tea.Batch(initial, func() tea.Msg { return messages.TabsUpdatedMsg{Tabs: tabs, ActiveIdx: active} })
 	model := &ownerProgramModel{root: root, initial: initial}
+	// This test exercises standalone reasoning disclosure and retained slack, not compact Work.
+	if owner, ok := root.chatPages["profile"].(interface{ SetCompactWorkLog(enabled bool) tea.Cmd }); ok {
+		owner.SetCompactWorkLog(false)
+	}
 	program := startTestProgram(t, root, model, tea.WithOutput(io.Discard), tea.WithWindowSize(156, 48))
 	// This is the production notifier, not filtered/fabricated switch snapshots.
 	root.supervisor.SetProgram(program)

@@ -81,17 +81,29 @@ models:
   gemini-image:
     provider: google
     model: gemini-2.5-flash-image
+    output_capabilities:
+      image: true
 ```
 
 `output_capabilities.image` can be omitted for models that models.dev lists
 with image output; set it explicitly for custom models or to override
 incorrect catalogue data. Capability is never guessed from the model name.
 
+This is Gemini's native response-modality path, and the models.dev fallback
+above applies to it; OpenAI image generation instead always needs an explicit
+`image: true`. The example sets the flag explicitly so it does not depend on
+catalogue availability. Do not set `image_generation` or
+`api_type: openai_images` for a native Google model; those configure the
+separate [OpenAI image paths](../openai/index.md#generated-images). See
+[`examples/gemini_image_output.yaml`](https://github.com/docker/docker-agent/blob/main/examples/gemini_image_output.yaml)
+for a dedicated agent without custom tools.
+
 Session-title and compaction requests omit image response modalities and
 bypass the guard even for image-output-capable models. They do not explicitly
 force TEXT-only output. Ordinary image-output requests with custom function tools or
 structured output are rejected locally before any request is sent. Google
-Search, Maps, and code-execution built-ins remain available. When custom
+Search, Maps, and code-execution built-ins are not rejected by this guard;
+actual support depends on the model and backend. When custom
 tools conflict, Docker Agent uses models.dev's `tool_call` capability to clarify
 whether the model cannot call tools at all or supports tools only outside an
 image-output request. Unknown catalogue data keeps the conservative generic

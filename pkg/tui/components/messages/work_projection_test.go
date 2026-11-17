@@ -12,6 +12,9 @@ func workProjectionMessages(typesList ...types.MessageType) []*types.Message {
 	items := make([]*types.Message, len(typesList))
 	for i, typ := range typesList {
 		items[i] = &types.Message{Type: typ}
+		if typ == types.MessageTypeAssistant {
+			items[i].Content = "reply"
+		}
 	}
 	return items
 }

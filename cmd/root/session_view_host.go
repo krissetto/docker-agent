@@ -98,11 +98,11 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 			}
 			return identity, prepared, nil
 		}
-		factory = func(_ context.Context, identity viewhost.ViewOwnerIdentity) (viewhost.ViewOwnerResources, error) {
+		factory = func(factoryCtx context.Context, identity viewhost.ViewOwnerIdentity) (viewhost.ViewOwnerResources, error) {
 			if identity.Scope != f.sessionViewScope || identity.Source != f.sessionViewSource {
 				return viewhost.ViewOwnerResources{}, viewOwnerError(identity.RootSessionID, "view_source", "source lifetime does not match this host")
 			}
-			opts := []app.Opt{app.WithRuntimeServices(services)}
+			opts := withTitleGenerator(factoryCtx, services, []app.Opt{app.WithRuntimeServices(services)})
 			if f.sessionReadOnly {
 				opts = append(opts, app.WithReadOnly())
 			}

@@ -302,8 +302,12 @@ func HistoryPending(list Model) bool { return list.HistoryPending() }
 
 func (m *model) HistoryPending() bool { return m.historyReplay != nil }
 
-// historyProgressedMsg asks the page to continue paging older history.
-type historyProgressedMsg struct{}
+// HistoryProgressedMsg asks the page to continue paging older history. It is
+// the work-mode continuation signal: ContinueHistory made bounded progress and
+// more history remains, so the page must re-arm its paging tick. The page owns
+// the tick, so it must handle this message; dropping it stalls paging with
+// older history left unmeasured.
+type HistoryProgressedMsg struct{}
 
 // ContinueHistory pages older history into the geometry without rendering it, so
 // live events and the recent viewport never wait on historical markdown.
@@ -320,6 +324,13 @@ func ContinueHistory(list Model) tea.Cmd {
 		advanced := 0
 		for advanced < 8 && m.historyStart > 0 {
 			m.historyStart--
+			// Paging a slot in only lifts the zero-height floor that unpaged
+			// history sits at; the slot keeps the height it was seeded with while
+			// it was still history. Seed the O(1) placeholder the way prependHistory
+			// does for the non-work path: a zero-height slot owns no line, so the
+			// viewport scan (which enters slots through geom.Find) can never reach
+			// it to measure it, and the item stays invisible forever.
+			m.seedHistoryEstimate(m.historyStart)
 			advanced++
 		}
 		if advanced == 0 {
@@ -339,7 +350,7 @@ func ContinueHistory(list Model) tea.Cmd {
 		if m.historyStart == 0 {
 			return nil
 		}
-		return func() tea.Msg { return historyProgressedMsg{} }
+		return func() tea.Msg { return HistoryProgressedMsg{} }
 	}
 	// Older history pages in as identity plus the O(1) content estimate. No body is
 	// rendered or prepared here; a viewport demand measures the rows it shows.

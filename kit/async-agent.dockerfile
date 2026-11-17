@@ -47,22 +47,32 @@ printf '%s  task.tar.gz\n' "$checksum" | sha256sum -c -
 tar -xzf task.tar.gz task LICENSE
 EOF_TASK
 
+# Target-independent directory skeleton, created on $BUILDPLATFORM so the target-platform runtime stage needs no RUN.
+FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS layout
+RUN <<EOF_LAYOUT
+set -eux
+mkdir -p /layout/usr/local/share/licenses/task
+mkdir -p /layout/home/agent/.config/cagent /layout/home/agent/.cagent
+chmod 0755 /layout/usr/local/share/licenses /layout/usr/local/share/licenses/task
+chmod 0700 /layout/home/agent/.config /layout/home/agent/.config/cagent /layout/home/agent/.cagent
+EOF_LAYOUT
+
 FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae3212a0310b2e5a0349c54e29249e45e919 AS runtime
 ARG ASYNC_AGENT_KIT_VERSION="0.1.0"
 LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION
 USER root
-# openssh-client provides ssh-keygen (SSH commit signing) and ssh-add (agent key discovery).
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+# openssh-client (ssh-keygen, ssh-add) is already installed in the pinned base image for both amd64 and arm64,
+# so no target-platform RUN is needed to install it.
 COPY --from=builder --chmod=0755 /docker-agent /opt/async-agent/docker-agent
 COPY --from=task --chown=root:root --chmod=0755 /task/task /usr/local/bin/task
-RUN install -d -m 0755 /usr/local/share/licenses /usr/local/share/licenses/task
+COPY --from=layout --chown=root:root --chmod=0755 /layout/usr/local/share/licenses/ /usr/local/share/licenses/
 COPY --from=task --chown=root:root --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
 COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
 COPY --chmod=0755 kit/start.sh /opt/async-agent/start.sh
 COPY --chmod=0755 kit/git-signing.sh /opt/async-agent/git-signing.sh
 COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
-RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent /home/agent/.cagent
+COPY --from=layout --chown=agent:agent --chmod=0700 /layout/home/agent/.config/ /home/agent/.config/
+COPY --from=layout --chown=agent:agent --chmod=0700 /layout/home/agent/.cagent/ /home/agent/.cagent/
 COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml
 ENV DOCKER_AGENT_AUTO_UPDATE=0 \
     DOCKER_AGENT_NO_TOUR=1 \

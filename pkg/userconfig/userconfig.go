@@ -73,6 +73,8 @@ type Settings struct {
 	ExpandThinking *bool `yaml:"expand_thinking,omitempty"`
 	// CompactWorkLog groups intermediate activity in the full TUI. Defaults to true.
 	CompactWorkLog *bool `yaml:"compact_work_log,omitempty"`
+	// ScrollOnSend moves a locally sent prompt near the top to leave reply room. Defaults to false.
+	ScrollOnSend bool `yaml:"scroll_on_send,omitempty"`
 	// ShowAgentContext shows each agent's context-window fill in the sidebar.
 	// Defaults to false.
 	ShowAgentContext bool `yaml:"show_agent_context,omitempty"`
@@ -286,6 +288,11 @@ func (s *Settings) GetExpandThinking() bool {
 		return false
 	}
 	return *s.ExpandThinking
+}
+
+// GetScrollOnSend reports whether locally sent prompts leave room for the reply.
+func (s *Settings) GetScrollOnSend() bool {
+	return s != nil && s.ScrollOnSend
 }
 
 // GetCompactWorkLog returns whether intermediate activity is grouped, defaulting to true.

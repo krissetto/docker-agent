@@ -270,6 +270,9 @@ type Session struct {
 	// TurnOutcomes contains committed terminal evidence; absence never proves success.
 	TurnOutcomes     map[string]string `json:"turn_outcomes,omitempty"`
 	TurnOutcomeOrder []string          `json:"turn_outcome_order,omitempty"`
+	// TurnTimings holds measured timing for settled root turns, keyed by turn ID.
+	// Turns without a measurement (including legacy rows) have no entry.
+	TurnTimings map[string]TurnTiming `json:"turn_timings,omitempty"`
 
 	// now and newID are per-session sources of time and identity. They are
 	// indirected (rather than calling time.Now/uuid.New directly) so that
@@ -388,6 +391,11 @@ type Session struct {
 	// AgentModelOverrides stores per-agent model overrides for this session.
 	// Shared-session callers must use the model-state accessors below.
 	AgentModelOverrides map[string]string `json:"agent_model_overrides,omitempty"`
+
+	// AgentThinkingLevels stores the reasoning-effort level picked per agent. It is
+	// persisted with the execution settings and re-applied whenever the agent's
+	// providers are rebuilt, so a manual choice outlives the YAML default.
+	AgentThinkingLevels map[string]string `json:"agent_thinking_levels,omitempty"`
 
 	// CustomModelsUsed tracks custom models (provider/model format) used during this session.
 	// Shared-session callers must use the model-state accessors below.
@@ -2011,7 +2019,7 @@ func (s *Session) TotalCost() float64 {
 }
 
 func (s *Session) totalCostLocked() float64 {
-	var cost float64
+	cost := s.auxiliaryCostLocked()
 	for _, item := range s.Messages {
 		switch {
 		case item.IsMessage():
@@ -2032,7 +2040,7 @@ func (s *Session) OwnCost() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var cost float64
+	cost := s.auxiliaryCostLocked()
 	for _, item := range s.Messages {
 		if item.IsMessage() {
 			cost += item.Message.Message.Cost
@@ -2096,6 +2104,34 @@ func (s *Session) AgentModelOverride(agentName string) (string, bool) {
 	defer s.mu.RUnlock()
 	modelRef, ok := s.AgentModelOverrides[agentName]
 	return modelRef, ok
+}
+
+// AgentThinkingLevel returns the reasoning-effort level picked for agentName, or "".
+func (s *Session) AgentThinkingLevel(agentName string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.AgentThinkingLevels[agentName]
+}
+
+// ThinkingLevelsSnapshot returns an independent copy of the per-agent effort picks.
+func (s *Session) ThinkingLevelsSnapshot() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maps.Clone(s.AgentThinkingLevels)
+}
+
+// SetAgentThinkingLevel records the effort picked for agentName; an empty level clears it.
+func (s *Session) SetAgentThinkingLevel(agentName, level string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if level == "" {
+		delete(s.AgentThinkingLevels, agentName)
+		return
+	}
+	if s.AgentThinkingLevels == nil {
+		s.AgentThinkingLevels = make(map[string]string)
+	}
+	s.AgentThinkingLevels[agentName] = level
 }
 
 // SetAgentModelOverride updates an override and custom-model history atomically.
@@ -2604,10 +2640,18 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, pr
 
 	// Build invariant system messages (cacheable across sessions/users/projects)
 	invariantMessages := buildInvariantSystemMessages(a)
+	// Spawned children get the full child prompt, which already carries the shared
+	// guidance. Top-level agents without subagents get only the shared guidance;
+	// agents that declare subagents already carry it in their parent prompt.
 	if s.AsyncSubagent {
 		invariantMessages = append([]chat.Message{{
 			Role:    chat.MessageRoleSystem,
 			Content: subagent.ChildInstructions(),
+		}}, invariantMessages...)
+	} else if prompt := a.SharedHarnessPrompt(); prompt != "" && !a.HasAsyncSubagents() {
+		invariantMessages = append([]chat.Message{{
+			Role:    chat.MessageRoleSystem,
+			Content: prompt,
 		}}, invariantMessages...)
 	}
 	markLastMessageAsCacheControl(invariantMessages)
@@ -3165,4 +3209,24 @@ func (s *Session) SetTurnOutcome(id, outcome string) {
 	}
 	// Retained admissions need their terminal evidence to avoid false recovery uncertainty.
 	s.TurnOutcomes[id] = outcome
+}
+
+func (s *Session) TurnTimingsSnapshot() map[string]TurnTiming {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maps.Clone(s.TurnTimings)
+}
+
+// SetTurnTiming records a complete timing for turnID. Incomplete timing is ignored
+// so that no partial measurement ever becomes durable.
+func (s *Session) SetTurnTiming(turnID string, timing TurnTiming) {
+	if timing.TurnID != turnID || !timing.valid() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TurnTimings == nil {
+		s.TurnTimings = map[string]TurnTiming{}
+	}
+	s.TurnTimings[turnID] = timing
 }

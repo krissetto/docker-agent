@@ -13,10 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/httpclient"
-	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
@@ -1183,7 +1181,7 @@ func (h *sessionHandle) SetModel(ctx context.Context, modelRef string) error {
 	if err != nil {
 		return err
 	}
-	return h.driver.setModelOverride(ctx, binding, binding.agentName, modelRef, providers)
+	return h.driver.setModelOverride(ctx, binding, binding.agentName, modelRef, providers, "")
 }
 
 // RefreshModelsCatalog refreshes the local runtime's shared model catalog.
@@ -1315,18 +1313,11 @@ func (h *sessionHandle) applyThinkingLevel(ctx context.Context, pick func([]effo
 	if err != nil {
 		return "", err
 	}
-	updated := make([]provider.Provider, 0, len(models))
-	for _, model := range models {
-		baseCfg := model.BaseConfig().ModelConfig
-		cfg := baseCfg.Clone()
-		cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: string(next)}
-		p, err := h.runtime.createProviderFromConfig(opCtx, cfg)
-		if err != nil {
-			return "", err
-		}
-		updated = append(updated, p)
+	updated, err := h.runtime.withThinkingLevel(opCtx, models, next)
+	if err != nil {
+		return "", err
 	}
-	if err := h.driver.setModelOverride(ctx, binding, binding.agentName, ref, updated); err != nil {
+	if err := h.driver.setModelOverride(ctx, binding, binding.agentName, ref, updated, next); err != nil {
 		return "", err
 	}
 	return next, nil

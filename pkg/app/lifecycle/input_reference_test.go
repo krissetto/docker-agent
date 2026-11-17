@@ -40,6 +40,23 @@ func TestInputIdentityResolverUsesCanonicalMappingNotIDShape(t *testing.T) {
 	assert.Equal(t, "unknown (fffff)", unknown.Label())
 }
 
+func TestInputIdentityResolverShowsSessionRootOnceAsRoot(t *testing.T) {
+	const rootID = "root:session-1234567890"
+	tree := &subagent.Snapshot{Nodes: []subagent.NodeSnapshot{
+		{Node: subagent.Node{ID: rootID, Name: "director", Agent: "director"}},
+	}}
+	fromTree := ResolveInputReference(tree, "", rootID, "stale")
+	assert.Equal(t, InputReferenceNode, fromTree.Kind)
+	assert.Equal(t, rootID, fromTree.ID, "routing keeps the canonical root ID")
+	assert.Equal(t, "root", fromTree.Label(), "root appears once, without a parenthetical ID")
+	assert.Equal(t, "director", fromTree.Agent, "color stays keyed by the canonical agent")
+	fromMessage := ResolveInputReference(nil, "", rootID, "director")
+	assert.Equal(t, "root", fromMessage.Label())
+	assert.Equal(t, "director", fromMessage.Agent)
+	assert.Equal(t, "root", NodeReference(rootID, "director", "director").Label())
+	assert.Equal(t, "worker (abcde)", ResolveInputReference(tree, "", "abcde-child", "worker").Label(), "non-root IDs keep the short ID")
+}
+
 func TestInputIdentityResolverLastDepthFirstMatchAndEmptySender(t *testing.T) {
 	tree := &subagent.Snapshot{Nodes: []subagent.NodeSnapshot{
 		{Node: subagent.Node{ID: "duplicate", SessionID: "shared", Agent: "first"}, Children: []subagent.NodeSnapshot{

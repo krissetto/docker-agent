@@ -8,6 +8,8 @@
 │  While working: Enter steers into the active turn; Alt+Enter      │  │
 │  queues for the next turn.                                        │  │
 │  › Interrupt confirmation            ‹ Always (confirm dialog) ›  │  │
+│    Scroll new prompt to top          [ ]                          │  │
+│  Leaves room below for the reply; new turns only.                 │  │
 │                                                                   │  │
 │  Automation                                                       │  │
 │    Auto-approve tools by default     [ ]                          │  │
@@ -16,8 +18,6 @@
 │    Cache-stable dynamic prompts      [ ]                          │  │
 │                                                                   │  │
 │  Startup and tabs                                                 │  │
-│    Restore tabs on launch            [ ]                          │  │
-│    Lean UI by default                [ ]                          │  │
 │                                                                      │
 │  Cancel                                                   Save       │
 │                                                                      │

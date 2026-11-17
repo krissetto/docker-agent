@@ -530,10 +530,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		sink.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
 		return
 	}
-	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
-	agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
-	agentTools = enrichSpawnToolDescription(a, agentTools, r.allowedFromAgentForTeam(r.teamForContext(ctx, sess), a))
-	agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addConfiguredSubagentTools(sess, a, r.teamForContext(ctx, sess), addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools)))))
+	agentTools = r.prepareTurnTools(ctx, sess, a, agentTools)
 
 	// Record the catalogue size on the session span — answers "how
 	// many tools could this turn actually use?" without having to
@@ -626,10 +623,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			sink.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
 			return
 		}
-		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
-		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
-		agentTools = enrichSpawnToolDescription(a, agentTools, r.allowedFromAgentForTeam(r.teamForContext(ctx, sess), a))
-		agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addConfiguredSubagentTools(sess, a, r.teamForContext(ctx, sess), addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools)))))
+		agentTools = r.prepareTurnTools(ctx, sess, a, agentTools)
 
 		// Emit updated tool count. After a ToolListChanged MCP notification
 		// the cache is invalidated, so getTools above re-fetches from the
@@ -690,11 +684,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			slog.DebugContext(ctx, "Failed to get model definition", "error", err)
 		}
 		// We can only compact if we know the context limit.
-		// resolveContextLimit prefers provider_opts.context_size when set
-		// (some providers — notably Docker Model Runner — use it to size
-		// the actual inference context), then falls back to the models.dev
-		// catalogue. The lookup above is reused inside resolveContextLimit
-		// only when context_size isn't supplied; we keep the explicit call
+		// resolveContextLimit prefers context_window (or DMR-only
+		// provider_opts.context_size), then runtime discovery and the catalogue.
+		// The catalogue lookup is reused when no window is declared; keep it
 		// here because m is also passed to [computeMessageCost] for
 		// per-turn cost computation.
 		// resolveContextLimit yields the primary model's window; effectiveContextLimit

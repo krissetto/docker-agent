@@ -65,7 +65,7 @@ var namedKeys = map[string]bool{
 }
 
 // reservedKeys are bound by the TUI outside the configurable KeyMap (tab bar,
-// agent quick-switch, thinking-level, cancel). Seeding them into the conflict
+// thinking-level, cancel). Seeding them into the conflict
 // table makes an override onto one of them rejected-with-warning rather than
 // silently shadowed by the built-in handler.
 var reservedKeys = []string{
@@ -73,8 +73,6 @@ var reservedKeys = []string{
 	"shift+tab", // cycle thinking level
 	"alt+enter", // explicit queue while working
 	"esc",       // cancel / dismiss
-	"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5",
-	"ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9", // agent quick-switch
 }
 
 // editorOwnedKeys are edit keys the editor needs for delete-word. Only the named

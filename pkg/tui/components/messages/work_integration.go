@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
 	"github.com/docker/docker-agent/pkg/tui/components/workblock"
@@ -64,27 +65,171 @@ func (m *model) VisibleReplies() messages.VisibleReplies { return m.visibleRepli
 // Read-only; it does not change handoff state.
 func (m *model) ReplyHandoffActive() bool { return m.replyHandoff.Active() }
 
+// workTiming is the settled timing shown on a Work header. It is keyed by the
+// turn ID of the human message that opens the exchange, never by pointer, so it
+// survives session reloads.
+type workTiming struct {
+	// measured is true only for an accepted runtime duration; outcome may still be
+	// known without one (a stopped or failed turn with no usable timing).
+	measured bool
+	duration time.Duration
+	outcome  string
+}
+
+// outcomeLabel maps a runtime turn outcome to its header state. Completed and
+// unknown outcomes carry no label.
+func outcomeLabel(outcome string) string {
+	switch outcome {
+	case session.TurnTimingOutcomeCanceled:
+		return workblock.OutcomeStopped
+	case session.TurnTimingOutcomeFailed:
+		return workblock.OutcomeFailed
+	}
+	return ""
+}
+
+// authoritativeTiming converts a persisted or runtime-settled timing into header
+// data. Anything that is not the current schema for turnID is rejected, so
+// unknown or legacy turns stay unlabelled instead of guessed.
+func authoritativeTiming(turnID string, timing session.TurnTiming) (workTiming, bool) {
+	if turnID == "" || timing.TurnID != turnID || timing.Version != session.TurnTimingVersion ||
+		timing.Basis != session.TurnTimingBasisActiveWall || timing.DurationMs < 0 {
+		return workTiming{}, false
+	}
+	switch timing.Outcome {
+	case session.TurnTimingOutcomeCompleted, session.TurnTimingOutcomeCanceled, session.TurnTimingOutcomeFailed:
+		return workTiming{measured: true, duration: time.Duration(timing.DurationMs) * time.Millisecond, outcome: outcomeLabel(timing.Outcome)}, true
+	}
+	return workTiming{}, false
+}
+
+// SetTurnOutcome records a durable outcome for turnID when no accepted duration
+// is known. Completed outcomes and turns with a measured duration are left alone.
+func (m *model) SetTurnOutcome(turnID, outcome string) tea.Cmd {
+	label := outcomeLabel(outcome)
+	if turnID == "" || label == "" {
+		return nil
+	}
+	if current, ok := m.workTimings[turnID]; ok && current.measured {
+		return nil
+	}
+	if m.workTimings == nil {
+		m.workTimings = make(map[string]workTiming)
+	}
+	recorded := workTiming{outcome: label}
+	if m.workTimings[turnID] == recorded {
+		return nil
+	}
+	m.workTimings[turnID] = recorded
+	return m.SetWorkStatus(m.workActive, m.workElapsed)
+}
+
+// SetTurnTiming records the authoritative settled timing of turnID (nil or
+// invalid means unknown) and refreshes the Work headers that show it.
+func (m *model) SetTurnTiming(turnID string, timing *session.TurnTiming) tea.Cmd {
+	if timing == nil {
+		return nil
+	}
+	recorded, ok := authoritativeTiming(turnID, *timing)
+	if !ok {
+		return nil
+	}
+	if m.workTimings == nil {
+		m.workTimings = make(map[string]workTiming)
+	}
+	if m.workTimings[turnID] == recorded {
+		return nil
+	}
+	m.workTimings[turnID] = recorded
+	return m.SetWorkStatus(m.workActive, m.workElapsed)
+}
+
+// restoreTurnTimings loads the persisted timing of every human turn in sess.
+// Turns without valid timing stay unlabelled. Existing entries are kept so a
+// reload never drops timing already learned for this process.
+func (m *model) restoreTurnTimings(sess *session.Session) {
+	for _, item := range sess.Messages {
+		if !item.IsMessage() || item.Message.TurnID == "" {
+			continue
+		}
+		if m.workTimings == nil {
+			m.workTimings = make(map[string]workTiming)
+		}
+		if timing, ok := sess.TurnTiming(item.Message.TurnID); ok {
+			if recorded, valid := authoritativeTiming(item.Message.TurnID, timing); valid {
+				m.workTimings[item.Message.TurnID] = recorded
+				continue
+			}
+		}
+		// Without accepted timing, only a durable stopped or failed outcome is shown.
+		if label := outcomeLabel(sess.TurnOutcome(item.Message.TurnID)); label != "" && !m.workTimings[item.Message.TurnID].measured {
+			m.workTimings[item.Message.TurnID] = workTiming{outcome: label}
+		}
+	}
+}
+
+// exchangeTiming returns the settled timing shown on the exchange opened by the
+// human message at boundary. A turn can own several human messages (steering
+// consumed into the same turn); only the first owns the label, so it renders
+// once per turn. Orphan exchanges have no turn, so no timing.
+func (m *model) exchangeTiming(boundary int) workTiming {
+	if boundary < 0 || boundary >= len(m.messages) {
+		return workTiming{}
+	}
+	turnID := m.messages[boundary].TurnID
+	if turnID == "" || m.workTimingOwners[turnID] != boundary {
+		return workTiming{}
+	}
+	timing := m.workTimings[turnID]
+	if !timing.measured {
+		timing.duration = 0 // an unmeasured turn never shows a duration
+	}
+	return timing
+}
+
+// indexTimingOwners records, per turn, the first exchange boundary that carries
+// it. Called from syncWorkProjection so headers and lookups agree on owners.
+func (m *model) indexTimingOwners(projection workProjection) {
+	owners := make(map[string]int, len(projection.exchanges))
+	for _, exchange := range projection.exchanges {
+		if exchange.boundary < 0 || exchange.boundary >= len(m.messages) {
+			continue
+		}
+		turnID := m.messages[exchange.boundary].TurnID
+		if _, seen := owners[turnID]; turnID != "" && !seen {
+			owners[turnID] = exchange.boundary
+		}
+	}
+	m.workTimingOwners = owners
+}
+
+// SetWorkWaiting replaces the active Work label with a blocking-interaction
+// label ("" restores the normal working state). Only the active header uses it.
+func (m *model) SetWorkWaiting(label string) tea.Cmd {
+	if m.workWaiting == label {
+		return nil
+	}
+	m.workWaiting = label
+	return m.SetWorkStatus(m.workActive, m.workElapsed)
+}
+
+// SetWorkStatus marks the root turn active or settled. Settled durations come
+// only from SetTurnTiming; elapsed is kept for callers but never labels a turn.
 func (m *model) SetWorkStatus(active bool, elapsed time.Duration) tea.Cmd {
+	if !active {
+		m.workReasoningActive = false
+		for _, view := range m.views {
+			if child, ok := view.(*reasoningblock.Model); ok {
+				child.SetReasoningActive(false)
+			}
+		}
+	}
+	if !active {
+		m.scrollOnSend.pending = nil
+	}
 	m.workActive, m.workElapsed = active, elapsed
 	if !active {
 		m.stats.projectionRebuilds++
-		// Local read of exchanges only: the unindexed variant is never published.
-		projection := projectWorkWith(m.messages, m.responseGroups, m.visibleReplies, m.currentSessionOpener(), false)
-		if len(projection.exchanges) > 0 {
-			exchange := projection.exchanges[len(projection.exchanges)-1]
-			identity := (*types.Message)(nil)
-			switch {
-			case exchange.boundary >= 0 && exchange.boundary < len(m.messages):
-				identity = m.messages[exchange.boundary]
-			case len(exchange.work) > 0:
-				identity = m.messages[exchange.work[0]]
-			case len(exchange.response) > 0:
-				identity = m.messages[exchange.response[0]]
-			}
-			if identity != nil {
-				m.workDurations[identity] = elapsed
-			}
-		}
 	}
 	if !m.workEnabled {
 		// Status only feeds Work headers, which do not exist with compact Work off.
@@ -187,6 +332,7 @@ func (m *model) syncWorkProjection() {
 		}
 		for _, block := range m.workBlocks {
 			block.StopAnimation()
+			block.Release()
 		}
 		if len(m.workHeaderBySource) > 0 || len(m.workSourceToHeader) > 0 {
 			m.restoreWorkPlain()
@@ -251,6 +397,7 @@ func (m *model) syncWorkProjection() {
 			projection.bySource[source] = exchangeIndex
 		}
 	}
+	m.indexTimingOwners(projection)
 	blocks := make(map[*types.Message]*workblock.Model, len(projection.exchanges))
 	headerBySource := make(map[int]*workblock.Model)
 	sourceToHeader := make(map[int]int)
@@ -298,9 +445,10 @@ func (m *model) syncWorkProjection() {
 		status := m.workStatusForIndices(visibleWork)
 		status.Active = m.workActive && (exchangeIndex == len(projection.exchanges)-1)
 		if status.Active {
-			status.Elapsed = 0
+			status.Waiting = m.workWaiting
 		} else {
-			status.Elapsed = m.workDurations[identity]
+			timing := m.exchangeTiming(exchange.boundary)
+			status.Elapsed, status.Outcome = timing.duration, timing.outcome
 		}
 		before := block.Status()
 		if cmd := block.SetStatus(status); cmd != nil {
@@ -315,6 +463,7 @@ func (m *model) syncWorkProjection() {
 	for identity, old := range m.workBlocks {
 		if blocks[identity] == nil {
 			old.StopAnimation()
+			old.Release()
 		}
 	}
 	m.workBlocks = blocks
@@ -571,6 +720,8 @@ func (m *model) toggleWork(block *workblock.Model) {
 	if m.userHasScrolled && m.scrollOffset < m.layoutTotal() {
 		if source, local, ok := m.workRangeAt(m.scrollOffset); ok {
 			anchorSourceLine, anchorLocal = source, local
+		} else if source, local := m.globalLineToMessageLineCanonical(m.scrollOffset); source >= 0 {
+			anchorSourceLine, anchorLocal = source, local
 		}
 	}
 	wasAtBottom := m.isAtBottom()
@@ -651,6 +802,9 @@ func (m *model) workItemsForAnchor(anchor int) []workblock.Item {
 }
 
 func (m *model) displayNeedsSeparator(index int) bool {
+	if m.hiddenSlot(index) {
+		return false
+	}
 	if m.workEnabled {
 		if _, hidden := m.workSourceToHeader[index]; hidden && m.workSourceToHeader[index] != index {
 			return false
@@ -660,20 +814,22 @@ func (m *model) displayNeedsSeparator(index int) bool {
 		return false
 	}
 	next := index + 1
-	for next < len(m.messages) && m.workEnabled {
-		if _, hidden := m.workSourceToHeader[next]; !hidden || m.workSourceToHeader[next] == next {
-			break
-		}
+	for next < len(m.messages) && m.hiddenSlot(next) {
 		next++
 	}
 	if next >= len(m.messages) {
 		return false
 	}
+	// A Work composite owns its spacing regardless of its anchor source type.
+	// In particular, an assistant anchor has no invisible action row.
+	if m.workEnabled && m.workHeaderBySource[next] != nil {
+		return true
+	}
 	// Compact Work: a regular assistant reply reserves an invisible top action row that already separates it.
 	if m.workEnabled && m.messages[next].Type == types.MessageTypeAssistant && m.actionRowEligible(next) {
 		return false
 	}
-	return !m.compactRow(index) || !m.compactRow(next)
+	return (m.workEnabled && m.workHeaderBySource[index] != nil) || !m.compactRow(index) || !m.compactRow(next)
 }
 
 func (m *model) workCopyContent(anchor int) string {
@@ -691,7 +847,7 @@ func (m *model) workCopyContent(anchor int) string {
 		if text == "" && msg.Type == types.MessageTypeToolCall {
 			text = msg.ToolCall.Function.Arguments
 		}
-		if strings.TrimSpace(text) != "" {
+		if types.HasVisibleProse(text) {
 			parts = append(parts, text)
 		}
 	}
@@ -718,7 +874,7 @@ func (m *model) WorkBlockAtSource(source int) *workblock.Model { return m.workHe
 
 func (m *model) copyWorkBlock(anchor int) tea.Cmd {
 	text := m.workCopyContent(anchor)
-	if strings.TrimSpace(text) == "" {
+	if !types.HasVisibleProse(text) {
 		return nil
 	}
 	return copyTextToClipboard(text)
@@ -991,7 +1147,7 @@ func (m *model) startReplyHandoff(previous, target workProjection, oldLayout []r
 			if source < 0 || source >= len(m.messages) {
 				continue
 			}
-			if m.messages[source].Type != types.MessageTypeAssistant || strings.TrimSpace(m.messages[source].Content) == "" {
+			if m.messages[source].Type != types.MessageTypeAssistant || !types.HasVisibleProse(m.messages[source].Content) {
 				continue
 			}
 			id := m.replyComponentForSource(target, source)
@@ -1530,13 +1686,11 @@ func (m *model) refreshWorkStatusForSource(source int) {
 	exchange := m.workProjection.exchanges[i]
 	status := m.workStatusForIndices(exchange.work)
 	status.Active = m.workActive && i == len(m.workProjection.exchanges)-1
-	switch {
-	case status.Active:
-		status.Elapsed = 0
-	case exchange.boundary >= 0 && exchange.boundary < len(m.messages):
-		status.Elapsed = m.workDurations[m.messages[exchange.boundary]]
-	default:
-		status.Elapsed = 0
+	if status.Active {
+		status.Waiting = m.workWaiting
+	} else {
+		timing := m.exchangeTiming(exchange.boundary)
+		status.Elapsed, status.Outcome = timing.duration, timing.outcome
 	}
 	if cmd := block.SetStatus(status); cmd != nil {
 		m.workCommands = append(m.workCommands, cmd)

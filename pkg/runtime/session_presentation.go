@@ -23,7 +23,7 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 	if len(observed.models) > 0 {
 		model := observed.models[0]
 		modelID = model.ID()
-		limit = providerContextLimit(model)
+		limit = declaredContextLimit(model)
 		if limit == 0 {
 			if metadata, ok := cachedModelDatabase(h.runtime.modelsStore).LookupModel(modelID); ok {
 				limit = int64(metadata.Limit.Context)

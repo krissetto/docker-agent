@@ -2,6 +2,7 @@ package facade
 
 import (
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -27,7 +28,11 @@ type Payload interface{ isPayload() }
 type TurnStarted struct{}
 
 // TurnSettled marks settlement of the turn named by Event.TurnID. It is the last event of a turn.
-type TurnSettled struct{ Outcome Outcome }
+// Timing is nil when the turn was not measured.
+type TurnSettled struct {
+	Outcome Outcome
+	Timing  *session.TurnTiming
+}
 
 // InteractionKind identifies what an interaction asks for.
 type InteractionKind string

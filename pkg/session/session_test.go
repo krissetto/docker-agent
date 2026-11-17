@@ -329,7 +329,7 @@ func TestGetMessages_AsyncSubagentHarnessPromptFirst(t *testing.T) {
 	require.Len(t, messages, 3)
 
 	assert.True(t, strings.HasPrefix(messages[0].Content, "# Async subagents"))
-	assert.Contains(t, messages[0].Content, "A fresh subagent sees only its task")
+	assert.Contains(t, messages[0].Content, "starts with no view of this conversation")
 	// Spawnable names and descriptions are carried by the spawn tool definition, not the harness prompt.
 	assert.NotContains(t, messages[0].Content, "- worker: Does work")
 	assert.Equal(t, "user instructions", messages[1].Content)
@@ -371,6 +371,66 @@ func TestGetMessages_IgnoresAsyncHarnessPromptWithoutSubagents(t *testing.T) {
 	require.Len(t, messages, 1)
 	assert.Equal(t, "instructions", messages[0].Content)
 	assert.NotContains(t, messages[0].Content, "# Async subagents")
+}
+
+func TestGetMessages_SpawnedLeafAgentGetsSharedGuidance(t *testing.T) {
+	t.Parallel()
+
+	// A spawned child without subagent tools still receives the team-wide rules.
+	leaf := agent.New("greppy", "scout instructions")
+	messages := New(WithAsyncSubagent(true)).GetMessages(leaf)
+	require.NotEmpty(t, messages)
+	assert.Equal(t, subagent.ChildInstructions(), messages[0].Content)
+	assert.Contains(t, messages[0].Content, "Reviews happen only when the user explicitly asks for one")
+	assert.NotContains(t, messages[0].Content, "# Async subagents")
+}
+
+func TestGetMessages_TopLevelLeafAgentGetsSharedGuidance(t *testing.T) {
+	t.Parallel()
+
+	// A top-level agent without subagent tools (e.g. a designer picked as root)
+	// gets the shared team guidance, once, and no parent or child prompt.
+	leaf := agent.New("designer", "design instructions",
+		agent.WithSharedHarnessPrompt(subagent.SharedGuidance()),
+	)
+	messages := New().GetMessages(leaf)
+	require.Len(t, messages, 2)
+	assert.Equal(t, subagent.SharedGuidance(), messages[0].Content)
+	assert.Equal(t, "design instructions", messages[1].Content)
+	assert.Equal(t, 1, strings.Count(messagesText(messages), "Keep replies short"))
+	assert.NotContains(t, messages[0].Content, "# Async subagents")
+	assert.NotContains(t, messages[0].Content, "# Spawned subagent role")
+}
+
+func TestGetMessages_SharedGuidanceIsNotDuplicated(t *testing.T) {
+	t.Parallel()
+
+	// Agents with subagents carry the shared guidance in their parent prompt, and
+	// spawned children carry it in the child prompt; neither adds a second copy.
+	root := agent.New("root", "root instructions",
+		agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"}),
+		agent.WithAsyncHarnessPrompt(subagent.HarnessPrompt([]subagent.AllowedSubagent{{Agent: "worker"}})),
+		agent.WithSharedHarnessPrompt(subagent.SharedGuidance()),
+	)
+	parentMessages := New().GetMessages(root)
+	assert.Equal(t, 1, strings.Count(messagesText(parentMessages), "Keep replies short"))
+	assert.True(t, strings.HasPrefix(parentMessages[0].Content, "# Async subagents"))
+
+	child := agent.New("worker", "worker instructions",
+		agent.WithSharedHarnessPrompt(subagent.SharedGuidance()),
+	)
+	childMessages := New(WithAsyncSubagent(true)).GetMessages(child)
+	assert.Equal(t, subagent.ChildInstructions(), childMessages[0].Content)
+	assert.Equal(t, 1, strings.Count(messagesText(childMessages), "Keep replies short"))
+}
+
+func messagesText(messages []chat.Message) string {
+	var b strings.Builder
+	for _, m := range messages {
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func TestGetMessages_CacheControlWithSummary(t *testing.T) {

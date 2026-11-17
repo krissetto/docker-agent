@@ -65,6 +65,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	runtime.ShowBanner, runtime.DimInactivePanes, runtime.TransparentBackground = m.showBanner, m.dimInactivePanes, m.transparentBackground
 	runtime.InactivePaneDim = m.inactivePaneDim
 	runtime.CompactWorkLog = m.compactWorkLog
+	runtime.ScrollOnSend = m.scrollOnSend
 	runtime.ShowAgentContext = m.agentContextReadings
 	runtime.VisibleReplies = m.visibleReplies
 	if m.imageWriter != nil {
@@ -126,6 +127,14 @@ func (m *appModel) previewSettings(before, p messages.Preferences) tea.Cmd {
 				SetVisibleReplies(policy messages.VisibleReplies) tea.Cmd
 			}); ok {
 				cmds = append(cmds, owner.SetVisibleReplies(m.visibleReplies))
+			}
+		}
+	}
+	if before.ScrollOnSend != p.ScrollOnSend {
+		m.scrollOnSend = p.ScrollOnSend
+		for _, page := range m.chatPages {
+			if owner, ok := page.(interface{ SetScrollOnSend(bool) }); ok {
+				owner.SetScrollOnSend(p.ScrollOnSend)
 			}
 		}
 	}
