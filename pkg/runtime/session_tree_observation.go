@@ -57,6 +57,8 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	}
 	errorsCh := make(chan error, 1)
 	observations := make(map[string]Observation)
+	var interestMu sync.Mutex
+	interests := make(map[string]Observation)
 	// stopped holds descendants already stopped when observed: they have no live
 	// observation, so their baseline entry is recorded once and never re-observed.
 	stopped := make(map[string]bool)
@@ -67,11 +69,14 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 		if _, exists := observations[sessionID]; exists || stopped[sessionID] {
 			return nil
 		}
-		observation, err := observe(obsCtx, sessionID, ObserveOptions{Buffer: buffer})
+		observation, err := observe(obsCtx, sessionID, ObserveOptions{Buffer: buffer, BackgroundOutputInterest: options.BackgroundOutputInterest})
 		var primary SessionSnapshot
 		live := err == nil
 		if live {
 			observations[sessionID] = observation
+			interestMu.Lock()
+			interests[sessionID] = observation
+			interestMu.Unlock()
 			primary = observation.Primary()
 			if sessionID == h.sessionID {
 				h.attachLiveSubtree(&primary)
@@ -233,8 +238,32 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 		}
 	}()
 	var once sync.Once
-	cancel := func() { once.Do(cancelCtx) }
-	return Observation{Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: cancel}, nil
+	cancel := func() {
+		once.Do(func() {
+			cancelCtx()
+			interestMu.Lock()
+			defer interestMu.Unlock()
+			for _, observation := range interests {
+				cancelObservation(observation)
+			}
+		})
+	}
+	setInterest := func(sessionID string, processIDs []string) error {
+		interestMu.Lock()
+		defer interestMu.Unlock()
+		if obsCtx.Err() != nil {
+			return ErrSessionClosed
+		}
+		observation, ok := interests[sessionID]
+		if !ok {
+			return &SessionError{Kind: SessionErrorNotFound, SessionID: sessionID, Operation: "background_output_interest"}
+		}
+		if observation.SetBackgroundOutputInterest == nil {
+			return ErrUnsupported
+		}
+		return observation.SetBackgroundOutputInterest(sessionID, processIDs)
+	}
+	return Observation{Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: cancel, SetBackgroundOutputInterest: setInterest}, nil
 }
 
 // attachLiveSubtree gives a non-root watch root the live subtree of its own node,

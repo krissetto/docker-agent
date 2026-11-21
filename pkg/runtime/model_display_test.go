@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/team"
@@ -162,4 +163,25 @@ func TestFallbackPrimaryThinkingProjectionJSONRoundTrip(t *testing.T) {
 	data, err = json.Marshal(remote)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "primary_thinking", "ordinary wire shape remains unchanged")
+}
+
+func TestModelDisplayDistinguishesNormalizedOffFromDefault(t *testing.T) {
+	t.Parallel()
+	for _, noThinking := range []bool{false, true} {
+		model := newConfigProvider(latest.ModelConfig{Provider: "openai", Model: "gpt-5.2"})
+		if noThinking {
+			model.ModelOptions = options.Apply(options.WithNoThinking())
+		}
+		cfg := modelDisplayConfig(model)
+		display := AgentDetails{}
+		projectModelDisplay(&display, cfg, cachedModelDatabase(nil), true)
+		want := "default"
+		if noThinking {
+			want = "off"
+		}
+		assert.Equal(t, want, display.ThinkingMode)
+		assert.Equal(t, want, display.ThinkingLevel)
+		assert.True(t, display.CanCycleThinking)
+		assert.Nil(t, model.ModelConfig.ThinkingBudget, "display must not mutate the provider")
+	}
 }

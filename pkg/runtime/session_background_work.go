@@ -22,14 +22,15 @@ type sessionBackgroundWork struct {
 	generation  uint64
 	environment *TeamEnvironmentLease
 
-	closeOnce  sync.Once
-	cancelMu   sync.Mutex
-	cancel     func()
-	canceled   bool
-	agentName  string
-	toolCallID string
-	processID  string
-	closeErr   error
+	closeOnce    sync.Once
+	cancelMu     sync.Mutex
+	cancel       func()
+	canceled     bool
+	agentName    string
+	toolCallID   string
+	processID    string
+	outputSource tools.BackgroundProcessOutputSource
+	closeErr     error
 }
 
 func (r *LocalRuntime) beginSessionBackgroundWork(ctx context.Context, sess *session.Session, driver *sessionDriver, calls ...tools.ToolCall) (tools.BackgroundWork, error) {
@@ -92,13 +93,40 @@ func (w *sessionBackgroundWork) BackgroundProcessIdentity() (string, string, str
 }
 
 func (w *sessionBackgroundWork) AdoptBackgroundProcess(process tools.BackgroundProcess) error {
-	if err := w.driver.adoptBackgroundProcess(w.runtime.lifetime(), process); err != nil {
+	if err := w.driver.adoptBackgroundProcess(w.runtime.lifetime(), process, w.outputSource); err != nil {
 		return err
 	}
 	w.cancelMu.Lock()
 	w.processID = process.ID
 	w.cancelMu.Unlock()
 	return nil
+}
+
+func (w *sessionBackgroundWork) SetBackgroundProcessOutputSource(source tools.BackgroundProcessOutputSource) {
+	w.outputSource = source
+}
+
+func (w *sessionBackgroundWork) BackgroundProcessOutputInterested() bool {
+	w.cancelMu.Lock()
+	id := w.processID
+	w.cancelMu.Unlock()
+	return id != "" && w.driver.events.HasBackgroundOutputInterest(w.sessionID, id)
+}
+
+func (w *sessionBackgroundWork) EmitBackgroundProcessOutput(offset int64, output string) {
+	w.cancelMu.Lock()
+	id := w.processID
+	w.cancelMu.Unlock()
+	if id != "" && output != "" && w.driver.events.HasBackgroundOutputInterest(w.sessionID, id) {
+		w.driver.events.Publish(w.sessionID, &BackgroundProcessOutputEvent{AgentContext: newAgentContext(w.agentName), Type: "background_process_output", SessionID: w.sessionID, ProcessID: id, ToolCallID: w.toolCallID, Offset: offset, Output: output})
+	}
+}
+
+func (w *sessionBackgroundWork) FinishBackgroundProcessResult(state tools.BackgroundProcessState, finishedAt time.Time, exitCode int, timedOut bool) {
+	w.cancelMu.Lock()
+	id := w.processID
+	w.cancelMu.Unlock()
+	w.driver.finishBackgroundProcessResult(w.runtime.lifetime(), id, state, finishedAt, exitCode, timedOut)
 }
 
 func (w *sessionBackgroundWork) FinishBackgroundProcess(state tools.BackgroundProcessState, finishedAt time.Time) {

@@ -1072,25 +1072,30 @@ func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier
 					continue
 				}
 			}
+			var stored Message
 			if row.streamOpen {
 				chatMsg = row.openBody
-			} else if err := json.Unmarshal([]byte(row.messageJSON.String), &chatMsg); err != nil {
+			} else if err := unmarshalStoredMessage([]byte(row.messageJSON.String), &stored); err != nil {
 				return nil, fmt.Errorf("unmarshaling message at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
+			}
+			if !row.streamOpen {
+				chatMsg = stored.Message
 			}
 			items = append(items, Item{
 				Message: &Message{
-					ID:            row.id,
-					AgentName:     row.agentName.String,
-					Message:       chatMsg,
-					Implicit:      row.implicit,
-					Pending:       row.actorPending,
-					Accepted:      row.actorAccepted,
-					TurnID:        row.actorTurnID,
-					InputMode:     row.actorInputMode,
-					InputOrigin:   row.inputOrigin,
-					SenderID:      row.senderID,
-					SenderName:    row.senderName,
-					ReportOutcome: row.reportOutcome,
+					RequireApproval: stored.RequireApproval,
+					ID:              row.id,
+					AgentName:       row.agentName.String,
+					Message:         chatMsg,
+					Implicit:        row.implicit,
+					Pending:         row.actorPending,
+					Accepted:        row.actorAccepted,
+					TurnID:          row.actorTurnID,
+					InputMode:       row.actorInputMode,
+					InputOrigin:     row.inputOrigin,
+					SenderID:        row.senderID,
+					SenderName:      row.senderName,
+					ReportOutcome:   row.reportOutcome,
 				},
 			})
 
@@ -1490,7 +1495,7 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 		return 0, ErrEmptyID
 	}
 
-	msgJSON, err := json.Marshal(msg.Message)
+	msgJSON, err := marshalStoredMessage(msg)
 	if err != nil {
 		return 0, fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 	}
@@ -1556,7 +1561,7 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 	if sessionID == "" {
 		return ErrEmptyID
 	}
-	msgJSON, err := json.Marshal(msg.Message)
+	msgJSON, err := marshalStoredMessage(msg)
 	if err != nil {
 		return fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 	}
@@ -1711,7 +1716,7 @@ func (s *SQLiteSessionStore) upsertSessionRowTx(ctx context.Context, tx *sql.Tx,
 func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionID string, position int, item Item) error {
 	switch {
 	case item.Message != nil:
-		msgJSON, err := json.Marshal(item.Message.Message)
+		msgJSON, err := marshalStoredMessage(item.Message)
 		if err != nil {
 			return fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 		}

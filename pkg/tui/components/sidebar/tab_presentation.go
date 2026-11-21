@@ -104,6 +104,8 @@ func (m *model) placementText(row placedRow, width int) string {
 		text = m.hoverText(m.treeSummary(width), "tree-summary")
 	case row.id == "todo-summary":
 		text = m.todoSummary(width)
+	case row.id == "plan-summary":
+		text = m.planSummary(width)
 	case strings.HasPrefix(row.id, "exit:"):
 		return row.text
 	}

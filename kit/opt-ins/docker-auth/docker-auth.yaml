@@ -1,0 +1,19 @@
+# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: Authentication to one chosen registry
+provides: [async-agent-docker-auth@1.0.0]
+args:
+  registry:
+    required: true
+    pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+    description: Exact lowercase registry DNS name; no scheme, port, path, wildcard or IP. Effective config additionally validates length and IP exclusion.
+capabilities:
+  - type: com.docker.sandbox/docker-auth@1
+    config:
+      registries: ["${{ kit.args.registry }}"]
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow: ["${{ kit.args.registry }}:443"]

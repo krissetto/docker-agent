@@ -466,6 +466,7 @@ type model struct {
 	planData messages.PlanSidebarDataMsg
 	// backgroundAgents maps running background child sessions to their agent names.
 	backgroundAgents map[string]string
+	plansCollapsed   bool
 	recentPlans      []plans.Plan
 	planZones        []planClickZone
 	planClickZones   map[int]planClickZone
@@ -599,6 +600,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		backgroundEnd:       -1,
 		treeCollapsed:       true,
 		todosCollapsed:      true,
+		plansCollapsed:      true,
 		presentationActive:  true,
 		scrollbarVisible:    true,
 		hoveredTreeRow:      -1,
@@ -2622,7 +2624,7 @@ func (m *model) renderSections(contentWidth int) []string {
 	}
 
 	m.planStart, m.planEnd, m.planZones = 0, 0, nil
-	if m.sectionVisibility.ShowPlans {
+	if m.hasPlansSection() {
 		section, zones := m.plansSection(contentWidth)
 		if len(lines) > 0 {
 			markBlock()

@@ -58,8 +58,10 @@ type Item struct {
 
 // Status describes compact header data without inferring completion semantics.
 type Status struct {
-	Active    bool
-	ToolCount int
+	Active            bool
+	ToolCount         int
+	BackgroundRunning int
+	BackgroundFailed  bool
 	// Elapsed is the authoritative turn duration (settled turns only); zero means unknown.
 	Elapsed time.Duration
 	// Outcome is the settled turn's outcome: "" (completed), "stopped" or "failed".
@@ -388,6 +390,8 @@ func (m *Model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if !m.previewRetire.Running() {
 				m.previewRetired = true
 				m.previewRows = 0
+				m.previewLines = nil
+				m.previewFading = nil
 			}
 			tick.MarkDirty()
 			m.invalidateView()
@@ -556,15 +560,16 @@ func (m *Model) View() string {
 
 // refreshPreview runs on authoritative source mutations, never on View or ticks.
 // Running reveal/retirement transitions keep their deadlines across projection
-// rebuilds. Only live reasoning can reserve preview rows; history stays expanded-only.
+// rebuilds. Displayable history keeps its compact tail; only live reasoning
+// reserves the full preview row budget.
 func (m *Model) refreshPreview() {
 	var lines []string
 	truncated := false
 	active := false
 	for i := range m.items {
 		if child, ok := m.items[i].item.View.(nestedReasoning); ok {
-			active = active || child.ReasoningActive()
 			childLines, childTruncated := child.PreviewLines()
+			active = active || (child.ReasoningActive() && len(childLines) > 0)
 			lines = append(lines, childLines...)
 			truncated = truncated || childTruncated
 		}
@@ -596,17 +601,20 @@ func (m *Model) refreshPreview() {
 		}
 	}
 	wasActive := m.previewActive
-	m.previewActive = active && m.status.Active
-	if m.previewActive {
+	m.previewActive = active && m.status.Active && len(lines) > 0
+	if len(lines) > 0 {
 		m.previewRetire.Cancel()
 		m.previewRetired = false
-		if len(lines) > 0 {
+		m.previewRows = len(lines)
+		if m.previewActive {
 			m.previewRows = workPreviewLines
 		}
-	} else if wasActive && !m.previewRetired {
+	} else if (wasActive || len(m.previewLines) > 0) && !m.previewRetired {
 		m.previewFade.Cancel()
 		if !m.expanded && !m.disclosure.Visible() && !m.previewSuspended && m.previewRows > 0 {
-			m.previewRetire.Start(animation.ShortDuration, animation.EaseOutCubic)
+			if !m.previewRetire.Running() {
+				m.previewRetire.Start(animation.ShortDuration, animation.EaseOutCubic)
+			}
 		} else {
 			m.previewRetired = true
 			m.previewRows = 0
@@ -622,6 +630,11 @@ func (m *Model) refreshPreview() {
 		}
 	} else if !live || len(lines) == 0 {
 		m.previewFade.Cancel()
+	}
+	// Source resets and removals must not replace retiring paint.
+	// Keep only the bounded old tail through its existing retirement deadline.
+	if !m.previewActive && m.previewRetire.Running() {
+		return
 	}
 	m.previewLines, m.previewFading, m.previewTruncated = lines, fading, truncated
 }
@@ -712,64 +725,55 @@ func (m *Model) WheelAt(line, col, delta int) bool {
 }
 
 func (m *Model) SetHoveredAt(line int, hovered bool) bool {
-	if !hovered {
-		changed := false
-		for i := range m.items {
-			if child, ok := m.items[i].item.View.(interface {
-				SetHoveredAt(line int, hovered bool) bool
-			}); ok {
-				changed = child.SetHoveredAt(-1, false) || changed
-			}
-		}
-		return changed
-	}
-	source, local, ok := m.SourceAt(line)
-	if !ok {
-		return false
-	}
-	child, ok := m.sourceView(source).(interface {
-		SetHoveredAt(line int, hovered bool) bool
-	})
-	return ok && child.SetHoveredAt(local, true)
+	return m.setHover(line, -1, hovered, false)
 }
 
 // SetHoveredPositionAt routes gutter-precise hover to the owning child. Columns
 // outside the child's inset clear its pointer instead of hovering it.
 func (m *Model) SetHoveredPositionAt(line, col int, hovered bool) bool {
-	if !hovered {
-		return m.SetHoveredAt(line, false)
-	}
-	source, local, ok := m.SourceAt(line)
-	if !ok {
-		return m.SetHoveredAt(-1, false)
-	}
-	childCol, inside := m.SourceColumnAt(line, col)
-	if !inside {
-		childCol = -1
+	return m.setHover(line, col, hovered, true)
+}
+
+func (m *Model) setHover(line, col int, hovered, positional bool) bool {
+	source, local, found := 0, 0, false
+	if hovered {
+		source, local, found = m.SourceAt(line)
+		if positional {
+			var inside bool
+			col, inside = m.SourceColumnAt(line, col)
+			if !inside {
+				col = -1
+			}
+		}
 	}
 	changed := false
 	for i := range m.items {
-		if m.items[i].item.SourceIndex == source {
+		item := m.items[i].item
+		child, ok := item.View.(interface {
+			SetHoveredAt(line int, hovered bool) bool
+		})
+		if !ok {
 			continue
 		}
-		if child, ok := m.items[i].item.View.(interface {
-			SetHoveredAt(line int, hovered bool) bool
-		}); ok {
-			changed = child.SetHoveredAt(-1, false) || changed
+		childChanged := false
+		if found && item.SourceIndex == source {
+			if pointer, ok := child.(interface {
+				SetHoveredPositionAt(line, col int, hovered bool) bool
+			}); positional && ok {
+				childChanged = pointer.SetHoveredPositionAt(local, col, true)
+			} else {
+				childChanged = child.SetHoveredAt(local, true)
+			}
+		} else {
+			childChanged = child.SetHoveredAt(-1, false)
+		}
+		if childChanged {
+			// Hover changes the child's rendered text, not just the outer slot.
+			m.InvalidateSource(item.SourceIndex)
+			changed = true
 		}
 	}
-	child, ok := m.sourceView(source).(interface {
-		SetHoveredAt(line int, hovered bool) bool
-	})
-	if !ok {
-		return changed
-	}
-	if positional, ok := child.(interface {
-		SetHoveredPositionAt(line, col int, hovered bool) bool
-	}); ok {
-		return positional.SetHoveredPositionAt(local, childCol, true) || changed
-	}
-	return child.SetHoveredAt(local, true) || changed
+	return changed
 }
 
 func (m *Model) sourceView(source int) layout.Model {
@@ -896,6 +900,12 @@ func (m *Model) header() string {
 			unit = "tool"
 		}
 		parts = append(parts, styles.MutedStyle.Render("("+strconv.Itoa(m.status.ToolCount)+" "+unit+")"))
+	}
+	if m.status.BackgroundRunning > 0 {
+		parts = append(parts, styles.MutedStyle.Render(strconv.Itoa(m.status.BackgroundRunning)+" running in bg"))
+	}
+	if m.status.BackgroundFailed {
+		parts = append(parts, styles.ToolErrorMessageStyle.Render("bg failed"))
 	}
 	if text := m.settledLabel(); text != "" {
 		parts = append(parts, styles.MutedStyle.Render("· "+text))

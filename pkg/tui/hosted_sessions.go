@@ -39,6 +39,7 @@ func loadHostedSession(ctx context.Context, owner *supervisor.Supervisor, id str
 }
 
 type hostedLoadRequest struct {
+	restoringTabs                     bool
 	application                       *app.App
 	targetApp                         *app.App
 	oldPersisted                      string
@@ -64,7 +65,7 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 	generation, _ := m.supervisor.RouteGeneration(m.paneFocus())
 	lifetime := m.ctx()
 	ctx, cancel := context.WithCancel(lifetime)
-	request := &hostedLoadRequest{application: m.application, focus: m.paneFocus(), target: target, persisted: id, generation: generation, cancel: cancel, sidebar: m.chatPage.GetSidebarSettings(), send: send}
+	request := &hostedLoadRequest{restoringTabs: m.restoringTabs, application: m.application, focus: m.paneFocus(), target: target, persisted: id, generation: generation, cancel: cancel, sidebar: m.chatPage.GetSidebarSettings(), send: send}
 	if target != "" {
 		request.pending = m.pendingRestores[target]
 		request.oldPersisted = m.persistedSessionID(target)
@@ -128,6 +129,10 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 
 func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 	request := result.request
+	if request != nil && request.restoringTabs {
+		m.restoringTabs = true
+		defer func() { m.restoringTabs = false }()
+	}
 	closeResult := func() {
 		if result.data != nil && result.data.application != nil {
 			result.data.application.Close()
@@ -192,10 +197,13 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 	var persistenceWarning tea.Cmd
 	if m.tuiStore != nil {
 		var persistErr error
-		if request.target != "" {
+		if request.target != "" && request.target != m.fallbackTab {
 			persistErr = m.tuiStore.UpdateTabSessionID(m.ctx(), request.oldPersisted, sess.ID)
 		} else {
 			persistErr = m.tuiStore.AddTab(m.ctx(), sess.ID, sess.WorkingDir)
+		}
+		if persistErr == nil && request.target == m.fallbackTab {
+			m.fallbackTab = ""
 		}
 		if persistErr != nil {
 			persistenceWarning = notification.WarningCmd("Session opened but tab persistence failed: " + persistErr.Error())

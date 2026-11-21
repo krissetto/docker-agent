@@ -4,9 +4,10 @@ package messages
 // heights. Prefix sums, point updates, appends and "which item holds line N"
 // are all O(log n), so geometry queries never walk the transcript.
 type layoutIndex struct {
-	tree []int // 1-based Fenwick tree; tree[0] is unused
-	vals []int // current effective height per item, 0-based
-	sum  int   // total of vals
+	order, positions []int
+	tree             []int // 1-based Fenwick tree; tree[0] is unused
+	vals             []int // current effective height per item, 0-based
+	sum              int   // total of vals
 
 	// touched counts Fenwick nodes read or written. It is a work counter only.
 	touched uint64
@@ -22,10 +23,10 @@ func (x *layoutIndex) Len() int { return len(x.vals) }
 func (x *layoutIndex) Total() int { return x.sum }
 
 // Height returns the effective height of item i.
-func (x *layoutIndex) Height(i int) int { return x.vals[i] }
+func (x *layoutIndex) Height(i int) int { return x.vals[x.position(i)] }
 
 // Offset returns the first line of item i, that is the sum of heights before it.
-func (x *layoutIndex) Offset(i int) int { return x.prefix(i) }
+func (x *layoutIndex) Offset(i int) int { return x.prefix(x.position(i)) }
 
 // Append adds an item of height v at the end in O(log n).
 func (x *layoutIndex) Append(v int) {
@@ -42,6 +43,7 @@ func (x *layoutIndex) Append(v int) {
 
 // Set changes the height of item i in O(log n).
 func (x *layoutIndex) Set(i, v int) {
+	i = x.position(i)
 	delta := v - x.vals[i]
 	if delta == 0 {
 		return
@@ -83,6 +85,9 @@ func (x *layoutIndex) Find(target int) int {
 			rem -= x.tree[next]
 		}
 	}
+	if pos < len(x.order) {
+		return x.order[pos]
+	}
 	return pos
 }
 
@@ -98,6 +103,13 @@ func (x *layoutIndex) prefix(k int) int {
 
 // Rebuild replaces every item height with vals in O(n) time.
 func (x *layoutIndex) Rebuild(vals []int) {
+	if len(x.order) == len(vals) {
+		ordered := make([]int, len(vals))
+		for position, source := range x.order {
+			ordered[position] = vals[source]
+		}
+		vals = ordered
+	}
 	x.vals = append(x.vals[:0], vals...)
 	x.tree = make([]int, len(vals)+1)
 	x.sum = 0
@@ -108,4 +120,11 @@ func (x *layoutIndex) Rebuild(vals []int) {
 			x.tree[p] += x.tree[i+1]
 		}
 	}
+}
+
+func (x *layoutIndex) position(source int) int {
+	if source >= 0 && source < len(x.positions) {
+		return x.positions[source]
+	}
+	return source
 }

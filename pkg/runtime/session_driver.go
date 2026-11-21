@@ -86,6 +86,7 @@ func (g *driverWorkGroup) Wait() { <-g.DoneChan() }
 // runtime-owned wake run.
 
 type sessionDriver struct {
+	activeRequireApproval bool // Transient constraint for this accepted turn, never session policy.
 	sessionLifecycle
 
 	withdrawnInputs   map[string]string
@@ -198,18 +199,19 @@ type sessionDriver struct {
 	beforePrepareStart    func()
 	// beforeAnyPrepareStart is a test seam parked by every start (post, wake,
 	// scheduler, drive) before the active request is claimed. Nil in production.
-	beforeAnyPrepareStart atomic.Pointer[func()]
-	abortStart            func()
-	onStarted             map[int]func()
-	onSettled             map[int]func()
-	nextHookID            int
-	settled               chan struct{}
-	cacheWarmups          map[string]bool
-	titleStatus           string
-	backgroundProcesses   map[string]tools.BackgroundProcess
-	titleGeneration       uint64
-	titleCancel           context.CancelFunc
-	titleWriteReserved    bool
+	beforeAnyPrepareStart   atomic.Pointer[func()]
+	abortStart              func()
+	onStarted               map[int]func()
+	onSettled               map[int]func()
+	nextHookID              int
+	settled                 chan struct{}
+	cacheWarmups            map[string]bool
+	titleStatus             string
+	backgroundProcesses     map[string]tools.BackgroundProcess
+	backgroundOutputSources map[string]tools.BackgroundProcessOutputSource
+	titleGeneration         uint64
+	titleCancel             context.CancelFunc
+	titleWriteReserved      bool
 }
 
 type sessionInteraction struct {
@@ -1064,7 +1066,7 @@ func (d *sessionDriver) beginReclaimLocked() driverReclaimOutcome {
 	return driverReclaimed
 }
 
-func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLimits, buffer int) (driverObservation, SessionSnapshot, error) {
+func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLimits, buffer int, interest ...[]string) (driverObservation, SessionSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return driverObservation{}, SessionSnapshot{}, err
 	}
@@ -1073,7 +1075,7 @@ func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLi
 	if d.reclaiming || (d.stopped && !d.stoppedView) || d.sess == nil {
 		return driverObservation{}, SessionSnapshot{}, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "observe"}
 	}
-	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), nil, buffer)
+	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), nil, buffer, interest...)
 	if live == nil || cancel == nil {
 		return driverObservation{}, SessionSnapshot{}, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "observe"}
 	}
@@ -1152,13 +1154,13 @@ func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLi
 	return obs, snapshot, nil
 }
 
-func (d *sessionDriver) observe(since *uint64, buffer int) driverObservation {
+func (d *sessionDriver) observe(since *uint64, buffer int, interest ...[]string) driverObservation {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.reclaiming || (d.stopped && !d.stoppedView) {
 		return driverObservation{}
 	}
-	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), since, buffer)
+	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), since, buffer, interest...)
 	cloned, status, interactions, pendingInputs, position := d.snapshotLocked()
 	processes := d.backgroundProcessesLocked()
 	for i := range seed {
@@ -1445,6 +1447,7 @@ func (d *sessionDriver) pruneBackgroundProcessesLocked(now time.Time) {
 	for id, process := range d.backgroundProcesses {
 		if process.State != tools.BackgroundProcessRunning && !process.FinishedAt.IsZero() && now.Sub(process.FinishedAt) >= backgroundProcessRetention {
 			delete(d.backgroundProcesses, id)
+			delete(d.backgroundOutputSources, id)
 		}
 	}
 }
@@ -1469,7 +1472,7 @@ func (d *sessionDriver) publishBackgroundProcessesLocked() {
 	d.events.Publish(d.sessionIDLocked(), &BackgroundProcessesEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "background_processes", SessionID: d.sessionIDLocked(), Processes: processes})
 }
 
-func (d *sessionDriver) adoptBackgroundProcess(ctx context.Context, process tools.BackgroundProcess) error {
+func (d *sessionDriver) adoptBackgroundProcess(ctx context.Context, process tools.BackgroundProcess, sources ...tools.BackgroundProcessOutputSource) error {
 	err := d.ownerCall(context.WithoutCancel(ctx), func() error {
 		if d.stopped || d.sess == nil || process.SessionID != d.sessionIDLocked() || process.ID == "" || process.State != tools.BackgroundProcessRunning || process.StartedAt.IsZero() || !process.FinishedAt.IsZero() {
 			return ErrSessionClosed
@@ -1493,6 +1496,7 @@ func (d *sessionDriver) adoptBackgroundProcess(ctx context.Context, process tool
 				return errors.New("background process capacity exceeded")
 			}
 			delete(d.backgroundProcesses, oldestID)
+			delete(d.backgroundOutputSources, oldestID)
 		}
 		process.Command = boundedProcessText(process.Command)
 		process.Cwd = boundedProcessText(process.Cwd)
@@ -1500,6 +1504,12 @@ func (d *sessionDriver) adoptBackgroundProcess(ctx context.Context, process tool
 			process.AgentName = d.AgentNameLocked()
 		}
 		d.backgroundProcesses[process.ID] = process
+		if len(sources) > 0 && sources[0] != nil {
+			if d.backgroundOutputSources == nil {
+				d.backgroundOutputSources = make(map[string]tools.BackgroundProcessOutputSource)
+			}
+			d.backgroundOutputSources[process.ID] = sources[0]
+		}
 		d.publishBackgroundProcessesLocked()
 		return nil
 	})
@@ -1510,6 +1520,10 @@ func (d *sessionDriver) adoptBackgroundProcess(ctx context.Context, process tool
 }
 
 func (d *sessionDriver) finishBackgroundProcess(ctx context.Context, id string, state tools.BackgroundProcessState, finishedAt time.Time) {
+	d.finishBackgroundProcessResult(ctx, id, state, finishedAt, -1, false)
+}
+
+func (d *sessionDriver) finishBackgroundProcessResult(ctx context.Context, id string, state tools.BackgroundProcessState, finishedAt time.Time, exitCode int, timedOut bool) {
 	if state != tools.BackgroundProcessCompleted && state != tools.BackgroundProcessStopped && state != tools.BackgroundProcessFailed {
 		return
 	}
@@ -1520,6 +1534,7 @@ func (d *sessionDriver) finishBackgroundProcess(ctx context.Context, id string, 
 			return nil
 		}
 		process.State, process.FinishedAt = state, finishedAt
+		process.ExitCode, process.TimedOut = exitCode, timedOut
 		d.backgroundProcesses[id] = process
 		d.publishBackgroundProcessesLocked()
 		changed = true
@@ -1995,6 +2010,7 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		if d.startCanceled {
 			return context.Canceled
 		}
+		d.activeRequireApproval = next.RequireApproval
 		d.events.SetRequest(d.identityID, d.activeRequestID, d.generation+1)
 		d.beginRun()
 		d.generationResult, d.lastActive = "", time.Now()
@@ -2294,6 +2310,7 @@ func (d *sessionDriver) finishRunContextOpts(ctx context.Context, generation uin
 			successorStartDone = d.startDone
 			d.startCanceled = false
 		}
+		d.activeRequireApproval = false
 		d.cancel, d.activeRequestID = nil, ""
 		d.events.SetRequest(d.identityID, "", 0)
 		if !successor {

@@ -17,7 +17,7 @@ func (m *appModel) persistPaneWorkspaceState() {
 		return
 	}
 	ctx := m.ctx()
-	tabs, _, err := m.tuiStore.GetTabs(ctx)
+	tabs, activeID, err := m.tuiStore.GetTabs(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to read tabs while persisting pane workspaces", "error", err)
 		return
@@ -62,6 +62,56 @@ func (m *appModel) persistPaneWorkspaceState() {
 			workspace.SidebarPreferredWidth = m.paneSidebarSettings.PreferredWidth
 		}
 		state.Workspaces = append(state.Workspaces, workspace)
+	}
+	// A partially attached workspace is only a projection of its saved layout.
+	// Keep its full topology until every remaining member can be materialized.
+	saved, err := m.tuiStore.GetPaneWorkspaceState(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to read saved pane workspaces", "error", err)
+		return
+	}
+	if saved.Version > 1 {
+		return
+	}
+	for index, workspace := range saved.Workspaces {
+		workspace.Layout = filterPersistedPaneLayout(workspace.Layout, persisted)
+		workspace.RestoreLayout = filterPersistedPaneLayout(workspace.RestoreLayout, persisted)
+		if !persisted[workspace.AnchorSessionID] {
+			workspace.AnchorSessionID = firstPaneSession(workspace.Layout, workspace.RestoreLayout)
+		}
+		if workspace.AnchorSessionID == "" {
+			continue
+		}
+		if !persisted[workspace.FocusSessionID] {
+			workspace.FocusSessionID = workspace.AnchorSessionID
+		}
+		retained := false
+		for id := range persisted {
+			if !paneLayoutContains(workspace.Layout, id) && !paneLayoutContains(workspace.RestoreLayout, id) {
+				continue
+			}
+			route := m.findTabByPersistedID(id)
+			if route == "" || m.pendingRestores[route] != "" {
+				retained = true
+				break
+			}
+		}
+		if !retained {
+			continue
+		}
+		state.Workspaces = slices.DeleteFunc(state.Workspaces, func(live tuistate.PaneWorkspace) bool {
+			for id := range persisted {
+				if (paneLayoutContains(workspace.Layout, id) || paneLayoutContains(workspace.RestoreLayout, id)) &&
+					(paneLayoutContains(live.Layout, id) || paneLayoutContains(live.RestoreLayout, id)) {
+					return true
+				}
+			}
+			return false
+		})
+		state.Workspaces = slices.Insert(state.Workspaces, min(index, len(state.Workspaces)), workspace)
+		if paneLayoutContains(workspace.Layout, activeID) || paneLayoutContains(workspace.RestoreLayout, activeID) {
+			state.ActiveAnchorSessionID = workspace.AnchorSessionID
+		}
 	}
 	if err := m.tuiStore.SetPaneWorkspaceState(ctx, state); err != nil {
 		slog.WarnContext(ctx, "Failed to persist pane workspaces", "error", err)
@@ -276,4 +326,28 @@ func (m *appModel) ensurePaneWorkspaceComponents() tea.Cmd {
 		commands = append(commands, page.Init(), chat.WatchGitBranch(page), editor.Init())
 	}
 	return tea.Batch(commands...)
+}
+
+func filterPersistedPaneLayout(node *tuistate.PaneLayoutNode, persisted map[string]bool) *tuistate.PaneLayoutNode {
+	if node == nil {
+		return nil
+	}
+	if node.SessionID != "" {
+		if !persisted[node.SessionID] {
+			return nil
+		}
+		copy := *node
+		return &copy
+	}
+	first := filterPersistedPaneLayout(node.First, persisted)
+	second := filterPersistedPaneLayout(node.Second, persisted)
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	copy := *node
+	copy.First, copy.Second = first, second
+	return &copy
 }

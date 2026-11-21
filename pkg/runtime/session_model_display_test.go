@@ -264,6 +264,12 @@ func TestFallbackReasoningControlsTargetPrimarySessionBinding(t *testing.T) {
 				}
 				assert.Equal(t, "openai/"+wantModel, info.Model)
 				assert.Equal(t, wantModel, details.ModelID)
+				observed, err := h.Observe(t.Context(), ObserveOptions{})
+				require.NoError(t, err)
+				presentation := observed.Primary().Presentation
+				observed.Cancel()
+				assert.Equal(t, "openai/"+wantModel, presentation[0].(*AgentInfoEvent).Model)
+				assert.Equal(t, details, presentation[1].(*TeamInfoEvent).AvailableAgents[0], "reconnect preserves the same fallback reasoning controls")
 				assert.NotEmpty(t, details.ModelName)
 				control := details.ThinkingControl()
 				assert.Equal(t, "openai/"+primaryModel, control.ModelRef)

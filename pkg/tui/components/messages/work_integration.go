@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
 	"github.com/docker/docker-agent/pkg/tui/components/workblock"
@@ -37,6 +38,24 @@ func (m *model) HasWorkInCurrentExchange() bool {
 		return false
 	}
 	return len(m.workProjection.exchanges[len(m.workProjection.exchanges)-1].work) > 0
+}
+
+// HasResponseInCurrentExchange ignores status envelopes and earlier human turns.
+func (m *model) HasResponseInCurrentExchange() bool {
+	for _, msg := range slices.Backward(m.messages) {
+		if msg.Type == types.MessageTypeUser && !msg.Pending {
+			break
+		}
+		switch msg.Type {
+		case types.MessageTypeAssistant, types.MessageTypeAssistantReasoningBlock:
+			if msg.Content != "" || len(msg.AssistantMedia) > 0 {
+				return true
+			}
+		case types.MessageTypeToolCall, types.MessageTypeToolResult:
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) SetVisibleReplies(policy messages.VisibleReplies) tea.Cmd {
@@ -343,6 +362,7 @@ func (m *model) syncWorkProjection() {
 			m.workProjectionDirty = false
 			return
 		}
+		m.transientWork = nil
 		m.workBlocks = map[*types.Message]*workblock.Model{}
 		m.workProjection = emptyWorkProjection()
 		m.workExchangeBySource = nil
@@ -404,6 +424,7 @@ func (m *model) syncWorkProjection() {
 	// Anchors whose header text changed. Their rows are no longer valid, and
 	// nothing else would re-measure them now that layout does not poll blocks.
 	var restyled []int
+	transient := make(map[int]*workblock.Model)
 	for exchangeIndex, exchange := range projection.exchanges {
 		visibleWork := make([]int, 0, len(exchange.work))
 		for _, source := range exchange.work {
@@ -466,6 +487,19 @@ func (m *model) syncWorkProjection() {
 			old.Release()
 		}
 	}
+	for source, block := range transient {
+		if m.transientWork[source] != block {
+			m.markSlotsStale()
+			m.dropSlot(source)
+		}
+	}
+	for source, block := range m.transientWork {
+		if transient[source] != block {
+			m.markSlotsStale()
+			m.dropSlot(source)
+		}
+	}
+	m.transientWork = transient
 	m.workBlocks = blocks
 	m.rememberPlainHeights(sourceToHeader)
 	if !sameMembership(m.workHeaderBySource, headerBySource) || !sameSourceMap(m.workSourceToHeader, sourceToHeader) {
@@ -615,16 +649,29 @@ func (m *model) restoreWorkPlain() {
 
 func (m *model) workStatusForIndices(indices []int) workblock.Status {
 	var status workblock.Status
+	background := func(msg *types.Message) {
+		if bg := msg.Background; bg != nil && bg.Authoritative {
+			if bg.State == tools.BackgroundProcessRunning {
+				status.BackgroundRunning++
+			}
+			if bg.State == tools.BackgroundProcessFailed || bg.TimedOut {
+				status.BackgroundFailed = true
+			}
+		}
+	}
+
 	for _, source := range indices {
 		msg := m.messages[source]
 		switch msg.Type {
 		case types.MessageTypeToolCall:
+			background(msg)
 			if msg.ToolStatus == types.ToolStatusCompleted || msg.ToolStatus == types.ToolStatusError {
 				status.ToolCount++
 			}
 		case types.MessageTypeAssistantReasoningBlock:
 			if block, ok := m.views[source].(*reasoningblock.Model); ok {
 				status.ToolCount += block.CompletedToolCount()
+				block.ToolCards(func(msg *types.Message, _ layout.Model) { background(msg) })
 			}
 		}
 	}
@@ -656,7 +703,7 @@ func (m *model) workBlockAt(g int) (anchor int, block *workblock.Model, start in
 // visited.
 func (m *model) unmeasuredWorkAnchorsIn(start, end int) []int {
 	var anchors []int
-	for slot := max(0, m.slotAt(start)); slot < len(m.views); slot++ {
+	for slot := max(0, m.slotAt(start)); slot < len(m.views); slot = m.nextDisplaySlot(slot) {
 		m.stats.workIndexVisits++
 		offset := m.slotOffset(slot)
 		if offset >= end {
@@ -810,19 +857,19 @@ func (m *model) displayNeedsSeparator(index int) bool {
 			return false
 		}
 	}
-	if index < 0 || index >= len(m.messages)-1 {
+	if index < 0 || index >= len(m.messages) {
 		return false
 	}
-	next := index + 1
+	next := m.nextDisplaySlot(index)
 	for next < len(m.messages) && m.hiddenSlot(next) {
-		next++
+		next = m.nextDisplaySlot(next)
 	}
 	if next >= len(m.messages) {
 		return false
 	}
 	// A Work composite owns its spacing regardless of its anchor source type.
 	// In particular, an assistant anchor has no invisible action row.
-	if m.workEnabled && m.workHeaderBySource[next] != nil {
+	if m.workEnabled && (m.workHeaderBySource[next] != nil || m.transientWork[next] != nil) {
 		return true
 	}
 	// Compact Work: a regular assistant reply reserves an invisible top action row that already separates it.
@@ -1267,7 +1314,9 @@ func (m *model) captureReplyHandoffAnchor() {
 	if !m.userHasScrolled || m.height <= 0 {
 		return
 	}
-	for screenY := range m.height {
+	// Anchor within the body, not the inserted header: sticky visibility may
+	// change during reflow without moving the reader to a different source row.
+	for screenY := range m.bodyHeight() {
 		line := m.scrollOffset + screenY
 		source, local := m.globalLineToMessageLineCanonical(line)
 		if source < 0 || source >= len(m.messages) {
@@ -1698,6 +1747,14 @@ func (m *model) refreshWorkStatusForSource(source int) {
 }
 
 func (m *model) invalidateWorkBlock(block *workblock.Model) {
+	for source, transient := range m.transientWork {
+		if transient == block {
+			m.dropSlot(source)
+			m.renderDirty = true
+			m.invalidateView()
+			return
+		}
+	}
 	if source := m.workSourceForBlock(block); source >= 0 {
 		m.dropSlot(source)
 		m.renderDirty = true

@@ -386,6 +386,7 @@ type call struct {
 	guardComputed bool
 	guardResult   *hooks.Result
 	// A new ask after a legacy rewrite cannot be bypassed by earlier grants.
+	requiredApproval  bool
 	rewrittenInputAsk bool
 
 	// Safety-label cache: the classifier result is stable for the
@@ -417,6 +418,7 @@ func (c *call) safetyLabel() safety.Label {
 // and approval bookkeeping lives here so the call lifecycle is visible
 // at a glance.
 func (c *call) run(ctx context.Context) CallOutcome {
+	c.requiredApproval = requiredApproval(ctx)
 	// gen_ai.* attributes are always emitted (spec-compliant). Legacy
 	// attribute names are added only when the OTel stability flag is
 	// at its default — `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`
@@ -1025,6 +1027,14 @@ func (c *call) confirmationMetadata(permissionMeta map[string]string) map[string
 // (with optional session/tool-wide approval persistence) or emit a
 // rejection error response.
 func (c *call) handleResume(ctx context.Context, req ResumeRequest, runTool func() CallOutcome) CallOutcome {
+	// A turn-local constraint never grants lasting session/tool authority,
+	// even if another observer submits an "always" response to the prompt.
+	if c.requiredApproval {
+		switch NormalizeResumeType(req.Type) {
+		case ResumeTypeApproveBalanced, ResumeTypeApproveAutonomous, ResumeTypeApproveTool:
+			req.Type = ResumeTypeApprove
+		}
+	}
 	if c.d.ApprovalEffect != nil {
 		if err := c.d.ApprovalEffect(ctx, c.sess, req, c.tc.Function.Name); err != nil {
 			c.errorResponse(ctx, "Unable to persist approval: "+err.Error())

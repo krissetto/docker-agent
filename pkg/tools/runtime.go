@@ -89,6 +89,9 @@ type BackgroundProcess struct {
 	StartedAt  time.Time              `json:"started_at"`
 	FinishedAt time.Time              `json:"finished_at,omitzero"`
 	State      BackgroundProcessState `json:"state"`
+	// ExitCode is meaningful only for terminal states; -1 means no exit status (e.g. timeout).
+	ExitCode int  `json:"exit_code,omitempty"`
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 func (p BackgroundProcess) MarshalJSON() ([]byte, error) {
@@ -107,7 +110,9 @@ func (p BackgroundProcess) MarshalJSON() ([]byte, error) {
 		StartedAt  time.Time              `json:"started_at"`
 		FinishedAt *time.Time             `json:"finished_at,omitempty"`
 		State      BackgroundProcessState `json:"state"`
-	}{p.ID, p.SessionID, p.AgentName, p.ToolCallID, p.Command, p.Cwd, p.StartedAt, finishedAt, p.State})
+		ExitCode   int                    `json:"exit_code,omitempty"`
+		TimedOut   bool                   `json:"timed_out,omitempty"`
+	}{p.ID, p.SessionID, p.AgentName, p.ToolCallID, p.Command, p.Cwd, p.StartedAt, finishedAt, p.State, p.ExitCode, p.TimedOut})
 }
 
 // BackgroundWork tracks an adopted process until its completion guidance has
@@ -131,6 +136,26 @@ type BackgroundProcessIdentity interface {
 type BackgroundProcessLifecycle interface {
 	AdoptBackgroundProcess(process BackgroundProcess) error
 	FinishBackgroundProcess(state BackgroundProcessState, finishedAt time.Time)
+}
+
+// BackgroundProcessResultLifecycle adds terminal exit details without changing legacy hosts.
+type BackgroundProcessResultLifecycle interface {
+	FinishBackgroundProcessResult(state BackgroundProcessState, finishedAt time.Time, exitCode int, timedOut bool)
+}
+
+// BackgroundProcessOutputSink receives bounded, contiguous live output batches.
+type BackgroundProcessOutputSink interface {
+	EmitBackgroundProcessOutput(offset int64, output string)
+}
+
+// BackgroundProcessOutputInterest optionally suppresses live batching when no viewer wants it.
+type BackgroundProcessOutputInterest interface {
+	BackgroundProcessOutputInterested() bool
+}
+
+// BackgroundProcessOutputRegistrar binds the manager's snapshot source to adopted work.
+type BackgroundProcessOutputRegistrar interface {
+	SetBackgroundProcessOutputSource(BackgroundProcessOutputSource)
 }
 
 // BackgroundWorkRuntime is an optional capability used by tools that hand

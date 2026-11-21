@@ -82,6 +82,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 			"pending_user_message_accepted": func() Event { return &PendingUserMessageAcceptedEvent{} },
 			"pending_user_message_promoted": func() Event { return &PendingUserMessagePromotedEvent{} },
 			"turn_settled":                  func() Event { return &TurnSettledEvent{} },
+			"background_process_output":     func() Event { return &BackgroundProcessOutputEvent{} },
 			"background_processes":          func() Event { return &BackgroundProcessesEvent{} },
 			"subagent_created":              func() Event { return &SubagentCreatedEvent{} },
 			"interaction_resolved":          func() Event { return &InteractionResolvedEvent{} },

@@ -39,6 +39,15 @@ func TestKitUserConfig(t *testing.T) {
 	assert.True(t, cfg.Settings.YOLO)
 	assert.Equal(t, latest.SafetyModeAutonomous, cfg.Settings.GetSafety())
 	assert.True(t, cfg.Settings.GetRestoreTabs())
+	assert.True(t, cfg.Settings.GetScrollOnSend())
+	require.NotNil(t, cfg.Settings.SplitDiffView)
+	assert.True(t, cfg.Settings.GetSplitDiffView())
+	assert.Equal(t, "split", cfg.Settings.GetGitDiffLayout())
+	assert.Equal(t, "all", cfg.Settings.GetVisibleReplies())
+	layout := cfg.Settings.GetLayout()
+	assert.Equal(t, "left", layout.SidebarPosition)
+	assert.True(t, layout.AlignInputWithMessages)
+	assert.True(t, layout.ShowPlans)
 
 	require.NoError(t, userconfig.Update(func(cfg *userconfig.Config) error {
 		cfg.Settings.ShowBanner = new(true)
@@ -53,6 +62,7 @@ func TestKitUserConfig(t *testing.T) {
 	require.NoError(t, userconfig.Update(func(cfg *userconfig.Config) error {
 		cfg.Settings.YOLO = false
 		cfg.Settings.RestoreTabs = new(false)
+		cfg.Settings.ScrollOnSend = false
 		return nil
 	}))
 	cfg, err = userconfig.Load()
@@ -60,6 +70,7 @@ func TestKitUserConfig(t *testing.T) {
 	assert.False(t, cfg.GetSettings().YOLO, "saved Settings can disable YOLO")
 	assert.Empty(t, cfg.GetSettings().GetSafety(), "no autonomous safety override remains")
 	assert.False(t, cfg.GetSettings().GetRestoreTabs(), "saved Settings can disable tab restoration")
+	assert.False(t, cfg.GetSettings().GetScrollOnSend(), "saved Settings can disable scroll-on-send")
 
 	paths.SetConfigDir(t.TempDir())
 	t.Cleanup(func() { paths.SetConfigDir("") })

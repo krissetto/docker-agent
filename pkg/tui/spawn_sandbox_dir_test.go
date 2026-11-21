@@ -143,11 +143,26 @@ func TestSandboxNewSessionInvalidDirectoryDoesNotSpawn(t *testing.T) {
 }
 
 func TestHostExplicitWorkingDirectoryStillBypassesPicker(t *testing.T) {
-	t.Setenv("SANDBOX_VM_ID", "")
+	isolateSandboxEnv(t)
 	workspace := t.TempDir()
 	spy := &spySpawner{}
 	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir(workspace))
 	_, _ = m.Update(messages.SpawnSessionMsg{})
 	require.Equal(t, []string{workspace}, spy.dirs)
 	require.Equal(t, 2, m.supervisor.Count())
+}
+
+func TestModernSandboxMarkerPreservesWorkingDirectoryPicker(t *testing.T) {
+	isolateSandboxEnv(t)
+	t.Setenv("IS_SANDBOX", "1")
+	workspace := t.TempDir()
+	spy := &spySpawner{}
+	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir(workspace))
+	m.supervisor.ActiveRunner().WorkingDir = workspace
+
+	_, cmd := m.Update(messages.SpawnSessionMsg{})
+	_, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
+	require.True(t, ok, "Kit sbx@1 sandboxes retain the same picker as legacy VMs")
+	require.Empty(t, spy.dirs)
+	require.Equal(t, 1, m.supervisor.Count())
 }

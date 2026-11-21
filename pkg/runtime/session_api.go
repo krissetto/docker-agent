@@ -528,12 +528,16 @@ type SessionCapabilities struct {
 
 // TurnInput describes one requested turn.
 type TurnInput struct {
-	GenerateTitle  bool
-	TitleGenerator *sessiontitle.Generator `json:"-"`
-	Content        string
-	MultiContent   []chat.MessagePart
-	Retry          bool
-	RequestID      string `json:"request_id,omitempty"`
+	// RequireIdle and RequireApproval opt synchronous hosts out of mailbox
+	// queueing and permissive shared-session defaults at atomic admission.
+	RequireIdle     bool
+	RequireApproval bool
+	GenerateTitle   bool
+	TitleGenerator  *sessiontitle.Generator `json:"-"`
+	Content         string
+	MultiContent    []chat.MessagePart
+	Retry           bool
+	RequestID       string `json:"request_id,omitempty"`
 }
 
 // SessionMetadata is immutable handle metadata.
@@ -687,6 +691,9 @@ type ObserveOptions struct {
 	Tree        bool
 	// OrderedTree selects atomic descendant baselines and an ordered tree tail.
 	OrderedTree bool
+	// BackgroundOutputInterest seeds the observation's live background-output
+	// interest (session ID → process IDs) atomically with registration.
+	BackgroundOutputInterest map[string][]string
 }
 
 // InteractionSnapshot is an immutable outstanding interaction. Event is
@@ -769,6 +776,8 @@ func (envelope SessionEvent) IsLiveSeed() bool {
 		return event.ToolCallID != "" && event.Output != ""
 	case *ToolCallResponseEvent:
 		return event.ToolCallID != ""
+	case *BackgroundProcessOutputEvent:
+		return event.SessionID == envelope.SessionID && event.ProcessID != "" && event.Offset >= 0 && event.Output != ""
 	case *BackgroundProcessesEvent:
 		if event.SessionID != envelope.SessionID {
 			return false
@@ -814,6 +823,10 @@ type Observation struct {
 	// channel means the in-process observation cannot fail independently.
 	Errors <-chan error
 	Cancel func()
+	// SetBackgroundOutputInterest replaces this observation's set of background
+	// processes (of sessionID) whose live output it wants; empty clears it.
+	// Interest is per observation and dies with it. Nil means unsupported.
+	SetBackgroundOutputInterest func(sessionID string, processIDs []string) error
 }
 
 // Primary returns the observed session snapshot, or the zero value when the

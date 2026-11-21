@@ -775,7 +775,7 @@ func (a *App) watchDescendantUsage(ctx context.Context, handle runtime.SessionHa
 }
 
 // consumeDescendantUsage is the topology-free counterpart of consumeTreeObservation:
-// it seeds added descendants and forwards descendant usage, nothing else.
+// it seeds added descendants and forwards usage and shared-plan changes.
 func (a *App) consumeDescendantUsage(ctx context.Context, watch *treeWatch, observation runtime.Observation, epoch uint64) {
 	a.seedDescendantUsages(ctx, watch, observation.Initial, epoch)
 	for _, envelope := range observation.Replay {
@@ -919,10 +919,10 @@ func descendantSeedable(sess *session.Session, rootSessionID string) bool {
 	return input > 0 || output > 0
 }
 
-// forwardDescendantUsage republishes a descendant's per-session usage on the
-// bus. The root projection keeps only its own session's usage, and UIs key
-// usage by session ID, so child context and cost otherwise never reach them.
+// forwardDescendantUsage republishes descendant usage and shared-plan changes.
+// The root projection omits child usage; an idle root has no plan subscription.
 func (a *App) forwardDescendantUsage(ctx context.Context, watch *treeWatch, envelope runtime.SessionEvent, epoch uint64) {
+	a.forwardDescendantPlanChange(ctx, watch, envelope, epoch)
 	usage, ok := envelope.Event.(*runtime.TokenUsageEvent)
 	if !ok || usage.Usage == nil || envelope.Gap || envelope.SessionID == "" || envelope.SessionID == watch.rootSessionID {
 		return
@@ -934,6 +934,15 @@ func (a *App) forwardDescendantUsage(ctx context.Context, watch *treeWatch, enve
 		return
 	}
 	a.sendEvent(ctx, usage)
+}
+
+// An idle parent has no run-stream subscription to shared-plan mutations.
+func (a *App) forwardDescendantPlanChange(ctx context.Context, watch *treeWatch, envelope runtime.SessionEvent, epoch uint64) {
+	change, ok := envelope.Event.(*runtime.PlanChangedEvent)
+	if !ok || envelope.Gap || envelope.SessionID == "" || envelope.SessionID == watch.rootSessionID || epoch != a.bridgeEpoch.Load() {
+		return
+	}
+	a.sendEvent(ctx, change)
 }
 
 const maxTreeRebaselines = 8

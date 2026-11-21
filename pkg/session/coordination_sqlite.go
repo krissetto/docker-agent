@@ -255,7 +255,7 @@ func (s *SQLiteSessionStore) AcceptReport(ctx context.Context, parent, id string
 		if err != nil {
 			return ReportAcceptance{}, err
 		}
-		if err := json.Unmarshal([]byte(data), &stored.Message); err != nil {
+		if err := unmarshalStoredMessage([]byte(data), &stored); err != nil {
 			return ReportAcceptance{}, err
 		}
 		result.Message = &stored

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,14 +20,20 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+const maxBackgroundOutputSnapshotBytes = 64 * 1024
+
 const (
 	ToolNameListRunningProcesses  = "list_running_processes"
 	ToolNameInspectRunningProcess = "inspect_running_process"
 	ToolNameKillRunningProcess    = "kill_running_process"
 
-	maxShellProcessOutputBytes = 10 * 1024 * 1024
-	maxProcessesPerOwner       = 8
-	maxActiveProcesses         = 8
+	maxShellProcessOutputBytes    = 10 * 1024 * 1024
+	maxBackgroundOutputBatchBytes = 32 * 1024
+	backgroundOutputInterval      = 100 * time.Millisecond
+	completedOutputRetention      = 4 * time.Second
+	maxRetainedCompletedProcesses = 64
+	maxProcessesPerOwner          = 8
+	maxActiveProcesses            = 8
 
 	// BackgroundFollowupGuidance keeps adopted process ownership distinct from model polling.
 	BackgroundFollowupGuidance = "Completion output is delivered automatically and wakes/resumes this agent. After adoption, do independent work; if no independent work remains, end your turn without tool calls (no keep-alive needed). Never poll with inspect_running_process, list_running_processes, sleep, or dummy calls. Use inspect/list only once for a concrete diagnostic or user request; use kill only to intentionally cancel, never to end your turn."
@@ -78,6 +85,10 @@ type shellProcess struct {
 	processGroup     *processGroup
 	outputMu         sync.RWMutex
 	output           *bytes.Buffer
+	outputBase       int64
+	truncated        bool
+	finishedAt       time.Time
+	writer           *shellCommandOutput
 	startTime        time.Time
 	status           atomic.Int32
 	exitCode         int
@@ -173,25 +184,88 @@ func (h *processHandler) finishJob(ctx context.Context, job *shellProcess, cmd *
 		newStatus = statusStopped
 	}
 	job.status.Store(newStatus)
+	job.finishedAt = time.Now()
 
 	status := job.status.Load()
 	exitCode := job.exitCode
-	output := job.output.String()
 	work := job.work
+	message := ""
+	if work != nil && status != statusStopped {
+		message = formatShellJobCompletion(job, status, exitCode, job.output.String())
+	}
+	if dropped := job.output.Len() - maxBackgroundOutputSnapshotBytes; dropped > 0 {
+		tail := bytes.Clone(job.output.Bytes()[dropped:])
+		job.output = bytes.NewBuffer(tail)
+		job.outputBase += int64(dropped)
+	}
 	job.outputMu.Unlock()
-	if lifecycle, ok := work.(tools.BackgroundProcessLifecycle); ok {
-		lifecycle.FinishBackgroundProcess(backgroundState(status), time.Now())
+	if job.shellOwned {
+		time.AfterFunc(completedOutputRetention, func() { h.jobs.Delete(job.id) })
+	}
+	if lifecycle, ok := work.(tools.BackgroundProcessResultLifecycle); ok {
+		lifecycle.FinishBackgroundProcessResult(backgroundState(status), job.finishedAt, exitCode, job.timeoutRequested.Load())
+	} else if lifecycle, ok := work.(tools.BackgroundProcessLifecycle); ok {
+		lifecycle.FinishBackgroundProcess(backgroundState(status), job.finishedAt)
 	}
 	if work != nil && status != statusStopped {
-		message := formatShellJobCompletion(job, status, exitCode, output)
 		if err := work.Complete(message); err != nil {
 			slog.WarnContext(ctx, "Failed to enqueue shell job completion", "job_id", job.id, "error", err)
 		}
 	} else if work != nil {
 		work.Cancel()
 	}
-	if job.shellOwned {
-		h.jobs.Delete(job.id)
+}
+
+// BackgroundProcessOutput returns only output belonging to the exact resource owner.
+func (t *Manager) BackgroundProcessOutput(ctx context.Context, processID string, maxBytes int) (tools.BackgroundProcessOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return tools.BackgroundProcessOutput{}, err
+	}
+	job, ok := t.handler.jobs.Load(processID)
+	if !ok || job.owner == nil || job.owner != tools.ResourceOwnerFromContext(ctx) {
+		return tools.BackgroundProcessOutput{}, tools.ErrBackgroundProcessNotFound
+	}
+	maxBytes = min(maxBytes, maxBackgroundOutputSnapshotBytes)
+	if maxBytes <= 0 {
+		maxBytes = maxBackgroundOutputSnapshotBytes
+	}
+	job.outputMu.RLock()
+	defer job.outputMu.RUnlock()
+	if !job.finishedAt.IsZero() && time.Since(job.finishedAt) >= completedOutputRetention {
+		return tools.BackgroundProcessOutput{}, tools.ErrBackgroundProcessNotFound
+	}
+	total := job.output.Len()
+	offset := max(0, total-maxBytes)
+	sessionID, _, toolCallID := "", "", ""
+	if identity, ok := job.work.(tools.BackgroundProcessIdentity); ok {
+		sessionID, _, toolCallID = identity.BackgroundProcessIdentity()
+	}
+	return tools.BackgroundProcessOutput{SessionID: sessionID, ProcessID: job.id, ToolCallID: toolCallID, State: backgroundState(job.status.Load()), Offset: job.outputBase + int64(offset), Output: string(job.output.Bytes()[offset:]), Total: job.outputBase + int64(total), Truncated: job.truncated}, nil
+}
+
+func (h *processHandler) pruneCompletedJobs() {
+	type completed struct {
+		id string
+		at time.Time
+	}
+	var retained []completed
+	h.jobs.Range(func(id string, job *shellProcess) bool {
+		job.outputMu.RLock()
+		at := job.finishedAt
+		job.outputMu.RUnlock()
+		if !at.IsZero() {
+			if time.Since(at) >= completedOutputRetention {
+				h.jobs.Delete(id)
+			} else {
+				retained = append(retained, completed{id, at})
+			}
+		}
+		return true
+	})
+	slices.SortFunc(retained, func(a, b completed) int { return a.at.Compare(b.at) })
+	for len(retained) >= maxRetainedCompletedProcesses {
+		h.jobs.Delete(retained[0].id)
+		retained = retained[1:]
 	}
 }
 
@@ -303,13 +377,15 @@ func (s *shellProcessSupervisor) reap() {
 }
 
 type shellCommandOutput struct {
-	job        *shellProcess
-	runtime    tools.Runtime
-	ctx        context.Context
-	foreground atomic.Bool
-	written    int64
-	truncated  bool
-	mu         sync.Mutex
+	job           *shellProcess
+	runtime       tools.Runtime
+	ctx           context.Context
+	foreground    atomic.Bool
+	written       int64
+	truncated     bool
+	mu            sync.Mutex
+	pending       []byte
+	pendingOffset int64
 }
 
 func (w *shellCommandOutput) result() string {
@@ -338,16 +414,52 @@ func (w *shellCommandOutput) Write(p []byte) (int, error) {
 	if kept < int64(len(p)) {
 		w.truncated = true
 	}
+	w.job.outputMu.Lock()
+	w.job.truncated = w.truncated
 	if kept > 0 {
-		w.job.outputMu.Lock()
 		w.job.output.Write(p[:kept])
-		w.job.outputMu.Unlock()
 	}
+	w.job.outputMu.Unlock()
 	if w.foreground.Load() && kept > 0 {
 		w.runtime.EmitOutput(w.ctx, string(p[:kept]))
+	} else if kept > 0 {
+		if _, ok := w.job.work.(tools.BackgroundProcessOutputSink); ok && w.backgroundOutputInterested() {
+			if int(kept) >= maxBackgroundOutputBatchBytes {
+				w.pending = append(w.pending[:0], p[kept-maxBackgroundOutputBatchBytes:kept]...)
+			} else {
+				drop := max(0, len(w.pending)+int(kept)-maxBackgroundOutputBatchBytes)
+				copy(w.pending, w.pending[drop:])
+				w.pending = append(w.pending[:len(w.pending)-drop], p[:kept]...)
+			}
+			w.pendingOffset = w.written - int64(len(w.pending))
+		} else {
+			w.pending = nil
+		}
 	}
 	w.mu.Unlock()
 	return len(p), nil
+}
+
+func (w *shellCommandOutput) backgroundOutputInterested() bool {
+	interest, ok := w.job.work.(tools.BackgroundProcessOutputInterest)
+	return !ok || interest.BackgroundProcessOutputInterested()
+}
+
+func (w *shellCommandOutput) flushBackground() {
+	w.mu.Lock()
+	if !w.backgroundOutputInterested() {
+		w.pending = nil
+		w.mu.Unlock()
+		return
+	}
+	output, offset := string(w.pending), w.pendingOffset
+	w.pending = w.pending[:0]
+	w.mu.Unlock()
+	if output != "" {
+		if sink, ok := w.job.work.(tools.BackgroundProcessOutputSink); ok {
+			sink.EmitBackgroundProcessOutput(offset, output)
+		}
+	}
 }
 
 func (h *processHandler) reserveShellSlot(owner *tools.ResourceOwner) (func(), bool) {
@@ -380,6 +492,7 @@ func (h *processHandler) reserveShellSlot(owner *tools.ResourceOwner) (func(), b
 
 func (h *processHandler) retainShellJob(job *shellProcess) bool {
 	job.shellOwned = true
+	h.pruneCompletedJobs()
 	h.jobs.Store(job.id, job)
 	return true
 }
@@ -422,6 +535,7 @@ func (t *Manager) RunShellCommand(ctx context.Context, owner *tools.ResourceOwne
 	cmd.SysProcAttr, cmd.WaitDelay = platformSpecificShellSysProcAttr(), waitDelayAfterJobExit
 	job := &shellProcess{owner: owner, id: fmt.Sprintf("job_%d_%d", time.Now().Unix(), processIDCounter.Add(1)), cmd: command, cwd: cwd, output: &bytes.Buffer{}, startTime: time.Now(), done: make(chan struct{}), work: work, timeoutAfter: timeout, releaseSlot: releaseSlot, shellOwned: true}
 	output := &shellCommandOutput{job: job, runtime: rt, ctx: ctx}
+	job.writer = output
 	output.foreground.Store(true)
 	cmd.Stdout, cmd.Stderr = output, output
 	var supervisor *shellProcessSupervisor
@@ -552,6 +666,9 @@ func (t *Manager) RunShellCommand(ctx context.Context, owner *tools.ResourceOwne
 				releaseSlot()
 				return ShellCommandResult{Output: output.result(), Err: errors.New("shell background job limit reached")}
 			}
+			if registrar, ok := work.(tools.BackgroundProcessOutputRegistrar); ok {
+				registrar.SetBackgroundProcessOutputSource(t)
+			}
 			if lifecycle, ok := work.(tools.BackgroundProcessLifecycle); ok {
 				sessionID, agentName, toolCallID := "", "", ""
 				if identity, ok := work.(tools.BackgroundProcessIdentity); ok {
@@ -578,23 +695,27 @@ func (t *Manager) RunShellCommand(ctx context.Context, owner *tools.ResourceOwne
 }
 
 func (h *processHandler) monitorShellJob(job *shellProcess, supervisor *shellProcessSupervisor) {
+	ticker := time.NewTicker(backgroundOutputInterval)
+	defer ticker.Stop()
+	var timeout <-chan time.Time
 	if job.timeoutAfter > 0 {
 		timer := time.NewTimer(time.Until(job.startTime.Add(job.timeoutAfter)))
-		select {
-		case <-supervisor.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-		case <-timer.C:
-			supervisor.Stop(true)
-			<-supervisor.Done()
-		}
-	} else {
-		<-supervisor.Done()
+		defer timer.Stop()
+		timeout = timer.C
 	}
+monitor:
+	for {
+		select {
+		case <-ticker.C:
+			job.writer.flushBackground()
+		case <-timeout:
+			supervisor.Stop(true)
+			timeout = nil
+		case <-supervisor.Done():
+			break monitor
+		}
+	}
+	job.writer.flushBackground()
 	r := supervisor.result()
 	if r.timedOut {
 		job.timeoutRequested.Store(true)
@@ -607,6 +728,8 @@ func (h *processHandler) monitorShellJob(job *shellProcess, supervisor *shellPro
 
 func backgroundState(status int32) tools.BackgroundProcessState {
 	switch status {
+	case statusRunning:
+		return tools.BackgroundProcessRunning
 	case statusCompleted:
 		return tools.BackgroundProcessCompleted
 	case statusStopped:

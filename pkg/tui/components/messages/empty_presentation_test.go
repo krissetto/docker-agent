@@ -160,7 +160,7 @@ func TestScrollOnSendKeepsGapAcrossHiddenTail(t *testing.T) {
 	m.SetScrollOnSend(true)
 	prompt := addSentPrompt(m, "sent", "new prompt")
 	m.ScrollToSentInput("sent")
-	m.View()
+	settleSentScroll(t, m)
 	index := m.messagePointerIndex(prompt)
 	require.True(t, m.slotSep[m.separatorOwnerFrom(index-1)])
 	require.Equal(t, m.slotOffset(index)-1, m.scrollOffset)

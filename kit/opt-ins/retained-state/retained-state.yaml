@@ -1,0 +1,35 @@
+# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: Private retained settings and managed history
+provides: [async-agent-retained-state@1.0.0]
+requires: [async-agent-kit]
+capabilities:
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.config/cagent
+      mode: "0700"
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.cagent
+      mode: "0700"
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              umask 077
+              config=/home/agent/.config/cagent
+              state=/home/agent/.cagent
+              for directory in "$config" "$state"; do
+                [ -w "$directory" ] || { printf '%s\n' 'retained-state: runtime must provide agent-writable private volumes' >&2; exit 1; }
+              done
+              [ -e "$config/config.yaml" ] || cp /opt/async-agent/default-user-config.yaml "$config/config.yaml"
+              mkdir -p "$config/hooks.d"
+              [ -e "$config/hooks.d/async-agent-context.yaml" ] || cp /opt/async-agent/default-context-hooks.yaml "$config/hooks.d/async-agent-context.yaml"
+          user: agent
+          description: Initialize only missing packaged defaults; never migrate or reset retained data.

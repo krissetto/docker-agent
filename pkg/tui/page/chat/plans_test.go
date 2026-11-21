@@ -72,9 +72,34 @@ func TestPlanSidebar_ClickRoutesDirectEdit(t *testing.T) {
 			}}})
 			settlePlansSidebar(t, p, ar)
 			sl := p.computeSidebarLayout()
+			// The summary discloses inline rows, without navigating to /plans.
+			initial := strings.Split(ansi.Strip(p.sidebar.View()), "\n")
+			assert.NotContains(t, strings.Join(initial, "\n"), "release")
+			expanded := false
+			for y, line := range initial {
+				if !strings.Contains(line, "1 plan") {
+					continue
+				}
+				x := styles.AppPadding + sl.sidebarStartX + strings.Index(line, "1 plan")
+				require.Equal(t, TargetSidebarContent, NewHitTest(p).At(x, y))
+				_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+				_ = cmd // Animation commands are driven by the deterministic runtime below.
+				settlePlansSidebar(t, p, ar)
+				expanded = true
+				break
+			}
+			require.True(t, expanded)
 			lines := strings.Split(ansi.Strip(p.sidebar.View()), "\n")
-			found := false
+			found, browserFound := false, false
 			for y, line := range lines {
+				if strings.Contains(line, "Open /plans") {
+					browserFound = true
+					x := styles.AppPadding + sl.sidebarStartX + strings.Index(line, "Open /plans")
+					require.Equal(t, TargetSidebarPlanBrowser, NewHitTest(p).At(x, y))
+					_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+					require.NotNil(t, cmd)
+					assert.IsType(t, msgtypes.ShowPlanBrowserMsg{}, cmd())
+				}
 				if !strings.Contains(line, "release") {
 					continue
 				}
@@ -94,6 +119,7 @@ func TestPlanSidebar_ClickRoutesDirectEdit(t *testing.T) {
 				assert.Nil(t, cmd)
 			}
 			assert.True(t, found)
+			assert.True(t, browserFound, "expanded plans retain a separate browser action")
 		})
 	}
 }

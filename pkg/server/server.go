@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -32,11 +33,13 @@ import (
 )
 
 type Server struct {
-	serverInfo      api.ServerInfo
-	e               *echo.Echo
-	sm              *SessionManager
-	authToken       string
-	sourceRegistrar SourceRegistrar
+	backgroundOutputMu        sync.Mutex
+	backgroundOutputObservers map[backgroundOutputObserverKey]*backgroundOutputObserver
+	serverInfo                api.ServerInfo
+	e                         *echo.Echo
+	sm                        *SessionManager
+	authToken                 string
+	sourceRegistrar           SourceRegistrar
 	// heartbeatInterval is how often an idle /events stream emits an SSE
 	// comment (": ping") so clients can tell a quiet session from a dead
 	// transport. SSE comments are invisible to EventSource clients and carry
@@ -109,10 +112,11 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 	e.Use(echo.WrapMiddleware(upstream.Handler))
 	if o.corsOrigin != "" {
 		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-			AllowOrigins: []string{o.corsOrigin},
-			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-			AllowHeaders: []string{"Authorization", "Content-Type", "Accept"},
-			MaxAge:       86400,
+			AllowOrigins:  []string{o.corsOrigin},
+			AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+			AllowHeaders:  []string{"Authorization", "Content-Type", "Accept", api.SessionFeaturesHeader, api.SessionObserverHeader, api.SessionBackgroundOutputInterestHeader},
+			ExposeHeaders: []string{api.SessionFeaturesHeader},
+			MaxAge:        86400,
 		}))
 	}
 

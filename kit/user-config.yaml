@@ -3,3 +3,11 @@ settings:
   show_banner: false
   YOLO: true
   restore_tabs: true
+  scroll_on_send: true
+  split_diff_view: true
+  git_diff_layout: split
+  visible_replies: all
+  layout:
+    sidebar_position: left
+    align_input_with_messages: true
+    show_plans: true

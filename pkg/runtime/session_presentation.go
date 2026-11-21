@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/docker/docker-agent/pkg/agent"
-	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 func (h *sessionHandle) observationPresentation(ctx context.Context, observed driverObservation) []Event {
@@ -18,11 +17,16 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 	}
 	ctx = withHarnessEffortOverride(ctx, observed.harness)
 	ctx = agent.WithContextModels(ctx, observed.status.AgentName, observed.models)
-	modelID := modelsdev.ID{}
+	modelID := h.runtime.getEffectiveModelID(ctx, a)
 	var limit int64
 	if len(observed.models) > 0 {
 		model := observed.models[0]
-		modelID = model.ID()
+		if cooldown := h.runtime.fallback.cooldowns.Get(a.Name()); cooldown != nil {
+			fallbacks := a.FallbackModels()
+			if cooldown.fallbackIndex >= 0 && cooldown.fallbackIndex < len(fallbacks) {
+				model = fallbacks[cooldown.fallbackIndex]
+			}
+		}
 		limit = declaredContextLimit(model)
 		if limit == 0 {
 			if metadata, ok := cachedModelDatabase(h.runtime.modelsStore).LookupModel(modelID); ok {
@@ -37,35 +41,6 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 	}
 	info := AgentInfo(a.Name(), label, a.Description(), a.WelcomeMessage(), limit).(*AgentInfoEvent)
 	info.ExecutionCapabilities = executionCapabilities(a)
-	var details []AgentDetails
-	for _, name := range tm.AgentNames() {
-		member, err := tm.Agent(name)
-		if err != nil {
-			continue
-		}
-		models := member.ConfiguredModels()
-		if name == observed.status.AgentName {
-			models = observed.models
-		}
-		detail := AgentDetails{Name: name, Description: member.Description(), Commands: member.Commands(), ThinkingMode: "unknown", ThinkingLevel: "unknown"}
-		if len(models) > 0 {
-			model := models[0]
-			id := model.ID()
-			cfg := model.BaseConfig().ModelConfig
-			if cfg.Provider == "" {
-				cfg.Provider = id.Provider
-			}
-			if cfg.Model == "" {
-				cfg.Model = id.Model
-			}
-			detail.Provider, detail.Model = id.Provider, id.Model
-			projectModelDisplay(&detail, cfg, cachedModelDatabase(h.runtime.modelsStore), h.runtime.SupportsModelSwitching())
-		} else if member.HasHarness() {
-			detail.ModelID, detail.Model, detail.ModelName = member.HarnessType(), member.HarnessType(), member.HarnessType()
-			h.runtime.harnessThinkingDisplay(ctx, member, &detail)
-		}
-		detail.ExecutionCapabilities = executionCapabilities(member)
-		details = append(details, detail)
-	}
+	details := h.runtime.agentDetailsFromTeamForTeam(ctx, tm)
 	return []Event{info, TeamInfo(details, a.Name())}
 }

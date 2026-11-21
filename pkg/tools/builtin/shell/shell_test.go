@@ -647,6 +647,9 @@ func TestShellAutoBackgroundsSameProcessAndInspectors(t *testing.T) {
 	result, err := shellTool.handler.RunShell(ctx, RunShellArgs{Cmd: "echo start >> " + marker + "; sleep 0.2; echo after-handoff", Timeout: 2}, rt)
 	require.NoError(t, err)
 	require.Contains(t, result.Output, "Completion output will be delivered automatically.")
+	parsedID, parsed := tools.ParseShellBackgroundHandoff(result.Output)
+	require.True(t, parsed)
+	require.NotEmpty(t, parsedID)
 	assertShellBackgroundGuidance(t, result.Output)
 	id := strings.Fields(strings.Split(result.Output, "process ID ")[1])[0]
 	inspected, err := shellTool.Tools(t.Context())
@@ -666,6 +669,9 @@ func TestShellAutoBackgroundsSameProcessAndInspectors(t *testing.T) {
 	select {
 	case message := <-work.complete:
 		require.Contains(t, message, "after-handoff")
+		completion, parsed := tools.ParseShellCompletion(message)
+		require.True(t, parsed)
+		require.Equal(t, parsedID, completion.ProcessID)
 	case <-time.After(3 * time.Second):
 		t.Fatal("completion was not delivered")
 	}

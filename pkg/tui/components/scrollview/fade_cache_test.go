@@ -151,3 +151,28 @@ func BenchmarkScrollFade(b *testing.B) {
 		}
 	}
 }
+
+func TestFadeExemptRowsLeaveOtherEdgesUnchanged(t *testing.T) {
+	m := New()
+	m.SetSize(30, 20)
+	m.SetContent(make([]string, 60), 60)
+	m.SetScrollOffset(20)
+	line := "\x1b[38;2;221;212;201mprompt\x1b[m"
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = line
+	}
+	normal := append([]string(nil), lines...)
+	m.applyFade(normal)
+	m.SetFadeExemptRows(0, 2)
+	exempt := append([]string(nil), lines...)
+	m.applyFade(exempt)
+	require.Equal(t, line, exempt[0])
+	require.Equal(t, line, exempt[1])
+	require.NotEqual(t, normal[0], exempt[0])
+	require.Equal(t, normal[2:], exempt[2:], "other history and reply rows still fade")
+	m.SetFadeExemptRows(0, 0)
+	restored := append([]string(nil), lines...)
+	m.applyFade(restored)
+	require.Equal(t, normal, restored)
+}

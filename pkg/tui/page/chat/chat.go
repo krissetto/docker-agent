@@ -255,6 +255,7 @@ type chatPage struct {
 	backgroundLinkToolCallIDs    map[string]struct{}
 	backgroundLinkToolCallCounts map[string]int
 	backgroundLinkSeenPositions  map[int]struct{}
+	backgroundRemoteToolCalls    map[int][]string
 	backgroundLinkCacheValid     bool
 	backgroundSidebarSeeded      bool
 	// ownedSkillOperation is the exact operation admitted by this page.
@@ -778,7 +779,8 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return model, effects.Cmd(true)
 }
 
-func (p *chatPage) updateVisible(msg tea.Msg) (layout.Model, tea.Cmd) {
+func (p *chatPage) updateVisible(msg tea.Msg) (result layout.Model, command tea.Cmd) {
+	defer func() { command = tea.Batch(command, p.tabLocal(p.messages.SyncShellBackgroundOutput())) }()
 	// Asynchronous submission results are accepted only by the page lifetime that dispatched them.
 	if result, ok := msg.(interface{ inputOrigin() *inputScope }); ok && !p.ownsInputScope(result.inputOrigin()) {
 		return p, nil
@@ -1026,6 +1028,12 @@ func (p *chatPage) setWorking(working bool) tea.Cmd {
 // the scrollable list; when stopping, it explicitly removes any lingering spinner.
 func (p *chatPage) setPendingResponse(pending bool) tea.Cmd {
 	if pending {
+		if owner, ok := p.messages.(interface{ HasResponseInCurrentExchange() bool }); ok && owner.HasResponseInCurrentExchange() {
+			return nil
+		}
+		if owner, ok := p.messages.(interface{ HasWorkInCurrentExchange() bool }); ok && owner.HasWorkInCurrentExchange() {
+			return nil
+		}
 		sender, label := p.pendingSpinnerContext()
 		return p.messages.AddAssistantMessage(sender, label)
 	}
@@ -1087,7 +1095,7 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 		return ""
 	}
 
-	banner := styles.BaseStyle.Foreground(styles.Accent).Render(strings.Join(tuibanner.Lines, "\n"))
+	banner := styles.MutedStyle.Render(strings.Join(tuibanner.Lines, "\n"))
 	return lipgloss.Place(
 		sl.chatWidth,
 		sl.chatHeight,

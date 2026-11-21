@@ -45,10 +45,11 @@ func TestKitBuildInputIsolation(t *testing.T) {
 		"!pkg/compaction/prompts/compaction-system.txt", "!pkg/compaction/prompts/compaction-user.txt",
 		"!pkg/config/sources/builtin-agents/*.yaml", "!pkg/creator/instructions.txt",
 		"!pkg/evaluation/Dockerfile.template", "!pkg/evaluation/Dockerfile.custom.template",
+		"!pkg/model/provider/catalog/providers.json",
 		"!pkg/modelsdev/snapshot.json", "!pkg/modelsdev/snapshot_date.txt",
 		"!pkg/safety/safety_patterns.json", "!pkg/tools/builtin/mcpcatalog/servers.json",
 		"!pkg/tui/styles/themes/*.yaml",
-		"!kit/start.sh", "!kit/git-signing.sh", "!kit/launch.sh", "!kit/hackerspace.yaml", "!kit/user-config.yaml",
+		"!kit/acp.sh", "!kit/start.sh", "!kit/git-signing.sh", "!kit/launch.sh", "!kit/hackerspace.yaml", "!kit/user-config.yaml", "!kit/context-hooks.yaml",
 		"**/*_test.go", "**/testdata/**", "**/fixtures/**",
 	}, rules)
 }

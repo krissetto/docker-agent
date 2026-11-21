@@ -45,7 +45,7 @@ func TestTeam(t *testing.T) {
 		readFile  bool
 	}{
 		{"root", "openai", "gpt-6-astra", "gpt-6-astra", "medium", []string{"orchestrator"}, []string{"shell", "todo"}, false},
-		{"orchestrator", "openai", "gpt-6.1-sol", "gpt-6.1-sol-xhigh", "xhigh", []string{"dev-team", "engineer", "designer", "review-team"}, []string{"todo"}, false},
+		{"orchestrator", "openai", "gpt-6.1-sol", "gpt-6.1-sol-xhigh", "xhigh", []string{"dev-team", "engineer", "designer", "review-team"}, []string{"todo", "plan"}, false},
 		{"dev-team", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", []string{"greppy", "planner", "engineer", "designer", "technical-reviewer"}, []string{"shell"}, false},
 		{"greppy", "anthropic", "claude-haiku-5-5", "haiku-5.5", "adaptive/medium", nil, []string{"shell", "todo"}, false},
 		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"shell", "todo"}, false},
@@ -78,9 +78,13 @@ func TestTeam(t *testing.T) {
 			require.Len(t, a.Toolsets, len(expected.toolsets))
 			for i, toolset := range a.Toolsets {
 				assert.Equal(t, expected.toolsets[i], toolset.Type)
-				if toolset.Type == "filesystem" && expected.readFile {
+				switch {
+				case toolset.Type == "filesystem" && expected.readFile:
 					assert.Equal(t, []string{"read_file"}, toolset.Tools)
-				} else {
+				case toolset.Type == "plan":
+					assert.ElementsMatch(t, []string{"list_plans", "read_plan", "write_plan"}, toolset.Tools)
+					assert.NotEmpty(t, toolset.Instruction)
+				default:
 					assert.Empty(t, toolset.Tools)
 				}
 			}
@@ -234,15 +238,20 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "off", kit.Args["diagnostics"]["default"])
 	assert.Equal(t, []any{"off", "on"}, kit.Args["diagnostics"]["enum"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_DIAGNOSTICS", kit.Args["diagnostics"]["env"])
-	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:210ccc3@sha256:8944c950eaaef7e1f33bd4c672e9607c8deb33eedd49d62d8ac58b2d4045de99\n"))
+	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3\n"))
 	byType := make(map[string][]int)
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
 	}
-	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "agent-interactive-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "long-running"} {
+	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "agent-interactive-sessions", "lifecycle", "agent-skills", "git-identity", "ssh-agent", "long-running", "dockerd"} {
 		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
 	}
-	require.Len(t, kit.Capabilities, 14)
+	require.Len(t, kit.Capabilities, 17)
+	require.Len(t, byType["com.docker.sandbox/agent-context@2"], 1)
+	assert.Equal(t, map[string]any{"filename": "ASYNC_AGENT_KIT.md"}, kit.Capabilities[byType["com.docker.sandbox/agent-context@2"][0]].Config)
+	assert.NotContains(t, byType, "com.docker.sandbox/agent-context@1")
+	require.Len(t, byType["com.docker.sandbox/auto-restart@1"], 1)
+	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/auto-restart@1"][0]].Config)
 	assert.NotContains(t, byType, "com.docker.sandbox/volume@1")
 	for _, capability := range kit.Capabilities {
 		switch capability.Type {
@@ -255,16 +264,16 @@ func TestNativeKit(t *testing.T) {
 		}
 	}
 	for kind, expected := range map[string]map[string]any{
-		"agent-context": {"filename": "ASYNC_AGENT_KIT.md"},
-		"agent-skills":  {"path": "/home/agent/.agents/skills", "mode": "readonly"},
-		"ssh-agent":     {"phase": "runtime", "unrestricted": false, "sign": []any{"git"}},
-		"git-identity":  nil,
-		"long-running":  nil,
+		"dockerd":      {"autoStart": true},
+		"agent-skills": {"path": "/home/agent/.agents/skills", "mode": "readonly"},
+		"ssh-agent":    {"phase": "runtime", "unrestricted": false, "sign": []any{"git"}},
+		"git-identity": nil,
+		"long-running": nil,
 	} {
 		assert.Equal(t, expected, kit.Capabilities[byType["com.docker.sandbox/"+kind+"@1"][0]].Config, kind)
 	}
 	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/sbx@1"][0]].Config)
-	assert.NotContains(t, string(descriptor), "${{ kit.env.WORKSPACE_DIR }}", "SBX supplies WORKSPACE_DIR at runtime, after descriptor resolution")
+	assert.NotContains(t, string(descriptor), "${{ kit.env.WORKSPACE_DIR }}", "keep workspace optional at create-time expansion")
 	assert.Equal(t, map[string]any{
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
 		"resume":   []any{"--exec", "--session", "{{.SessionID}}"},
@@ -290,11 +299,11 @@ func TestNativeKit(t *testing.T) {
 	assert.Contains(t, string(recipe), "COPY --chmod=0755 kit/start.sh /opt/async-agent/start.sh")
 	assert.Contains(t, string(recipe), "xx-go build")
 	assert.Contains(t, string(recipe), `ARG ASYNC_AGENT_KIT_VERSION="0.1.0"`)
-	assert.Contains(t, string(recipe), `LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION`)
+	assert.Contains(t, string(recipe), `com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION`)
 	assert.Contains(t, string(recipe), "xx-verify --static /docker-agent")
 	assert.Contains(t, string(recipe), `ENTRYPOINT ["/opt/async-agent/launch.sh"]`)
 	assert.Contains(t, string(recipe), `COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml`)
-	assert.Contains(t, string(recipe), `RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent`)
+	assert.Contains(t, string(recipe), `COPY --from=layout --chown=agent:agent --chmod=0700 /layout/home/agent/.config/ /home/agent/.config/`)
 	assert.Contains(t, string(recipe), `COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml`)
 	assert.NotContains(t, string(recipe), "DOCKER_AGENT_CONFIG_DIR")
 	assert.NotContains(t, string(recipe), "COPY . ")
@@ -302,7 +311,8 @@ func TestNativeKit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(ignore), "!kit/hackerspace.yaml\n")
 	assert.Contains(t, string(ignore), "!kit/user-config.yaml\n")
-	assert.Contains(t, string(recipe), "/home/agent/.config/cagent /home/agent/.cagent")
+	assert.Contains(t, string(recipe), "/layout/home/agent/.config/cagent/hooks.d /layout/home/agent/.cagent")
+	assert.Contains(t, string(recipe), "COPY --chown=agent:agent --chmod=0600 kit/context-hooks.yaml /home/agent/.config/cagent/hooks.d/async-agent-context.yaml")
 }
 
 func TestKitDiagnostics(t *testing.T) {

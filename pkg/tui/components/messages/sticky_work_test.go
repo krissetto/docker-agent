@@ -105,7 +105,7 @@ func TestStickyWorkLoadingResizeAndSelection(t *testing.T) {
 	_, _, ok := m.stickyWork()
 	require.True(t, ok)
 	line, col := m.selectionMouseToLineCol(m.xPos+20, m.yPos)
-	require.Equal(t, m.scrollOffset+1, line)
+	require.Equal(t, m.scrollOffset, line, "the inserted header leaves the first body row selectable")
 	require.Zero(t, col)
 	m.replay = &sessionReplay{}
 	_, _, ok = m.stickyWork()
@@ -151,7 +151,7 @@ func TestStickyWorkExcludesObscuredRowFromSelectionAndImages(t *testing.T) {
 	_, _, ok := m.stickyWork()
 	require.False(t, ok, "an active text range reveals all underlying rows")
 	m.selection.clear()
-	// Real image markers are clipped by replacing the obscured painted row.
+	// The header is inserted above image markers, not painted over them.
 	inline := generatedMediaTestImage(t, "sticky.png")
 	m.AppendAssistantMedia("root", []types.AssistantMedia{{ID: 1, Image: &inline}})
 	m.ensureAllItemsRendered()

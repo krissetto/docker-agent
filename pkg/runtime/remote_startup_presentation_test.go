@@ -13,6 +13,8 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/effort"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
@@ -34,12 +36,14 @@ func TestRemoteStartupLeavesPresentationToSessionObservation(t *testing.T) {
 }
 
 func TestRemoteIdleObservationRetainsCanonicalModelReasoningAndAgent(t *testing.T) {
-	cfg := latest.ModelConfig{Provider: "openai", Model: "gpt-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}}
+	cfg := latest.ModelConfig{Provider: "openai", Model: "gpt-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "low"}}
 	worker := agent.New("worker", "", agent.WithModel(newConfigProvider(cfg)))
-	owner, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "", agent.WithModel(newConfigProvider(cfg))), worker)), WithSessionStore(session.NewInMemorySessionStore()))
+	owner, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "", agent.WithModel(newConfigProvider(cfg))), worker)), WithSessionStore(session.NewInMemorySessionStore()), WithModelStore(emptyCatalogStore{}), WithModelSwitcherConfig(&ModelSwitcherConfig{ProviderRegistry: testProviderRegistry(), EnvProvider: environment.NewMapEnvProvider(nil)}))
 	require.NoError(t, err)
 	defer owner.Close()
 	handle, err := owner.CreateSession(t.Context(), session.New(session.WithID("idle"), session.WithAgentName("worker")), SessionBinding{AgentName: "worker"})
+	require.NoError(t, err)
+	_, err = handle.SetThinkingLevel(t.Context(), effort.High)
 	require.NoError(t, err)
 	initial, err := handle.Observe(t.Context(), ObserveOptions{})
 	require.NoError(t, err)
@@ -87,6 +91,7 @@ func TestRemoteIdleObservationRetainsCanonicalModelReasoningAndAgent(t *testing.
 				require.NotEmpty(t, detail.ModelName)
 				require.Equal(t, "effort", detail.ThinkingMode)
 				require.Equal(t, "high", detail.ThinkingLevel)
+				require.Equal(t, "high", detail.Thinking)
 			}
 		}
 		require.True(t, found)

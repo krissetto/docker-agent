@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"errors"
 	"os"
 	"slices"
 	"strconv"
@@ -159,6 +160,12 @@ type Model interface {
 
 	RemoveSpinner()
 	ScrollToBottom() tea.Cmd
+	SetShellBackgroundProcesses(sessionID string, processes []tools.BackgroundProcess, source func(string) (tools.BackgroundProcessOutput, error)) tea.Cmd
+	SetShellBackgroundOutputInterest(sessionID string, setter func([]string) error) tea.Cmd
+	SetShellBackgroundOutputVisible(visible bool) tea.Cmd
+	SyncShellBackgroundOutput() tea.Cmd
+	HasAmbiguousShellBackgroundProcess(processID string) bool
+	AppendBackgroundOutput(event *runtime.BackgroundProcessOutputEvent) tea.Cmd
 	HasUniqueToolCall(toolCallID string) bool
 	NavigateToToolCall(toolCallID string) bool
 	// FinalizeStream materializes any offscreen active tail before stream
@@ -217,6 +224,7 @@ type visualSelectionKey struct {
 }
 
 type transcriptFrameKey struct {
+	themeGeneration                     uint64
 	stickyWorkHeader                    string
 	stickyWorkBlock                     *workblock.Model
 	stickyWorkGeneration                uint64
@@ -325,6 +333,16 @@ type streamedReasoningTail struct {
 }
 
 type model struct {
+	backgroundInterest        *backgroundInterest
+	backgroundOutputHidden    bool
+	backgroundSession         string
+	backgroundSource          func(string) (tools.BackgroundProcessOutput, error)
+	backgroundReplayHandoffs  map[string]int
+	backgroundReplayCalls     map[string]int
+	backgroundReplayProcesses map[string]int
+	backgroundWatching        map[string]bool
+	backgroundFetching        map[string]bool
+
 	scrollOnSend                  sentInputScroll
 	stickyWorkLatch               stickyWorkLatch
 	stickyWorkPressed             bool
@@ -451,6 +469,7 @@ type model struct {
 	workExchangeBySource map[int]int
 	sessionOpener        *types.Message // established compact-Work opener; see resolveSessionOpener
 	defaultOpenedOpener  *types.Message // opener whose incoming body is currently default-open
+	transientWork        map[int]*workblock.Model
 	workBlocks           map[*types.Message]*workblock.Model
 	workHeaderBySource   map[int]*workblock.Model
 	workSourceToHeader   map[int]int
@@ -562,6 +581,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 	}
 	return &model{
 		toolRenderers:           tool.DefaultRegistry(),
+		scrollOnSend:            sentInputScroll{transition: animation.NewTransition(ar)},
 		ar:                      ar,
 		themeGeneration:         styles.ThemeGeneration(),
 		slackAnimationSub:       ar.Subscribe(),
@@ -615,7 +635,8 @@ func (m *model) Init() tea.Cmd {
 }
 
 // Update handles messages and updates the component state
-func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (result layout.Model, command tea.Cmd) {
+	defer func() { command = tea.Batch(command, m.syncBackgroundOutput()) }()
 	if _, wheel := msg.(tea.MouseWheelMsg); wheel {
 		m.cancelImageClick()
 	}
@@ -630,6 +651,19 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case backgroundInterestMsg:
+		if msg.owner == m.backgroundInterest && errors.Is(msg.err, tools.ErrBackgroundProcessOutputUnsupported) {
+			m.shellCards(func(i int, message *types.Message, _ layout.Model) {
+				if message.Background != nil {
+					message.Background.OutputUnavailable = true
+					m.invalidateShell(i)
+				}
+			})
+		}
+		return m, nil
+	case backgroundSnapshotMsg:
+		m.applyBackgroundSnapshot(msg)
+		return m, nil
 	case messages.StreamCancelledMsg:
 		finalizeCmd := m.FinalizeStream()
 		m.removeSpinner()
@@ -1449,7 +1483,11 @@ func (m *model) View() string {
 	}
 
 	startLine := m.scrollOffset
-	endLine := min(startLine+m.height, totalLines)
+	bodyHeight := m.height
+	if frameKey.stickyWorkBlock != nil {
+		bodyHeight--
+	}
+	endLine := min(startLine+bodyHeight, m.bodyScrollableHeight())
 
 	if startLine >= endLine {
 		return ""
@@ -1457,7 +1495,7 @@ func (m *model) View() string {
 
 	// Copy only the visible window to avoid mutating cached lines
 	// This is O(viewportHeight) instead of O(totalHeight)
-	visibleLines := make([]string, endLine-startLine)
+	visibleLines := make([]string, endLine-startLine, m.height)
 	for i := startLine; i < endLine; i++ {
 		visibleLines[i-startLine] = m.renderedLine(i)
 	}
@@ -1469,9 +1507,11 @@ func (m *model) View() string {
 	m.applyReferenceHover(visibleLines, startLine)
 	visibleLines = m.applyURLUnderline(visibleLines, startLine)
 	visibleLines = m.applyCopiedFlash(visibleLines, startLine)
-	// Replace, never insert: the overlay owns one painted row, not geometry.
-	// Removing the underlying row also clips any inline-image placement markers.
+	// The header owns a viewport row, never a transcript row. Restyle body
+	// rows before inserting it so selection and hover retain canonical offsets.
 	if frameKey.stickyWorkHeader != "" && len(visibleLines) > 0 {
+		visibleLines = append(visibleLines, "")
+		copy(visibleLines[1:], visibleLines[:len(visibleLines)-1])
 		visibleLines[0] = frameKey.stickyWorkHeader
 	}
 
@@ -1480,6 +1520,7 @@ func (m *model) View() string {
 	// URL-hover restyling preserve display width, so the scrollview can reuse
 	// memoized line widths instead of re-measuring every visible line.
 	m.syncScrollviewContent()
+	m.scrollview.SetFadeExemptRows(m.sentInputFadeRows())
 	// Segmented active lines are not in scrollview's flattened content buffer,
 	// so use its pre-sliced path. Selection/URL restyling already requires the
 	// same viewport-local width work.
@@ -1500,6 +1541,7 @@ func (m *model) View() string {
 
 func (m *model) transcriptFrameKey() transcriptFrameKey {
 	frame := transcriptFrameKey{
+		themeGeneration:          styles.ThemeGeneration(),
 		scrollbarDragging:        m.scrollview.IsDragging(),
 		referenceHoverGeneration: m.referenceHoverGeneration,
 		contentGeneration:        m.contentGeneration, segmentsRevision: m.segmentsRevision,
@@ -1514,8 +1556,14 @@ func (m *model) transcriptFrameKey() transcriptFrameKey {
 		},
 	}
 	if _, block, ok := m.stickyWork(); ok {
-		frame.stickyWorkHeader = block.HeaderView()
 		frame.stickyWorkBlock, frame.stickyWorkGeneration = block, block.VisualGeneration()
+		// Scrolling changes placement, not the header. Reuse its styled row
+		// until the composite or its presentation changes.
+		if previous := m.lastFrameKey; previous.stickyWorkBlock == block && previous.stickyWorkGeneration == frame.stickyWorkGeneration && previous.width == frame.width && previous.themeGeneration == frame.themeGeneration {
+			frame.stickyWorkHeader = previous.stickyWorkHeader
+		} else {
+			frame.stickyWorkHeader = block.HeaderView()
+		}
 	}
 	if m.hoveredURL != nil {
 		frame.hoveredURL, frame.hasHoveredURL = *m.hoveredURL, true
@@ -1592,7 +1640,9 @@ func (m *model) updateScrollState() {
 	maxScrollOffset := max(0, scrollableHeight-m.height)
 
 	// Auto-scroll when content grows beyond any slack.
-	if !m.userHasScrolled && scrollableHeight > prevScrollableHeight {
+	// A sticky reserve is viewport geometry, not transcript growth. In
+	// particular it must not send an explicitly revealed Work block to bottom.
+	if !m.userHasScrolled && m.bodyScrollableHeight() > prevScrollableHeight {
 		m.scrollOffset = maxScrollOffset
 	} else {
 		m.scrollOffset = max(0, min(m.scrollOffset, maxScrollOffset))
@@ -1706,7 +1756,14 @@ func (m *model) maxBottomSlack() int {
 // further ticks fire even after fade animations finish. Returns the command
 // to schedule the next tick when the subscription transitions to active.
 func (m *model) handleAnimationTick(tick animation.TickMsg) tea.Cmd {
+	before := m.scrollOffset
+	m.scrollOnSend.transition.Tick()
 	m.updateScrollState()
+	if before != m.scrollOffset {
+		m.lastFrameOutput = ""
+		m.invalidateView()
+		tick.MarkDirty()
+	}
 	if m.replyHandoff != nil && m.replyHandoff.Active() {
 		if changed, cmd := m.replyHandoff.Tick(); changed {
 			m.syncAnimatedWorkProjection()
@@ -1982,13 +2039,13 @@ func (m *model) scrollPageUp() {
 	m.cancelSentInputScroll()
 	m.userHasScrolled = true
 	m.bottomSlack = 0
-	m.setScrollOffset(max(0, m.scrollOffset-m.height))
+	m.setScrollOffset(max(0, m.scrollOffset-m.bodyHeight()))
 }
 
 func (m *model) scrollPageDown() tea.Cmd {
 	m.cancelSentInputScroll()
 	cmd := m.materializeDeferredTailForRange(m.scrollOffset, m.scrollOffset+m.height*2)
-	m.setScrollOffset(m.scrollOffset + m.height)
+	m.setScrollOffset(m.scrollOffset + m.bodyHeight())
 	if m.isAtBottom() {
 		m.userHasScrolled = false
 		m.releaseDeferredWorkFold()
@@ -2272,7 +2329,7 @@ func (m *model) scrollToSelectedMessage() {
 	// Scroll to show the top of the selected message.
 	// When messages are taller than the viewport, always anchor to the start
 	// so the user sees the beginning of the message first.
-	if startLine < m.scrollOffset || endLine > m.scrollOffset+m.height {
+	if startLine < m.scrollOffset || endLine > m.scrollOffset+m.bodyHeight() {
 		m.setScrollOffset(startLine)
 	}
 }
@@ -2308,7 +2365,21 @@ func (m *model) shouldCacheMessage(index int) bool {
 	}
 }
 
-func (m *model) renderItem(index int, view layout.Model) renderedItem {
+func (m *model) renderItem(index int, view layout.Model) (result renderedItem) {
+	cachedHeader := false
+	defer func() {
+		if block := m.transientWork[index]; block != nil && !cachedHeader {
+			header := block.HeaderView()
+			if result.segments != nil {
+				copy := *result.segments
+				copy.Header = append([]string{header}, copy.Header...)
+				result.segments = &copy
+			} else {
+				result.lines = append([]string{header}, result.lines...)
+			}
+			result.height++
+		}
+	}()
 	m.syncViewTheme(index)
 	// If this message is being inline edited, render the textarea instead
 	if index == m.inlineEditMsgIndex {
@@ -2349,6 +2420,7 @@ func (m *model) renderItem(index int, view layout.Model) renderedItem {
 	shouldCache := !isSelected && !isHovered && m.hoverActionProgress(index) == 0 && m.shouldCacheMessage(index)
 	if shouldCache {
 		if cached, exists := m.renderedItems[index]; exists {
+			cachedHeader = true
 			if cached.virtual {
 				return renderedItem{segments: cached.seg, height: cached.height}
 			}
@@ -2497,7 +2569,7 @@ func (m *model) ensureAllItemsRendered() {
 // displayEnd finds the next displayed source row. Work child sources are
 // virtual inside their composite and must not bound the preceding real message.
 func (m *model) displayEnd(index int) int {
-	for next := index + 1; next < len(m.views); next++ {
+	for next := m.nextDisplaySlot(index); next < len(m.views); next = m.nextDisplaySlot(next) {
 		if m.hiddenSlot(next) {
 			continue
 		}
@@ -2712,6 +2784,9 @@ func (m *model) replaceLoadingWithMessage(msg *types.Message) tea.Cmd {
 }
 
 func (m *model) AddInputMessage(msg *session.Message, sessionPos int) tea.Cmd {
+	if m.applyShellCompletion(msg) {
+		return nil
+	}
 	if !visibleInputMessage(msg) {
 		return nil
 	}
@@ -3014,7 +3089,57 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 }
 
 func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, toolResults map[string]string) {
+	m.backgroundSession = sess.ID
+	m.backgroundSource = nil
+	m.backgroundWatching, m.backgroundFetching = nil, nil
+	m.backgroundReplayCalls = make(map[string]int)
+	m.backgroundReplayHandoffs = make(map[string]int)
+	m.backgroundReplayProcesses = make(map[string]int)
+	replayHandoffs := make(map[string]string)
+	for id, text := range toolResults {
+		if processID, ok := tools.ParseShellBackgroundHandoff(text); ok {
+			replayHandoffs[id] = processID
+		}
+	}
+	for position, item := range sess.Messages {
+		if !item.IsMessage() {
+			continue
+		}
+		if item.Message.Message.Role == chat.MessageRoleTool {
+			if id, ok := tools.ParseShellBackgroundHandoff(item.Message.Message.Content); ok {
+				m.backgroundReplayHandoffs[id] = position
+			}
+		}
+		for _, part := range item.Message.Message.Presentation {
+			if part.Tool != nil {
+				listed := false
+				for _, call := range item.Message.Message.ToolCalls {
+					if call.ID == part.Tool.Call.ID {
+						listed = true
+						break
+					}
+				}
+				if !listed {
+					m.backgroundReplayCalls[part.Tool.Call.ID]++
+				}
+			}
+			if part.Tool != nil && part.Tool.Result != nil {
+				if id, ok := tools.ParseShellBackgroundHandoff(*part.Tool.Result); ok {
+					m.backgroundReplayHandoffs[id] = position
+					replayHandoffs[part.Tool.Call.ID] = id
+				}
+			}
+		}
+		for _, call := range item.Message.Message.ToolCalls {
+			m.backgroundReplayCalls[call.ID]++
+		}
+	}
+	for _, id := range replayHandoffs {
+		m.backgroundReplayProcesses[id]++
+	}
+
 	m.cancelSentInputScroll()
+	m.scrollOnSend.reserve = nil
 	m.scrollOnSend.seen = nil
 	m.scrollOnSend.padding = 0
 	m.inputParentSessionID = sess.ParentID
@@ -3059,7 +3184,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
 		// Apply tool result if available
 		if result, ok := toolResults[tc.ID]; ok {
-			toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
+			toolMsg.SetToolResponse(result, toolMsg.ToolStatus)
 		}
 		view := m.createToolCallView(toolMsg)
 		appendSessionMessage(toolMsg, view)
@@ -3095,6 +3220,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 		block.Release()
 	}
 	m.workBlocks = make(map[*types.Message]*workblock.Model)
+	m.transientWork = nil
 	m.workProjectionDirty = true
 	m.sessionOpener = nil
 	m.defaultOpenedOpener = nil
@@ -3125,6 +3251,9 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 
 		switch smsg.Message.Role {
 		case chat.MessageRoleUser:
+			if m.applyShellCompletion(smsg, pos) {
+				return
+			}
 			if !lifecycle.IsUserInput(smsg.InputOrigin) {
 				msg := types.Input(smsg)
 				appendSessionMessage(msg, m.createMessageView(msg))
@@ -3204,7 +3333,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 							}
 						} else {
 							if hasResult {
-								toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
+								toolMsg.SetToolResponse(result, toolMsg.ToolStatus)
 							}
 							appendSessionMessage(toolMsg, m.createToolCallView(toolMsg))
 						}
@@ -3430,8 +3559,7 @@ func (m *model) AddToolResult(msg *runtime.ToolCallResponseEvent, status types.T
 	for i := range slices.Backward(m.messages) {
 		toolMessage := m.messages[i]
 		if toolMessage.Type == types.MessageTypeToolCall && toolMessage.ToolCall.ID == msg.ToolCallID {
-			toolMessage.Content = strings.ReplaceAll(msg.Response, "\t", "    ")
-			toolMessage.ToolStatus = status
+			toolMessage.SetToolResponse(msg.Response, status)
 			toolMessage.ToolResult = msg.Result.WithoutPayload()
 			toolMessage.Images = tuiimage.FromToolResult(msg.Result)
 			m.invalidateItem(i)
@@ -3481,7 +3609,7 @@ func (m *model) finalizeStreamedAssistant(agentName, content, reasoning string, 
 	defer func() { m.committedMessageCount = len(m.messages) }()
 	// Locate the streamed tail, bounded by the snapshot render.
 	start := len(m.messages)
-	for start > max(m.loadedMessageCount, m.committedMessageCount) {
+	for start > max(m.loadedMessageCount, m.committedMessageCount, m.groupStart) {
 		msg := m.messages[start-1]
 		isStreamed := msg.InputOrigin != session.InputOriginAgent && msg.Sender == agentName &&
 			(msg.Type == types.MessageTypeAssistant || msg.Type == types.MessageTypeAssistantReasoningBlock)
@@ -3603,7 +3731,34 @@ func (m *model) liveTailSettledBy(event *runtime.MessageAddedEvent) bool {
 }
 
 func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
-	defer func() { m.streamedReasoning = nil }()
+	// Completions can arrive after a newer message has started streaming. Only
+	// the matching identity closes its reasoning segment; otherwise the next
+	// delta would manufacture another segment (and churn the compact preview).
+	reasoningBefore := m.streamedReasoning
+	settlesReasoning := false
+	if reasoningBefore != nil && reasoningBefore.agentName == event.GetAgentName() {
+		for i, view := range m.views {
+			if view != reasoningBefore.block {
+				continue
+			}
+			msg := m.messages[i]
+			messageID := ""
+			if event.Message != nil {
+				messageID = event.Message.Message.MessageID
+			}
+			compatible := func(id string) bool { return id == "" || streamcontent.IsLegacy(id) }
+			settlesReasoning = (event.SessionID == "" || msg.SessionID == "" || event.SessionID == msg.SessionID) &&
+				(compatible(msg.MessageID) || messageID == msg.MessageID)
+			break
+		}
+	}
+	defer func() {
+		if settlesReasoning {
+			m.streamedReasoning = nil
+		} else {
+			m.streamedReasoning = reasoningBefore
+		}
+	}()
 	pinnedBefore := m.liveTailMsg
 	settlesLiveTail := m.liveTailSettledBy(event)
 	start := m.committedMessageCount
@@ -3628,7 +3783,7 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 				break
 			}
 		}
-		if committedTail != "" && m.streamedReasoning != nil && m.streamedReasoning.agentName == event.GetAgentName() && m.streamedReasoning.text != "" {
+		if settlesReasoning && committedTail != "" && m.streamedReasoning != nil && m.streamedReasoning.text != "" {
 			tail := m.streamedReasoning
 			for i := range m.messages {
 				if m.messages[i].Type != types.MessageTypeAssistantReasoningBlock || m.messages[i].Sender != event.GetAgentName() {
@@ -3652,10 +3807,11 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 			// A runtime message ID settles its own row. Reasoning is finalized
 			// as before; the canonical text then joins the row with that
 			// identity, or starts one, so a repeated completion adds no copy.
-			cmd = tea.Batch(cmd,
-				m.finalizeStreamedAssistant(agentName, "", event.Message.Message.ReasoningContent, false, false),
-				m.ReconcileAssistantContent(event.SessionID, messageID, agentName, content))
-		} else {
+			if reasoningBefore == nil || settlesReasoning {
+				cmd = tea.Batch(cmd, m.finalizeStreamedAssistant(agentName, "", event.Message.Message.ReasoningContent, false, false))
+			}
+			cmd = tea.Batch(cmd, m.ReconcileAssistantContent(event.SessionID, messageID, agentName, content))
+		} else if reasoningBefore == nil || settlesReasoning {
 			cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(agentName, content, event.Message.Message.ReasoningContent, false))
 		}
 	}
@@ -3667,7 +3823,7 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 	// A tool-bearing commit closes a model message, not the turn's reasoning
 	// preview. Keep it through tool execution, including rounds with no new
 	// reasoning. Visible prose and turn settlement still retire it.
-	if len(event.CommittedToolCallIDs()) == 0 {
+	if len(event.CommittedToolCallIDs()) == 0 && (reasoningBefore == nil || settlesReasoning) {
 		m.finishReasoningPreview(event.GetAgentName(), event.SessionID, messageID)
 	}
 	// A completion never pins: its reconcile path appends through the stream entry, so the
@@ -4144,6 +4300,11 @@ func (m *model) contentWidth() int {
 // totalScrollableHeight is the painted document height, including rows an active
 // reply handoff still displays; it must match View and the scrollview clamp.
 func (m *model) totalScrollableHeight() int {
+	total := m.bodyScrollableHeight()
+	return total + m.stickyWorkBottomReserve(total)
+}
+
+func (m *model) bodyScrollableHeight() int {
 	return m.displayTotalHeight() + m.bottomSlack + m.scrollOnSend.padding
 }
 
@@ -4471,7 +4632,7 @@ func (m *model) mouseToLineCol(x, y int) (line, col int) {
 	}
 	adjustedX := max(0, x-m.xPos)
 	adjustedY := max(0, y-m.yPos)
-	return m.scrollOffset + adjustedY, adjustedX
+	return m.scrollOffset + max(0, adjustedY-m.stickyWorkInset()), adjustedX
 }
 
 // SubagentNodeAt returns the subagent node id referenced by the subagent tool
@@ -4537,7 +4698,7 @@ func (m *model) routeBodyDrag(msg tea.MouseMsg) (bool, tea.Cmd) {
 	}
 	m.updateScrollState()
 	mouse := msg.Mouse()
-	line := m.scrollOffset + mouse.Y - m.yPos - m.slotOffset(idx)
+	line := m.scrollOffset + mouse.Y - m.yPos - m.stickyWorkInset() - m.slotOffset(idx)
 	col := mouse.X - m.xPos
 	_, cmd := view.MouseAt(line, col, msg)
 	if !view.IsBodyDragging() {
@@ -4764,6 +4925,7 @@ type InlineEditCommittedMsg struct {
 }
 
 func (m *model) StopAnimations() {
+	m.scrollOnSend.transition.Cancel()
 	m.CancelPointerHover()
 	if m.replyHandoff != nil && m.replyHandoff.Active() {
 		m.replyHandoff.transition.Cancel()
@@ -4784,6 +4946,9 @@ func (m *model) StopAnimations() {
 // initialize views, retry image loading, rebuild markdown, or change scrolling.
 func (m *model) ResumeAnimations() tea.Cmd {
 	var cmds []tea.Cmd
+	if m.scrollOnSend.target != nil {
+		cmds = append(cmds, m.scrollOnSend.transition.Resume())
+	}
 	if m.bottomSlack > 0 {
 		cmds = append(cmds, m.slackAnimationSub.Start())
 	}

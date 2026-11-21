@@ -238,7 +238,7 @@ func TestAgentThinkingLabel(t *testing.T) {
 		cfg  latest.ModelConfig
 		want string
 	}{
-		{"reasoning model, no budget shows off", latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, "off"},
+		{"reasoning model, no budget shows default", latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, "default"},
 		{"reasoning model with effort", latest.ModelConfig{Provider: "openai", Model: "gpt-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}}, "high"},
 		{"reasoning model disabled shows off", latest.ModelConfig{Provider: "openai", Model: "gpt-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}}, "off"},
 		{"adaptive budget shows adaptive", latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-4-7", ThinkingBudget: &latest.ThinkingBudget{Effort: "adaptive"}}, "adaptive"},

@@ -21,11 +21,13 @@
 !pkg/safety/safety_patterns.json
 !pkg/tools/builtin/mcpcatalog/servers.json
 !pkg/tui/styles/themes/*.yaml
+!kit/acp.sh
 !kit/start.sh
 !kit/git-signing.sh
 !kit/launch.sh
 !kit/hackerspace.yaml
 !kit/user-config.yaml
+!kit/context-hooks.yaml
 **/*_test.go
 **/testdata/**
 **/fixtures/**

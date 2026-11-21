@@ -818,7 +818,7 @@ func migrateItem(ctx context.Context, tx *sql.Tx, sessionID string, position int
 	switch {
 	case item.Message != nil:
 		// Migrate message
-		msgJSON, err := json.Marshal(item.Message.Message)
+		msgJSON, err := marshalStoredMessage(item.Message)
 		if err != nil {
 			return fmt.Errorf("marshaling message: %w", err)
 		}

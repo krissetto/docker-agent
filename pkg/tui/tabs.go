@@ -24,7 +24,7 @@ import (
 
 // persistActiveTab writes the active tab ID to the tuistate store.
 func (m *appModel) persistActiveTab(persistedID string) {
-	if m.tuiStore == nil {
+	if m.tuiStore == nil || m.restoringTabs {
 		return
 	}
 	if err := m.tuiStore.SetActiveTab(m.ctx(), persistedID); err != nil {
@@ -76,7 +76,12 @@ func (m *appModel) restoreTabs(
 	var savedTabs []tuistate.TabEntry
 	var savedActiveID string
 	if userconfig.Get().GetRestoreTabs() {
-		savedTabs, savedActiveID, _ = ts.GetTabs(ctx)
+		var err error
+		savedTabs, savedActiveID, err = ts.GetTabs(ctx)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to read saved tabs", "error", err)
+			return
+		}
 	}
 
 	if len(savedTabs) == 0 {
@@ -94,15 +99,20 @@ func (m *appModel) restoreTabs(
 			}
 		}
 	}
+	initialSaved := false
+	for _, saved := range savedTabs {
+		initialSaved = initialSaved || saved.SessionID == initialApp.Session().ID
+	}
+	initial := initialApp.Session()
+	reuseInitial := !initialSaved && initial.Title == "" && len(initial.Messages) == 0
 	restoredFirst := false
 	restoredCount := 0
 
 	for _, saved := range savedTabs {
 		// Startup presence/title checks use one metadata read, never per-tab
 		// transcript loads or persisted canonical owner admission.
-		if summaries != nil && saved.SessionID != "" {
+		if summaries != nil && saved.SessionID != "" && saved.SessionID != initial.ID {
 			if _, exists := summaries[saved.SessionID]; !exists {
-				_ = ts.RemoveTab(ctx, saved.SessionID)
 				continue
 			}
 		}
@@ -154,10 +164,13 @@ func (m *appModel) restoreTabs(
 			continue
 		}
 
-		// Determine the runtime tab ID to use.
+		// A saved current session must not become another tab's placeholder.
 		var runtimeID string
-		if !restoredFirst {
-			restoredFirst = true
+		if saved.SessionID == initial.ID {
+			runtimeID = initialTabID
+		} else if sessionStore == nil {
+			continue
+		} else if !restoredFirst && reuseInitial {
 			runtimeID = initialTabID
 		} else {
 			if spawner == nil {
@@ -166,7 +179,6 @@ func (m *appModel) restoreTabs(
 			spawned, err := spawner(ctx, saved.WorkingDir)
 			if err != nil {
 				slog.WarnContext(ctx, "Failed to restore tab", "working_dir", saved.WorkingDir, "error", err)
-				_ = ts.RemoveTab(ctx, saved.SessionID)
 				continue
 			}
 			cleanup := spawned.Cleanup
@@ -180,19 +192,22 @@ func (m *appModel) restoreTabs(
 			}
 		}
 
-		// Stash persisted session ID for lazy loading on first switch.
-		m.pendingRestores[runtimeID] = saved.SessionID
+		restoredFirst = true
+		if runtimeID == initialTabID {
+			sv.ReorderTab(0, restoredCount)
+		}
+		restoredCount++
+		// Already attached current sessions need no lazy replacement.
+		if saved.SessionID != initial.ID {
+			m.pendingRestores[runtimeID] = saved.SessionID
+		}
 		if saved.SidebarCollapsed {
 			m.pendingSidebarCollapsed[runtimeID] = true
 		}
 
 		// If this was the active tab, queue a switch on Init().
 		if saved.SessionID == savedActiveID {
-			if restoredFirst && runtimeID == initialTabID {
-				_ = ts.SetActiveTab(ctx, saved.SessionID)
-			} else {
-				m.pendingActiveTab = runtimeID
-			}
+			m.pendingActiveTab = runtimeID
 		}
 
 		if summary, exists := summaries[saved.SessionID]; exists && summary.Title != "" {
@@ -200,9 +215,16 @@ func (m *appModel) restoreTabs(
 		}
 	}
 
-	// If all saved tabs were stale, persist the initial session.
-	if !restoredFirst {
-		m.persistFreshTab(ctx, initialTabID, initialWorkingDir)
+	// An unsaved blank is only a fallback view, not another tab to retry.
+	if !initialSaved && m.pendingRestores[initialTabID] == "" && initialApp.AttachedSubagent() == nil {
+		m.fallbackTab = initialTabID
+	}
+	if m.fallbackTab != "" && (initial.Title != "" || len(initial.Messages) != 0) {
+		if err := ts.AddTab(ctx, initial.ID, initialWorkingDir); err != nil {
+			slog.WarnContext(ctx, "Failed to persist current tab", "error", err)
+		} else {
+			m.fallbackTab = ""
+		}
 	}
 }
 
@@ -242,4 +264,64 @@ func (m *appModel) findTabByPersistedID(persistedID string) string {
 		}
 	}
 	return ""
+}
+
+// persistTabOrder reorders visible tabs without moving inaccessible saved slots.
+func (m *appModel) persistTabOrder(ids []string) error {
+	saved, _, err := m.tuiStore.GetTabs(m.ctx())
+	if err != nil {
+		return err
+	}
+	persisted := make(map[string]bool, len(saved))
+	for _, tab := range saved {
+		persisted[tab.SessionID] = true
+	}
+	visible := make(map[string]bool, len(ids))
+	var live []string
+	for _, id := range ids {
+		if persisted[id] {
+			visible[id] = true
+			live = append(live, id)
+		}
+	}
+	var order []string
+	next := 0
+	for _, tab := range saved {
+		if visible[tab.SessionID] {
+			order = append(order, live[next])
+			next++
+		} else {
+			order = append(order, tab.SessionID)
+		}
+	}
+	return m.tuiStore.ReorderTab(m.ctx(), order)
+}
+
+func (m *appModel) persistFallbackTab() {
+	if m.tuiStore == nil {
+		return
+	}
+	focus := m.paneFocus()
+	if m.pendingRestores[focus] != "" {
+		// Typing into a failed placeholder starts a new conversation, not a
+		// replacement for the saved identity that could not be loaded.
+		delete(m.pendingRestores, focus)
+		delete(m.pendingSidebarCollapsed, focus)
+		m.fallbackTab = focus
+	}
+	if m.fallbackTab == "" || m.fallbackTab != focus {
+		return
+	}
+	runner := m.supervisor.GetRunner(m.fallbackTab)
+	if runner == nil || runner.App == nil {
+		return
+	}
+	id := runner.App.Session().ID
+	if err := m.tuiStore.AddTab(m.ctx(), id, runner.WorkingDir); err != nil {
+		slog.Warn("Failed to persist fallback tab", "error", err)
+		return
+	}
+	m.fallbackTab = ""
+	m.persistActiveTab(id)
+	m.persistPaneWorkspaceState()
 }

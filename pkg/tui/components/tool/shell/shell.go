@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tools"
 	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
@@ -58,13 +59,17 @@ type shellModel struct {
 	hovered        bool
 	bodyOffset     int
 
-	bodyArgs   string
-	bodyOutput string
-	bodyWidth  int
-	bodyTheme  uint64
-	bodyHidden bool
-	bodyStatus types.ToolStatus
-	bodyLines  []string
+	bodyArgs       string
+	bodyOutput     string
+	bodyWidth      int
+	bodyTheme      uint64
+	bodyHidden     bool
+	bodyStatus     types.ToolStatus
+	bodyBackground bool
+	bodyLines      []string
+
+	backgroundSpinner       spinner.Spinner
+	backgroundSpinnerActive bool
 
 	commandArgs  string
 	commandValue string
@@ -83,17 +88,22 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 	return &shellModel{ar: ar, base: base, message: msg, disclosure: agentmessage.New(ar), width: 80, extractCmd: extractCmd, sessionState: sessionState}
 }
 
-func (m *shellModel) Init() tea.Cmd { return m.base.Init() }
+func (m *shellModel) Init() tea.Cmd { return tea.Batch(m.base.Init(), m.syncBackgroundSpinner()) }
 
 func (m *shellModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	_, cmd := m.base.Update(msg)
+	backgroundCmd := m.syncBackgroundSpinner()
+	if m.backgroundSpinnerActive {
+		_, tickCmd := m.backgroundSpinner.Update(msg)
+		backgroundCmd = tea.Batch(backgroundCmd, tickCmd)
+	}
 	if tick, ok := msg.(animation.TickMsg); ok {
 		m.disclosure.Tick(tick)
 		if m.bodyScroll != nil {
 			m.bodyScroll.UpdateAnimation(tick)
 		}
 	}
-	return m, cmd
+	return m, tea.Batch(cmd, backgroundCmd)
 }
 
 func (m *shellModel) SetSize(width, height int) tea.Cmd {
@@ -139,7 +149,7 @@ func (m *shellModel) BodyScrollState() (offset int, atBottom, ok bool) {
 		return 0, false, false
 	}
 	lines := m.detailsLines()
-	return m.bodyOffset, m.bodyOffset >= shellBodyMaxOffset(len(lines)), true
+	return m.bodyOffset, m.bodyOffset >= m.bodyMaxOffset(len(lines)), true
 }
 
 func (m *shellModel) SetExpanded(expanded bool) {
@@ -186,8 +196,8 @@ func (m *shellModel) setHover(line, col int, hovered, positional bool) bool {
 	x, y := -1, -1
 	if positional && body && m.width >= 12 && m.disclosure.Expanded() && m.disclosure.Visible() && !m.disclosure.NeedsTick() {
 		bodyRows := len(m.detailsLines())
-		first, last := shellBodyOutputRows(bodyRows)
-		if line >= first && line <= last && shellBodyMaxOffset(bodyRows) > 0 {
+		first, last := m.bodyOutputRows(bodyRows)
+		if line >= first && line <= last && m.bodyMaxOffset(bodyRows) > 0 {
 			x, y = col-shellCardBodyLeft(), line-first
 		}
 	}
@@ -210,9 +220,9 @@ func (m *shellModel) MouseAt(line, col int, msg tea.MouseMsg) (bool, tea.Cmd) {
 		}
 	}
 	bodyRows := len(m.detailsLines())
-	first, last := shellBodyOutputRows(bodyRows)
+	first, last := m.bodyOutputRows(bodyRows)
 	x, y := col-shellCardBodyLeft(), line-first
-	if !dragging && (shellBodyMaxOffset(bodyRows) == 0 || line < first || line > last || x != m.scroll().ScrollbarX()) {
+	if !dragging && (m.bodyMaxOffset(bodyRows) == 0 || line < first || line > last || x != m.scroll().ScrollbarX()) {
 		return false, nil
 	}
 	scroll := m.scroll()
@@ -255,8 +265,8 @@ func (m *shellModel) WheelAt(line, col, delta int) bool {
 		return false
 	}
 	bodyRows := len(m.detailsLines())
-	maxOffset := shellBodyMaxOffset(bodyRows)
-	first, last := shellBodyOutputRows(bodyRows)
+	maxOffset := m.bodyMaxOffset(bodyRows)
+	first, last := m.bodyOutputRows(bodyRows)
 	if maxOffset == 0 || line < first || line > last {
 		return false
 	}
@@ -310,7 +320,7 @@ func saturatingAdd(a, b int) int {
 }
 
 func (m *shellModel) NeedsTick() bool {
-	return m.disclosure.NeedsTick() || (m.bodyScroll != nil && m.bodyScroll.AnimationActive())
+	return m.backgroundRunning() || m.disclosure.NeedsTick() || (m.bodyScroll != nil && m.bodyScroll.AnimationActive())
 }
 
 func (m *shellModel) StopAnimation() {
@@ -319,13 +329,17 @@ func (m *shellModel) StopAnimation() {
 		m.bodyScroll.StopAnimation()
 	}
 	m.base.StopAnimation()
+	if m.backgroundSpinner != nil {
+		m.backgroundSpinner.Stop()
+		m.backgroundSpinnerActive = false
+	}
 }
 
 func (m *shellModel) ResumeAnimation() tea.Cmd {
 	if m.bodyScroll != nil {
 		m.bodyScroll.SetScrollbarActive(true)
 	}
-	return m.base.ResumeAnimation()
+	return tea.Batch(m.base.ResumeAnimation(), m.syncBackgroundSpinner())
 }
 
 // scroll allocates the body scrollview on first body render, so collapsed shells stay lightweight.
@@ -363,6 +377,11 @@ func (m *shellModel) renderHeader(showPreview bool) string {
 			}
 		}
 	}
+	statusSlot := headerStatusSlot
+	if m.message.Background != nil {
+		icon, status = m.backgroundHeader(time.Now())
+		statusSlot = max(statusSlot, ansi.StringWidth(status))
+	}
 	name := m.message.ToolDefinition.DisplayName()
 	if name == "" {
 		name = "shell"
@@ -373,7 +392,7 @@ func (m *shellModel) renderHeader(showPreview bool) string {
 	}
 	nameStyle := styles.ToolName.PaddingLeft(0)
 	line += " " + nameStyle.Render(name)
-	previewWidth := max(m.width-headerIconWidth-1-ansi.StringWidth(nameStyle.Render(name))-1-headerStatusSlot-1-headerControlWidth, 0)
+	previewWidth := max(m.width-headerIconWidth-1-ansi.StringWidth(nameStyle.Render(name))-1-statusSlot-1-headerControlWidth, 0)
 	preview := ""
 	if showPreview {
 		preview, _ = shellPreviewSanitized(m.command())
@@ -388,10 +407,10 @@ func (m *shellModel) renderHeader(showPreview bool) string {
 	}
 	line += strings.Repeat(" ", max(0, previewWidth-ansi.StringWidth(shownPreview)))
 	if status != "" {
-		status = ansi.Truncate(status, headerStatusSlot, "…")
-		line += " " + strings.Repeat(" ", max(0, headerStatusSlot-ansi.StringWidth(status))) + status
+		status = ansi.Truncate(status, statusSlot, "…")
+		line += " " + strings.Repeat(" ", max(0, statusSlot-ansi.StringWidth(status))) + status
 	} else {
-		line += strings.Repeat(" ", headerStatusSlot)
+		line += strings.Repeat(" ", statusSlot)
 	}
 	line += " " + agentmessage.Control(m.disclosure.Chevron())
 	return ansi.Truncate(line, max(m.width, 0), "")
@@ -516,22 +535,25 @@ func (m *shellModel) details() string {
 		return ""
 	}
 	lines := m.detailsLines()
-	if len(lines) == 0 {
+	if len(lines) == 0 && m.message.Background == nil {
 		return ""
 	}
 	inner := cardInnerWidth(m.width)
-	visibleBodyRows := shellBodyVisibleRows(len(lines))
-	start := min(m.bodyOffset, shellBodyMaxOffset(len(lines)))
+	visibleBodyRows := m.bodyVisibleRows(len(lines))
+	start := min(m.bodyOffset, m.bodyMaxOffset(len(lines)))
 	bodyScroll := m.scroll()
 	bodyScroll.SetSize(inner, visibleBodyRows)
 	bodyScroll.SetContent(lines, len(lines))
 	bodyScroll.SetScrollOffset(start)
 	rows := strings.Split(bodyScroll.ViewWithPaddedContentAndPadding(lines, 0, 0), "\n")
-	if !shellBodyFits(len(lines)) {
+	if m.message.Background != nil || !shellBodyFits(len(lines)) {
 		remaining := len(lines) - (start + visibleBodyRows)
 		hintText := "end of output"
 		if remaining > 0 {
 			hintText = fmt.Sprintf("… %d more lines · scroll", remaining)
+		}
+		if m.message.Background != nil {
+			hintText = m.backgroundFooter(remaining)
 		}
 		hint := ansi.Truncate(styles.MutedStyle.Render(hintText), inner, "…")
 		rows = append(rows, hint+strings.Repeat(" ", max(0, inner-ansi.StringWidth(hint))))
@@ -556,11 +578,15 @@ func (m *shellModel) detailsLines() []string {
 	arguments := m.message.ToolCall.Function.Arguments
 	output := m.message.Content
 	generation := styles.ThemeGeneration()
-	if m.bodyLines != nil && m.bodyArgs == arguments && m.bodyOutput == output && m.bodyWidth == m.width && m.bodyTheme == generation && m.bodyHidden == hideResults && m.bodyStatus == m.message.ToolStatus {
+	if m.bodyLines != nil && m.bodyArgs == arguments && m.bodyOutput == output && m.bodyWidth == m.width && m.bodyTheme == generation && m.bodyHidden == hideResults && m.bodyStatus == m.message.ToolStatus && m.bodyBackground == (m.message.Background != nil) {
 		return m.bodyLines
 	}
 	oldOffset := m.bodyOffset
-	wasAtBottom := m.bodyLines != nil && oldOffset >= shellBodyMaxOffset(len(m.bodyLines))
+	oldMaxOffset := shellBodyMaxOffset(len(m.bodyLines))
+	if m.bodyBackground {
+		oldMaxOffset = max(0, len(m.bodyLines)-(maxBodyRows-bodyPadRows-hintRows))
+	}
+	wasAtBottom := m.bodyLines != nil && oldOffset >= oldMaxOffset
 	width := max(agentmessage.InnerWidth(m.width)-m.scroll().ReservedCols(), 1)
 	var sections []string
 	if command := m.command(); command != "" {
@@ -573,6 +599,11 @@ func (m *shellModel) detailsLines() []string {
 		} else {
 			commandLines := toolcommon.WrapTextWithIndent("$ "+commandText, max(width-4, 1), max(width-4, 1))
 			sections = append(sections, styleCommandLines(commandLines))
+		}
+	}
+	if m.message.Background != nil {
+		if _, handoff := tools.ParseShellBackgroundHandoff(output); handoff {
+			output = ""
 		}
 	}
 	if output != "" && !hideResults {
@@ -599,17 +630,18 @@ func (m *shellModel) detailsLines() []string {
 	m.bodyTheme = generation
 	m.bodyHidden = hideResults
 	m.bodyStatus = m.message.ToolStatus
+	m.bodyBackground = m.message.Background != nil
 	if m.preservedScrollSet {
 		if m.preservedAtBottom {
-			m.bodyOffset = shellBodyMaxOffset(len(m.bodyLines))
+			m.bodyOffset = m.bodyMaxOffset(len(m.bodyLines))
 		} else {
-			m.bodyOffset = min(m.preservedScroll, shellBodyMaxOffset(len(m.bodyLines)))
+			m.bodyOffset = min(m.preservedScroll, m.bodyMaxOffset(len(m.bodyLines)))
 		}
 		m.preservedScrollSet = false
 	} else if wasAtBottom {
-		m.bodyOffset = shellBodyMaxOffset(len(m.bodyLines))
+		m.bodyOffset = m.bodyMaxOffset(len(m.bodyLines))
 	} else {
-		m.bodyOffset = min(oldOffset, shellBodyMaxOffset(len(m.bodyLines)))
+		m.bodyOffset = min(oldOffset, m.bodyMaxOffset(len(m.bodyLines)))
 	}
 	return m.bodyLines
 }

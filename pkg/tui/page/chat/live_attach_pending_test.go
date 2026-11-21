@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func TestReplayStreamStartedShowsAttachedPending(t *testing.T) {
@@ -42,13 +43,13 @@ func TestToolActivityClearsFirstResponsePending(t *testing.T) {
 		page := &chatPage{messages: messagecomponent.New(animation.NewRuntime(), state), sidebar: sidebar.New(animation.NewRuntime(), t.Context(), state)}
 		page.handleToolCall(&runtime.ToolCallEvent{ToolCall: tools.ToolCall{ID: "call"}})
 		page.handleStreamStarted(runtime.StreamStarted("s", "worker").(*runtime.StreamStartedEvent), false)
-		withSpinner := page.messages.View()
+		assert.Zero(t, page.messages.MessageTypeCount(types.MessageTypeSpinner), "stream start after tool output does not rearm pending")
 		if result {
 			page.handleToolCallResponse(&runtime.ToolCallResponseEvent{ToolCallID: "call", Result: &tools.ToolCallResult{Output: "done"}})
 		} else {
 			page.handleToolCallOutput(&runtime.ToolCallOutputEvent{ToolCallID: "call", Output: "output"})
 		}
-		assert.NotEqual(t, withSpinner, page.messages.View())
+		assert.Zero(t, page.messages.MessageTypeCount(types.MessageTypeSpinner))
 		withoutSpinner := page.messages.View()
 		page.setPendingResponse(false)
 		assert.Equal(t, withoutSpinner, page.messages.View())

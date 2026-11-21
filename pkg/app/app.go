@@ -94,17 +94,19 @@ type App struct {
 	// source and Run's own channel is drained for flow control only.
 	// runCancelled mutes bridged events after the user cancels the in-flight
 	// turn (all but the stream stop), mirroring the classic drop-on-cancel.
-	bridgeMu         sync.Mutex
-	stopBridge       func()
-	hubBridged       bool
-	bridgeEpoch      atomic.Uint64
-	presentation     atomic.Pointer[PresentationState]
-	projectionMu     sync.Mutex
-	cancelGeneration uint64
-	connection       atomic.Uint32 // ConnectionState of the current bridge
-	treeMu           sync.Mutex
-	treeWatch        *treeWatch
-	runCancelled     atomic.Bool
+	backgroundOutputMu sync.Mutex
+	backgroundOutput   *backgroundOutputObservation
+	bridgeMu           sync.Mutex
+	stopBridge         func()
+	hubBridged         bool
+	bridgeEpoch        atomic.Uint64
+	presentation       atomic.Pointer[PresentationState]
+	projectionMu       sync.Mutex
+	cancelGeneration   uint64
+	connection         atomic.Uint32 // ConnectionState of the current bridge
+	treeMu             sync.Mutex
+	treeWatch          *treeWatch
+	runCancelled       atomic.Bool
 	// lifecycleMu correlates accepted submissions with cancellation and bridged
 	// envelopes. A cancelled request only mutes its own tail; a stale stop can
 	// never clear presentation state for a newer request.
@@ -1752,6 +1754,28 @@ func (a *App) Runtime() Services {
 // ownership transfer. Callers must not infer registry ownership from it.
 func (a *App) SessionHandle() runtime.SessionHandle {
 	return a.state().handle
+}
+
+// BackgroundProcessOutput returns a bounded output tail of one of the current
+// session's background processes.
+func (a *App) BackgroundProcessOutput(ctx context.Context, processID string, maxBytes int) (tools.BackgroundProcessOutput, error) {
+	source, ok := a.state().handle.(tools.BackgroundProcessOutputSource)
+	if !ok {
+		return tools.BackgroundProcessOutput{}, tools.ErrBackgroundProcessOutputUnsupported
+	}
+	return source.BackgroundProcessOutput(ctx, processID, maxBytes)
+}
+
+// SetBackgroundProcessOutputInterest replaces the current session's set of
+// background processes whose live output this view wants delivered.
+func (a *App) SetBackgroundProcessOutputInterest(processIDs []string) error {
+	return a.BackgroundProcessOutputInterestSetter()(processIDs)
+}
+
+// BackgroundProcessOutputInterestSetter returns a setter bound to the current
+// session's observation at call time, so a late call can't leak into another session.
+func (a *App) BackgroundProcessOutputInterestSetter() func(processIDs []string) error {
+	return a.backgroundProcessOutputInterestSetter()
 }
 
 // SessionRuntime returns the shared handle registry injected at construction.

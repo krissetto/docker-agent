@@ -120,6 +120,12 @@ func (d *sessionDriver) admitInputReceiptWithAuthorization(ctx context.Context, 
 			}
 			return sessionIOReservation{commit: func(error) error { return existingErr }}, nil
 		}
+		// Check in the same owner reservation as the durable input append. A
+		// status preflight cannot prevent another client from winning admission.
+		if msg.RequireIdle && (d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.interactions) != 0 || d.compactReserved || d.pauseCh != nil || d.skillOperationID != "") {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorCapacity, SessionID: d.identityID, Operation: op, Reason: SessionErrorReasonBusy, Detail: "session is busy or has pending work; wait for the owning client to finish"}
+		}
+
 		if authorizeDormant && d.viewDormant && !d.stopped {
 			if err := d.dormantCommunicationAdmissionLocked(msg); err != nil {
 				return sessionIOReservation{}, err
@@ -131,6 +137,16 @@ func (d *sessionDriver) admitInputReceiptWithAuthorization(ctx context.Context, 
 		if err := d.admitLocked(op); err != nil {
 			err.RequestID = msg.RequestID
 			return sessionIOReservation{}, err
+		}
+		if msg.Retry {
+			// Retrying the last input must retain its approval constraint, even
+			// through recovery. A genuinely new turn inherits no old constraint.
+			for _, item := range slices.Backward(d.sess.MessagesSnapshot()) {
+				if item.Message != nil && item.Message.Message.Role == "user" && !item.Message.Pending {
+					msg.RequireApproval = msg.RequireApproval || item.Message.RequireApproval
+					break
+				}
+			}
 		}
 		if msg.Retry {
 			// An explicit retry is the only way to resume after an uncertain write.

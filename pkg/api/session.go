@@ -9,14 +9,20 @@ import (
 )
 
 const (
-	SessionFeaturesHeader             = "X-Docker-Agent-Features"
-	SessionFeatureBackgroundProcesses = "background-processes"
-	SessionAPIVersion                 = 2
-	SessionAPIPath                    = "/api/v2/sessions"
-	SessionCatalogDefaultLimit        = 50
-	SessionCatalogMaxLimit            = 200
-	SessionViewMetadataProjection     = "metadata"
-	SessionHistoryProjection          = "tail"
+	SessionObserverHeader                       = "X-Docker-Agent-Observer"
+	SessionBackgroundOutputInterestHeader       = "X-Docker-Agent-Background-Output-Interest"
+	SessionBackgroundOutputInterestMaxBytes     = 8 << 10
+	SessionBackgroundOutputInterestMaxProcesses = 128
+	SessionFeaturesHeader                       = "X-Docker-Agent-Features"
+	SessionFeatureBackgroundProcesses           = "background-processes"
+	SessionFeatureBackgroundProcessOutput       = "background-process-output"
+	SessionBackgroundProcessOutputMaxBytes      = 64 << 10
+	SessionAPIVersion                           = 2
+	SessionAPIPath                              = "/api/v2/sessions"
+	SessionCatalogDefaultLimit                  = 50
+	SessionCatalogMaxLimit                      = 200
+	SessionViewMetadataProjection               = "metadata"
+	SessionHistoryProjection                    = "tail"
 )
 
 type SessionCatalog[State ~string] struct {
@@ -126,11 +132,13 @@ type SessionThinkingLevel struct {
 }
 
 type SessionInputRequest struct {
-	GenerateTitle bool               `json:"generate_title,omitempty"`
-	Mode          string             `json:"mode,omitempty"`
-	Content       string             `json:"content"`
-	MultiContent  []chat.MessagePart `json:"multi_content,omitempty"`
-	RequestID     string             `json:"request_id,omitempty"`
+	RequireIdle     bool               `json:"require_idle,omitempty"`
+	RequireApproval bool               `json:"require_approval,omitempty"`
+	GenerateTitle   bool               `json:"generate_title,omitempty"`
+	Mode            string             `json:"mode,omitempty"`
+	Content         string             `json:"content"`
+	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
+	RequestID       string             `json:"request_id,omitempty"`
 }
 
 type SessionSubmission[Disposition ~string] struct {
@@ -286,4 +294,11 @@ type SessionOpened[Info any, State ~string] struct {
 	Info     Info                 `json:"info"`
 	Metadata SessionMetadata      `json:"metadata"`
 	Status   SessionStatus[State] `json:"status"`
+}
+
+// SessionBackgroundOutputInterest replaces one session's interest on a live observation.
+type SessionBackgroundOutputInterest struct {
+	ObserverID string   `json:"observer_id"`
+	SessionID  string   `json:"session_id"`
+	ProcessIDs []string `json:"process_ids"`
 }

@@ -19,6 +19,7 @@ type treeControl struct {
 	x     int
 	whole bool
 	todos bool
+	plans bool
 }
 
 func (m *model) canonicalTreeID() subagent.NodeID {
@@ -242,6 +243,9 @@ func (m *model) treeControlAt(x, y int) (treeControl, bool) {
 	}
 	contentY := y + m.scrollview.ScrollOffset()
 	row := contentY - m.treeSectionStart
+	if m.hasPlansSection() && contentY == m.planStart {
+		return treeControl{whole: true, plans: true}, true
+	}
 	if contentY == m.todoSummaryLine && m.todoSummaryLine >= 0 {
 		return treeControl{whole: true, todos: true}, true
 	}
@@ -262,7 +266,9 @@ func (m *model) treeControlAt(x, y int) (treeControl, bool) {
 
 func (m *model) toggleTreeControl(control treeControl) tea.Cmd {
 	if control.whole {
-		if control.todos {
+		if control.plans {
+			m.plansCollapsed = !m.plansCollapsed
+		} else if control.todos {
 			m.todosCollapsed = !m.todosCollapsed
 		} else {
 			m.treeCollapsed = !m.treeCollapsed

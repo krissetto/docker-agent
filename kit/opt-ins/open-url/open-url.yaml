@@ -1,0 +1,8 @@
+# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: Runtime host browser navigation
+provides: [async-agent-open-url@1.0.0]
+capabilities:
+  - type: com.docker.sandbox/open-url@1

@@ -438,7 +438,7 @@ func closeStreamTx(ctx context.Context, tx *sql.Tx, sessionID string, itemID int
 	}
 	var result sql.Result
 	if msg != nil {
-		msgJSON, err := json.Marshal(msg.Message)
+		msgJSON, err := marshalStoredMessage(msg)
 		if err != nil {
 			return fmt.Errorf("marshaling message: %w", err)
 		}
@@ -461,7 +461,7 @@ func closeStreamTx(ctx context.Context, tx *sql.Tx, sessionID string, itemID int
 		}
 		rebuilt := ReconstructStreamingMessage(agentName.String, chunks)
 		rebuilt.Message.MessageID = storedMessageID
-		msgJSON, err := json.Marshal(rebuilt.Message)
+		msgJSON, err := marshalStoredMessage(&rebuilt)
 		if err != nil {
 			return fmt.Errorf("marshaling message: %w", err)
 		}

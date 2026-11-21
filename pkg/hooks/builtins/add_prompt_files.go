@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -36,7 +37,31 @@ func addPromptFiles(ctx context.Context, in *hooks.Input, args []string) (*hooks
 	if in == nil || in.Cwd == "" || len(args) == 0 {
 		return nil, nil
 	}
-	names, depth := parsePromptFileArgs(args)
+	group := promptFilesGroup
+	var fileArgs []string
+	for _, arg := range args {
+		if value, ok := strings.CutPrefix(arg, "--group="); ok {
+			if strings.TrimSpace(value) == "" {
+				return nil, fmt.Errorf("add_prompt_files: --group requires a nonempty name")
+			}
+			group = value
+		} else if arg == "--group" {
+			return nil, fmt.Errorf("add_prompt_files: use --group=<name>")
+		} else {
+			fileArgs = append(fileArgs, arg)
+		}
+	}
+	names, depth := parsePromptFileArgs(fileArgs)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("add_prompt_files: at least one filename is required")
+	}
+	// Independent hook consumers must not retire each other's context.
+	keyFor := func(key string) string {
+		if group != promptFilesGroup {
+			return group + "/" + key
+		}
+		return key
+	}
 	home, _ := os.UserHomeDir()
 	var sources []hooks.InstructionContext
 	var loaded []string
@@ -46,14 +71,14 @@ func addPromptFiles(ctx context.Context, in *hooks.Input, args []string) (*hooks
 			if err != nil {
 				slog.WarnContext(ctx, "reading prompt file", "path", path, "error", err)
 				return instructionContextOutput(hooks.InstructionContext{
-					Group: promptFilesGroup, Unavailable: true, SetMarker: true,
+					Group: group, Unavailable: true, SetMarker: true,
 				}), nil
 			}
 			loaded = append(loaded, path)
 			rendered := "Instructions from: " + path + "\n" + string(content)
 			sources = append(sources, hooks.InstructionContext{
-				Key:            promptFileKey(path),
-				Group:          promptFilesGroup,
+				Key:            keyFor(promptFileKey(path)),
+				Group:          group,
 				Label:          "instructions from " + path,
 				Content:        rendered,
 				ChangedContent: "The instructions from " + path + " have changed and replace the previous instructions from that file.\n\n" + rendered,
@@ -63,8 +88,8 @@ func addPromptFiles(ctx context.Context, in *hooks.Input, args []string) (*hooks
 	}
 	if note := promptfiles.Index(ctx, in.Cwd, names, depth, loaded); note != "" {
 		sources = append(sources, hooks.InstructionContext{
-			Key:            promptFilesIndexKey,
-			Group:          promptFilesGroup,
+			Key:            keyFor(promptFilesIndexKey),
+			Group:          group,
 			Label:          "prompt files below " + in.Cwd,
 			Content:        note,
 			ChangedContent: "The list of prompt files below " + in.Cwd + " has changed and replaces the previous list.\n\n" + note,
@@ -73,7 +98,7 @@ func addPromptFiles(ctx context.Context, in *hooks.Input, args []string) (*hooks
 	}
 	if len(sources) == 0 {
 		sources = append(sources, hooks.InstructionContext{
-			Group: promptFilesGroup, CompleteGroup: true, SetMarker: true,
+			Group: group, CompleteGroup: true, SetMarker: true,
 		})
 	} else {
 		sources[0].CompleteGroup = true

@@ -86,6 +86,8 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, nil
 	case *app.SessionResetEvent:
 		return true, p.resetProjection(msg.Snapshot)
+	case *runtime.BackgroundProcessOutputEvent:
+		return true, p.messages.AppendBackgroundOutput(msg)
 	case *runtime.BackgroundProcessesEvent:
 		return true, p.setBackgroundProcesses(msg.SessionID, msg.Processes)
 	case *runtime.InteractionResolvedEvent:
@@ -523,14 +525,14 @@ func (p *chatPage) trackContentSession(sessionID string) {
 }
 
 func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
-	if p.streamCancelled {
+	if p.streamCancelled || msg.Content == "" {
 		return nil
 	}
 	p.trackContentSession(msg.SessionID)
 	identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), msg.MessageID)
 	// Track that we've received assistant content
 	p.hasReceivedAssistantContent = true
-	// Clear pending response indicator - first chunk has arrived
+	// Empty envelopes do not reach this first-output handoff.
 	p.setPendingResponse(false)
 	// Content is useful activity: acknowledge the sidebar's outbound transfer
 	// box when this agent is a delegation target.
@@ -539,7 +541,7 @@ func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 }
 
 func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningEvent) tea.Cmd {
-	if p.streamCancelled {
+	if p.streamCancelled || msg.Content == "" {
 		return nil
 	}
 	p.trackContentSession(msg.SessionID)
@@ -767,6 +769,9 @@ func (p *chatPage) finishTurnPresentation() tea.Cmd {
 
 // handlePartialToolCall renders each streaming tool call with an animated pending indicator.
 func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.Cmd {
+	if msg.ToolCall.ID == "" && msg.ToolCall.Function.Name == "" && msg.ToolCall.Function.Arguments == "" {
+		return nil
+	}
 	p.setPendingResponse(false)
 	var toolDef tools.Tool
 	if msg.ToolDefinition != nil {
@@ -780,6 +785,7 @@ func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.
 }
 
 func (p *chatPage) handleToolCallConfirmation(msg *runtime.ToolCallConfirmationEvent) tea.Cmd {
+	p.setPendingResponse(false)
 	spinnerCmd := p.setWorking(false)
 	toolCmd := p.messages.AddOrUpdateToolCall(msg.AgentName, msg.ToolCall, msg.ToolDefinition, types.ToolStatusConfirmation)
 	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
@@ -811,7 +817,7 @@ func (p *chatPage) handleToolCallResponse(msg *runtime.ToolCallResponseEvent) te
 	if msg.Result.IsError {
 		status = types.ToolStatusError
 	}
-	toolCmd := p.messages.AddToolResult(msg, status)
+	toolCmd := tea.Batch(p.messages.AddToolResult(msg, status), p.refreshBackgroundProcessLinks())
 
 	// Update todo sidebar if this is a todo tool
 	if msg.ToolDefinition.Category == "todo" && !msg.Result.IsError {
@@ -905,6 +911,7 @@ func (p *chatPage) applyLifecycle(event runtime.Event) {
 }
 
 func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
+	p.backgroundRemoteToolCalls = nil
 	if p.asyncReplay && snapshot.Session != nil {
 		return p.beginReplay(snapshot)
 	}

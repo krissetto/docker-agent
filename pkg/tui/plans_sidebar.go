@@ -41,6 +41,13 @@ func (m *appModel) refreshPlanSidebarCmd() tea.Cmd {
 	return m.planRefreshCmd(false)
 }
 
+func (m *appModel) refreshPlanSidebarOrDialogCmd() tea.Cmd {
+	if !m.planDataVisible() {
+		return nil
+	}
+	return m.planRefreshCmd(false)
+}
+
 // planPanelLabel is the bottom panel's Plans element: the same snapshot the
 // sidebar section shows, reduced to a count.
 func (m *appModel) planPanelLabel() string {

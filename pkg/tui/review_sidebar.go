@@ -230,11 +230,6 @@ func (m *appModel) pushGitSidebar(ws *gitReviewWorkspace) tea.Cmd {
 		}
 		return strings.Compare(a.Path, b.Path)
 	})
-	if model := ws.models[view.ModeFiles]; model != nil {
-		if key, ok := model.OpenKey(); ok {
-			c.Open = key
-		}
-	}
 	if ws.inspecting {
 		if model := ws.models[ws.mode]; model != nil {
 			c.Open, _ = model.OpenKey()
@@ -422,6 +417,13 @@ func (m *appModel) openGitFilesInspector(ws *gitReviewWorkspace, key view.Docume
 		}
 		ws.mode = view.ModeFiles
 	}
+	if !ws.inspecting {
+		if m.focusedPanel == PanelSidebarGit {
+			ws.restore = gitReviewFocus{panel: PanelContent}
+		} else {
+			ws.restore = m.captureReviewFocus()
+		}
+	}
 	model := ws.current()
 	if ws.snapshot != nil {
 		model.SetSnapshot(*ws.snapshot)
@@ -434,6 +436,7 @@ func (m *appModel) openGitFilesInspector(ws *gitReviewWorkspace, key view.Docume
 	_ = m.chatPage.SetSize(m.width, m.contentHeight)
 	if page, ok := m.gitPage(ws.anchor); ok {
 		page.SetContentOverlay(model)
+		_ = page.SetGitFocused(false)
 	}
 	model.Focus()
 	m.focusReview()

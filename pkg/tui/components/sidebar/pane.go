@@ -44,7 +44,9 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 	}
 	if control, ok := m.treeControlAt(x, y); ok {
 		key = "tree-summary"
-		if control.todos {
+		if control.plans {
+			key = "plan-summary"
+		} else if control.todos {
 			key = "todo-summary"
 		} else if !control.whole {
 			key = "node:" + string(control.id)
@@ -89,6 +91,10 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		}
 		if key != "" {
 			key = "background:" + key
+		}
+	case ClickPlanBrowser:
+		if row, ok := m.placementRowAt(x, y); ok && row.id == "plan-summary" {
+			key = "plan-summary"
 		}
 	case ClickGit:
 		key = ""

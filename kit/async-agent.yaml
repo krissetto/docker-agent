@@ -1,4 +1,4 @@
-# syntax=docker/sandbox-kit:210ccc3@sha256:8944c950eaaef7e1f33bd4c672e9607c8deb33eedd49d62d8ac58b2d4045de99
+# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3
 schemaVersion: "3"
 kind: workload
 displayName: krissetto's Docker Agent hack with async subagents
@@ -98,6 +98,12 @@ capabilities:
           - domain: github.com
             header: Authorization
             format: "Bearer %s"
+  - type: com.docker.sandbox/acp@1
+    optional: true
+    config:
+      agent: async-agent-kit
+      command: ["/opt/async-agent/acp.sh"]
+      protocolVersion: 1
   - type: com.docker.sandbox/agent-sessions@1
     optional: true
     config:
@@ -113,9 +119,10 @@ capabilities:
       continue: ["--session=-1"]
       newSession: []
       list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
-  - type: com.docker.sandbox/agent-context@1
+  - type: com.docker.sandbox/agent-context@2
     optional: true
     config:
+      # Workload guidance stays inline with or without the legacy delivery field.
       filename: ASYNC_AGENT_KIT.md
   - type: com.docker.sandbox/agent-skills@1
     optional: true
@@ -130,6 +137,12 @@ capabilities:
       phase: runtime
       unrestricted: false
       sign: [git]
+  - type: com.docker.sandbox/dockerd@1
+    optional: true
+    config:
+      autoStart: true
+  - type: com.docker.sandbox/auto-restart@1
+    optional: true
   - type: com.docker.sandbox/long-running@1
   - type: com.docker.sandbox/lifecycle@1
     config:
@@ -185,8 +198,10 @@ capabilities:
             - no_proxy
             - SSL_CERT_FILE
             - SSL_CERT_DIR
+            - IS_SANDBOX
             - SANDBOX_VM_ID
             - SSH_AUTH_SOCK
+            - BROWSER
             - BASH_ENV
             - XDG_CACHE_HOME
             - TMPDIR

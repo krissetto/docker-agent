@@ -341,8 +341,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 			entry.msg.ToolStatus == types.ToolStatusRunning
 		isCompleted := status == types.ToolStatusCompleted || status == types.ToolStatusError
 
-		entry.msg.Content = strings.ReplaceAll(content, "\t", "    ")
-		entry.msg.ToolStatus = status
+		entry.msg.SetToolResponse(content, status)
 		entry.msg.ToolResult = result.WithoutPayload()
 		entry.msg.Images = tuiimage.FromToolResult(result)
 
@@ -1164,3 +1163,21 @@ func (m *Model) ToggleAt(line, col int) {
 		view.Toggle()
 	}
 }
+
+// ToolCards exposes source-owned messages and views for background updates.
+func (m *Model) ToolCards(visit func(*types.Message, layout.Model)) {
+	for _, entry := range m.toolEntries {
+		visit(entry.msg, entry.view)
+	}
+}
+
+// InvalidateTools refreshes a changed background card without replacing its view.
+func (m *Model) InvalidateTools() {
+	m.cache = nil
+	for i := range m.toolEntries {
+		m.toolEntries[i].strippedCollapsed = ""
+	}
+}
+
+// ToolCardsVisible includes reasoning rendered directly inside an expanded Work block.
+func (m *Model) ToolCardsVisible() bool { return m.expanded || m.hostedByWork() }

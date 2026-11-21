@@ -1,0 +1,4 @@
+turn_start:
+  - type: builtin
+    command: add_prompt_files
+    args: ["--group=kit/async-agent-context", ASYNC_AGENT_KIT.md]

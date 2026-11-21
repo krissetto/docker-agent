@@ -93,6 +93,7 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 		a.stopBridge()
 		a.stopBridge = nil
 	}
+	a.clearBackgroundOutputObservation()
 	state := a.state()
 	sess, session := state.session, state.handle
 	if session == nil || sess == nil {
@@ -102,7 +103,7 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 	a.connection.Store(uint32(ConnectionConnecting))
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	stopBusCancel := context.AfterFunc(a.busLifetime(), cancel)
-	attachment, err := runtimeclient.Attach(bridgeCtx, session, &appProjectionSink{app: a, ctx: bridgeCtx, sessionID: sess.ID, epoch: epoch})
+	attachment, err := runtimeclient.Attach(bridgeCtx, a.backgroundOutputObserver(session, sess.ID), &appProjectionSink{app: a, ctx: bridgeCtx, sessionID: sess.ID, epoch: epoch})
 	if err != nil {
 		stopBusCancel()
 		cancel()

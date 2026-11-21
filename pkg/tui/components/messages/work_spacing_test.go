@@ -7,150 +7,133 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
-	"github.com/docker/docker-agent/pkg/tui/messages"
-	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-// Assistant replies retained beside Work keep one separator per block, and
-// expanded Work keeps one breathing row under its header.
-func newWorkSpacingFixture(t *testing.T, workExpanded bool) *model {
+func requireUserWorkGap(t *testing.T, m *model, prompt string) {
 	t.Helper()
-	ar := animation.NewRuntime()
-	m := NewScrollableView(ar, 84, 60, &service.SessionState{}).(*model)
-	t.Cleanup(func() { m.StopAnimations(); ar.Stop() })
-	m.SetPosition(0, 0)
-	m.SetCompactWorkLog(true)
-	m.SetVisibleReplies(messages.VisibleRepliesThree)
-
-	user := types.User("request")
-	m.messages = append(m.messages, user)
-	m.views = append(m.views, m.createMessageView(user))
-	m.AppendReasoning("root", "planning the work")
-	call := tools.ToolCall{ID: "spacing-tool", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"printf spacing"}`}}
-	m.AddOrUpdateToolCall("root", call, tools.Tool{Name: "shell"}, types.ToolStatusCompleted)
-	m.AppendToolOutput(&runtime.ToolCallOutputEvent{ToolCallID: call.ID, Output: "spacing output"})
-	for _, text := range []string{"first retained answer", "para one\n\npara two", "third retained answer"} {
-		msg := types.Agent(types.MessageTypeAssistant, "root", text)
-		m.messages = append(m.messages, msg)
-		m.views = append(m.views, m.createMessageView(msg))
-	}
+	m.ensureAllItemsRendered()
+	index := -1
 	for i, msg := range m.messages {
-		m.responseGroups[msg] = uint64(i + 1)
+		if msg.Type == types.MessageTypeUser && msg.Content == prompt {
+			index = i
+			break
+		}
 	}
-	m.nextResponseGroup = uint64(len(m.messages) + 1)
-	m.workProjectionDirty = true
-	m.syncWorkProjection()
-	if workExpanded {
-		if work := firstWorkBlock(m); work != nil {
-			work.SetExpandedImmediately(true)
-		}
-		for _, v := range m.views {
-			if block, ok := v.(*reasoningblock.Model); ok {
-				block.SetExpandedImmediately(true)
-				block.SetToolCallExpandedImmediately(call.ID, true)
+	require.GreaterOrEqual(t, index, 0)
+	end := m.slotOffset(index) + m.slotBase[index]
+	require.Equal(t, "┃", strings.TrimSpace(ansi.Strip(m.renderedLineAt(end-1))), "bottom padding belongs to the rendered user bubble")
+	require.Empty(t, strings.TrimSpace(ansi.Strip(m.renderedLineAt(end))), "one blank terminal row follows the bubble")
+	require.Contains(t, ansi.Strip(m.renderedLineAt(end+1)), "Work", "the header immediately follows that blank row")
+}
+
+func TestUserWorkGapLive(t *testing.T) {
+	for _, kind := range []string{"reasoning", "tool"} {
+		t.Run(kind, func(t *testing.T) {
+			m := newSpinnerTestModel(t)
+			t.Cleanup(m.StopAnimations)
+			m.SetSize(80, 40)
+			m.SetCompactWorkLog(true)
+			m.suppressReplyHandoff = true
+			m.AddUserMessage("request")
+			m.SetWorkStatus(true, 0)
+			m.AppendAssistantContent("s", "one", "root", "firstanswer")
+			require.NotContains(t, ansi.Strip(m.View()), "Working")
+			if kind == "reasoning" {
+				m.AppendReasoningContent("s", "one", "root", "privatework")
+			} else {
+				m.AddOrUpdateToolCall("root", tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "probe", Arguments: "{}"}}, tools.Tool{Name: "probe"}, types.ToolStatusRunning)
 			}
-		}
+			requireUserWorkGap(t, m, "request")
+			m.SetWorkStatus(false, 0)
+			requireUserWorkGap(t, m, "request")
+		})
+	}
+}
+
+func TestUserWorkGapPlainOnlyHasNoExtraSeparator(t *testing.T) {
+	m := newSpinnerTestModel(t)
+	t.Cleanup(m.StopAnimations)
+	m.SetSize(80, 40)
+	m.SetCompactWorkLog(true)
+	m.suppressReplyHandoff = true
+	m.AddUserMessage("request")
+	m.SetWorkStatus(true, 0)
+	m.AppendAssistantContent("s", "one", "root", "plainanswer")
+	require.NotContains(t, ansi.Strip(m.View()), "Working")
+	m.AppendAssistantContent("s", "one", "root", " more")
+	require.NotContains(t, ansi.Strip(m.View()), "Working")
+	m.SetWorkStatus(false, 0)
+	m.ensureAllItemsRendered()
+	require.Empty(t, m.transientWork)
+	require.False(t, m.slotSep[0], "ordinary assistant action row resumes owning the gap")
+	end := m.slotOffset(0) + m.slotBase[0]
+	require.Empty(t, strings.TrimSpace(ansi.Strip(m.renderedLineAt(end))))
+	require.Contains(t, ansi.Strip(m.renderedLineAt(end+1)), "plainanswer")
+}
+
+func TestUserWorkGapReplayAndExpanded(t *testing.T) {
+	sess := session.New(session.WithID("s"))
+	sess.Messages = []session.Item{
+		session.NewMessageItem(session.UserMessage("request")),
+		session.NewMessageItem(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "answer", ReasoningContent: "privatework"})),
+	}
+	m := newSpinnerTestModel(t)
+	t.Cleanup(m.StopAnimations)
+	m.SetSize(80, 40)
+	m.SetCompactWorkLog(true)
+	BeginReplay(m, PrepareReplay(sess), nil)
+	finishPreparedReplay(t, m)
+	requireUserWorkGap(t, m, "request")
+	for _, block := range m.workBlocks {
+		block.SetExpandedImmediately(true)
 	}
 	m.invalidateAllItems()
-	m.ensureAllItemsRendered()
-	m.userHasScrolled = false
-	m.scrollOffset = 0
+	requireUserWorkGap(t, m, "request")
+}
+
+func TestUserWorkGapDuringSendScrollAndActivityHandoff(t *testing.T) {
+	m := newSendScroll(t)
+	m.SetCompactWorkLog(true)
+	m.SetScrollOnSend(true)
+	addSentPrompt(m, "local", "request")
+	m.ScrollToSentInput("local")
+	m.SetWorkStatus(true, 0)
+	m.AppendAssistantContent("s", "one", "root", "visibleanswer")
 	m.View()
-	return m
-}
-
-func maxBlankRun(rows []string) int {
-	best, run := 0, 0
-	for _, row := range rows {
-		if strings.TrimSpace(row) == "" {
-			run++
-			best = max(best, run)
-			continue
+	require.True(t, m.scrollOnSend.transition.Running())
+	offsets := map[int]bool{}
+	assertFrame := func() {
+		t.Helper()
+		frame := strings.Split(ansi.Strip(m.View()), "\n")
+		offsets[m.scrollOffset] = true
+		for y, row := range frame {
+			if strings.Contains(row, "Working") && y >= 2 {
+				require.Empty(t, strings.TrimSpace(strings.TrimSuffix(frame[y-1], "│")))
+				require.Equal(t, "┃", strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(frame[y-2]), "│")), "painted header stays one row below the bubble")
+			}
 		}
-		run = 0
-	}
-	return best
-}
-
-func TestWorkSpacingCollapsedRetainedAssistantRepliesUseSingleSeparators(t *testing.T) {
-	m := newWorkSpacingFixture(t, false)
-	rows := strings.Split(ansi.Strip(m.View()), "\n")
-	work, last := -1, -1
-	for i, row := range rows {
-		if work < 0 && strings.Contains(row, "Work [+]") {
-			work = i
-		}
-		if strings.Contains(row, "third retained answer") {
-			last = i
+		if strings.Contains(strings.Join(frame, "\n"), "Working") {
+			requireUserWorkGap(t, m, "request")
 		}
 	}
-	require.GreaterOrEqual(t, work, 0, "collapsed Work header is visible")
-	require.Greater(t, last, work)
-	require.LessOrEqual(t, maxBlankRun(rows[work:last+1]), 1, "no doubled gap from the Work header through the retained replies")
-}
-
-func TestWorkSpacingExpandedKeepsHeaderBreathingRowAndParagraphs(t *testing.T) {
-	m := newWorkSpacingFixture(t, true)
-	rows := strings.Split(ansi.Strip(m.View()), "\n")
-	work := -1
-	for i, row := range rows {
-		if strings.Contains(row, "Work [-]") {
-			work = i
+	for range 5 {
+		tickSentScroll(t, m)
+		assertFrame()
+	}
+	m.AppendReasoningContent("s", "one", "root", "privatework")
+	for range 100 {
+		assertFrame()
+		if !m.scrollOnSend.transition.Running() && !m.replyHandoff.Active() {
 			break
 		}
+		tickSentScroll(t, m)
 	}
-	require.GreaterOrEqual(t, work, 0)
-	require.Empty(t, strings.TrimSpace(rows[work+1]), "one breathing row under the expanded Work header")
-	require.NotContains(t, rows[work+2], "Thinking", "hosted reasoning has no nested header")
-	require.Contains(t, rows[work+2], "planning the work", "reasoning content starts directly under the breathing row")
-
-	para := -1
-	for i, row := range rows {
-		if strings.Contains(row, "para one") {
-			para = i
-			break
-		}
-	}
-	require.GreaterOrEqual(t, para, 0)
-	blankBetween := 0
-	for i := para + 1; i < len(rows) && strings.TrimSpace(rows[i]) == ""; i++ {
-		blankBetween++
-	}
-	require.Equal(t, 1, blankBetween, "paragraph break inside a reply is preserved as exactly one row")
-}
-
-// Layout separators outside compact Work and for agent-origin replies must stay as before.
-func TestDisplayNeedsSeparatorKeepsNonCompactAndAgentOriginRules(t *testing.T) {
-	ar := animation.NewRuntime()
-	t.Cleanup(ar.Stop)
-
-	plain := NewScrollableView(ar, 84, 20, &service.SessionState{}).(*model)
-	t.Cleanup(plain.StopAnimations)
-	user := types.User("request")
-	reply := types.Agent(types.MessageTypeAssistant, "root", "plain reply")
-	plain.messages = append(plain.messages, user, reply)
-	require.True(t, plain.displayNeedsSeparator(0), "non-compact user to assistant keeps its separator")
-
-	compact := NewScrollableView(ar, 84, 20, &service.SessionState{}).(*model)
-	t.Cleanup(compact.StopAnimations)
-	compact.SetCompactWorkLog(true)
-	child := types.Agent(types.MessageTypeAssistant, "child", "agent-origin reply")
-	child.InputOrigin = session.InputOriginAgent
-	compact.messages = append(compact.messages, types.User("request"), child)
-	require.True(t, compact.displayNeedsSeparator(0), "agent-origin replies keep their separator in compact mode")
-}
-
-// Rendering must not mutate source messages.
-func TestWorkSpacingFixtureLeavesSourceMessagesUnchanged(t *testing.T) {
-	m := newWorkSpacingFixture(t, false)
-	before := messageContents(m.messages)
-	_ = m.View()
-	_ = m.View()
-	require.Equal(t, before, messageContents(m.messages))
+	require.False(t, m.scrollOnSend.transition.Running())
+	require.False(t, m.replyHandoff.Active())
+	require.Greater(t, len(offsets), 3, "smooth scroll still traverses intermediate rows")
+	requireWorkBefore(t, m, "Working", "visibleanswer")
 }

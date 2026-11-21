@@ -91,7 +91,7 @@ func TestKitTaskPackaging(t *testing.T) {
 	assert.Contains(t, stage, "set -eux\n")
 	assert.Contains(t, stage, "printf '%s  task.tar.gz\\n' \"$checksum\" | sha256sum -c -\ntar -xzf task.tar.gz task LICENSE\n", "verify before extracting")
 	assert.Contains(t, runtime, "COPY --from=task --chown=root:root --chmod=0755 /task/task /usr/local/bin/task\n")
-	assert.Contains(t, runtime, "RUN install -d -m 0755 /usr/local/share/licenses /usr/local/share/licenses/task\n")
+	assert.Contains(t, runtime, "COPY --from=layout --chown=root:root --chmod=0755 /layout/usr/local/share/licenses/ /usr/local/share/licenses/\n")
 	assert.Contains(t, runtime, "COPY --from=task --chown=root:root --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE\n")
 	assert.Contains(t, runtime, "USER agent\n")
 	assert.NotContains(t, runtime, "curl ")

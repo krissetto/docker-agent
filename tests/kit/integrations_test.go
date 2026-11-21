@@ -44,6 +44,8 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv(skills.KitDirEnv, "")
+	dropIn, err := os.ReadFile(kitPath(t, "context-hooks.yaml"))
+	require.NoError(t, err)
 	t.Chdir(workspace)
 	// SBX writes the profile beside the workspace, not over project AGENTS.md.
 	profilePath := filepath.Join(filepath.Dir(workspace), "ASYNC_AGENT_KIT.md")
@@ -52,6 +54,12 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	skillPath := filepath.Join(home, ".agents", "skills", "shared", "SKILL.md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(skillPath), 0o700))
 	require.NoError(t, os.WriteFile(skillPath, []byte("---\nname: shared\ndescription: Shared fixture guidance\n---\nStay within existing tool scopes.\n"), 0o600))
+	dropInDir := filepath.Join(home, ".config", "cagent", "hooks.d")
+	require.NoError(t, os.MkdirAll(dropInDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dropInDir, "async-agent-context.yaml"), dropIn, 0o600))
+	t.Setenv("DOCKER_AGENT_CONFIG_DIR", filepath.Dir(dropInDir))
+	globalHooks := config.MergeHooks(&latest.HooksConfig{TurnStart: []latest.HookDefinition{{Type: "builtin", Command: builtins.AddContext, Args: []string{"User hook retained."}}}}, config.LoadHookDropIns())
+	require.Len(t, globalHooks.TurnStart, 2)
 	registry := hooks.NewRegistry()
 	require.NoError(t, builtins.Register(registry))
 	loadPromptFiles, ok := registry.LookupBuiltin(builtins.AddPromptFiles)
@@ -79,7 +87,7 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 		return nil, nil
 	}
 	team, err := teamloader.Load(t.Context(), config.NewBytesSource("hackerspace.yaml", teamYAML), &config.RuntimeConfig{
-		Config:                 config.Config{WorkingDir: workspace},
+		Config:                 config.Config{WorkingDir: workspace, GlobalHooks: globalHooks},
 		EnvProviderForTests:    environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fixture", "ANTHROPIC_API_KEY": "fixture"}),
 		ModelsDevStoreOverride: store,
 	}, teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{"openai": inert, "anthropic": inert})),
@@ -92,6 +100,16 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 		name := authored.Name
 		a, err := team.Agent(name)
 		require.NoError(t, err)
+		require.NotNil(t, a.Hooks())
+		require.Len(t, a.Hooks().TurnStart, 2)
+		assert.Equal(t, "User hook retained.", a.Hooks().TurnStart[0].Args[0])
+		kitHook := a.Hooks().TurnStart[1]
+		assert.Equal(t, builtins.AddPromptFiles, kitHook.Command)
+		guidance, err := loadPromptFiles(t.Context(), &hooks.Input{Cwd: workspace}, kitHook.Args)
+		require.NoError(t, err)
+		require.Len(t, guidance.HookSpecificOutput.InstructionContext, 1)
+		assert.Equal(t, "kit/async-agent-context", guidance.HookSpecificOutput.InstructionContext[0].Group)
+		assert.Contains(t, guidance.HookSpecificOutput.InstructionContext[0].Content, string(profile))
 		actual, err := a.Tools(t.Context())
 		require.NoError(t, err)
 		var names []string
@@ -113,7 +131,7 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	synthYAML += "  dev-team:\n    model: openai/example\n    toolsets:\n      - type: filesystem\n        tools: [read_file]\n    subagents:\n      - agent: worker\n"
 	synthYAML += "  worker:\n    model: openai/example\n"
 	synthetic, err := teamloader.Load(t.Context(), config.NewBytesSource("kit-team.yaml", []byte(synthYAML)), &config.RuntimeConfig{
-		Config:                 config.Config{WorkingDir: workspace},
+		Config:                 config.Config{WorkingDir: workspace, GlobalHooks: globalHooks},
 		EnvProviderForTests:    environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "fixture", "ANTHROPIC_API_KEY": "fixture"}),
 		ModelsDevStoreOverride: store,
 	}, teamloader.WithProviderRegistry(provider.NewRegistry(map[string]provider.Factory{"openai": inert, "anthropic": inert})),
@@ -125,6 +143,16 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 	for _, name := range []string{"root", "dev-team"} {
 		a, err := synthetic.Agent(name)
 		require.NoError(t, err)
+		require.NotNil(t, a.Hooks())
+		require.Len(t, a.Hooks().TurnStart, 2)
+		assert.Equal(t, "User hook retained.", a.Hooks().TurnStart[0].Args[0])
+		kitHook := a.Hooks().TurnStart[1]
+		assert.Equal(t, builtins.AddPromptFiles, kitHook.Command)
+		guidance, err := loadPromptFiles(t.Context(), &hooks.Input{Cwd: workspace}, kitHook.Args)
+		require.NoError(t, err)
+		require.Len(t, guidance.HookSpecificOutput.InstructionContext, 1)
+		assert.Equal(t, "kit/async-agent-context", guidance.HookSpecificOutput.InstructionContext[0].Group)
+		assert.Contains(t, guidance.HookSpecificOutput.InstructionContext[0].Content, string(profile))
 		actual, err := a.Tools(t.Context())
 		require.NoError(t, err)
 		var names []string
@@ -138,7 +166,7 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 			assert.ElementsMatch(t, []string{"read_file", "spawn_subagent", "send_message", "read_subagent", "stop_subagent", "list_agents"}, names)
 		}
 	}
-	// A custom team replaces, rather than inherits, the bundled loaders.
+	// Custom teams keep their own loaders; the packaged global hook above also reaches synthetic custom agents.
 	customPath := filepath.Join(workspace, "custom.yaml")
 	require.NoError(t, os.WriteFile(customPath, []byte("agents:\n  root:\n    model: openai/example\n"), 0o600))
 	custom, err := config.Load(t.Context(), config.NewFileSource(customPath))

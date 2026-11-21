@@ -110,6 +110,9 @@ func (m *model) targetRows() []placedRow {
 		case y >= m.modelStart && y < m.modelEnd:
 			row.id = fmt.Sprintf("model:%s:%d", m.activeAgentName(), y-m.modelStart)
 			row.action = ClickModel
+		case m.hasPlansSection() && y == m.planStart:
+			row.id = "plan-summary"
+			row.controls = []treeControl{{x: width - 1, whole: true, plans: true}}
 		case y == m.todoSummaryLine && m.todoSummaryLine >= 0:
 			row.id = "todo-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true, todos: true}}
@@ -156,7 +159,13 @@ func (m *model) targetRows() []placedRow {
 			row.identity = m.preparedTrees[width].rows[y-m.treeSectionStart].identity
 		}
 		if zone, ok := m.planClickZones[y]; ok && m.sectionVisibility.ShowPlans {
-			row.id = fmt.Sprintf("plan:%d", y-m.planStart)
+			row.id = fmt.Sprintf("plan:action:%d:%d", zone.kind, y-m.planStart)
+			if zone.kind == ClickPlan {
+				row.id = "plan:" + zone.name
+			}
+			if y == m.planStart {
+				row.id = "plan-summary"
+			}
 			row.action = zone.kind
 			row.payload = zone.name
 		}
@@ -246,6 +255,7 @@ func (m *model) ReconcileLayout() tea.Cmd {
 	}
 	expandingTree := expanding("tree-summary", m.treeCollapsed)
 	expandingTodos := expanding("todo-summary", m.todosCollapsed)
+	expandingPlans := expanding("plan-summary", m.plansCollapsed)
 	old := make(map[string]placedRow, len(current.rows))
 	for _, row := range current.rows {
 		old[row.id] = row
@@ -264,7 +274,8 @@ func (m *model) ReconcileLayout() tea.Cmd {
 			}
 			id := strings.TrimPrefix(row.id, "gap:")
 			if (expandingTree && (strings.HasPrefix(id, "node:") || strings.HasPrefix(id, "agent:"))) ||
-				(expandingTodos && strings.HasPrefix(id, "todo:")) {
+				(expandingTodos && strings.HasPrefix(id, "todo:")) ||
+				(expandingPlans && strings.HasPrefix(id, "plan:")) {
 				survivors := make([]placedRow, 0, len(current.rows))
 				for _, prior := range current.rows {
 					if prior.target {
@@ -502,7 +513,7 @@ func (m *model) paintedRows() map[int]placedRow {
 		// Persistent navigation cannot be covered while emerging children still round
 		// to the collapse anchor; paint and hit ownership use this same winner map.
 		for _, row := range m.placement.rows {
-			if row.target && row.alpha > 0 && (row.id == "tree-summary" || row.id == "todo-summary" || strings.HasPrefix(row.id, "parent:")) {
+			if row.target && row.alpha > 0 && (row.id == "tree-summary" || row.id == "todo-summary" || row.id == "plan-summary" || strings.HasPrefix(row.id, "parent:")) {
 				rows[int(math.Round(row.y))] = row
 			}
 		}
@@ -1000,6 +1011,8 @@ func (m *model) refreshPlacementHover() {
 			row.text = m.modelRowView(width, y-m.modelStart)
 		case row.id == "todo-summary":
 			row.text = m.todoSummary(width)
+		case row.id == "plan-summary":
+			row.text = m.planSummary(width)
 		case row.action == ClickSubagentParent:
 			row.text = ansi.Truncate(m.parentLine(), width, "…")
 		case row.action == ClickAgent:

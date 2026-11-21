@@ -155,8 +155,11 @@ func TestKillRunningProcessCancelsAdoptedWork(t *testing.T) {
 		t.Fatal("stopped process sent completion")
 	default:
 	}
-	_, exists := tool.handler.jobs.Load(result.JobID)
+	_, exists := tool.handler.ownedRunningShellProcess(ctx, result.JobID)
 	assert.False(t, exists, "stopped processes must not remain inspectable")
+	snapshot, err := tool.BackgroundProcessOutput(ctx, result.JobID, 1024)
+	require.NoError(t, err)
+	assert.Equal(t, tools.BackgroundProcessStopped, snapshot.State)
 }
 
 func TestNoRunningProcessesWithoutOwner(t *testing.T) {

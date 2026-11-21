@@ -45,6 +45,7 @@ func (msg QueuedMessage) sessionMessage() *session.Message {
 	message.Message.MessageID = msg.MessageID
 	message.InputOrigin, message.SenderID, message.SenderName = msg.InputOrigin, msg.SenderID, msg.SenderName
 	message.ReportOutcome = msg.ReportOutcome
+	message.RequireApproval = msg.RequireApproval
 	message.InputMode = msg.InputMode
 	if message.InputMode == "" {
 		message.InputMode = "turn"
@@ -54,7 +55,8 @@ func (msg QueuedMessage) sessionMessage() *session.Message {
 
 func queuedSessionInput(message *session.Message, position int, persisted bool) QueuedMessage {
 	return QueuedMessage{
-		Content: message.Message.Content, MultiContent: message.Message.MultiContent,
+		RequireApproval: message.RequireApproval,
+		Content:         message.Message.Content, MultiContent: message.Message.MultiContent,
 		RequestID: message.TurnID, AcceptedPosition: position, AcceptedPersisted: persisted,
 		InputOrigin: message.InputOrigin, SenderID: message.SenderID, SenderName: message.SenderName, ReportOutcome: message.ReportOutcome, InputMode: message.InputMode,
 	}

@@ -78,7 +78,7 @@ func (c *call) runToolGuards(ctx context.Context, runTool func() CallOutcome) (C
 	}
 	preempt := c.preYoloResult
 
-	if c.toolGuardAsks() {
+	if c.toolGuardAsks() || c.requiredApproval {
 		// A mandatory ask cannot turn an explicit policy denial into approval.
 		decision := c.permissionDecision()
 		if decision.Outcome == OutcomeDeny {
@@ -111,7 +111,7 @@ func (c *call) recheckRewrittenInput(ctx context.Context, runTool func() CallOut
 		c.errorResponse(ctx, denyErrorMessage(decision, c.tc.Function.Name))
 		return CallOutcome{}, true
 	}
-	c.rewrittenInputAsk = c.rewrittenInputAsk || c.toolGuardAsks() ||
+	c.rewrittenInputAsk = c.requiredApproval || c.rewrittenInputAsk || c.toolGuardAsks() ||
 		(c.preYoloResult != nil && c.preYoloResult.Decision == hooks.DecisionAsk) ||
 		(decision.Outcome == OutcomeAsk && decision.Reason == ReasonChecker)
 	if c.rewrittenInputAsk {
@@ -121,7 +121,7 @@ func (c *call) recheckRewrittenInput(ctx context.Context, runTool func() CallOut
 }
 
 func (c *call) mandatoryAsk() bool {
-	return c.toolGuardAsks() || c.rewrittenInputAsk
+	return c.requiredApproval || c.toolGuardAsks() || c.rewrittenInputAsk
 }
 
 // hookCanceled turns a parent cancellation observed after a hook dispatch

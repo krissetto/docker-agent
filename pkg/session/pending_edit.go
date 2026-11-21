@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"strings"
 
@@ -146,14 +145,14 @@ func (s *SQLiteSessionStore) EditPendingUserMessage(ctx context.Context, session
 		return classifySQLiteError(err)
 	}
 	message := &Message{Pending: true, Accepted: true, InputOrigin: InputOriginUser}
-	if err := json.Unmarshal([]byte(payload), &message.Message); err != nil {
+	if err := unmarshalStoredMessage([]byte(payload), message); err != nil {
 		return err
 	}
 	next, err := PendingUserMessageReplacement(message, content, expectedContent...)
 	if err != nil {
 		return err
 	}
-	encoded, err := json.Marshal(next.Message)
+	encoded, err := marshalStoredMessage(next)
 	if err != nil {
 		return err
 	}

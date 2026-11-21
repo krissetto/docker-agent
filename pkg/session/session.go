@@ -579,14 +579,16 @@ type Message struct {
 	DisplayOnly bool `json:"display_only,omitempty"`
 	// Pending keeps an accepted user message visible and durable while excluding
 	// it from model input until its session turn is promoted.
-	Pending       bool          `json:"pending,omitempty"`
-	Accepted      bool          `json:"actor_accepted,omitempty"`
-	TurnID        string        `json:"actor_turn_id,omitempty"`
-	InputMode     string        `json:"actor_input_mode,omitempty"`
-	InputOrigin   InputOrigin   `json:"input_origin,omitempty"`
-	SenderID      string        `json:"sender_id,omitempty"`
-	SenderName    string        `json:"sender_name,omitempty"`
-	ReportOutcome ReportOutcome `json:"report_outcome,omitempty"`
+	Pending bool `json:"pending,omitempty"`
+	// RequireApproval is a durable per-input constraint, never conversation policy.
+	RequireApproval bool          `json:"require_approval,omitempty"`
+	Accepted        bool          `json:"actor_accepted,omitempty"`
+	TurnID          string        `json:"actor_turn_id,omitempty"`
+	InputMode       string        `json:"actor_input_mode,omitempty"`
+	InputOrigin     InputOrigin   `json:"input_origin,omitempty"`
+	SenderID        string        `json:"sender_id,omitempty"`
+	SenderName      string        `json:"sender_name,omitempty"`
+	ReportOutcome   ReportOutcome `json:"report_outcome,omitempty"`
 }
 
 // UnmarshalJSON accepts both the current "agent_name" key and the legacy

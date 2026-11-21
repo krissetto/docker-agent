@@ -359,6 +359,10 @@ type appModel struct {
 	// which point the app's live session ID takes over.
 	pendingRestores map[string]string
 
+	// Startup navigation must not replace an inaccessible saved selection.
+	restoringTabs bool
+	fallbackTab   string
+
 	// pendingSidebarCollapsed maps runtime tab IDs to their persisted sidebar
 	// collapsed state. Consumed when a chat page is first created for a
 	// restored tab (in handleSwitchTab) and then removed from the map.
@@ -1090,6 +1094,8 @@ func (m *appModel) tourStartupCmd() tea.Cmd {
 }
 
 func (m *appModel) init() tea.Cmd {
+	m.restoringTabs = true
+	defer func() { m.restoringTabs = false }()
 	tabCmd := m.initialTabCmd
 	m.initialTabCmd = nil
 	shutdownCmd := tea.Batch(m.contextShutdownCmd(), tabCmd)
@@ -1913,6 +1919,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleOpeningInputReplay(msg)
 
 	case messages.SendMsg:
+		m.persistFallbackTab()
 		// Forward send messages to the active content view.
 		if m.history != nil && !msg.BypassQueue {
 			_ = m.history.Add(msg.Content)
@@ -2279,7 +2286,11 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applyActiveRuntimeEvent(msg.Event)
 		_, cmd := m.forwardChat(msg)
-		return m, tea.Batch(majorCmd, reconcile, cmd)
+		var plansCmd tea.Cmd
+		if _, changed := msg.Event.(*runtime.PlanChangedEvent); changed {
+			plansCmd = m.refreshPlanSidebarOrDialogCmd()
+		}
+		return m, tea.Batch(majorCmd, reconcile, cmd, plansCmd)
 
 	// --- Errors ---
 
@@ -2479,7 +2490,7 @@ func (m *appModel) deliverRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd)
 
 	// Shared plans are scope-global: a mutation from a background tab's agent
 	// must still live-refresh the plan dialogs open on the active tab.
-	if _, isPlanChange := msg.Inner.(*runtime.PlanChangedEvent); isPlanChange && m.planDataVisible() {
+	if _, isPlanChange := runtimeEvent.(*runtime.PlanChangedEvent); isPlanChange && m.planDataVisible() {
 		return m, tea.Batch(presentationCmd, page.TakeRoutedTimers(), m.routePaneCmd(msg.SessionID, effects.Cmd(false)), m.planRefreshCmd(false))
 	}
 	return m, tea.Batch(presentationCmd, page.TakeRoutedTimers(), m.routePaneCmd(msg.SessionID, effects.Cmd(false)))
@@ -3151,7 +3162,7 @@ func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) tea.Cmd {
 				ids = append(ids, m.persistedSessionID(route))
 			}
 		}
-		if err := m.tuiStore.ReorderTab(m.ctx(), ids); err != nil {
+		if err := m.persistTabOrder(ids); err != nil {
 			slog.Warn("Failed to persist tab reorder", "error", err)
 		}
 		m.persistPaneWorkspaceState()

@@ -58,6 +58,22 @@ type BackgroundProcessesEvent struct {
 
 func (e *BackgroundProcessesEvent) GetSessionID() string { return e.SessionID }
 
+// BackgroundProcessOutputEvent carries live output batches of an adopted
+// background shell process. It is ephemeral: never persisted or replayed.
+type BackgroundProcessOutputEvent struct {
+	AgentContext
+
+	Type       string `json:"type"`
+	SessionID  string `json:"session_id"`
+	ProcessID  string `json:"process_id"`
+	ToolCallID string `json:"tool_call_id"`
+	// Offset is the byte offset of Output within the process's full output stream.
+	Offset int64  `json:"offset"`
+	Output string `json:"output"`
+}
+
+func (e *BackgroundProcessOutputEvent) GetSessionID() string { return e.SessionID }
+
 // TurnSettledEvent is published only after the accepted turn's persistence and
 // child settlement succeed. StreamStopped, withdrawals and snapshots are not
 // settlement signals. Identity is (SessionID, TurnID), not a stream generation.

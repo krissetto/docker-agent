@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -242,7 +243,7 @@ func (s *remoteSession) Steer(ctx context.Context, input TurnInput) (Submission,
 }
 
 func (s *remoteSession) input(ctx context.Context, operation string, input TurnInput) (Submission, error) {
-	request := api.SessionInputRequest{GenerateTitle: input.GenerateTitle, Content: input.Content, MultiContent: input.MultiContent, Mode: operation, RequestID: input.RequestID}
+	request := api.SessionInputRequest{RequireIdle: input.RequireIdle, RequireApproval: input.RequireApproval, GenerateTitle: input.GenerateTitle, Content: input.Content, MultiContent: input.MultiContent, Mode: operation, RequestID: input.RequestID}
 	var out api.SessionSubmission[SubmissionDisposition]
 	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("messages"), request, &out)
 	if err == nil && (out.SessionID != s.ID() || out.TurnID == "") {
@@ -650,6 +651,31 @@ func (s *remoteSession) Todos(ctx context.Context) ([]session.Todo, error) {
 	return out, nil
 }
 
+func (s *remoteSession) BackgroundProcessOutput(ctx context.Context, processID string, maxBytes int) (tools.BackgroundProcessOutput, error) {
+	var output tools.BackgroundProcessOutput
+	if processID == "" || maxBytes < 0 {
+		return output, &SessionError{Kind: SessionErrorInvalid, SessionID: s.ID()}
+	}
+	timeout := s.runtime.client.httpClient.Timeout
+	if timeout <= 0 {
+		timeout = defaultSessionRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	endpoint := s.endpoint("background-processes/"+url.PathEscape(processID)+"/output") + "?max_bytes=" + strconv.Itoa(maxBytes)
+	err := s.runtime.client.sessionJSONWithClientFeature(ctx, s.runtime.client.httpClient, http.MethodGet, endpoint, nil, &output, api.SessionFeatureBackgroundProcessOutput)
+	if transportErr, ok := errors.AsType[*sessionHTTPError](err); ok && (transportErr.status == http.StatusNotFound || transportErr.status == http.StatusNotImplemented) {
+		return tools.BackgroundProcessOutput{}, tools.ErrBackgroundProcessOutputUnsupported
+	}
+	if err != nil {
+		return tools.BackgroundProcessOutput{}, err
+	}
+	if output.SessionID != s.ID() || output.ProcessID != processID || output.Offset < 0 || output.Total != output.Offset+int64(len(output.Output)) {
+		return tools.BackgroundProcessOutput{}, errors.New("invalid background process output identity or offsets")
+	}
+	return output, nil
+}
+
 func (s *remoteSession) endpoint(operation string) string {
 	return api.SessionAPIPath + "/" + url.PathEscape(s.ID()) + "/" + operation
 }
@@ -690,6 +716,10 @@ func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body,
 }
 
 func (c *Client) sessionJSONWithClient(ctx context.Context, client *http.Client, method, endpoint string, body, result any) error {
+	return c.sessionJSONWithClientFeature(ctx, client, method, endpoint, body, result, "")
+}
+
+func (c *Client) sessionJSONWithClientFeature(ctx context.Context, client *http.Client, method, endpoint string, body, result any, feature string) error {
 	var data []byte
 	var err error
 	if body != nil {
@@ -711,7 +741,7 @@ func (c *Client) sessionJSONWithClient(ctx context.Context, client *http.Client,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcesses)
+	req.Header.Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcesses+","+api.SessionFeatureBackgroundProcessOutput)
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
@@ -722,6 +752,9 @@ func (c *Client) sessionJSONWithClient(ctx context.Context, client *http.Client,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return decodeSessionHTTPError(resp)
+	}
+	if feature != "" && !slices.ContainsFunc(strings.Split(resp.Header.Get(api.SessionFeaturesHeader), ","), func(token string) bool { return strings.TrimSpace(token) == feature }) {
+		return tools.ErrBackgroundProcessOutputUnsupported
 	}
 	if result == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
@@ -746,6 +779,12 @@ func decodeSessionHTTPError(resp *http.Response) error {
 		Detail    string             `json:"detail,omitempty"`
 	}
 	_ = json.Unmarshal(body, &payload)
+	if payload.Error == "background_process_not_found" {
+		return tools.ErrBackgroundProcessNotFound
+	}
+	if payload.Error == "background_process_output_unsupported" {
+		return tools.ErrBackgroundProcessOutputUnsupported
+	}
 	kind := SessionErrorInvalid
 	validKind := func(candidate SessionErrorKind) bool {
 		switch candidate {
@@ -792,6 +831,23 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		}
 		u.RawQuery = q.Encode()
 	}
+	observerID := rand.Text()
+	initialInterest, err := json.Marshal(options.BackgroundOutputInterest)
+	count := 0
+	for sessionID, processes := range options.BackgroundOutputInterest {
+		if sessionID == "" {
+			return Observation{}, &SessionError{Kind: SessionErrorInvalid, SessionID: id}
+		}
+		count += len(processes)
+		for _, processID := range processes {
+			if processID == "" {
+				return Observation{}, &SessionError{Kind: SessionErrorInvalid, SessionID: id}
+			}
+		}
+	}
+	if err != nil || len(initialInterest) > api.SessionBackgroundOutputInterestMaxBytes || count > api.SessionBackgroundOutputInterestMaxProcesses {
+		return Observation{}, &SessionError{Kind: SessionErrorInvalid, SessionID: id}
+	}
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	watchdog := newSessionStreamWatchdog(cancelStream, defaultSessionRequestTimeout, sessionStreamIdleTimeout)
 	cancel := func() { watchdog.stop(); cancelStream() }
@@ -804,7 +860,9 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		req.Header.Set("Last-Event-ID", strconv.FormatUint(*options.Since, 10))
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcesses)
+	req.Header.Set(api.SessionObserverHeader, observerID)
+	req.Header.Set(api.SessionBackgroundOutputInterestHeader, string(initialInterest))
+	req.Header.Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcesses+","+api.SessionFeatureBackgroundProcessOutput)
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
@@ -824,6 +882,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		cancel()
 		return Observation{}, protocolError(fmt.Errorf("unexpected session stream HTTP status %d", resp.StatusCode))
 	}
+	supportsOutputInterest := slices.ContainsFunc(strings.Split(resp.Header.Get(api.SessionFeaturesHeader), ","), func(token string) bool { return strings.TrimSpace(token) == api.SessionFeatureBackgroundProcessOutput })
 	scanner := bufio.NewScanner(sessionStreamReader{Reader: resp.Body, watchdog: watchdog})
 	scanner.Split(scanSessionLines)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxSSELineBytes)
@@ -968,6 +1027,11 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			cancel()
 			return Observation{}, protocolError(decodeErr)
 		}
+		if _, output := envelope.Event.(*BackgroundProcessOutputEvent); output {
+			resp.Body.Close()
+			cancel()
+			return Observation{}, protocolError(errors.New("background process output cannot be replayed"))
+		}
 		previous, known := replaySequences[envelope.SessionID]
 		_, processReplacement := envelope.Event.(*BackgroundProcessesEvent)
 		zeroSeed := known && envelope.IsLiveSeed() && (baseline || processReplacement)
@@ -1097,7 +1161,11 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				return
 			}
 			previous, known := lastSequences[env.SessionID]
-			if !known || env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && !env.Gap && env.Sequence != previous+1) {
+			_, output := env.Event.(*BackgroundProcessOutputEvent)
+			if output && !supportsOutputInterest {
+				continue
+			}
+			if !known || env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0 && !output) || (env.Sequence != 0 && !env.Gap && env.Sequence != previous+1) {
 				errorsCh <- protocolError(fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous))
 				return
 			}
@@ -1121,8 +1189,36 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			}
 		}
 	}()
+	var setInterest func(string, []string) error
+	if supportsOutputInterest {
+		var interestMu sync.Mutex
+		setInterest = func(sessionID string, processIDs []string) error {
+			interestMu.Lock()
+			defer interestMu.Unlock()
+			if streamCtx.Err() != nil {
+				return ErrSessionClosed
+			}
+			if sessionID == "" || len(processIDs) > api.SessionBackgroundOutputInterestMaxProcesses {
+				return &SessionError{Kind: SessionErrorInvalid, SessionID: sessionID}
+			}
+			request := api.SessionBackgroundOutputInterest{ObserverID: observerID, SessionID: sessionID, ProcessIDs: processIDs}
+			data, err := json.Marshal(map[string][]string{sessionID: processIDs})
+			if err != nil || len(data) > api.SessionBackgroundOutputInterestMaxBytes {
+				return &SessionError{Kind: SessionErrorInvalid, SessionID: sessionID}
+			}
+			requestCtx, cancel := context.WithTimeout(streamCtx, defaultSessionRequestTimeout)
+			defer cancel()
+			err = c.sessionJSONWithClientFeature(requestCtx, c.httpClient, http.MethodPut, api.SessionAPIPath+"/"+url.PathEscape(id)+"/background-output-interest", request, nil, api.SessionFeatureBackgroundProcessOutput)
+			if transportErr, ok := errors.AsType[*sessionHTTPError](err); ok && transportErr.status == http.StatusNotImplemented {
+				return tools.ErrBackgroundProcessOutputUnsupported
+			}
+			return err
+		}
+	} else {
+		setInterest = func(string, []string) error { return tools.ErrBackgroundProcessOutputUnsupported }
+	}
 	var once sync.Once
-	return Observation{Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
+	return Observation{SetBackgroundOutputInterest: setInterest, Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
 }
 
 const remoteSnapshotChunkBytes = 64 << 10
@@ -1306,6 +1402,9 @@ func (c *Client) decodeSessionEnvelope(in remoteSessionEnvelope) (SessionEvent, 
 				return out, errors.New("invalid interaction resolution reason")
 			}
 		}
+		if _, output := e.(*BackgroundProcessOutputEvent); output && (in.Sequence != 0 || in.Gap || in.FirstAvailable != 0 || in.TranscriptPosition != -1 || in.TurnID != "" || in.InteractionID != "") {
+			return out, errors.New("invalid live background process output envelope")
+		}
 		out.Event = e
 	}
 	return out, nil
@@ -1340,6 +1439,11 @@ func (c *Client) decodeSessionEvent(raw json.RawMessage) (Event, error) {
 	if err := json.Unmarshal(raw, event); err != nil {
 		return nil, err
 	}
+	if output, ok := event.(*BackgroundProcessOutputEvent); ok {
+		if output.SessionID == "" || output.ProcessID == "" || output.ToolCallID == "" || output.Offset < 0 {
+			return nil, errors.New("invalid background process output event")
+		}
+	}
 	if processes, ok := event.(*BackgroundProcessesEvent); ok {
 		if processes.SessionID == "" {
 			return nil, errors.New("invalid background process event identity")
@@ -1359,10 +1463,11 @@ func (c *Client) decodeSessionEvent(raw json.RawMessage) (Event, error) {
 }
 
 var (
-	_ SessionRuntime        = (*SessionTransport)(nil)
-	_ SessionViewInfoReader = (*SessionTransport)(nil)
-	_ SessionViewPreparer   = (*SessionTransport)(nil)
-	_ SessionHandle         = (*remoteSession)(nil)
+	_ SessionRuntime                      = (*SessionTransport)(nil)
+	_ SessionViewInfoReader               = (*SessionTransport)(nil)
+	_ SessionViewPreparer                 = (*SessionTransport)(nil)
+	_ SessionHandle                       = (*remoteSession)(nil)
+	_ tools.BackgroundProcessOutputSource = (*remoteSession)(nil)
 )
 
 func (s *remoteSession) AwaitTurn(ctx context.Context, turnID string) error {

@@ -68,12 +68,18 @@ func (m *Model) applyFade(lines []string) {
 
 	if hasAbove {
 		for i := range n {
+			if i >= m.fadeExemptStart && i < m.fadeExemptEnd {
+				continue
+			}
 			lines[i] = cachedFadeLine(lines[i], fadeAlpha(i, n), &fc, &m.fadeCache.top[i])
 		}
 	}
 	if hasBelow {
 		for i := range n {
 			idx := len(lines) - 1 - i
+			if idx >= m.fadeExemptStart && idx < m.fadeExemptEnd {
+				continue
+			}
 			lines[idx] = cachedFadeLine(lines[idx], fadeAlpha(i, n), &fc, &m.fadeCache.bottom[i])
 		}
 	}

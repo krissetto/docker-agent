@@ -378,7 +378,7 @@ func TestReplyHandoffPlainClickClampsReaderToLegalBottom(t *testing.T) {
 	m.userHasScrolled = true
 	m.setScrollOffset(anchorLine)
 	m.View()
-	require.Equal(t, anchorLine, m.scrollOffset, "reader starts on the retained reply")
+	require.Equal(t, min(anchorLine, max(0, m.totalScrollableHeight()-m.height)), m.scrollOffset, "reader starts on the retained reply, clamped to the legal bottom")
 	require.True(t, fourthReplyVisibleSource(m, 2))
 
 	m.handleMouseRelease(tea.MouseReleaseMsg{X: x, Y: m.yPos + anchorLine - m.scrollOffset, Button: tea.MouseLeft})
@@ -396,6 +396,6 @@ func TestReplyHandoffPlainClickClampsReaderToLegalBottom(t *testing.T) {
 	require.False(t, m.replyHandoff.Active())
 	m.View()
 	bottom := max(0, m.totalScrollableHeight()-m.height)
-	require.Equal(t, bottom, m.scrollOffset, "the clamp lands the reader on the legal bottom once the retiree collapses")
+	require.Equal(t, bottom-m.stickyWorkBottomReserve(m.displayTotalHeight()), m.scrollOffset, "the clamp lands at the natural bottom; a sticky header may reserve one trailing row")
 	require.True(t, fourthReplyVisibleSource(m, 2))
 }

@@ -75,6 +75,8 @@ The canonical endpoints are:
 | `GET` | `/api/v2/sessions/:id/snapshot` | Canonical full snapshot by default; capability-gated `?projection=tail` bounds transcript records and returns original positions plus an older-history cursor. |
 | `GET` | `/api/v2/sessions/:id/history` | Page older complete typed history using the opaque cursor from a tail snapshot; append-safe, but stale after transcript edits/compaction. |
 | `GET` | `/api/v2/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes; optional capability-gated tail projection bounds baselines/resets. |
+| `GET` | `/api/v2/sessions/:id/background-processes/:processID/output` | Bounded tail (`?max_bytes=`, default/max 64 KiB) of a background shell process owned by this session. Requires the `background-process-output` feature header; `404` for unknown, foreign, or expired processes. Live output streams as ephemeral `background_process_output` events (never replayed) only for processes explicitly selected by that observation; advertising the feature alone never delivers bytes. |
+| `PUT` | `/api/v2/sessions/:id/background-output-interest` | Replace one session's process interest on a live SSE observation. Requires `background-process-output`; body: `observer_id`, `session_id`, `process_ids` (empty clears). |
 | `POST` | `/api/v2/sessions/:id/workflow/wait` | Wait for the session and active descendants, pending reports, and follow-up turns to settle; returns the journal epoch and output cursor. Disconnecting cancels only the wait. |
 | `GET` | `/api/v2/sessions/:id/git-review` | Discover repositories and worktrees within the authorized session workspace using bounded read-only inspection. |
 | `POST` | `/api/v2/sessions/:id/git-review/browse` | Initialize the authorized working-directory scope without nearby-repository discovery or Git status. Returns a root-only browse snapshot, or reuses the existing inventory and generation; directory contents are requested separately. |
@@ -631,3 +633,23 @@ Clients requiring recovery after ambiguous creation should supply a stable
 `session_id` and inspect that identity after a conflict. Retrying creation
 without an ID can create another session. Input retries must reuse the same
 `request_id` and payload; a new or omitted token is a distinct input.
+
+### Background output observation interest
+
+Opt in with `X-Docker-Agent-Features: background-process-output`. Each SSE
+connection supplies a fresh client-generated `X-Docker-Agent-Observer` ID (up to
+128 bytes) and may supply `X-Docker-Agent-Background-Output-Interest`, a JSON
+object mapping observed session IDs to process-ID arrays. Initial interest is
+installed before any live output, including on reconnect. Both initial and
+updated interest are limited to 128 process IDs and 8 KiB of encoded JSON.
+The response advertises the feature only when observation interest is supported.
+
+Update that connection using `PUT /api/v2/sessions/:id/background-output-interest`
+with `{"observer_id":"...","session_id":"...","process_ids":["..."]}`.
+Here `:id` is the SSE root session; `session_id` must belong to that observation
+(including descendants for tree streams). Unknown/foreign observers or sessions
+return `404`. IDs and interest expire when the stream closes. Clearing a session's
+array stops its live bytes; collapsing output or switching sessions must clear
+interest or close the observation. Reconnect with a fresh observer ID and the
+client's complete current interest in the SSE header, not a later update. Legacy
+servers without interest support must be treated as output-streaming unsupported.

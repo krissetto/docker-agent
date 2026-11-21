@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1719,7 +1718,7 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 				}
 			}
 			if effective != nil {
-				cfg := effective.BaseConfig().ModelConfig
+				cfg := modelDisplayConfig(effective)
 				// Some providers expose identity only through ID, leaving their
 				// base config empty. Never erase the roster/fallback identity.
 				if cfg.Provider != "" {
@@ -1741,7 +1740,7 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 			if usingFallback {
 				primary := AgentDetails{ThinkingMode: "unknown", ThinkingLevel: "unknown"}
 				if len(models) > 0 {
-					cfg := models[0].BaseConfig().ModelConfig
+					cfg := modelDisplayConfig(models[0])
 					primary.Provider = cfg.Provider
 					if primary.Provider == "" {
 						primary.Provider = models[0].ID().Provider
@@ -1786,7 +1785,7 @@ func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView
 // agentThinkingLabel returns a short, user-facing label for the effective
 // thinking-effort level of the agent's current model: the effort level (e.g.
 // "high"), "adaptive" for adaptive budgets, the decimal token count for
-// token-based budgets, "off" when thinking is disabled on a reasoning-capable
+// token-based budgets, "default" when unset, "off" when disabled on a reasoning-capable
 // model, or "" when the model has no selectable thinking configuration to
 // display.
 func (r *LocalRuntime) agentThinkingLabel(ctx context.Context, a *agent.Agent) string {
@@ -1794,14 +1793,17 @@ func (r *LocalRuntime) agentThinkingLabel(ctx context.Context, a *agent.Agent) s
 	if len(models) == 0 {
 		return ""
 	}
-	cfg := models[0].BaseConfig().ModelConfig
+	cfg := modelDisplayConfig(models[0])
 	var display AgentDetails
 	projectModelDisplay(&display, cfg, cachedModelDatabase(r.modelsStore), r.SupportsModelSwitching())
 	if display.ThinkingMode == "unsupported" || display.ThinkingMode == "unknown" {
 		return ""
 	}
 	budget := cfg.ThinkingBudget
-	if budget == nil || budget.IsDisabled() {
+	if budget == nil {
+		return "default"
+	}
+	if budget.IsDisabled() {
 		return "off"
 	}
 	if l, ok := budget.EffortLevel(); ok {
@@ -1810,7 +1812,7 @@ func (r *LocalRuntime) agentThinkingLabel(ctx context.Context, a *agent.Agent) s
 	if budget.IsAdaptive() {
 		return "adaptive"
 	}
-	return strconv.Itoa(budget.Tokens) // token-based budget
+	return display.ThinkingLevel
 }
 
 // SessionStore returns the session store for browsing/loading past sessions.

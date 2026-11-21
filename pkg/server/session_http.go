@@ -63,6 +63,8 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.GET("/:id/snapshot", s.canonicalSessionSnapshot)
 	group.GET("/:id/history", s.canonicalSessionHistory)
 	group.GET("/:id/events", s.sessionEventStream)
+	group.GET("/:id/background-processes/:processID/output", s.canonicalBackgroundProcessOutput)
+	group.PUT("/:id/background-output-interest", s.setBackgroundOutputInterest)
 	group.POST("/:id/messages", s.sessionInput)
 	group.POST("/:id/retry", s.retrySession)
 	group.POST("/:id/responses", s.respondSession)
@@ -106,6 +108,49 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.DELETE("/:id", s.deleteCanonicalSession)
 }
 
+func (s *Server) canonicalBackgroundProcessOutput(c echo.Context) error {
+	if !supportsSessionFeature(c.Request(), api.SessionFeatureBackgroundProcessOutput) {
+		return echo.NewHTTPError(http.StatusNotImplemented, map[string]any{"error": "background_process_output_unsupported"})
+	}
+	c.Response().Header().Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcessOutput)
+	maxBytes := api.SessionBackgroundProcessOutputMaxBytes
+	if raw := c.QueryParam("max_bytes"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			return sessionRequestError("max_bytes must be a non-negative integer")
+		}
+		if value > 0 {
+			maxBytes = min(value, maxBytes)
+		}
+	}
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	source, ok := handle.(tools.BackgroundProcessOutputSource)
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotImplemented, map[string]any{"error": "background_process_output_unsupported"})
+	}
+	output, err := source.BackgroundProcessOutput(c.Request().Context(), c.Param("processID"), maxBytes)
+	if errors.Is(err, tools.ErrBackgroundProcessNotFound) {
+		return echo.NewHTTPError(http.StatusNotFound, map[string]any{"error": "background_process_not_found"})
+	}
+	if errors.Is(err, tools.ErrBackgroundProcessOutputUnsupported) {
+		return echo.NewHTTPError(http.StatusNotImplemented, map[string]any{"error": "background_process_output_unsupported"})
+	}
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	if output.SessionID != handle.ID() || output.ProcessID != c.Param("processID") {
+		return echo.NewHTTPError(http.StatusNotFound, map[string]any{"error": "background_process_not_found"})
+	}
+	if len(output.Output) > maxBytes {
+		output.Offset += int64(len(output.Output) - maxBytes)
+		output.Output = output.Output[len(output.Output)-maxBytes:]
+	}
+	return c.JSON(http.StatusOK, output)
+}
+
 func decodeSessionJSON(c echo.Context, value any) error {
 	decoder := json.NewDecoder(c.Request().Body)
 	decoder.DisallowUnknownFields()
@@ -130,12 +175,15 @@ func (s *Server) sessionInput(c echo.Context) error {
 	if err != nil {
 		return sessionHTTPError(err)
 	}
-	input := runtime.TurnInput{GenerateTitle: req.GenerateTitle, Content: req.Content, MultiContent: req.MultiContent, RequestID: req.RequestID}
+	input := runtime.TurnInput{RequireIdle: req.RequireIdle, RequireApproval: req.RequireApproval, GenerateTitle: req.GenerateTitle, Content: req.Content, MultiContent: req.MultiContent, RequestID: req.RequestID}
 	var submission runtime.Submission
 	switch req.Mode {
 	case "", "submit":
 		submission, err = handle.Submit(c.Request().Context(), input)
 	case "steer":
+		if req.RequireIdle || req.RequireApproval {
+			return sessionRequestError("require_idle and require_approval apply only to submit")
+		}
 		submission, err = handle.Steer(c.Request().Context(), input)
 	default:
 		return sessionRequestError("mode must be submit or steer")
@@ -732,11 +780,24 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		}
 		options.HistoryTail = &limits
 	}
+	observerID, initialInterest, err := parseBackgroundOutputObserver(c.Request())
+	if err != nil {
+		return err
+	}
+	options.BackgroundOutputInterest = initialInterest
 	observation, err := handle.Observe(c.Request().Context(), options)
 	if err != nil {
 		return sessionHTTPError(err)
 	}
 	defer observation.Cancel()
+	observer, unregister, err := s.registerBackgroundOutputObserver(handle.ID(), observerID, initialInterest, observation)
+	if err != nil {
+		return err
+	}
+	defer unregister()
+	if observer != nil {
+		c.Response().Header().Set(api.SessionFeaturesHeader, api.SessionFeatureBackgroundProcessOutput)
+	}
 	if s.cacheWarmup && !tree && since == nil {
 		if warmer, ok := handle.(runtime.SessionCacheWarmer); ok {
 			warmer.WarmSessionCache()
@@ -775,6 +836,23 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		response.Flush()
 		return nil
 	}
+	sendLive := func(envelope runtime.SessionEvent) error {
+		if observer != nil {
+			observer.mu.Lock()
+			defer observer.mu.Unlock()
+		}
+		includeOutput := false
+		if output, ok := envelope.Event.(*runtime.BackgroundProcessOutputEvent); ok {
+			if observer != nil {
+				includeOutput = slices.Contains(observer.interest[envelope.SessionID], output.ProcessID)
+			}
+		}
+		dto := sessionEnvelopeForRequest(envelope, supportsBackgroundProcessFeature(c.Request()), includeOutput)
+		if dto == nil {
+			return nil
+		}
+		return write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: dto})
+	}
 	snapshots := observation.Initial
 	for _, initial := range snapshots {
 		snapshot := sessionSnapshotForRequest(initial, c)
@@ -786,7 +864,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		}
 	}
 	for _, envelope := range observation.Replay {
-		dto := sessionEnvelopeForRequest(envelope, supportsBackgroundProcessFeature(c.Request()))
+		dto := sessionEnvelopeForRequest(envelope, supportsBackgroundProcessFeature(c.Request()), false)
 		if dto == nil {
 			continue
 		}
@@ -817,7 +895,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 					return nil
 				}
 				for _, seed := range update.Replay {
-					if envelope := sessionEnvelopeForRequest(seed, supportsBackgroundProcessFeature(c.Request())); envelope != nil {
+					if envelope := sessionEnvelopeForRequest(seed, supportsBackgroundProcessFeature(c.Request()), false); envelope != nil {
 						dto.LiveSeeds = append(dto.LiveSeeds, *envelope)
 					}
 				}
@@ -825,11 +903,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 					return nil
 				}
 			} else if update.Event != nil {
-				dto := sessionEnvelopeForRequest(*update.Event, supportsBackgroundProcessFeature(c.Request()))
-				if dto == nil {
-					continue
-				}
-				if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: dto}); err != nil {
+				if err := sendLive(*update.Event); err != nil {
 					return nil
 				}
 			}
@@ -849,11 +923,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 			if !ok {
 				return nil
 			}
-			dto := sessionEnvelopeForRequest(envelope, supportsBackgroundProcessFeature(c.Request()))
-			if dto == nil {
-				continue
-			}
-			if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: dto}); err != nil {
+			if err := sendLive(envelope); err != nil {
 				return nil
 			}
 		case <-heartbeat.C:
@@ -930,19 +1000,28 @@ func sessionSnapshotForRequest(snapshot runtime.SessionSnapshot, c echo.Context)
 }
 
 func supportsBackgroundProcessFeature(request *http.Request) bool {
+	return supportsSessionFeature(request, api.SessionFeatureBackgroundProcesses)
+}
+
+func supportsSessionFeature(request *http.Request, feature string) bool {
 	value := request.Header.Get(api.SessionFeaturesHeader)
 	if len(value) > 128 {
 		return false
 	}
 	for token := range strings.SplitSeq(value, ",") {
-		if strings.TrimSpace(token) == api.SessionFeatureBackgroundProcesses {
+		if strings.TrimSpace(token) == feature {
 			return true
 		}
 	}
 	return false
 }
 
-func sessionEnvelopeForRequest(envelope runtime.SessionEvent, includeBackgroundProcesses bool) *sessionEnvelopeDTO {
+func sessionEnvelopeForRequest(envelope runtime.SessionEvent, includeBackgroundProcesses bool, includeOutput ...bool) *sessionEnvelopeDTO {
+	if _, output := envelope.Event.(*runtime.BackgroundProcessOutputEvent); output {
+		if len(includeOutput) == 0 || !includeOutput[0] {
+			return nil
+		}
+	}
 	if _, isProcesses := envelope.Event.(*runtime.BackgroundProcessesEvent); isProcesses {
 		if !includeBackgroundProcesses {
 			if envelope.Sequence == 0 {

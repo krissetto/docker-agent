@@ -111,8 +111,9 @@ type Model struct {
 	// large viewports, and content lines are immutable between rebuilds.
 	lineWidths []int
 
-	fadeEffect bool
-	fadeCache  fadeCache
+	fadeExemptStart, fadeExemptEnd int
+	fadeEffect                     bool
+	fadeCache                      fadeCache
 
 	scrollbarDecorator ScrollbarDecorator
 
@@ -632,4 +633,10 @@ func (m *Model) updateScrollbarPosition() {
 
 func (m *Model) scrollbarLines() []string {
 	return m.composeScrollbar(m.sb.ViewLines())
+}
+
+// SetFadeExemptRows excludes a viewport-local half-open row range from edge fading.
+// An empty range restores the normal fade on every row.
+func (m *Model) SetFadeExemptRows(start, end int) {
+	m.fadeExemptStart, m.fadeExemptEnd = start, end
 }

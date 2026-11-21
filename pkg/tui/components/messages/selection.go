@@ -538,16 +538,16 @@ func (m *model) selectionBoundsFor(top, bottom int) (sl, sc, el, ec int) {
 		last := m.slotAt(max(top, bottom-1))
 		sentinel := func(r *selectionRef) int {
 			switch {
-			case r.spot.slot < first:
+			case m.geom.position(r.spot.slot) < m.geom.position(first):
 				return top - 1
-			case r.spot.slot > last:
+			case m.geom.position(r.spot.slot) > m.geom.position(last):
 				return bottom
 			default:
 				return top
 			}
 		}
 		for _, k := range []int{endpointStart, endpointEnd} {
-			if r := s.refs[k]; r != nil && r.spot.slot >= first && r.spot.slot <= last {
+			if r := s.refs[k]; r != nil && m.geom.position(r.spot.slot) >= m.geom.position(first) && m.geom.position(r.spot.slot) <= m.geom.position(last) {
 				m.resolveEndpoint(k, true)
 			}
 		}

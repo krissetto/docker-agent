@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -122,6 +123,7 @@ func (d *sessionDriver) ownerSnapshot(ctx context.Context) (*session.Session, er
 func (d *sessionDriver) executionContext(ctx context.Context, generation uint64) (context.Context, *session.Session, error) {
 	var snapshot *session.Session
 	var environment *TeamEnvironmentLease
+	var requireApproval bool
 	err := d.ownerCall(ctx, func() error {
 		if d.sess == nil {
 			return ErrSessionClosed
@@ -131,17 +133,22 @@ func (d *sessionDriver) executionContext(ctx context.Context, generation uint64)
 		}
 		snapshot = d.sess.Clone()
 		environment = d.runEnvironment
+		requireApproval = d.activeRequireApproval
 		return nil
 	})
+	if requireApproval {
+		ctx = toolexec.WithRequiredApproval(ctx)
+	}
 	identity := executionIdentity{driver: d, generation: generation, environment: environment}
 	ctx = context.WithValue(tools.WithResourceOwner(ctx, d.resourceOwner), executionIdentityKey{}, identity)
 	if environment != nil {
 		ctx = context.WithValue(ctx, teamEnvironmentContextKey{}, environment.Environment())
-		binding := identity.driver.activeBinding()
-		ctx = withHarnessEffortOverride(ctx, binding.harness)
-		ctx = agent.WithContextModels(ctx, snapshot.AgentName, binding.models)
 	}
-	return ctx, snapshot, err
+	if err != nil {
+		return ctx, snapshot, err
+	}
+	ctx = d.scopeModels(ctx)
+	return ctx, snapshot, nil
 }
 
 // commitExecutionEvent applies only the event's typed delta; concurrent accepted

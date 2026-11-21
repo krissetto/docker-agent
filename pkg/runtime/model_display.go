@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
@@ -18,6 +19,16 @@ func cachedModelDatabase(store ModelStore) *modelsdev.Database {
 		}
 	}
 	return modelsdev.EmbeddedSnapshot()
+}
+
+// modelDisplayConfig retains explicit off when provider defaults normalize its budget.
+func modelDisplayConfig(model provider.Provider) latest.ModelConfig {
+	base := model.BaseConfig()
+	cfg := base.ModelConfig
+	if base.ModelOptions.NoThinking() {
+		cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: "none"}
+	}
+	return cfg
 }
 
 // projectModelDisplay copies only immutable display scalars and owned tier

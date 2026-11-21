@@ -119,13 +119,13 @@ settings:
     show_plans: true
 ```
 
-Plans are shared documents from the same store used by `/plans`, the [plan tools](../../tools/plan/index.md), and `docker agent plans` — not plans attached to the current session. A full left/right sidebar shows up to **five** plans, ordered by last update (newest first, unknown timestamps last, with name as the tie-breaker). Status is shown as free-form text; there is no active/completed classification or status filter.
+Plans are shared documents from the same store used by `/plans`, the [plan tools](../../tools/plan/index.md), and `docker agent plans` — not plans attached to the current session. In a full left/right sidebar, the **N plans** summary starts collapsed, like Todos. Click anywhere on that summary row to expand or collapse it; live updates preserve your choice. When expanded, it shows up to **five** plans, ordered by last update (newest first, unknown timestamps last, with name as the tie-breaker). Each compact row shows the title (falling back to the canonical name) and its free-form status; there is no active/completed classification or status filter. The section and compact shortcut stay hidden while there are no plans, warnings, or read errors, including during the initial load.
 
 - **Single left-click a plan row** to open its content directly in `$VISUAL`/`$EDITOR`, guarded by the displayed revision. A stale revision is rejected rather than overwriting newer content.
-- **All plans** opens the shared plan browser. `/plans` and the <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette remain the keyboard routes.
+- The separate **Open /plans** row opens the shared plan browser and its detail view; **+K more** does the same when more than five plans exist. These actions appear when the section is expanded. `/plans` and the <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette remain the keyboard routes.
 - Top/bottom layouts and narrow or collapsed sidebar bands show only a compact `Plans (N) - open /plans` count and browser shortcut, not individual plan rows. Lean mode and `--sidebar=false` never show the section.
 - The bottom panel can show the same shared plans as a count, **N plans**, under **Settings → Panel → Plans** (off by default). Clicking it, or pressing Enter on it, opens the shared plan browser. It needs no sidebar, so it still works with `--sidebar=false`; lean mode never loads plan data.
-- Changes from plan events in the current process and local edits refresh the shared metadata. To pick up changes from another process, use the sidebar's **Refresh plans** action or press <kbd>r</kbd> in the plan browser or detail view. There is no automatic polling or file watcher.
+- Changes from plan events in the current process and local edits refresh the shared metadata. To pick up changes from another process, press <kbd>r</kbd> in the plan browser or detail view. Warnings and read errors retain a **Refresh plans** recovery action in the expanded section; failed refreshes keep stale rows visible. There is no automatic polling or file watcher.
 
 Editing changes only the plan document. It does not approve a plan, execute its steps, or authorize tool writes.
 
@@ -254,6 +254,8 @@ Source order is preserved if work already precedes the first public message.
 When an agent reply or background completion restarts the same exchange, the existing Work header becomes active again without adding a separate startup spinner. The standalone startup spinner is reserved for a fresh user message before the model begins producing work.
 
 The header reports completed tool calls as `(1 tool)` or `(N tools)`, including failed calls and tools inside thinking blocks; outgoing reply calls count once, while incoming agent replies, background-completion notices, reasoning, and pending or running calls do not increase the count.
+
+Collapsed Work shows up to the last three nonblank lines of displayable reasoning from that exchange, including after the response finishes and when session history is reloaded. Short or absent reasoning adds no empty preview rows once settled. While reasoning streams, the preview keeps its existing three-row budget and arrival fade. Expanding Work replaces the preview with the full source history, without duplicating reasoning or revealing reasoning that was not otherwise displayable. Tool-only exchanges have no reasoning preview.
 
 Expanded Work content is inset on both sides, with a blank row below the header and consistent spacing between reasoning, replies, and tool activity. This changes only the rendering bounds: nested thinking blocks, tool cards, and other expandable content retain their existing disclosure controls and behavior. Intermediate replies keep their original content without repeated “Earlier reply” headings. Assistant responses and thinking blocks do not repeat agent-name badges; incoming messages still identify their sender.
 

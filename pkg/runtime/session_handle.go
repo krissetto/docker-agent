@@ -809,7 +809,7 @@ func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission,
 }
 
 func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation string) (Submission, error) {
-	msg := QueuedMessage{InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, Retry: input.Retry}
+	msg := QueuedMessage{RequireIdle: input.RequireIdle, RequireApproval: input.RequireApproval, InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, Retry: input.Retry}
 	if err := ctx.Err(); err != nil {
 		return Submission{}, err
 	}
@@ -1372,7 +1372,7 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	if since != nil && options.SinceEpoch != h.driver.events.epoch {
 		since = nil
 	}
-	observed := h.driver.observe(since, buffer)
+	observed := h.driver.observe(since, buffer, options.BackgroundOutputInterest[h.sessionID])
 	if observed.live == nil || observed.cancel == nil {
 		return Observation{}, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, Operation: "observe"}
 	}
@@ -1399,7 +1399,7 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	presentation := h.observationPresentation(ctx, observed)
 	return Observation{
 		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, BackgroundProcesses: observed.backgroundProcesses, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position, Presentation: presentation, TitleStatus: observed.titleStatus}},
-		Replay:  replay, Events: observed.live, Cancel: cancel,
+		Replay:  replay, Events: observed.live, Cancel: cancel, SetBackgroundOutputInterest: h.driver.events.backgroundOutputInterestSetter(h.sessionID, observed.live),
 	}, nil
 }
 
@@ -1412,7 +1412,7 @@ func (h *sessionHandle) observeTail(ctx context.Context, options ObserveOptions)
 	if buffer <= 0 {
 		buffer = defaultEventChannelCapacity
 	}
-	observed, tail, err := h.driver.observeTail(ctx, limits, buffer)
+	observed, tail, err := h.driver.observeTail(ctx, limits, buffer, options.BackgroundOutputInterest[h.sessionID])
 	if err != nil {
 		return Observation{}, err
 	}
@@ -1431,7 +1431,7 @@ func (h *sessionHandle) observeTail(ctx context.Context, options ObserveOptions)
 	for i, item := range observed.seed {
 		replay[i] = sessionEnvelope(h.sessionID, item)
 	}
-	return Observation{Initial: []SessionSnapshot{tail}, Replay: replay, Events: observed.live, Cancel: cancel}, nil
+	return Observation{Initial: []SessionSnapshot{tail}, Replay: replay, Events: observed.live, Cancel: cancel, SetBackgroundOutputInterest: h.driver.events.backgroundOutputInterestSetter(h.sessionID, observed.live)}, nil
 }
 
 func sessionEnvelope(sessionID string, item SequencedSessionEvent) SessionEvent {
@@ -1547,4 +1547,20 @@ func (h *sessionHandle) StopSubtree(ctx context.Context) error {
 	}
 	_, err := h.runtime.subagents.stopChildContext(ctx, h.driver.session().ParentID, nodeID)
 	return err
+}
+
+// BackgroundProcessOutput reads only processes retained by this exact session.
+func (h *sessionHandle) BackgroundProcessOutput(ctx context.Context, processID string, maxBytes int) (tools.BackgroundProcessOutput, error) {
+	var source tools.BackgroundProcessOutputSource
+	if err := h.driver.ownerCall(ctx, func() error {
+		h.driver.pruneBackgroundProcessesLocked(time.Now())
+		source = h.driver.backgroundOutputSources[processID]
+		return nil
+	}); err != nil {
+		return tools.BackgroundProcessOutput{}, err
+	}
+	if source == nil {
+		return tools.BackgroundProcessOutput{}, tools.ErrBackgroundProcessNotFound
+	}
+	return source.BackgroundProcessOutput(tools.WithResourceOwner(ctx, h.driver.resourceOwner), processID, maxBytes)
 }

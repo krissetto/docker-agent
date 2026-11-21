@@ -8,7 +8,8 @@
 //   - add_environment_info  (session_start)   — cwd, git, OS, arch
 //   - add_prompt_files      (turn_start)      — contents of prompt files,
 //     plus (with args=['--depth=<N>']) a path-only listing of the same
-//     filenames found up to N levels below the working dir
+//     filenames found up to N levels below the working dir; --group=<name>
+//     isolates independently refreshed prompt-file sets (default core/prompt-files)
 //   - add_git_status        (turn_start)      — `git status --short --branch`
 //   - add_git_diff          (turn_start)      — `git diff --stat` (or full)
 //   - add_directory_listing (session_start)   — top-level entries of cwd

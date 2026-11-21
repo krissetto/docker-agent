@@ -268,6 +268,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 		return nil
 	}
 	p.presentationHidden = !visible
+	interestCmd := p.messages.SetShellBackgroundOutputVisible(visible)
 	p.shellVisualGeneration++
 	if !visible {
 		p.releaseSidebarInput()
@@ -275,7 +276,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 		p.stopHiddenPresentation()
 		p.applyScrollbarVisibility()
 		p.SetScrollbarPointer(-1, -1)
-		return SetSidebarPresentationActive(p, false)
+		return tea.Batch(interestCmd, SetSidebarPresentationActive(p, false))
 	}
 	var resumeCmd tea.Cmd
 	if owner, ok := p.messages.(interface{ ResumeAnimations() tea.Cmd }); ok {
@@ -286,7 +287,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 		layoutCmd = p.applySplitPresentation()
 	}
 	p.applyScrollbarVisibility()
-	return tea.Batch(resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden), p.continueHistoryCmd())
+	return tea.Batch(interestCmd, resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden), p.continueHistoryCmd())
 }
 
 func (p *chatPage) stopHiddenPresentation() {

@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 )
 
 func TestRuntimeReasoningPreviewPersistsAcrossCommittedToolRounds(t *testing.T) {
@@ -46,12 +47,22 @@ func TestRuntimeReasoningPreviewPersistsAcrossCommittedToolRounds(t *testing.T) 
 				}
 			}
 			p.handleRuntimeEvent(runtime.AgentChoice("root", sess.ID, "answer", "final"))
+			p.handleRuntimeEvent(runtime.StreamStopped(sess.ID, "root", "normal"))
 			p.messages.SetSize(96, 40)
+			for range 80 {
+				cmd := p.ar.Continue()
+				if cmd == nil {
+					break
+				}
+				tick, accepted := p.ar.Accept(cmd().(animation.TickMsg))
+				require.True(t, accepted)
+				p.messages.Update(tick)
+			}
 			frame := ansi.Strip(p.messages.View())
 			require.Contains(t, frame, "answer")
 			if compact {
-				require.NotContains(t, frame, "thought 0")
-				require.NotContains(t, frame, "thought 1")
+				require.Contains(t, frame, "thought 0")
+				require.Contains(t, frame, "thought 1")
 			}
 		})
 	}

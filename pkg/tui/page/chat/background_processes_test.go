@@ -174,3 +174,23 @@ func TestBackgroundProcessEventRejectsOtherSessionOwner(t *testing.T) {
 	require.Empty(t, page.backgroundProcesses)
 	require.Empty(t, page.backgroundProcessToolCalls)
 }
+
+func TestBackgroundRemoteCommitLinksArePositionedAndReset(t *testing.T) {
+	sess := session.New(session.WithID("remote-owner"))
+	page := newBackgroundProcessPage(t, sess)
+	call := tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"fixture"}`}}
+	page.handleRuntimeEvent(runtime.ToolCall(call, tools.Tool{Name: "shell"}, "root"))
+	commit := &runtime.MessageAddedEvent{SessionID: sess.ID, SessionPosition: 3, MessageRole: chatmsg.MessageRoleAssistant, ToolCallIDs: []string{call.ID}}
+	page.handleRuntimeEvent(commit)
+	process := backgroundProcess("job_1_1", sess.ID, call.ID, "fixture")
+	page.setBackgroundProcesses(sess.ID, []tools.BackgroundProcess{process})
+	require.Contains(t, page.backgroundProcessToolCalls, call.ID, "commits before adoption remain linkable")
+	page.handleRuntimeEvent(commit)
+	require.Contains(t, page.backgroundProcessToolCalls, call.ID, "replayed positions do not create ambiguity")
+	duplicate := *commit
+	duplicate.SessionPosition++
+	page.handleRuntimeEvent(&duplicate)
+	require.Empty(t, page.backgroundProcessToolCalls, "distinct committed positions with the same call ID are ambiguous")
+	page.resetProjection(runtime.SessionSnapshot{Session: sess.Clone(), Status: runtime.SessionStatus{SessionID: sess.ID}})
+	require.Empty(t, page.backgroundRemoteToolCalls, "replacement snapshots discard old wire evidence")
+}

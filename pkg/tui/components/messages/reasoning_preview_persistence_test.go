@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
+	"github.com/docker/docker-agent/pkg/tui/components/workblock"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -139,12 +141,12 @@ func TestReasoningPreviewReplayIsSettledAndResumesOnce(t *testing.T) {
 			finishPreparedReplay(t, m)
 			block := m.views[1].(*reasoningblock.Model)
 			require.Equal(t, "before\n\nafter", block.Reasoning())
-			require.False(t, block.ReasoningActive(), "historical reasoning never starts live preview")
+			require.False(t, block.ReasoningActive(), "historical reasoning never starts live animation")
 			m.View()
 			if compact {
 				firstWorkBlock(m).SetExpandedImmediately(false)
 				m.invalidateAllItems()
-				require.NotContains(t, ansi.Strip(m.View()), "before")
+				require.Contains(t, ansi.Strip(m.View()), "before")
 				firstWorkBlock(m).SetExpandedImmediately(true)
 				m.invalidateAllItems()
 			}
@@ -159,6 +161,145 @@ func TestReasoningPreviewReplayIsSettledAndResumesOnce(t *testing.T) {
 			m.AppendReasoning("worker", " chunks")
 			require.Equal(t, "before\n\nafter\n\n resumed chunks", block.Reasoning())
 			require.Contains(t, ansi.Strip(m.View()), "resumed chunks")
+		})
+	}
+}
+
+func TestOlderCompletionDoesNotSplitResumedReasoningChunks(t *testing.T) {
+	m := orderedTestModel(t)
+	m.SetCompactWorkLog(true)
+	m.AddUserMessage("request")
+	m.SetWorkStatus(true, 0)
+	m.AppendReasoningContent("s", "current", "worker", "before")
+	call := tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "check", Arguments: `{}`}}
+	m.AddOrUpdateToolCall("worker", call, tools.Tool{Name: "check"}, types.ToolStatusRunning)
+	m.AppendReasoningContent("s", "current", "worker", "after")
+	for _, chunk := range []string{" ", "tools", " again"} {
+		m.CompleteAssistant(runtime.MessageAdded("s", session.NewAgentMessage("worker", &chat.Message{
+			Role: chat.MessageRoleAssistant, MessageID: "older", Presentation: []chat.AssistantPart{},
+		}), "worker").(*runtime.MessageAddedEvent))
+		m.AppendReasoningContent("s", "current", "worker", chunk)
+	}
+	block := m.views[1].(*reasoningblock.Model)
+	require.Equal(t, "before\n\nafter tools again", block.Reasoning(), "an unrelated completion cannot create a boundary per delta")
+	require.True(t, block.ReasoningActive())
+}
+
+func TestOlderReasoningCommitCannotRewriteNewerPreview(t *testing.T) {
+	for _, ordered := range []bool{false, true} {
+		t.Run(fmt.Sprint(ordered), func(t *testing.T) {
+			m := orderedTestModel(t)
+			m.SetCompactWorkLog(true)
+			m.AddUserMessage("request")
+			m.SetWorkStatus(true, 0)
+			m.AppendReasoningContent("s", "current", "worker", "new reasoning")
+			msg := &chat.Message{Role: chat.MessageRoleAssistant, MessageID: "older", ReasoningContent: "old reasoning"}
+			if ordered {
+				msg.Presentation = []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "old reasoning"}}
+			}
+			m.CompleteAssistant(runtime.MessageAdded("s", session.NewAgentMessage("worker", msg), "worker").(*runtime.MessageAddedEvent))
+			m.AppendReasoningContent("s", "current", "worker", " continues")
+			block := m.views[1].(*reasoningblock.Model)
+			require.Equal(t, "new reasoning continues", block.Reasoning())
+			require.True(t, block.ReasoningActive())
+		})
+	}
+}
+
+func TestLateAnonymousCompletionCannotRewriteCurrentReasoning(t *testing.T) {
+	for _, id := range []string{"", "legacy:1"} {
+		for _, ordered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("id=%q/ordered=%v", id, ordered), func(t *testing.T) {
+				m := orderedTestModel(t)
+				m.SetCompactWorkLog(true)
+				m.AddUserMessage("request")
+				m.SetWorkStatus(true, 0)
+				m.AppendReasoningContent("s", "current", "worker", "new reasoning")
+				block := m.views[1].(*reasoningblock.Model)
+				tracker := m.streamedReasoning
+				msg := &chat.Message{Role: chat.MessageRoleAssistant, MessageID: id, ReasoningContent: "old reasoning"}
+				if ordered {
+					msg.Presentation = []chat.AssistantPart{{Type: chat.AssistantPartReasoning, Text: "old reasoning"}}
+				}
+				m.CompleteAssistant(runtime.MessageAdded("s", session.NewAgentMessage("worker", msg), "worker").(*runtime.MessageAddedEvent))
+				require.Same(t, tracker, m.streamedReasoning)
+				require.Same(t, block, m.views[1])
+				require.Equal(t, "new reasoning", block.Reasoning())
+				require.Equal(t, "new reasoning", m.messages[1].Content)
+				require.True(t, block.ReasoningActive())
+				m.AppendReasoningContent("s", "current", "worker", " continues")
+				require.Equal(t, "new reasoning continues", block.Reasoning())
+			})
+		}
+	}
+}
+
+func TestCollapsedWorkPreviewReloadUsesOnlyDisplayableExchangeReasoning(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		reasoning    string
+		presentation []chat.AssistantPart
+		want         []string
+	}{
+		{name: "legacy short", reasoning: "visible-one", want: []string{"visible-one"}},
+		{name: "ordered tail", reasoning: "aggregate-not-displayable", presentation: []chat.AssistantPart{
+			{Type: chat.AssistantPartReasoning, Text: "visible-one\n\nvisible-two"},
+			{Type: chat.AssistantPartContent, Text: "intermediate"},
+			{Type: chat.AssistantPartReasoning, Text: "visible-three\n\nvisible-four"},
+		}, want: []string{"visible-two", "visible-three", "visible-four"}},
+		{name: "ordered presentation suppresses aggregate", reasoning: "aggregate-not-displayable", presentation: []chat.AssistantPart{{Type: chat.AssistantPartContent, Text: "public content only"}}},
+		{name: "tool only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := session.New(session.WithID("reload-preview"))
+			sess.AddMessage(session.UserMessage("earlier request"))
+			sess.AddMessage(session.NewAgentMessage("worker", &chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "earlier-exchange"}))
+			sess.AddMessage(session.UserMessage("current request"))
+			call := tools.ToolCall{ID: "reload-call", Function: tools.FunctionCall{Name: "probe"}}
+			msg := &chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: tc.reasoning, Presentation: tc.presentation, ToolCalls: []tools.ToolCall{call},
+				OpenAIResponse: &chat.OpenAIResponse{Source: "test", Output: []json.RawMessage{json.RawMessage(`{"type":"reasoning","encrypted_content":"opaque-not-displayable"}`)}},
+			}
+			sess.AddMessage(session.NewAgentMessage("worker", msg))
+			sess.AddMessage(session.NewAgentMessage("worker", &chat.Message{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "standalone", Function: tools.FunctionCall{Name: "probe"}}}}))
+			sess.AddMessage(session.NewAgentMessage("worker", &chat.Message{Role: chat.MessageRoleAssistant, Content: "final answer"}))
+			data, err := json.Marshal(sess)
+			require.NoError(t, err)
+			var reloaded session.Session
+			require.NoError(t, json.Unmarshal(data, &reloaded))
+			m := orderedTestModel(t)
+			m.SetCompactWorkLog(true)
+			BeginReplay(m, PrepareReplay(&reloaded), nil)
+			finishPreparedReplay(t, m)
+			m.View()
+			var work *workblock.Model
+			for _, candidate := range m.workBlocks {
+				for _, item := range candidate.Items() {
+					if item.SourceIndex > 2 {
+						work = candidate
+						break
+					}
+				}
+			}
+			require.NotNil(t, work)
+			work.SetExpandedImmediately(false)
+			frame := ansi.Strip(work.View())
+			require.Equal(t, 1+len(tc.want), work.Height(), "replay has no live blank budget")
+			require.NotContains(t, frame, "earlier-exchange")
+			require.NotContains(t, frame, "aggregate-not-displayable")
+			require.NotContains(t, frame, "opaque-not-displayable")
+			for _, line := range tc.want {
+				require.Equal(t, 1, strings.Count(frame, line))
+			}
+			if len(tc.want) == 3 {
+				require.NotContains(t, frame, "visible-one")
+			}
+			work.SetExpandedImmediately(true)
+			frame = ansi.Strip(work.View())
+			for _, line := range tc.want {
+				require.Equal(t, 1, strings.Count(frame, line), "expanded source history is not duplicated")
+			}
+			require.NotContains(t, frame, "opaque-not-displayable")
+			require.NotContains(t, frame, "aggregate-not-displayable")
 		})
 	}
 }

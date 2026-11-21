@@ -85,6 +85,24 @@ type AssistantMedia struct {
 	Fallback string
 }
 
+// ShellBackground retains the adopted process state on its original tool card.
+// State is running only while present in the authoritative list; completed,
+// failed, and stopped are cached terminal states. Unknown means ended without
+// a recorded completion; an empty state is a legacy handoff without live data.
+type ShellBackground struct {
+	ProcessID string
+	State     tools.BackgroundProcessState
+	// Authoritative is set after a uniquely linked process-list update or completion.
+	Authoritative     bool
+	ExitCode          int
+	TimedOut          bool
+	StartedAt         time.Time
+	FinishedAt        time.Time
+	OutputUnavailable bool
+	OutputOffset      int64
+	OutputTotal       int64
+}
+
 // Message represents a single message in the chat
 type Message struct {
 	// SessionID and MessageID identify the logical assistant message a streamed
@@ -106,9 +124,10 @@ type Message struct {
 	Attachments    []UserAttachment
 	Type           MessageType
 	Content        string
-	Sender         string                // Agent name for assistant messages
-	ToolCall       tools.ToolCall        // Associated tool call for tool messages
-	ToolDefinition tools.Tool            // Definition of the tool being called
+	Sender         string         // Agent name for assistant messages
+	ToolCall       tools.ToolCall // Associated tool call for tool messages
+	ToolDefinition tools.Tool     // Definition of the tool being called
+	Background     *ShellBackground
 	ToolStatus     ToolStatus            // Status for tool calls
 	ToolResult     *tools.ToolCallResult // Result of tool call (when completed)
 	Images         []tuiimage.Inline     // Prepared terminal images from the result
@@ -271,4 +290,19 @@ func Loading(description string) *Message {
 		Type:    MessageTypeLoading,
 		Content: strings.ReplaceAll(description, "\t", "    "),
 	}
+}
+
+// SetToolResponse keeps the streamed output when a shell command is adopted.
+func (m *Message) SetToolResponse(content string, status ToolStatus) {
+	if id, ok := tools.ParseShellBackgroundHandoff(content); ok {
+		if m.Background == nil || m.Background.ProcessID != id {
+			m.Background = &ShellBackground{ProcessID: id, OutputTotal: -1}
+			if m.StartedAt != nil {
+				m.Background.StartedAt = *m.StartedAt
+			}
+		}
+	} else {
+		m.Content = strings.ReplaceAll(content, "\t", "    ")
+	}
+	m.ToolStatus = status
 }

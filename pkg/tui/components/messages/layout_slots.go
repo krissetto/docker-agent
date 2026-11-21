@@ -159,6 +159,9 @@ func (m *model) markSlotsStale() { m.slotsStale = true }
 func (m *model) syncSlots() {
 	n := len(m.views)
 	oldN := len(m.slotViews)
+	if len(m.geom.order) > 0 && len(m.geom.order) != n {
+		m.slotsStale = true
+	}
 	if m.slotsStale || oldN == 0 || m.geom.Len() != oldN || len(m.slotBase) != oldN || len(m.slotKnown) != oldN || len(m.slotSep) != oldN || len(m.slotTheme) != oldN {
 		m.syncSlotsFull()
 		return
@@ -305,6 +308,7 @@ func (m *model) syncSlotsFull() {
 	for i, view := range m.slotViews {
 		prev[view] = i
 	}
+	m.syncWorkOrder()
 	oldBase, oldSep, oldTheme := m.slotBase, m.slotSep, m.slotTheme
 	gen := styles.ThemeGeneration()
 	theme := make([]uint64, n)
@@ -769,7 +773,7 @@ func (m *model) pruneRetained() {
 	hi := m.scrollOffset + max(1, m.height) + margin
 	first := m.geom.Find(lo)
 	last := first
-	for i := first; i < n; i++ {
+	for i := first; i < n; i = m.nextDisplaySlot(i) {
 		if m.slotOffset(i) >= hi {
 			break
 		}
@@ -777,7 +781,7 @@ func (m *model) pruneRetained() {
 	}
 	keep := m.handoffRetained()
 	retained := func(i int) bool {
-		if (i >= first && i <= last) || m.isLiveTail(i) {
+		if (m.geom.position(i) >= m.geom.position(first) && m.geom.position(i) <= m.geom.position(last)) || m.isLiveTail(i) {
 			return true
 		}
 		_, ok := keep[i]
@@ -813,7 +817,7 @@ func (m *model) measureBottomWindow() {
 	// which hides the rows at the bottom. The window is re-derived after every slot,
 	// so only rows the reader will still show after the slack are measured.
 	rows := 0
-	for i := len(m.views) - 1; i >= m.historyStart && i >= 0; i-- {
+	for i := m.previousDisplaySlot(len(m.views)); i >= 0; i = m.previousDisplaySlot(i) {
 		if rows >= m.height-m.predictedBottomSlack() {
 			break
 		}
@@ -900,7 +904,7 @@ func (m *model) layoutViewport() {
 			bottom = 0
 		}
 	}
-	for i := m.geom.Find(top); i < n; i++ {
+	for i := m.geom.Find(top); i < n; i = m.nextDisplaySlot(i) {
 		if m.slotOffset(i) >= bottom {
 			break
 		}

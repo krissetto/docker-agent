@@ -173,7 +173,7 @@ func TestDefaultGroupedWorkPreservesHumanBoundaryAndExpandsSourceChildren(t *tes
 	frame := ansi.Strip(p.messages.View())
 	require.Contains(t, frame, "human request stays visible", "actual user input remains a top-level boundary")
 	require.Contains(t, frame, "Work", "full TUI groups source-owned work by default")
-	require.NotContains(t, frame, "collapsed reasoning details", "settled collapsed Work retires its reasoning preview")
+	require.Contains(t, frame, "collapsed reasoning details", "settled collapsed Work retains displayable reasoning")
 	require.NotContains(t, frame, "Thinking", "nested thinking headers stay hidden inside collapsed Work")
 
 	owner, ok := p.messages.(interface {
@@ -304,7 +304,7 @@ func TestResumedWorkFromSnapshotPreservesSpinnerModesAndCancellation(t *testing.
 						require.Contains(t, ansi.Strip(p.messages.View()), "Working")
 						require.Zero(t, p.messages.MessageTypeCount(types.MessageTypeSpinner))
 					} else {
-						require.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeSpinner), "compact-off keeps its existing pending indicator")
+						require.Zero(t, p.messages.MessageTypeCount(types.MessageTypeSpinner), "existing response must not rearm pending in compact-off either")
 					}
 					deliver(runtime.StreamStopped(sess.ID, "root", "cancelled"))
 					active, _ = workStatus(t, p)

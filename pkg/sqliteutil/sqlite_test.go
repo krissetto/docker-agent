@@ -22,9 +22,14 @@ func TestOpenDB_UsesWALWithFullSynchronous(t *testing.T) {
 		{name: "OpenDBWithImmediateTransactions", open: OpenDBWithImmediateTransactions},
 	} {
 		t.Run(opener.name, func(t *testing.T) {
-			for _, sandbox := range []string{"", "synthetic-vm"} {
-				t.Run("sandbox="+sandbox, func(t *testing.T) {
-					t.Setenv("SANDBOX_VM_ID", sandbox)
+			for _, sandbox := range []struct{ name, marker, vmID string }{
+				{name: "host"},
+				{name: "legacy", vmID: "synthetic-vm"},
+				{name: "modern", marker: "1"},
+			} {
+				t.Run(sandbox.name, func(t *testing.T) {
+					t.Setenv("IS_SANDBOX", sandbox.marker)
+					t.Setenv("SANDBOX_VM_ID", sandbox.vmID)
 					for _, existingMode := range []string{"new", "delete", "wal"} {
 						t.Run(existingMode, func(t *testing.T) {
 							path := filepath.Join(t.TempDir(), "session.db")

@@ -58,13 +58,13 @@ func newSpawnTestModel(t *testing.T, spy *spySpawner, opts ...Option) *appModel 
 }
 
 // isolateSandboxEnv clears the Docker sandbox markers for the test. A shell
-// running inside a sandbox exports SANDBOX_VM_ID, which makes
+// running inside a sandbox exports IS_SANDBOX or SANDBOX_VM_ID, which makes
 // WithDefaultWorkingDir a no-op (environment.InSandbox), so the default-dir
 // tests must not inherit it. t.Setenv restores the original values afterwards
 // and forbids t.Parallel, which is why these tests run serially.
 func isolateSandboxEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"SANDBOX_VM_ID", "SANDBOX_NAME", "SANDBOX_ID"} {
+	for _, key := range []string{"IS_SANDBOX", "SANDBOX_VM_ID", "SANDBOX_NAME", "SANDBOX_ID"} {
 		t.Setenv(key, "")
 	}
 }

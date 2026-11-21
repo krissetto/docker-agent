@@ -301,3 +301,67 @@ func TestInactiveTabUsageKeepsSelectedAgent(t *testing.T) {
 	assert.Equal(t, "helper", m.sessionStates[backgroundID].CurrentAgentName(),
 		"a non-accounting event still follows the agent")
 }
+
+func TestPlanSidebar_EmptySnapshotStillReceivesCreateAndDelete(t *testing.T) {
+	t.Parallel()
+	m, svc := newPlansTestModel(t)
+	m.layoutSettings.ShowPlans = true
+	page := &planSidebarTestPage{}
+	m.chatPages["active"] = page
+	drainPlanFlow(t, m, m.refreshPlanSidebarCmd())
+	assert.Empty(t, page.data.Result.Plans)
+	assert.True(t, m.planDataVisible(), "configured sidebar must keep receiving events while its empty section is hidden")
+
+	p := mustCreatePlan(t, svc, "release", "content")
+	runPlanFlow(t, m, runtime.PlanChanged("shared", p.Name, "create", *p.Version, ""))
+	require.Len(t, page.data.Result.Plans, 1)
+	assert.Equal(t, p.Name, page.data.Result.Plans[0].Name)
+
+	require.NoError(t, svc.Delete(t.Context(), plans.DeleteRequest{Ref: plans.SharedRef(p.Name), ExpectedVersion: p.Version}))
+	runPlanFlow(t, m, runtime.PlanChanged("shared", p.Name, "delete", *p.Version, ""))
+	assert.Empty(t, page.data.Result.Plans)
+	assert.False(t, page.data.Loading)
+	assert.False(t, m.planDialogOpen())
+}
+
+func TestPlanSidebar_WrappedEventsRefreshEveryPage(t *testing.T) {
+	t.Parallel()
+	for _, background := range []bool{false, true} {
+		name := "active"
+		if background {
+			name = "background"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m, svc := newPlansTestModel(t)
+			m.layoutSettings.ShowPlans = true
+			m.supervisor = supervisor.New(nil)
+			activeID := addPlanTestSession(t, m.supervisor)
+			backgroundID := addPlanTestSession(t, m.supervisor)
+			active, other := &planSidebarTestPage{}, &planSidebarTestPage{}
+			m.chatPages[activeID], m.chatPages[backgroundID] = active, other
+			m.chatPage = active
+			origin := activeID
+			if background {
+				origin = backgroundID
+			}
+			drainPlanFlow(t, m, m.refreshPlanSidebarCmd())
+			assert.Empty(t, active.data.Result.Plans)
+			p := mustCreatePlan(t, svc, "release", "content")
+			for _, status := range []string{"awaiting input", "handed over"} {
+				var err error
+				p, err = svc.SetStatus(t.Context(), plans.SetStatusRequest{Ref: plans.SharedRef(p.Name), Status: status, ExpectedVersion: p.Version})
+				require.NoError(t, err)
+				runPlanFlow(t, m, messages.RoutedMsg{SessionID: origin, Inner: messages.SessionRuntimeEventMsg{
+					Event: runtime.PlanChanged("shared", p.Name, "write", *p.Version, ""),
+				}})
+				for _, page := range []*planSidebarTestPage{active, other} {
+					require.Len(t, page.data.Result.Plans, 1)
+					assert.Equal(t, status, page.data.Result.Plans[0].Status)
+					assert.Equal(t, *p.Version, *page.data.Result.Plans[0].Version)
+				}
+			}
+			assert.False(t, m.planDialogOpen())
+		})
+	}
+}

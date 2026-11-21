@@ -119,7 +119,10 @@ func userSandboxAllowlist(ctx context.Context) []string {
 // without re-resolving the ref.
 func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runConfig *config.RuntimeConfig, template string, preferSbx, noKit bool, agentCfg *latestcfg.Config) error {
 	if environment.InSandbox() {
-		return fmt.Errorf("already running inside a Docker sandbox (VM %s)", os.Getenv("SANDBOX_VM_ID"))
+		if vmID := os.Getenv("SANDBOX_VM_ID"); vmID != "" {
+			return fmt.Errorf("already running inside a Docker sandbox (VM %s)", vmID)
+		}
+		return errors.New("already running inside a Docker sandbox")
 	}
 
 	backend := sandbox.NewBackend(preferSbx)

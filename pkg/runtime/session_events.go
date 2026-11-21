@@ -17,9 +17,11 @@ import (
 const (
 	defaultSessionEventReplayCapacity = 1024
 	// Subscriber limits are independent of caller buffers and replay retention.
-	maxSessionEventSubscriberBuffer = 1024
-	maxSessionEventSubscribers      = 256
-	maxSessionEventSubscriberBytes  = 8 << 20
+	maxSessionEventSubscriberBuffer      = 1024
+	maxSessionEventSubscribers           = 256
+	maxSessionEventSubscriberBytes       = 8 << 20
+	maxBackgroundOutputInterestProcesses = 1024
+	maxBackgroundOutputInterestIDBytes   = 1024
 )
 
 // SequencedSessionEvent is a replayable session event. Gap marks that events
@@ -207,6 +209,10 @@ func (h *sessionEventHub) Publish(sessionID string, event Event) {
 }
 
 func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
+	output, liveOnly := event.(*BackgroundProcessOutputEvent)
+	if liveOnly && !h.hasBackgroundOutputInterestLocked(sessionID, output.ProcessID) {
+		return
+	}
 	detached, wire, err := observerEventSnapshotWithWire(event)
 	if err != nil {
 		slog.Warn("Cannot detach session event", "error", err)
@@ -233,13 +239,27 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			h.terminal[sessionID] = true
 		}
 	}
-	h.trackInflightLocked(sessionID, event)
+	if !liveOnly {
+		h.trackInflightLocked(sessionID, event)
+	}
 	interactionID := interactionEventID(event)
-	sequence := h.nextSeq[sessionID] + 1
-	h.nextSeq[sessionID] = sequence
-	eventBytes := len(wire) + len(h.requestID[sessionID]) + len(interactionID)
-	h.appendReplayLocked(sessionID, retainedSessionEvent{sequence: sequence, requestID: h.requestID[sessionID], interactionID: interactionID, generation: h.generation[sessionID], event: event, bytes: eventBytes})
+	requestID := h.requestID[sessionID]
+	if liveOnly {
+		requestID = ""
+	}
+	sequence := uint64(0)
+	if !liveOnly {
+		sequence = h.nextSeq[sessionID] + 1
+		h.nextSeq[sessionID] = sequence
+	}
+	eventBytes := len(wire) + len(requestID) + len(interactionID)
+	if !liveOnly {
+		h.appendReplayLocked(sessionID, retainedSessionEvent{sequence: sequence, requestID: requestID, interactionID: interactionID, generation: h.generation[sessionID], event: event, bytes: eventBytes})
+	}
 	for sub := range h.subs[sessionID] {
+		if liveOnly {
+			continue
+		}
 		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
 		if eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes {
 			h.removeSubscriberLocked(sessionID, sub)
@@ -258,6 +278,9 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 		}
 	}
 	for sub := range h.seqSubs[sessionID] {
+		if liveOnly {
+			continue
+		}
 		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
 		if eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes {
 			h.gapSequencedSubscriberLocked(sessionID, sub)
@@ -268,7 +291,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			continue
 		}
 		select {
-		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEventWire(event, wire)}:
+		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: requestID, InteractionID: interactionID, Event: cloneSessionEventWire(event, wire)}:
 			sub.queuedBytes += eventBytes
 			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
@@ -276,12 +299,20 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 		}
 	}
 	for sub := range h.publicSubs[sessionID] {
+		if liveOnly {
+			if _, ok := sub.backgroundOutputInterest[output.ProcessID]; !ok {
+				continue
+			}
+		}
 		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
+		if liveOnly && (len(sub.out) >= sub.limit-1 || eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes) {
+			continue
+		}
 		if eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes || (!terminalEvent && len(sub.out) >= sub.limit) {
 			h.gapPublicSubscriberLocked(sessionID, sub)
 			continue
 		}
-		item := SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEventWire(event, wire)}
+		item := SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: requestID, InteractionID: interactionID, Event: cloneSessionEventWire(event, wire)}
 		select {
 		case sub.out <- sessionEnvelope(sessionID, item):
 			sub.queuedBytes += eventBytes
@@ -877,12 +908,13 @@ func cloneSessionEventWire(event Event, wire []byte) Event {
 }
 
 type publicSessionEventSubscriber struct {
-	queuedBytes int
-	queuedSizes []int
-	out         chan SessionEvent
-	limit       int
-	closed      bool
-	done        chan struct{}
+	backgroundOutputInterest map[string]struct{}
+	queuedBytes              int
+	queuedSizes              []int
+	out                      chan SessionEvent
+	limit                    int
+	closed                   bool
+	done                     chan struct{}
 }
 
 // Public observations use the hub's accounted queue directly, without a second buffer.
@@ -892,7 +924,7 @@ func (h *sessionEventHub) CurrentCursor(sessionID string) (string, uint64) {
 	return h.epoch, h.nextSeq[sessionID]
 }
 
-func (h *sessionEventHub) SubscribePublic(sessionID string, since *uint64, buffer int) (seed []SequencedSessionEvent, events <-chan SessionEvent, cancel func(), cursor uint64, done <-chan struct{}) {
+func (h *sessionEventHub) SubscribePublic(sessionID string, since *uint64, buffer int, initialInterest ...[]string) (seed []SequencedSessionEvent, events <-chan SessionEvent, cancel func(), cursor uint64, done <-chan struct{}) {
 	buffer = min(max(buffer, 1), maxSessionEventSubscriberBuffer)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -906,6 +938,9 @@ func (h *sessionEventHub) SubscribePublic(sessionID string, since *uint64, buffe
 		return nil, out, func() {}, cursor, closed
 	}
 	sub := &publicSessionEventSubscriber{done: make(chan struct{}), out: make(chan SessionEvent, buffer+1), limit: buffer}
+	if len(initialInterest) > 0 {
+		sub.backgroundOutputInterest = backgroundOutputInterestSet(initialInterest[0])
+	}
 	if since == nil {
 		for _, event := range h.liveSeedLocked(sessionID) {
 			seed = append(seed, SequencedSessionEvent{Epoch: h.epoch, Event: event})
@@ -954,4 +989,46 @@ func (h *sessionEventHub) removePublicSubscriberLocked(sessionID string, sub *pu
 	}
 	close(sub.out)
 	close(sub.done)
+}
+
+func backgroundOutputInterestSet(ids []string) map[string]struct{} {
+	interest := make(map[string]struct{}, min(len(ids), maxBackgroundOutputInterestProcesses))
+	for _, id := range ids[:min(len(ids), maxBackgroundOutputInterestProcesses)] {
+		if id != "" && len(id) <= maxBackgroundOutputInterestIDBytes {
+			interest[id] = struct{}{}
+		}
+	}
+	return interest
+}
+
+func (h *sessionEventHub) HasBackgroundOutputInterest(sessionID, processID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.hasBackgroundOutputInterestLocked(sessionID, processID)
+}
+
+func (h *sessionEventHub) hasBackgroundOutputInterestLocked(sessionID, processID string) bool {
+	for sub := range h.publicSubs[sessionID] {
+		if _, ok := sub.backgroundOutputInterest[processID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *sessionEventHub) backgroundOutputInterestSetter(sessionID string, events <-chan SessionEvent) func(string, []string) error {
+	return func(id string, processIDs []string) error {
+		if id != sessionID {
+			return &SessionError{Kind: SessionErrorNotFound, SessionID: id, Operation: "background_output_interest"}
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for sub := range h.publicSubs[sessionID] {
+			if sub.out == events {
+				sub.backgroundOutputInterest = backgroundOutputInterestSet(processIDs)
+				return nil
+			}
+		}
+		return ErrSessionClosed
+	}
 }

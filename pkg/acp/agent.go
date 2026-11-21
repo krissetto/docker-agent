@@ -32,6 +32,7 @@ import (
 
 // Agent implements the ACP Agent interface for docker agent.
 type Agent struct {
+	managed      bool
 	agentSource  config.Source
 	runConfig    *config.RuntimeConfig
 	sessionStore session.Store
@@ -69,6 +70,8 @@ type Session struct {
 	closed           bool
 	shutdownDone     chan struct{}
 	shutdownComplete bool
+	rejectConcurrent bool
+	drainTurn        bool // Borrowed managed sessions must drain their accepted prompt before detach.
 }
 
 var errSessionClosed = errors.New("ACP session closed")
@@ -113,7 +116,20 @@ func (s *Session) shutdown(ctx context.Context) error {
 		s.shutdownDone = make(chan struct{})
 		s.mu.Unlock()
 		var err error
-		if s.supervisor != nil {
+		if s.drainTurn {
+			s.mu.Lock()
+			turns := s.turns
+			s.mu.Unlock()
+			if turns != nil {
+				select {
+				case <-turns:
+					turns <- struct{}{}
+				case <-ctx.Done():
+					err = ctx.Err()
+				}
+			}
+		}
+		if err == nil && s.supervisor != nil {
 			err = s.supervisor.Shutdown(ctx)
 		}
 		s.mu.Lock()
@@ -148,6 +164,11 @@ func (s *Session) startTurn(ctx context.Context) (context.Context, func(), error
 	}
 	turns := s.turns
 	previous := s.cancel
+	if previous != nil && s.rejectConcurrent {
+		s.mu.Unlock()
+		cancel()
+		return nil, nil, errors.New("managed ACP session already has an active prompt")
+	}
 	s.generation++
 	generation := s.generation
 	s.cancel = cancel
@@ -489,8 +510,12 @@ func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) 
 	if _, err := a.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: params.SessionId, Cwd: params.Cwd, AdditionalDirectories: params.AdditionalDirectories, McpServers: params.McpServers}); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
+	return a.replaySession(ctx, string(params.SessionId))
+}
+
+func (a *Agent) replaySession(ctx context.Context, sid string) (acp.LoadSessionResponse, error) {
 	a.mu.Lock()
-	attached := a.sessions[string(params.SessionId)]
+	attached := a.sessions[sid]
 	a.mu.Unlock()
 	if attached == nil {
 		return acp.LoadSessionResponse{}, errSessionClosed
@@ -763,7 +788,7 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	defer finish()
 
 	userMsg := a.buildUserMessage(turnCtx, sid, params.Prompt)
-	input := runtime.TurnInput{}
+	input := runtime.TurnInput{RequireIdle: a.managed, RequireApproval: a.managed}
 	if userMsg != nil {
 		input.Content = userMsg.Message.Content
 		input.MultiContent = userMsg.Message.MultiContent
@@ -974,6 +999,9 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 			}
 
 		case *runtime.ElicitationRequestEvent:
+			if a.managed {
+				return runtimeclient.TurnTerminate, errors.New("managed ACP modal elicitation is unsupported; turn cancelled")
+			}
 			if err := acpSess.session.Respond(ctx, runtime.InteractionResponse{
 				InteractionID: envelope.InteractionID,
 				Kind:          runtime.InteractionElicitation,
@@ -1082,26 +1110,13 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session, requestID string, e *runtime.ToolCallConfirmationEvent) error {
 	toolCallUpdate := buildToolCallUpdate(e.ToolCall, e.ToolDefinition, acp.ToolCallStatusPending)
 
+	options := []acp.PermissionOption{{Kind: acp.PermissionOptionKindAllowOnce, Name: "Allow this action", OptionId: "allow"}}
+	if !a.managed {
+		options = append(options, acp.PermissionOption{Kind: acp.PermissionOptionKindAllowAlways, Name: "Allow and remember my choice", OptionId: "allow-always"})
+	}
+	options = append(options, acp.PermissionOption{Kind: acp.PermissionOptionKindRejectOnce, Name: "Skip this action", OptionId: "reject"})
 	permResp, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{
-		SessionId: acp.SessionId(acpSess.id),
-		ToolCall:  toolCallUpdate,
-		Options: []acp.PermissionOption{
-			{
-				Kind:     acp.PermissionOptionKindAllowOnce,
-				Name:     "Allow this action",
-				OptionId: "allow",
-			},
-			{
-				Kind:     acp.PermissionOptionKindAllowAlways,
-				Name:     "Allow and remember my choice",
-				OptionId: "allow-always",
-			},
-			{
-				Kind:     acp.PermissionOptionKindRejectOnce,
-				Name:     "Skip this action",
-				OptionId: "reject",
-			},
-		},
+		SessionId: acp.SessionId(acpSess.id), ToolCall: toolCallUpdate, Options: options,
 	})
 	if err != nil {
 		return err

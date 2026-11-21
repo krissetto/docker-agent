@@ -1,0 +1,28 @@
+# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: One runtime host loopback service
+provides: [async-agent-host-port@1.0.0]
+args:
+  hostPort:
+    required: true
+    pattern: '^([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$'
+    description: Exact host loopback port, 1 through 65535, without leading zeros.
+  guestPort:
+    required: true
+    pattern: '^([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$'
+    description: Exact guest IPv4 loopback relay port; must not collide with a guest listener (including API port 9182).
+  transport:
+    default: tcp
+    enum: [tcp, udp]
+  family:
+    default: ipv4
+    enum: [ipv4, ipv6, dual]
+capabilities:
+  - type: com.docker.sandbox/host-port@1
+    config:
+      host: "${{ kit.args.hostPort }}"
+      container: "${{ kit.args.guestPort }}"
+      transport: "${{ kit.args.transport }}"
+      family: "${{ kit.args.family }}"
