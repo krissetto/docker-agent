@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
 
+	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2"
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -496,6 +499,58 @@ func TestApplyTheme(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates 
 
 	// Reset to default for other tests
 	ApplyTheme(DefaultTheme())
+}
+
+func TestBundledPaletteSelection(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates package-wide style variables.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+
+	registry := newThemeRegistry()
+	refs, err := registry.ListThemeRefs()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		ref, name, background, accent, codeComment string
+	}{
+		{"docker-dark", "Docker Dark", "#101010", "#6F7FFE", "#A09992"},
+		{"black-amber", "Black Amber", "#000000", "#FFC568", "#A4B2C2"},
+		{"black-cyan", "Black Cyan", "#000000", "#63D9EE", "#A4B2C2"},
+		{"black-violet", "Black Violet", "#000000", "#C9A2FF", "#A4B2C2"},
+		{"white-cobalt", "White Cobalt", "#FFFFFF", "#174FC4", "#526174"},
+		{"white-rose", "White Rose", "#FFFFFF", "#AA3158", "#526174"},
+		{"white-teal", "White Teal", "#FFFFFF", "#006B63", "#526174"},
+		{"default-light", "Default Light", "#FAFAFA", "#2E59D9", "#666b79"},
+		{"catppuccin-latte", "Catppuccin Latte (Light)", "#eff1f5", "#1b5ad9", "#66687c"},
+		{"gruvbox-light", "Gruvbox Light", "#fbf1c7", "#076678", "#71655a"},
+	} {
+		t.Run(tc.ref, func(t *testing.T) {
+			assert.Contains(t, refs, tc.ref)
+			assert.True(t, registry.IsBuiltinTheme(tc.ref))
+
+			data, err := builtinThemes.ReadFile("themes/" + tc.ref + ".yaml")
+			require.NoError(t, err)
+			var authored Theme
+			require.NoError(t, yaml.UnmarshalWithOptions(data, &authored, yaml.Strict()))
+
+			theme, err := registry.LoadTheme(tc.ref)
+			require.NoError(t, err)
+			assert.Equal(t, tc.ref, theme.Ref)
+			assert.Equal(t, tc.name, theme.Name)
+
+			ApplyTheme(theme)
+			assert.Equal(t, lipgloss.Color(tc.background), Background)
+			assert.Equal(t, lipgloss.Color(tc.accent), Accent)
+			assert.Equal(t, lipgloss.Color(authored.Colors.TabActiveBg), TabActiveBg)
+			assert.Equal(t, lipgloss.Color(authored.Colors.BackgroundAlt), UserMessageStyle.GetBackground())
+			assert.Equal(t, lipgloss.Color(authored.Colors.SelectedFg), PaletteSelectedActionStyle.GetForeground())
+			if len(authored.Colors.AgentHues) > 0 {
+				assert.Equal(t, authored.Colors.AgentHues, theme.Colors.AgentHues)
+			}
+			heading := MarkdownStyle().Heading.Color
+			require.NotNil(t, heading)
+			assert.Equal(t, authored.Markdown.Heading, *heading)
+			assert.Equal(t, strings.ToLower(tc.codeComment), ChromaStyle().Get(chroma.Comment).Colour.String())
+		})
+	}
 }
 
 func TestMergeTheme_AllFields(t *testing.T) {

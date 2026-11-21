@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -832,7 +833,7 @@ func (m *appModel) handleChangeTheme(themeRef string) (tea.Model, tea.Cmd) {
 	wasAuto := styles.AutoThemeEnabled()
 	styles.SetAutoThemeEnabled(selectingAuto)
 	styles.ApplyTheme(theme)
-	m.invalidateCachesForThemeChange()
+	_, themeCmd := m.applyThemeChanged()
 
 	if err := styles.SaveThemeToUserConfig(themeRef); err != nil {
 		slog.Warn("Failed to save theme to user config", "theme", themeRef, "error", err)
@@ -844,7 +845,7 @@ func (m *appModel) handleChangeTheme(themeRef string) (tea.Model, tea.Cmd) {
 	}
 	cmds := []tea.Cmd{
 		notification.SuccessCmd("Theme changed to " + displayName),
-		core.CmdHandler(messages.ThemeChangedMsg{}),
+		themeCmd,
 	}
 	// Keep terminal color-scheme reporting (DEC mode 2031) in sync with the
 	// auto selection: enable it and re-query the polarity when auto is picked
@@ -891,10 +892,17 @@ func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 	// Re-target the file watcher: theme changes (picker selection, preview,
 	// hot reload) can move the active theme to a different backing file.
 	m.watchCurrentTheme()
-	return m, tea.Batch(
-		m.updateDialogCmd(messages.ThemeChangedMsg{}),
-		m.updateChatCmd(messages.ThemeChangedMsg{}),
-	)
+	msg := messages.ThemeChangedMsg{}
+	cmds := []tea.Cmd{m.updateDialogCmd(msg), m.updateChatCmd(msg)}
+	// Each initialized tab keeps its own editor and its own input styles.
+	for _, tab := range m.tabs {
+		if tab.editor != nil {
+			updated, cmd := tab.editor.Update(msg)
+			tab.editor = updated.(editor.Editor)
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // handleThemeFileChanged hot-reloads a theme that was modified on disk.

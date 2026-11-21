@@ -3,14 +3,14 @@ name: "Catppuccin Latte (Light)"
 colors:
   # Text colors
   text_bright: "#4c4f69"
-  text_primary: "#4c4f69"
-  text_secondary: "#5c5f77"
-  text_muted: "#6c6f85"
-  text_faint: "#9ca0b0"
+  text_primary: "#4b4d67"
+  text_secondary: "#555872"
+  text_muted: "#5c5f77"
+  text_faint: "#868a9c"
   
   # Accent colors
-  accent: "#1e66f5"
-  accent_muted: "#7287fd"
+  accent: "#1b5ad9"
+  accent_muted: "#5362d6"
   
   # Background colors
   background: "#eff1f5"
@@ -20,11 +20,11 @@ colors:
   border_secondary: "#9ca0b0"
   
   # Status colors
-  success: "#40a02b"
-  error: "#d20f39"
-  warning: "#df8e1d"
-  info: "#04a5e5"
-  highlight: "#ea76cb"
+  success: "#2d701e"
+  error: "#c40e35"
+  warning: "#895712"
+  info: "#036992"
+  highlight: "#b51c8c"
   
   # Brand colors
   # NOTE: Used as selection background in dialogs - must be dark for white text
@@ -32,67 +32,67 @@ colors:
   brand_bg: "#eff1f5"
   
   # Error colors
-  error_strong: "#d20f39"
+  error_strong: "#c40e35"
   error_dark: "#f5e0e5"
   
   # Spinner colors
-  spinner_dim: "#1e66f5"
-  spinner_bright: "#3575f5"
-  spinner_brightest: "#4c84f5"
+  spinner_dim: "#1b5ad9"
+  spinner_bright: "#1b5ad9"
+  spinner_brightest: "#1b5ad9"
   
   # Diff colors
   diff_add_bg: "#d8f0d8"
   diff_remove_bg: "#f5d8d8"
   
   # UI element colors
-  line_number: "#7c7f93"
-  separator: "#bcc0cc"
-  selected: "#ccd0da"
+  line_number: "#5c5f77"
+  separator: "#9ca0b0"
+  selected: "#bcc0cc"
   selected_fg: "#ffffff"
-  suggestion_ghost: "#7c7f93"
-  tab_bg: "#e6e9ef"
+  suggestion_ghost: "#606372"
+  tab_bg: "#eff1f5"
   tab_active_bg: "#dce0e8"
   tab_active_fg: "#4c4f69"
-  tab_inactive_fg: "#6c6f85"
-  tab_border: "#7287fd"
+  tab_inactive_fg: "#5c5f77"
+  tab_border: "#1a58d6"
 
-  placeholder: "#6c6f85"
-  
+  placeholder: "#5c5f77"
+
   # Badge colors
   badge_accent: "#8839ef"
-  badge_info: "#04a5e5"
-  badge_success: "#40a02b"
+  badge_info: "#036992"
+  badge_success: "#2d701e"
 
 chroma:
   # Syntax highlighting colors - Catppuccin Latte style
-  comment: "#8c8fa1"
-  comment_preproc: "#ea76cb"
-  keyword: "#8839ef"
-  keyword_reserved: "#d20f39"
-  keyword_namespace: "#04a5e5"
-  keyword_type: "#1e66f5"
-  operator: "#04a5e5"
+  comment: "#66687c"
+  comment_preproc: "#bf1e94"
+  keyword: "#8738ed"
+  keyword_reserved: "#c40e35"
+  keyword_namespace: "#03709c"
+  keyword_type: "#1c5fe5"
+  operator: "#03709c"
   punctuation: "#4c4f69"
-  name_builtin: "#fe640b"
-  name_tag: "#d20f39"
-  name_attribute: "#1e66f5"
-  name_decorator: "#df8e1d"
-  literal_number: "#fe640b"
-  literal_string: "#40a02b"
-  literal_string_escape: "#179299"
-  generic_deleted: "#d20f39"
-  generic_subheading: "#8c8fa1"
+  name_builtin: "#b34708"
+  name_tag: "#c40e35"
+  name_attribute: "#1c5fe5"
+  name_decorator: "#935d13"
+  literal_number: "#b74301"
+  literal_string: "#307820"
+  literal_string_escape: "#127479"
+  generic_deleted: "#c40e35"
+  generic_subheading: "#66687c"
   background: "#eff1f5"
-  error_fg: "#d20f39"
+  error_fg: "#c10e35"
   error_bg: "#f2d5d5"
-  success: "#40a02b"
+  success: "#2d701e"
 
 markdown:
-  heading: "#1e66f5"
-  link: "#209fb5"
+  heading: "#1a58d6"
+  link: "#187787"
   strong: "#4c4f69"
-  code: "#fe640b"
+  code: "#b74301"
   code_bg: "#e6e9ef"
-  blockquote: "#6c6f85"
+  blockquote: "#5c5f77"
   list: "#4c4f69"
   hr: "#acb0be"
