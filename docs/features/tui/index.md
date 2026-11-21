@@ -614,6 +614,14 @@ settings:
     hide_todos: false
 ```
 
+### Resizing the sidebar and input area
+
+In the full TUI, move the pointer near the edge of a left- or right-docked sidebar to reveal its grip. When you grab the divider, the grip extends upward and downward into a guide spanning the full height of the chat. The guide follows the pointer immediately, even as it grows. The transcript keeps updating at its current width until you release.
+
+Release to apply the new width immediately, or press <kbd>Esc</kbd> to cancel. Either way, the guide shrinks back toward the grip and fades out without holding the pointer. To collapse the sidebar, drag past its minimum width and release when the guide is at the outer edge. Releasing at the starting column leaves the layout unchanged.
+
+The input area resizes **while you drag**. Grab the horizontal divider above the input and move it up or down to see how much of your draft fits. Both grips fade away when you move the pointer away.
+
 ## Theming
 
 Customize the TUI appearance with built-in or custom themes:

@@ -44,6 +44,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/internal/editorname"
+	"github.com/docker/docker-agent/pkg/tui/internal/resizegrip"
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
@@ -66,7 +67,7 @@ const (
 	PanelContent FocusedPanel = "content"
 	PanelEditor  FocusedPanel = "editor"
 
-	// resizeHandleWidth is the width of the draggable center portion of the resize handle
+	// resizeHandleWidth is the width of the compact visual grip on the resize row
 	resizeHandleWidth = 8
 	// appPaddingHorizontal is total horizontal padding from AppStyle (left + right)
 	appPaddingHorizontal = 2 * styles.AppPadding
@@ -181,6 +182,10 @@ type appModel struct {
 	viewCache            tea.View
 	viewCacheValid       bool
 	viewCacheInitialized bool
+	sidebarGuideCache    struct {
+		guide   chat.SidebarGuide
+		content string
+	}
 
 	paneHidden           bool
 	tmuxVisibilityProbe  func(context.Context) bool
@@ -194,9 +199,9 @@ type appModel struct {
 	contentHeight int
 
 	// Editor resize state
-	editorLines      int
-	isDragging       bool
-	isHoveringHandle bool
+	editorLines  int
+	isDragging   bool
+	composerGrip resizegrip.Reveal
 
 	// Focus state
 	focusedPanel FocusedPanel
@@ -530,6 +535,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	m := &appModel{
 		ar:            ar,
+		composerGrip:  resizegrip.NewReveal(ar),
 		shutdownDone:  ctx.Done(),
 		themeCtx:      themeCtx,
 		cancelThemes:  cancelThemes,
@@ -770,6 +776,7 @@ func (m *appModel) editorOpts() []editor.Option {
 // initSessionComponents creates a new chat page, session state, and editor for
 // the given app, then activates the owning tab.
 func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session.Session) {
+	m.resetResizeGrips()
 	m.cancelSidebarPlanEdit()
 	tab := m.ensureTab(tabID)
 	if run := m.stopSpeechForTab(tab); run != nil {
@@ -977,7 +984,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	beforeVisual := m.activeTab.chatPage.VisualGeneration()
 	beforeSidebarVisual := sidebarVisualGeneration(m.activeTab.chatPage)
 	beforeTabVisual := tabVisualGeneration(m.tabBar)
-	beforeResizeHover := m.isHoveringHandle
+	beforeResizeGrip := m.composerGrip.Generation()
+	beforeContentHeight := m.contentHeight
 	wasCached := m.viewCacheValid
 	cached := m.viewCache
 	canRestore := m.canRestorePointerCache(msg)
@@ -985,7 +993,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if canRestore && wasCached && m.activeTab.chatPage.VisualGeneration() == beforeVisual &&
 			sidebarVisualGeneration(m.activeTab.chatPage) == beforeSidebarVisual &&
 			tabVisualGeneration(m.tabBar) == beforeTabVisual &&
-			m.isHoveringHandle == beforeResizeHover {
+			m.composerGrip.Generation() == beforeResizeGrip && m.contentHeight == beforeContentHeight {
 			m.viewCache, m.viewCacheValid = cached, true
 		}
 	}()
@@ -1026,6 +1034,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		msg = accepted
+		m.composerGrip.Tick(msg)
 		cmds := []tea.Cmd{m.updateChatCmd(msg)}
 		// Update working spinner
 		if m.activeTab.chatPage.IsWorking() {
@@ -1139,6 +1148,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.BlurMsg:
+		m.resetResizeGrips()
 		m.focused = false
 		return m, nil
 
@@ -2076,6 +2086,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	}
 	m.cancelSidebarPlanEdit()
 	if outgoing != m.tabs[sessionID] {
+		m.resetResizeGrips()
 		chat.CancelStartupBanner(outgoing.chatPage)
 		m.cancelSpeechSend(outgoing)
 		m.parkAttention(outgoing)
@@ -2252,6 +2263,9 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 // handleWindowResize handles window resize.
 func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
 	m.wWidth, m.wHeight = width, height
+	if !m.isDragging && (width != m.width || height != m.height) {
+		m.composerGrip.Reset()
+	}
 
 	m.statusBar.SetWidth(width)
 	m.tabBar.SetWidth(width - appPaddingHorizontal)
@@ -2438,6 +2452,11 @@ var (
 
 // handleKeyPress handles all keyboard input with proper priority routing.
 func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.Key().Code == tea.KeyEscape && (m.isDragging || chat.IsResizingSidebar(m.activeTab.chatPage)) {
+		m.isDragging = false
+		m.composerGrip.Reset()
+		return m, chat.CancelSidebarDrag(m.activeTab.chatPage)
+	}
 	if key.Matches(msg, sidebarPlanCancelKey) && m.sidebarPlanEditInFlight {
 		m.cancelSidebarPlanEdit()
 		return m, nil
@@ -2678,8 +2697,16 @@ func sidebarVisualGeneration(page chat.Page) uint64 {
 }
 
 func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
-	if !m.viewCacheValid || m.tabBar == nil || m.activeTab.chatPage == nil || m.isDragging || m.dialogMgr == nil || m.dialogMgr.Open() ||
-		m.activeTab.chatPage.IsSelecting() || m.notification.Open() {
+	if !m.viewCacheValid || m.activeTab.chatPage == nil {
+		return false
+	}
+	// A captured left drag updates only its own grip. A changed composer
+	// divider invalidates via contentHeight; a sidebar guide is separate.
+	if motion, ok := msg.(tea.MouseMotionMsg); ok && motion.Button == tea.MouseLeft &&
+		(m.isDragging || chat.IsResizingSidebar(m.activeTab.chatPage)) {
+		return true
+	}
+	if m.tabBar == nil || m.dialogMgr == nil || m.dialogMgr.Open() || m.activeTab.chatPage.IsSelecting() || m.notification.Open() {
 		return false
 	}
 	var x, y int
@@ -2754,6 +2781,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 	case regionResizeHandle:
 		if msg.Button == tea.MouseLeft {
 			m.isDragging = true
+			return m, m.updateComposerGrip(msg.X, region)
 		}
 		return m, nil
 
@@ -2791,6 +2819,20 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
 func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if m.isDragging {
+		switch msg.Button {
+		case tea.MouseLeft:
+			return m, m.handleEditorResize(msg.Y)
+		case tea.MouseNone:
+			m.resetResizeGrips()
+		default:
+			return m, nil
+		}
+	}
+	if chat.IsResizingSidebar(m.activeTab.chatPage) {
+		return m.forwardChat(msg)
+	}
+
 	var cmds []tea.Cmd
 	batchWith := func(cmd tea.Cmd) tea.Cmd {
 		if cmd != nil {
@@ -2807,13 +2849,9 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 		}
 	}
 
-	if m.isDragging {
-		cmd := m.handleEditorResize(msg.Y)
-		return m, batchWith(cmd)
-	}
-
 	// Forward drag motion to tab bar when a tab drag is active.
 	if m.tabBar.IsDragging() {
+		cmds = append(cmds, m.composerGrip.Set(false, false, false), chat.ClearSidebarGripHover(m.activeTab.chatPage))
 		adjustedMsg := msg
 		adjustedMsg.X = msg.X - styles.AppPadding
 		if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
@@ -2831,13 +2869,17 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	// goes (editor, tab bar, status bar), otherwise the selection freezes
 	// and the release-copy pair is lost.
 	if m.activeTab.chatPage.IsSelecting() {
+		cmds = append(cmds, m.composerGrip.Set(false, false, false))
 		model, cmd := m.forwardChat(msg)
 		return model, batchWith(cmd)
 	}
 
-	// Update hover state for resize handle
+	// The sidebar does not receive pointer motion routed to the bottom panel.
 	region := m.hitTestRegion(msg.Y)
-	m.isHoveringHandle = region == regionResizeHandle
+	cmds = append(cmds, m.updateComposerGrip(msg.X, region))
+	if region != regionContent {
+		cmds = append(cmds, chat.ClearSidebarGripHover(m.activeTab.chatPage))
+	}
 	switch region {
 	case regionContent:
 		model, cmd := m.forwardChat(msg)
@@ -2854,8 +2896,14 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 // handleMouseRelease routes mouse release events with adjusted coordinates.
 func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
 	if m.isDragging {
+		if msg.Button != tea.MouseLeft && msg.Button != tea.MouseNone {
+			return m, nil
+		}
 		m.isDragging = false
-		return m, nil
+		return m, m.updateComposerGrip(msg.X, m.hitTestRegion(msg.Y))
+	}
+	if chat.IsResizingSidebar(m.activeTab.chatPage) {
+		return m.forwardChat(msg)
 	}
 
 	// Forward release to tab bar when a tab drag is active.
@@ -2872,8 +2920,7 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 		return m.forwardDialog(msg)
 	}
 
-	// Finish a text-selection drag in the chat no matter where the button
-	// was released; this is what triggers the selection copy.
+	// Finish text selection even if the button was released outside chat.
 	if m.activeTab.chatPage.IsSelecting() {
 		return m.forwardChat(msg)
 	}
@@ -2974,9 +3021,9 @@ func (m *appModel) editorTop() int {
 
 // handleEditorResize adjusts editor height based on drag position.
 func (m *appModel) handleEditorResize(y int) tea.Cmd {
-	// Calculate target lines from drag position
-	editorPadding := styles.EditorStyle.GetVerticalFrameSize()
-	targetLines := m.height - y - 1 - editorPadding - m.tabBar.Height()
+	// The divider is painted at contentHeight. Move it by the pointer's
+	// row delta, using the laid-out position rather than recounting chrome.
+	targetLines := m.editorLines + (m.contentHeight - y)
 	minLines := 4
 	maxLines := max(minLines, (m.height-6)/2)
 	newLines := max(minLines, min(targetLines, maxLines))
@@ -3009,42 +3056,50 @@ func (m *appModel) renderLeanWorkingIndicator() string {
 
 // renderResizeHandle renders the draggable separator between content and bottom panel.
 func (m *appModel) renderResizeHandle(width int) string {
-	// The terminal can report degenerate sizes (0x0, 1x1) where the padded
-	// inner width goes negative; there is nothing to draw a handle on.
 	innerWidth := width - appPaddingHorizontal
 	if innerWidth <= 0 {
 		return ""
 	}
 
-	// Use brighter style when actively dragging
-	centerStyle := styles.ResizeHandleHoverStyle
-	if m.isDragging {
-		centerStyle = styles.ResizeHandleActiveStyle
+	left, end := resizegrip.Segment(innerWidth, resizeHandleWidth)
+	line := strings.Repeat(" ", left) + m.composerGrip.Render("━", end-left) + strings.Repeat(" ", innerWidth-end)
+	if suffix := m.resizeHandleSuffix(); suffix != "" {
+		line = lineWithSuffix(line, suffix, innerWidth)
 	}
+	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(line)
+}
 
-	// Show a small centered highlight when hovered or dragging
-	centerPart := strings.Repeat("─", min(resizeHandleWidth, innerWidth))
-	handle := centerStyle.Render(centerPart)
+func (m *appModel) updateComposerGrip(x int, region layoutRegion) tea.Cmd {
+	onEdge := region == regionResizeHandle && !chat.IsResizingSidebar(m.activeTab.chatPage)
+	onGrip := false
+	if onEdge && !m.isDragging {
+		width := m.width - appPaddingHorizontal
+		left, end := resizegrip.Segment(width, resizeHandleWidth)
+		x -= styles.AppPadding
+		onGrip = x >= left && x < end && x < width-lipgloss.Width(m.resizeHandleSuffix())
+	}
+	return m.composerGrip.Set(onEdge, onGrip, m.isDragging)
+}
 
-	// Always center handle on full width
-	fullLine := lipgloss.PlaceHorizontal(
-		innerWidth, lipgloss.Center, handle,
-		lipgloss.WithWhitespaceChars("─"),
-		lipgloss.WithWhitespaceStyle(styles.ResizeHandleStyle),
-	)
+func (m *appModel) resetResizeGrips() {
+	m.isDragging = false
+	m.composerGrip.Reset()
+	m.viewCacheValid = false
+	if m.activeTab != nil {
+		chat.ResetSidebarGrip(m.activeTab.chatPage)
+	}
+}
 
-	var result string
+func (m *appModel) resizeHandleSuffix() string {
 	switch {
 	case m.activeTab.sessionState.PauseState() == service.PausePaused:
 		// Static indicator: the loop is idle until the user resumes.
 		resumeKey := styles.HighlightWhiteStyle.Render("/pause")
-		suffix := " " + styles.WarningStyle.Render("⏸ Paused") + " (" + resumeKey + " to resume)"
-		result = lineWithSuffix(fullLine, suffix, innerWidth)
+		return " " + styles.WarningStyle.Render("⏸ Paused") + " (" + resumeKey + " to resume)"
 
 	case m.activeTab.sessionState.PauseState() == service.PausePausing:
 		// The agent is finishing the in-flight request before it pauses.
-		suffix := " " + m.workingSpinner.View() + " " + styles.WarningStyle.Render("Pausing…") + " (finishing current request)"
-		result = lineWithSuffix(fullLine, suffix, innerWidth)
+		return " " + m.workingSpinner.View() + " " + styles.WarningStyle.Render("Pausing…") + " (finishing current request)"
 
 	case m.activeTab.chatPage.IsWorking():
 		// Truncate right side and append spinner (handle stays centered)
@@ -3055,18 +3110,15 @@ func (m *appModel) renderResizeHandle(width int) string {
 		suffix := " " + m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 		cancelKeyPart := styles.HighlightWhiteStyle.Render("Esc")
 		suffix += " (" + cancelKeyPart + " to interrupt)"
-		result = lineWithSuffix(fullLine, suffix, innerWidth)
+		return suffix
 
 	case m.activeTab.chatPage.QueueLength() > 0:
 		queueText := fmt.Sprintf("%d queued", m.activeTab.chatPage.QueueLength())
-		suffix := " " + styles.WarningStyle.Render(queueText) + " "
-		result = lineWithSuffix(fullLine, suffix, innerWidth)
+		return " " + styles.WarningStyle.Render(queueText) + " "
 
 	default:
-		result = fullLine
+		return ""
 	}
-
-	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(result)
 }
 
 // lineWithSuffix appends a status suffix to the centered handle line,
@@ -3093,7 +3145,7 @@ func anyRunningTab(tabs []messages.TabInfo) bool {
 // View renders the model.
 func (m *appModel) View() tea.View {
 	if m.viewCacheValid {
-		return m.viewCache
+		return m.withSidebarResizeGuide(m.viewCache)
 	}
 	if m.paneHidden && m.viewCacheInitialized && m.err == nil {
 		// Keep completion signals live without composing the hidden transcript.
@@ -3109,7 +3161,8 @@ func (m *appModel) View() tea.View {
 	m.viewCache = view
 	m.viewCacheValid = true
 	m.viewCacheInitialized = true
-	return view
+	m.sidebarGuideCache.content = ""
+	return m.withSidebarResizeGuide(view)
 }
 
 func (m *appModel) composeView() tea.View {

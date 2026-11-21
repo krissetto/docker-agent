@@ -17,7 +17,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/docker/go-units"
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
@@ -28,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/internal/ansiline"
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -473,32 +473,9 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		for len(outLines) <= ov.y {
 			outLines = append(outLines, "")
 		}
-		outLines[ov.y] = spliceLine(outLines[ov.y], ov.content, ov.x)
+		outLines[ov.y] = ansiline.Splice(outLines[ov.y], ov.content, ov.x)
 	}
 	return strings.Join(outLines, "\n")
-}
-
-// spliceLine overwrites line content at column x with overlay, preserving
-// ANSI styling on both sides and padding when the line is shorter than x.
-func spliceLine(line, overlay string, x int) string {
-	left := ansi.Truncate(line, x, "")
-	if pad := x - ansi.StringWidth(left); pad > 0 {
-		left += strings.Repeat(" ", pad)
-	}
-	cut := x + ansi.StringWidth(overlay)
-	right := ""
-	if lineWidth := ansi.StringWidth(line); cut < lineWidth {
-		right = ansi.TruncateLeft(line, cut, "")
-		// A wide rune straddling the cut is kept whole by TruncateLeft,
-		// which would shift the rest of the line one cell to the right.
-		// Cut the straddled rune entirely and pad its uncovered cell with
-		// a space — what a terminal shows for a half-overwritten cell.
-		if extra := ansi.StringWidth(right) - (lineWidth - cut); extra > 0 {
-			right = ansi.TruncateLeft(right, extra+1, "")
-			right = strings.Repeat(" ", lineWidth-cut-ansi.StringWidth(right)) + right
-		}
-	}
-	return left + overlay + right
 }
 
 // splitFirstRune splits a string into its first rune and the rest.
