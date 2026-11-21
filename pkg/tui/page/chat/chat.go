@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/internal/resizegrip"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/streamcontent"
@@ -185,7 +186,7 @@ type Page interface {
 
 func (p *chatPage) VisualGeneration() uint64 { return p.messages.VisualGeneration() }
 func (p *chatPage) SidebarVisualGeneration() uint64 {
-	return p.sidebar.VisualGeneration()
+	return p.sidebar.VisualGeneration() + p.sidebarGrip.Generation()
 }
 
 type queuedMessage struct {
@@ -285,6 +286,7 @@ type chatPage struct {
 	commandParser *commands.Parser
 
 	// Sidebar drag state
+	sidebarGrip           resizegrip.Reveal
 	isDraggingSidebar     bool // True while dragging the sidebar resize handle
 	sidebarDragStartX     int  // X position when drag started
 	sidebarDragStartWidth int  // Sidebar preferred width when drag started
@@ -416,6 +418,7 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		sessionState:      sessionState,
 		showStartupBanner: true,
 		bannerTransition:  ar.Transition(),
+		sidebarGrip:       resizegrip.NewReveal(ar),
 	}
 
 	for _, opt := range opts {
@@ -557,6 +560,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
+		ResetSidebarGrip(p)
 		p.bannerTransition.Cancel()
 		if p.inputScope != nil {
 			p.inputScope.close()
@@ -617,6 +621,7 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case animation.TickMsg:
+		p.sidebarGrip.Tick(msg)
 		if p.bannerTransition.Running() {
 			p.bannerTransition.Tick()
 			msg.MarkDirty()
@@ -828,7 +833,8 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 		sidebarLines[0] = padded + toggleGlyph
 	}
 
-	divider := styles.FadingStyle.Render(strings.Repeat("─", width))
+	// Keep the separator row for layout and pointer coordinates, not decoration.
+	divider := strings.Repeat(" ", width)
 	switch {
 	case sl.bandAtBottom:
 		sidebarLines = append([]string{divider}, sidebarLines...)
@@ -933,29 +939,6 @@ func (p *chatPage) View() string {
 	return appStyle.Render(bodyContent)
 }
 
-// renderSidebarHandle renders the sidebar toggle/resize handle.
-// The glyph points toward the edge the sidebar collapses to and flips when
-// the sidebar sits on the left.
-func (p *chatPage) renderSidebarHandle(height int) string {
-	lines := make([]string, height)
-
-	expandGlyph, collapseGlyph := "«", "»"
-	if p.layoutSettings.SidebarPosition == msgtypes.SidebarLeft {
-		expandGlyph, collapseGlyph = "»", "«"
-	}
-
-	glyph := collapseGlyph
-	if p.sidebar.IsCollapsed() {
-		glyph = expandGlyph
-	}
-	lines[0] = styles.MutedStyle.Render(glyph)
-	for i := 1; i < height; i++ {
-		lines[i] = " "
-	}
-
-	return strings.Join(lines, "\n")
-}
-
 func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	p.width = width
 	p.height = height
@@ -964,6 +947,9 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 
 	// Compute layout once and use it for all sizing
 	sl := p.computeSidebarLayout()
+	if !p.isDraggingSidebar && (sl.mode != sidebarVertical || sl.handleX != p.appliedLayout.handleX || sl.chatHeight != p.appliedLayout.chatHeight) {
+		p.sidebarGrip.Reset()
+	}
 	p.appliedLayout = sl
 
 	switch sl.mode {

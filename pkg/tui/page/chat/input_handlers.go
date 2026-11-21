@@ -124,7 +124,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			p.sidebarDragStartX = msg.X
 			p.sidebarDragStartWidth = p.sidebar.GetPreferredWidth()
 			p.sidebarDragMoved = false
-			return p, nil
+			return p, p.sidebarGrip.Set(true, false, true)
 		}
 
 	case TargetSidebarStar:
@@ -232,7 +232,7 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 	// so the drag continues even when the cursor drifts outside the component.
 	// The scrollbar ignores motion if it isn't the one being dragged.
 	if p.isScrollbarDragging() {
-		var cmds []tea.Cmd
+		cmds := []tea.Cmd{p.sidebarGrip.Set(false, false, false)}
 		messagesModel, messagesCmd := p.messages.Update(msg)
 		p.messages = messagesModel.(messages.Model)
 		cmds = append(cmds, messagesCmd)
@@ -249,11 +249,12 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 	if p.messages.IsSelecting() {
 		model, cmd := p.messages.Update(msg)
 		p.messages = model.(messages.Model)
-		return p, cmd
+		return p, tea.Batch(cmd, p.sidebarGrip.Set(false, false, false))
 	}
 
+	gripCmd := p.updateSidebarGrip(msg.X, msg.Y)
 	cmd := p.routeMouseEvent(msg, msg.Y)
-	return p, cmd
+	return p, tea.Batch(gripCmd, cmd)
 }
 
 // handleMouseRelease handles mouse release events.
@@ -263,7 +264,7 @@ func (p *chatPage) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, te
 	if p.isDraggingSidebar {
 		p.isDraggingSidebar = false
 		cmd := p.SetSize(p.width, p.height)
-		return p, cmd
+		return p, tea.Batch(cmd, p.updateSidebarGrip(msg.X, msg.Y))
 	}
 
 	var cmds []tea.Cmd
