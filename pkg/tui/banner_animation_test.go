@@ -28,8 +28,8 @@ func TestStartupBannerAnimationRootLifecycle(t *testing.T) {
 			tick = v
 		}
 	}
-	for i := 0; ar.HasActive(); i++ {
-		require.Less(t, i, 100)
+	for ar.HasActive() {
+		require.Less(t, ar.Now(), 2*time.Second)
 		_, next := root.Update(tick)
 		frames = append(frames, root.View().Content)
 		if !ar.HasActive() {
@@ -44,7 +44,8 @@ func TestStartupBannerAnimationRootLifecycle(t *testing.T) {
 		require.True(t, found)
 	}
 	require.Greater(t, len(frames), 3)
-	assert.NotEqual(t, frames[0], frames[1])
+	assert.GreaterOrEqual(t, ar.Now(), 2*time.Second)
+	assert.NotEqual(t, frames[0], frames[len(frames)/2])
 	assert.NotEqual(t, frames[0], frames[len(frames)-1])
 	assert.Contains(t, frames[len(frames)-1], banner.Render()[0])
 	_, _ = root.Update(tea.WindowSizeMsg{Width: 121, Height: 40})

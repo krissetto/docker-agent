@@ -37,8 +37,9 @@ func TestIndependentHoverFades(t *testing.T) {
 	}
 	settle := func(cmd tea.Cmd) {
 		t.Helper()
-		for i := 0; cmd != nil; i++ {
-			require.Less(t, i, 3, "fade must settle in three ticks")
+		started := ar.Now()
+		for cmd != nil {
+			require.Less(t, ar.Now()-started, fadeDuration, "fade must settle within its duration and one tick")
 			assert.EqualValues(t, 1, ar.ActiveCount())
 			cmd = advance(cmd)
 		}

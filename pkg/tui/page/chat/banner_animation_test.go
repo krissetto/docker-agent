@@ -94,6 +94,7 @@ func TestStartupBannerAnimationFinishesAndUnregisters(t *testing.T) {
 	require.NotEqual(t, static, first)
 	var frames int
 	for ar.HasActive() {
+		require.Less(t, ar.Now(), 2*time.Second)
 		require.NotNil(t, cmd)
 		tick, ok := ar.Accept(cmd().(animation.TickMsg))
 		require.True(t, ok)
@@ -101,7 +102,6 @@ func TestStartupBannerAnimationFinishesAndUnregisters(t *testing.T) {
 		require.True(t, tick.Dirty())
 		cmd = ar.Continue()
 		frames++
-		require.Less(t, frames, 100)
 	}
 	assert.Greater(t, frames, 2)
 	assert.Equal(t, static, p.messagesView(p.computeSidebarLayout()))

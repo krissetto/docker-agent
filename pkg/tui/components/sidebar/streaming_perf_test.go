@@ -109,7 +109,7 @@ func TestAnimationFastPathTracksSpinnerFrame(t *testing.T) {
 	m.invalidateCache()
 	first := m.View()
 
-	// Advance the spinner until its frame changes, as the 14 FPS tick does.
+	// Advance the shared clock until the spinner changes frame.
 	prev := m.spinner.RawFrame()
 	cmd := m.spinner.Init()
 	require.NotNil(t, cmd)

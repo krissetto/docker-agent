@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -217,9 +218,10 @@ type model struct {
 	height        int
 
 	// Height tracking system fields
-	scrollOffset      int                              // Current scroll position in lines
-	bottomSlack       int                              // Extra blank lines added after content shrinks
-	slackAnimationSub animation.Subscription           // Subscription to animation ticks while slack > 0
+	scrollOffset      int                    // Current scroll position in lines
+	bottomSlack       int                    // Extra blank lines added after content shrinks
+	slackAnimationSub animation.Subscription // Subscription to animation ticks while slack > 0
+	slackDecayElapsed time.Duration
 	renderedLines     []string                         // Cached flattened content excluding a segmented active suffix
 	activeSegments    *activeTranscriptSegments        // Segmented final assistant item while visibly streaming
 	renderedItems     *lrucache.LRU[int, renderedItem] // LRU cache of rendered items (bounded to renderedItemsCacheSize)
@@ -881,6 +883,9 @@ func (m *model) renderedLine(global int) string {
 func (m *model) updateScrollState() {
 	prevTotalHeight := m.totalHeight
 	prevScrollableHeight := m.totalHeight + m.bottomSlack
+	if m.bottomSlack == 0 {
+		m.slackDecayElapsed = 0
+	}
 	m.ensureAllItemsRendered()
 
 	if m.userHasScrolled {
@@ -915,19 +920,26 @@ func (m *model) maxBottomSlack() int {
 	return max(1, min(5, m.height/3))
 }
 
-// handleAnimationTick refreshes scroll state, decays any leftover slack by
-// one line, and keeps the slack subscription alive while slack > 0 so
-// further ticks fire even after fade animations finish. Returns the command
-// to schedule the next tick when the subscription transitions to active.
+// Preserve the original one-line rhythm independently of the shared tick rate.
+const slackDecayLineDuration = time.Second / 14
+
+// handleAnimationTick decays leftover slack and keeps the clock running until
+// it is gone, even when the fade that created it has already finished.
 func (m *model) handleAnimationTick(tick animation.TickMsg) tea.Cmd {
 	m.updateScrollState()
-	if !m.userHasScrolled && m.bottomSlack > 0 {
-		m.bottomSlack--
-		tick.MarkDirty()
+	if m.bottomSlack > 0 {
+		before, after := tick.ElapsedBounds()
+		m.slackDecayElapsed += after - before
+		if lines := animation.TimedStep(m.slackDecayElapsed, slackDecayLineDuration); lines > 0 {
+			m.bottomSlack = max(0, m.bottomSlack-lines)
+			m.slackDecayElapsed %= slackDecayLineDuration
+			tick.MarkDirty()
+		}
 	}
 	if m.bottomSlack > 0 {
 		return m.slackAnimationSub.Start()
 	}
+	m.slackDecayElapsed = 0
 	m.slackAnimationSub.Stop()
 	return nil
 }

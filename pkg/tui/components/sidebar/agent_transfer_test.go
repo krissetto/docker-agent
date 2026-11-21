@@ -3,7 +3,9 @@ package sidebar
 import (
 	"strings"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -361,6 +363,15 @@ func TestTransferCollapsedSummaryFitsNarrowWidths(t *testing.T) {
 	}
 }
 
+func tickTransfer(t *testing.T, m *model, cmd tea.Cmd) tea.Cmd {
+	t.Helper()
+	require.NotNil(t, cmd)
+	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
+	require.True(t, ok)
+	_, _ = m.Update(tick)
+	return m.ar.Continue()
+}
+
 // TestTransferAnimationAdvancesAcrossTicks verifies the rail dot travels
 // across shared animation ticks: at least three distinct positions appear
 // while the names, the arrow and the line width stay constant.
@@ -368,7 +379,7 @@ func TestTransferAnimationAdvancesAcrossTicks(t *testing.T) {
 	t.Parallel()
 
 	m := newAgentPanelSidebar(t, 40, transferRoster()...)
-	m.SetAgentSwitching(true, "Scout", "Coder")
+	cmd := m.SetAgentSwitching(true, "Scout", "Coder").Cmd
 
 	snapshot := func() string {
 		idx := transferRelationIndex(m)
@@ -383,10 +394,13 @@ func TestTransferAnimationAdvancesAcrossTicks(t *testing.T) {
 	first := snapshot()
 	width := lipgloss.Width(first)
 	positions := map[string]bool{first: true}
-	for frame := 1; frame <= 2*transferFramesPerStep*transferRailCells; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for m.ar.Now() < 2*transferRailCells*transferStepDuration {
+		cmd = tickTransfer(t, m, cmd)
 		relation := snapshot()
 		assert.Equal(t, width, lipgloss.Width(relation), "the width is constant across frames")
+		if m.ar.Now() < time.Second/7 {
+			assert.Equal(t, first, relation, "sub-step ticks do not move the dot")
+		}
 		positions[relation] = true
 	}
 	assert.GreaterOrEqual(t, len(positions), 3, "the dot visits at least three distinct positions")
@@ -399,15 +413,17 @@ func TestTransferAnimationTickKeepsLayoutClean(t *testing.T) {
 	t.Parallel()
 
 	m := newAgentPanelSidebar(t, 40, transferRoster()...)
-	m.SetAgentSwitching(true, "Scout", "Coder")
+	cmd := m.SetAgentSwitching(true, "Scout", "Coder").Cmd
 
 	_ = m.View() // settle the cache and the scrollbar probe
 	require.False(t, m.layoutDirty)
 	linesBefore := len(m.cachedLines)
 
-	for range transferFramesPerStep {
-		_, _ = m.Update(animation.TickMsg{})
+	for m.ar.Now()+animation.TickRate < transferStepDuration {
+		cmd = tickTransfer(t, m, cmd)
+		assert.False(t, m.cacheDirty, "no invalidation between visible phases")
 	}
+	tickTransfer(t, m, cmd)
 	assert.True(t, m.cacheDirty, "a rendered phase boundary refreshes the frame")
 	assert.False(t, m.layoutDirty, "a tick is animation-only and keeps the layout clean")
 
@@ -429,23 +445,24 @@ func TestTransferStackNestedRestore(t *testing.T) {
 		runtime.AgentDetails{Name: "C", Provider: "google", Model: "gemini-flash", Thinking: "off"},
 	)
 
-	m.SetAgentSwitching(true, "A", "B")
-	for frame := 1; frame <= transferFramesPerStep; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	cmd := m.SetAgentSwitching(true, "A", "B").Cmd
+	for m.ar.Now() < transferStepDuration {
+		cmd = tickTransfer(t, m, cmd)
 	}
-	require.NotZero(t, m.transferAnimationFrame)
+	require.NotZero(t, m.transferPhaseAt(m.ar.Now()))
 
 	m.SetAgentSwitching(true, "B", "C")
-	assert.Zero(t, m.transferAnimationFrame, "a nested hop restarts the dot on the left")
+	assert.Zero(t, m.transferPhaseAt(m.ar.Now()), "a nested hop restarts the dot on the left")
 	idx := transferRelationIndex(m)
 	require.GreaterOrEqual(t, idx, 0)
 	assert.Contains(t, agentBody(m)[idx], "B ●──► C", "the innermost hop is shown, dot on the left")
 
-	for frame := 1; frame <= transferFramesPerStep; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for m.ar.Now() < 2*transferStepDuration+animation.TickRate {
+		cmd = tickTransfer(t, m, cmd)
 	}
+	require.NotZero(t, m.transferPhaseAt(m.ar.Now()))
 	m.SetAgentSwitching(false, "C", "B") // stop of B→C carries the inverse pair
-	assert.Zero(t, m.transferAnimationFrame, "the Return restarts the dot on the left")
+	assert.Zero(t, m.transferPhaseAt(m.ar.Now()), "the Return restarts the dot on the left")
 	assert.True(t, m.transferAnimation.IsActive(), "the animation keeps running for the Return")
 	assert.Equal(t, transferReturnBoxTitle, visibleBoxTitle(m), "the stop presents a Return box first")
 	idx = transferRelationIndex(m)
@@ -479,9 +496,9 @@ func TestTransferStackOutOfOrderStop(t *testing.T) {
 		runtime.AgentDetails{Name: "C", Provider: "google", Model: "gemini-flash", Thinking: "off"},
 	)
 
-	m.SetAgentSwitching(true, "A", "B")
+	cmd := m.SetAgentSwitching(true, "A", "B").Cmd
 	m.SetAgentSwitching(true, "B", "C")
-	_, _ = m.Update(animation.TickMsg{})
+	tickTransfer(t, m, cmd)
 
 	m.SetAgentSwitching(false, "B", "A") // the outer stop arrives first
 	require.Len(t, m.agentTransfers, 1)
@@ -517,7 +534,7 @@ func TestTransferStopFallbackPop(t *testing.T) {
 	assert.Empty(t, m.agentTransfers, "a nameless stop pops the innermost hop")
 	assert.Nil(t, m.agentReturn, "a nameless stop presents no Return")
 	assert.False(t, m.transferAnimation.IsActive(), "an emptied stack stops the animation")
-	assert.Zero(t, m.transferAnimationFrame)
+	assert.Zero(t, m.transferStartedAt)
 
 	res = m.SetAgentSwitching(false, "Coder", "Scout")
 	assert.False(t, res.Accepted)
@@ -629,7 +646,7 @@ func TestTransferClearedOnCancelResetAndLoad(t *testing.T) {
 		assert.Nil(t, m.agentReturn, context)
 		assert.Equal(t, -1, transferRelationIndex(m), context)
 		assert.False(t, m.transferAnimation.IsActive(), context)
-		assert.Zero(t, m.transferAnimationFrame, context)
+		assert.Zero(t, m.transferStartedAt, context)
 	}
 
 	// The timers armed before each clear must be stale afterwards.
@@ -640,9 +657,9 @@ func TestTransferClearedOnCancelResetAndLoad(t *testing.T) {
 		}
 	}
 
-	m.SetAgentSwitching(true, "Scout", "Coder")
+	cmd := m.SetAgentSwitching(true, "Scout", "Coder").Cmd
 	hopGen := m.agentTransfers[0].gen
-	_, _ = m.Update(animation.TickMsg{})
+	tickTransfer(t, m, cmd)
 	require.GreaterOrEqual(t, transferRelationIndex(m), 0)
 	_, _ = m.Update(messages.StreamCancelledMsg{})
 	assertCleared("cancel clears the box and stops the animation")

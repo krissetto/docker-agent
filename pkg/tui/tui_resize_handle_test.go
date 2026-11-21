@@ -173,15 +173,10 @@ func TestSidebarGripFadesWhenPointerLeavesChatAndReleasesOutside(t *testing.T) {
 	x, y := lipgloss.Width(before), m.contentHeight/2
 	advance := func(cmd tea.Cmd) {
 		t.Helper()
-		for i := 0; ar.HasActive(); i++ {
-			require.Less(t, i, 3)
-			var next tea.Cmd
-			for _, msg := range collectMsgs(cmd) {
-				if tick, ok := msg.(animation.TickMsg); ok {
-					_, next = m.Update(tick)
-				}
-			}
-			cmd = next
+		started := ar.Now()
+		for ar.HasActive() {
+			require.Less(t, ar.Now()-started, 150*time.Millisecond)
+			cmd = sidebarGuideTestTick(t, m, cmd)
 		}
 	}
 
