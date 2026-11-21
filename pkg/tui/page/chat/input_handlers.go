@@ -168,6 +168,15 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			return p, core.CmdHandler(msgtypes.RefreshPlansMsg{})
 		}
 
+	case TargetSidebarModel:
+		if msg.Button == tea.MouseLeft {
+			return p, core.CmdHandler(msgtypes.OpenModelPickerMsg{})
+		}
+	case TargetSidebarThinkingLevel:
+		if msg.Button == tea.MouseLeft && p.routingID != "" {
+			return p, core.CmdHandler(msgtypes.CycleSidebarThinkingMsg{TabID: p.routingID, AgentName: p.sessionState.CurrentAgentName(), ModelRef: hit.ModelRef})
+		}
+
 	case TargetSidebarUsageContext:
 		if msg.Button == tea.MouseLeft {
 			return p, core.CmdHandler(msgtypes.ShowContextDialogMsg{})
@@ -216,6 +225,17 @@ func (p *chatPage) agentClickCmd(agentName string, button tea.MouseButton, mod t
 
 // handleMouseMotion handles mouse motion events.
 func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd) {
+	// Clear hover on pointer leave as well as entering either band row. Native
+	// routing still owns vertical scrolling and transcript selection.
+	pointer := msg
+	sl := p.computeSidebarLayout()
+	if sl.mode == sidebarVertical && !sl.isInSidebar(msg.X-styles.AppPadding) || sl.mode != sidebarVertical && !sl.isInBand(msg.Y) {
+		pointer.X, pointer.Y = -1, -1
+	}
+	if pointer.X < 0 || sl.mode != sidebarVertical {
+		_, _ = p.sidebar.Update(pointer)
+	}
+
 	if p.isDraggingSidebar {
 		delta := p.sidebarDragStartX - msg.X
 		if max(delta, -delta) >= dragThreshold {

@@ -306,61 +306,6 @@ func TestTransferPanelPathologicalWidths(t *testing.T) {
 	}
 }
 
-// TestTransferCollapsedSummaryFitsNarrowWidths verifies the collapsed band's
-// transfer summary is budgeted to the content width — long and wide (CJK)
-// names are truncated, never overflowing — so the band's height estimate
-// cannot be undercut by an over-wide info line.
-func TestTransferCollapsedSummaryFitsNarrowWidths(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name     string
-		from, to string
-	}{
-		{"long ascii", "delegation-orchestrator", "implementation-reviewer"},
-		{"wide cjk", "调度协调器智能体", "代码实现者智能体"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			m := newAgentPanelSidebar(t, MinWidth,
-				runtime.AgentDetails{Name: tc.from, Provider: "openai", Model: "gpt-5.4", Thinking: "off"},
-				runtime.AgentDetails{Name: tc.to, Provider: "anthropic", Model: "claude-sonnet-4-6", Thinking: "high"},
-			)
-			m.SetMode(ModeCollapsed)
-			// Isolate the info line to the transfer summary (no agent entry,
-			// no working dir) so the width/height assertions are exact.
-			m.sessionState.SetCurrentAgentName("")
-			m.workingDirectory = ""
-			m.SetAgentSwitching(true, tc.from, tc.to)
-
-			for width := 1; width <= 30; width++ {
-				summary := m.transferSummaryCollapsed(width)
-				assert.LessOrEqualf(t, lipgloss.Width(summary), width,
-					"summary must fit content width %d", width)
-			}
-
-			contentWidth := m.contentWidth(false)
-			summary := ansi.Strip(m.transferSummaryCollapsed(contentWidth))
-			assert.Contains(t, summary, transferArrowHead, "the rail survives truncation")
-			assert.Contains(t, summary, "…", "overflowing names are truncated with ellipses")
-
-			// With every band line fitting the content width, the terminal
-			// wraps nothing, so the height estimate covers the actual lines
-			// (CollapsedHeight additionally counts the divider).
-			vm := m.computeCollapsedViewModel(contentWidth)
-			rendered := strings.Split(RenderCollapsedView(vm), "\n")
-			for i, line := range rendered {
-				assert.LessOrEqualf(t, lipgloss.Width(line), contentWidth,
-					"collapsed band line %d must fit the content width", i)
-			}
-			assert.GreaterOrEqual(t, m.CollapsedHeight(m.width), len(rendered)+1,
-				"the height estimate is not under-evaluated")
-		})
-	}
-}
-
 // TestTransferAnimationAdvancesAcrossTicks verifies the rail dot travels
 // across shared animation ticks: at least three distinct positions appear
 // while the names, the arrow and the line width stay constant.

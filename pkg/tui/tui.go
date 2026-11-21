@@ -1537,6 +1537,15 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.OpenModelPickerMsg:
 		return m.handleOpenModelPicker()
 
+	case messages.CycleSidebarThinkingMsg:
+		if msg.TabID == "" || m.tabs[msg.TabID] != m.activeTab ||
+			msg.AgentName != m.activeTab.sessionState.CurrentAgentName() ||
+			msg.ModelRef == "" || msg.ModelRef != m.application.CurrentAgentModel(m.ctx()) ||
+			len(m.application.CurrentAgentThinkingLevels(m.ctx())) < 2 {
+			return m, nil
+		}
+		return m.handleCycleThinkingLevel()
+
 	case messages.RefreshModelPickerMsg:
 		_, closeCmd := m.dialogMgr.Update(dialog.CloseDialogMsg{})
 		model, refreshCmd := m.handleRefreshModelPicker(msg.Query)

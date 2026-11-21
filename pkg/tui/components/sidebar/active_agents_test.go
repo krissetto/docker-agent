@@ -3,7 +3,6 @@ package sidebar
 import (
 	"testing"
 
-	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -142,24 +141,6 @@ func TestActiveAgentsOnly_PreservesShortcutIndices(t *testing.T) {
 	line1, _ := agentLines(m, "reviewer")
 	assert.Contains(t, line1, "^3", "reviewer keeps its original team shortcut")
 	assert.NotContains(t, line1, "^2")
-}
-
-// TestActiveAgentsOnly_CollapsedBandFiltered verifies the top/bottom band's
-// agent summary honors the filter like the vertical panel.
-func TestActiveAgentsOnly_CollapsedBandFiltered(t *testing.T) {
-	t.Parallel()
-
-	m := newCompactPanelSidebar(t, 40, activeAgentsRoster()...)
-	recordAgentUsageWithCost(m, "s-planner", "planner", 10_000, 100_000, 0.01)
-
-	info := ansi.Strip(m.collapsedInfoLine(120))
-	require.Contains(t, info, "reviewer", "the filter is off by default")
-
-	m.SetActiveAgentsOnly(true)
-	info = ansi.Strip(m.collapsedInfoLine(120))
-	assert.Contains(t, info, "▶ root")
-	assert.Contains(t, info, "planner")
-	assert.NotContains(t, info, "reviewer")
 }
 
 // TestActiveAgentsOnly_DetailedSizingUsesFilteredRoster verifies the detailed

@@ -51,7 +51,7 @@ func TestBackgroundAgentStatusPreservesForegroundState(t *testing.T) {
 	}
 }
 
-func TestBackgroundAgentCountRelayoutsSidebarBand(t *testing.T) {
+func TestBackgroundAgentCountDoesNotGrowSidebarBand(t *testing.T) {
 	t.Parallel()
 
 	for _, position := range []msgtypes.SidebarPosition{msgtypes.SidebarTop, msgtypes.SidebarBottom} {
@@ -65,9 +65,9 @@ func TestBackgroundAgentCountRelayoutsSidebarBand(t *testing.T) {
 			before := p.computeSidebarLayout()
 			p.Update(runtime.BackgroundAgentStatus("child", "worker", true))
 			during := p.computeSidebarLayout()
-			assert.NotEqual(t, before, during, "the count needs more space in a narrow band")
+			assert.Equal(t, before, during, "background activity does not displace the transcript")
 			assert.Equal(t, during, p.appliedLayout)
-			assert.Contains(t, ansi.Strip(p.sidebar.View()), "Background: 1 running")
+			assert.NotContains(t, ansi.Strip(p.sidebar.View()), "Background: 1 running")
 			p.Update(runtime.BackgroundAgentStatus("child", "worker", false))
 			assert.Equal(t, before, p.computeSidebarLayout())
 			assert.Equal(t, before, p.appliedLayout)

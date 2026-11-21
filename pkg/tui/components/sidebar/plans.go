@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -47,46 +48,93 @@ func (m *model) EditPlan(name, tabID string) tea.Cmd {
 	return notification.WarningCmd("Plan is no longer available for editing. Refresh plans and retry.")
 }
 
-func (m *model) plansSection(width int) (string, []planClickZone) {
-	var lines []string
-	var zones []planClickZone
-	add := func(text string, zone planClickZone) {
-		text = strings.Join(strings.Fields(text), " ")
-		lines = append(lines, toolcommon.TruncateText(text, max(1, width)))
-		zones = append(zones, zone)
-	}
-	switch {
-	case m.planData.Err != nil:
-		label := "Plans unavailable; refresh to retry"
-		if len(m.recentPlans) > 0 {
-			label = "Plans unavailable; showing stale data"
-		}
-		add(styles.MutedStyle.Render(label), planClickZone{})
-	case m.planData.Loading:
-		add(styles.MutedStyle.Render("Loading plans"), planClickZone{})
-	case len(m.recentPlans) == 0:
-		add(styles.MutedStyle.Render("No plans"), planClickZone{})
-	}
-	if len(m.planData.Result.Warnings) > 0 {
-		add(styles.MutedStyle.Render(fmt.Sprintf("%d plan(s) could not be read", len(m.planData.Result.Warnings))), planClickZone{})
-	}
-	for _, p := range m.recentPlans {
-		zone := planClickZone{kind: ClickPlan, name: p.Name}
-		add(styles.BaseStyle.Render(p.Name), zone)
-		if p.Title != "" {
-			add(styles.MutedStyle.Render(p.Title), zone)
-		}
-		if p.Status != "" {
-			add(styles.MutedStyle.Render(p.Status), zone)
-		}
-	}
-	add(styles.MutedStyle.Render(fmt.Sprintf("All plans (%d)", len(m.planData.Result.Plans))), planClickZone{kind: ClickPlanBrowser})
-	add(styles.MutedStyle.Render("Refresh plans"), planClickZone{kind: ClickPlanRefresh})
-	return m.renderTab("Plans", strings.Join(lines, "\n"), width), zones
+// hasPlansSection keeps unused plans quiet without hiding read failures.
+func (m *model) hasPlansSection() bool {
+	return m.sectionVisibility.ShowPlans && (len(m.recentPlans) > 0 ||
+		len(m.planData.Result.Warnings) > 0 || m.planData.Err != nil)
 }
 
+func (m *model) planSummary(width int) string {
+	label := fmt.Sprintf("%d plans", len(m.planData.Result.Plans))
+	if len(m.planData.Result.Plans) == 1 {
+		label = "1 plan"
+	}
+	if m.planData.Err != nil && len(m.recentPlans) == 0 {
+		label = "Plans unavailable"
+	}
+	if len(m.planData.Result.Warnings) > 0 || m.planData.Err != nil && len(m.recentPlans) > 0 {
+		label += " (warnings)"
+	}
+	glyph := "⌄"
+	if m.plansCollapsed {
+		glyph = "›"
+	}
+	if width <= 1 {
+		return styles.MutedStyle.Render(glyph)
+	}
+	text := styles.MutedStyle.Render(ansi.Truncate(label, width-2, "…"))
+	return m.hoverText(text+strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-1))+styles.MutedStyle.Render(glyph), ClickPlanSummary)
+}
+
+// plansSection renders the Plans section body. Zones are relative to the
+// section's first line; renderSections maps them to content lines after
+// breathing rows are inserted.
+func (m *model) plansSection(width int) (string, []planClickZone) {
+	lines := []string{m.planSummary(width)}
+	zones := []planClickZone{{kind: ClickPlanSummary}}
+	if m.plansCollapsed {
+		return strings.Join(lines, "\n"), zones
+	}
+	lines = append(lines, "")
+	zones = append(zones, planClickZone{})
+	indent := min(2, max(0, width-1))
+	bodyWidth := max(1, width-indent)
+	add := func(text string, zone planClickZone) {
+		lines = append(lines, strings.Repeat(" ", indent)+ansi.Truncate(text, bodyWidth, "…"))
+		zones = append(zones, zone)
+	}
+	if m.planData.Err != nil && len(m.recentPlans) > 0 {
+		add(styles.MutedStyle.Render("Showing stale plans"), planClickZone{})
+	}
+	if n := len(m.planData.Result.Warnings); n > 0 {
+		add(styles.MutedStyle.Render(fmt.Sprintf("%d plan(s) could not be read", n)), planClickZone{})
+	}
+	for _, p := range m.recentPlans {
+		label := strings.Join(strings.Fields(p.Title), " ")
+		if label == "" {
+			label = p.Name
+		}
+		status := strings.Join(strings.Fields(p.Status), " ")
+		status = toolcommon.TruncateText(status, bodyWidth/2)
+		statusWidth := ansi.StringWidth(status)
+		if bodyWidth < 3 {
+			status, statusWidth = "", 0
+		}
+		labelWidth := bodyWidth
+		if statusWidth > 0 {
+			labelWidth -= statusWidth + 1
+		}
+		label = toolcommon.TruncateText(label, max(1, labelWidth))
+		row := styles.BaseStyle.Render(label)
+		if statusWidth > 0 {
+			row += strings.Repeat(" ", max(1, bodyWidth-ansi.StringWidth(label)-statusWidth)) + styles.MutedStyle.Render(status)
+		}
+		add(row, planClickZone{kind: ClickPlan, name: p.Name})
+	}
+	add(styles.MutedStyle.Render("Open /plans"), planClickZone{kind: ClickPlanBrowser})
+	if remaining := len(m.planData.Result.Plans) - len(m.recentPlans); remaining > 0 {
+		add(styles.MutedStyle.Render(fmt.Sprintf("+%d more", remaining)), planClickZone{kind: ClickPlanBrowser})
+	}
+	if m.planData.Err != nil || len(m.planData.Result.Warnings) > 0 {
+		add(styles.MutedStyle.Render("Refresh plans"), planClickZone{kind: ClickPlanRefresh})
+	}
+	return strings.Join(lines, "\n"), zones
+}
+
+// plansSummary is the one-line Plans entry for the collapsed band. It is a
+// link to the plan browser, so the band never grows beyond its two rows.
 func (m *model) plansSummary() string {
-	if !m.sectionVisibility.ShowPlans {
+	if !m.hasPlansSection() {
 		return ""
 	}
 	label := fmt.Sprintf("Plans (%d) - open /plans", len(m.planData.Result.Plans))

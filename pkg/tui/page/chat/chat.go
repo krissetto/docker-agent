@@ -105,15 +105,9 @@ func (l sidebarLayout) isInBand(y int) bool {
 	return y >= l.bandY() && y < l.bandY()+l.sidebarHeight
 }
 
-// bandContentY converts a screen Y coordinate to a Y coordinate relative to
-// the band content. A bottom band renders its divider on the first line, so
-// the content starts one line lower.
+// bandContentY converts a screen Y coordinate to a band-local content row.
 func (l sidebarLayout) bandContentY(y int) int {
-	contentY := y - l.bandY()
-	if l.bandAtBottom {
-		contentY--
-	}
-	return contentY
+	return y - l.bandY()
 }
 
 // showToggle returns true if a toggle glyph should be shown.
@@ -808,7 +802,6 @@ func (p *chatPage) pendingSpinnerContext() (sender, label string) {
 }
 
 // renderCollapsedSidebar renders the sidebar in collapsed/band mode.
-// A top band carries its divider on the last line; a bottom band on the first.
 func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 	// Guard against unset/invalid layout (can happen before WindowSizeMsg is received).
 	width := max(0, sl.innerWidth)
@@ -828,26 +821,15 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 		sidebarLines[0] = padded + toggleGlyph
 	}
 
-	divider := styles.FadingStyle.Render(strings.Repeat("─", width))
-	switch {
-	case sl.bandAtBottom:
-		sidebarLines = append([]string{divider}, sidebarLines...)
-		if len(sidebarLines) > height {
-			sidebarLines = sidebarLines[:height]
-		}
-	case len(sidebarLines) >= height:
-		sidebarLines[height-1] = divider
-	default:
-		sidebarLines = append(sidebarLines, divider)
+	if len(sidebarLines) > height {
+		sidebarLines = sidebarLines[:height]
 	}
-
-	sidebarWithDivider := strings.Join(sidebarLines, "\n")
 
 	return lipgloss.NewStyle().
 		Width(width).
 		Height(height).
 		Align(lipgloss.Left, lipgloss.Top).
-		Render(sidebarWithDivider)
+		Render(strings.Join(sidebarLines, "\n"))
 }
 
 func (p *chatPage) messagesView(sl sidebarLayout) string {

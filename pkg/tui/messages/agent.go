@@ -17,6 +17,9 @@ type (
 	// OpenModelPickerMsg opens the model picker dialog.
 	OpenModelPickerMsg struct{}
 
+	// CycleSidebarThinkingMsg advances the thinking level from the originating tab.
+	CycleSidebarThinkingMsg struct{ TabID, AgentName, ModelRef string }
+
 	// RefreshModelPickerMsg forces a refresh of model discovery and reopens
 	// the model picker with the updated choices.
 	RefreshModelPickerMsg struct{ Query string }

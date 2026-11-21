@@ -10,8 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
-	"github.com/docker/docker-agent/pkg/tools"
-	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
 )
 
 // newVisibilityTestSidebar builds a sidebar with data in every optional
@@ -144,85 +142,16 @@ func TestCollapsedView_HiddenPathLeavesNoBlankRow(t *testing.T) {
 
 	withPath := s.computeCollapsedViewModel(60).LineCount()
 
+	s.sessionState.SetCurrentAgentName("")
 	s.SetSectionVisibility(SectionVisibility{HideSessionPath: true, HideUsage: true})
 	vm := s.computeCollapsedViewModel(60)
 	assert.Equal(t, withPath-1, vm.LineCount(), "the path+usage row disappears entirely")
 
 	lines := strings.Split(RenderCollapsedView(vm), "\n")
-	assert.Len(t, lines, vm.LineCount()-1, "LineCount includes the divider, the render does not")
+	assert.Len(t, lines, vm.LineCount(), "rendered height has no divider")
 	for _, line := range lines {
 		assert.NotEmpty(t, strings.TrimSpace(ansi.Strip(line)), "no blank metadata row may remain")
 	}
-}
-
-func TestCollapsedInfoLine_ShowsAgentsToolsTodos(t *testing.T) {
-	t.Parallel()
-
-	s := newVisibilityTestSidebar(t)
-	require.NoError(t, s.SetTodos(&tools.ToolCallResult{Meta: []todo.Todo{
-		{Description: "first", Status: "completed"},
-		{Description: "second", Status: "pending"},
-	}}))
-
-	info := ansi.Strip(s.collapsedInfoLine(60))
-	assert.Contains(t, info, "▶ root")
-	assert.Contains(t, info, "12 tools")
-	assert.Contains(t, info, "1/2 todos")
-
-	vm := s.computeCollapsedViewModel(60)
-	assert.NotEmpty(t, vm.InfoLine, "band view model carries the info line")
-}
-
-// TestCollapsedInfoLine_ShowsTeamRoster verifies the band lists every team
-// agent by name (not a bare "+N" count), so a team run keeps its roster
-// visible when the sidebar sits at the top or bottom.
-func TestCollapsedInfoLine_ShowsTeamRoster(t *testing.T) {
-	t.Parallel()
-
-	s := newTestSidebar(t)
-	s.sessionState.SetCurrentAgentName("root")
-	s.SetTeamInfo([]runtime.AgentDetails{
-		{Name: "root", Provider: "openai", Model: "gpt-4"},
-		{Name: "planner", Provider: "openai", Model: "gpt-4"},
-		{Name: "reviewer", Provider: "openai", Model: "gpt-4"},
-	})
-	_ = s.SetAgentInfo("root", "openai/gpt-4", "", 0, "", 0)
-
-	info := ansi.Strip(s.collapsedInfoLine(120))
-	assert.Contains(t, info, "▶ root openai/gpt-4", "current agent leads with its model")
-	assert.Contains(t, info, "planner")
-	assert.Contains(t, info, "reviewer")
-	assert.NotContains(t, info, "+2", "roster names replace the bare count")
-}
-
-func TestCollapsedInfoLine_HonorsVisibility(t *testing.T) {
-	t.Parallel()
-
-	s := newVisibilityTestSidebar(t)
-	require.NoError(t, s.SetTodos(&tools.ToolCallResult{Meta: []todo.Todo{
-		{Description: "first", Status: "pending"},
-	}}))
-
-	s.SetSectionVisibility(SectionVisibility{HideAgents: true, HideTodos: true})
-	info := ansi.Strip(s.collapsedInfoLine(60))
-	assert.NotContains(t, info, "▶ root")
-	assert.NotContains(t, info, "todos")
-	assert.Contains(t, info, "12 tools", "tools stay visible")
-
-	s.SetSectionVisibility(SectionVisibility{HideAgents: true, HideTools: true, HideTodos: true})
-	assert.Empty(t, s.collapsedInfoLine(60), "hiding every section removes the line")
-}
-
-func TestCollapsedLineCount_GrowsWithInfoLine(t *testing.T) {
-	t.Parallel()
-
-	s := newVisibilityTestSidebar(t)
-
-	withInfo := s.computeCollapsedViewModel(60).LineCount()
-	s.SetSectionVisibility(SectionVisibility{HideAgents: true, HideTools: true, HideTodos: true})
-	withoutInfo := s.computeCollapsedViewModel(60).LineCount()
-
-	assert.Equal(t, withoutInfo+1, withInfo, "the info line adds one band line")
 }
 
 // sectionTitleGap returns the number of consecutive blank lines immediately

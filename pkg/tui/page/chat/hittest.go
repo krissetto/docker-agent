@@ -19,6 +19,8 @@ const (
 	TargetSidebarPlan
 	TargetSidebarPlanBrowser
 	TargetSidebarPlanRefresh
+	TargetSidebarModel
+	TargetSidebarThinkingLevel
 	TargetSidebarUsageContext
 	TargetSidebarUsage
 	TargetSidebarContent
@@ -32,6 +34,7 @@ type HitTest struct {
 	page      *chatPage
 	AgentName string // populated when At() returns TargetSidebarAgent
 	PlanName  string
+	ModelRef  string
 }
 
 // NewHitTest creates a hit tester for the given chat page.
@@ -127,6 +130,11 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 		return TargetSidebarPlanBrowser
 	case sidebar.ClickPlanRefresh:
 		return TargetSidebarPlanRefresh
+	case sidebar.ClickModel:
+		return TargetSidebarModel
+	case sidebar.ClickThinkingLevel:
+		h.ModelRef = agentName
+		return TargetSidebarThinkingLevel
 	case sidebar.ClickUsageContext:
 		return TargetSidebarUsageContext
 	case sidebar.ClickUsage:

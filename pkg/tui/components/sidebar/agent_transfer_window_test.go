@@ -5,7 +5,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -163,38 +162,6 @@ func TestTransferReturnDoesNotRestoreAckedOuter(t *testing.T) {
 	assert.False(t, m.transferAnimation.IsActive())
 	require.Len(t, m.agentTransfers, 1, "the outer hop is still tracked logically")
 	assert.Contains(t, renderAgentPanel(m)[0], "↔", "the header still hints at the outer delegation")
-}
-
-// TestTransferCollapsedSummaryShowsRelation verifies the collapsed band's info
-// line carries the visible relation (with the Transfer/Return state) and drops
-// it once the box acknowledged.
-func TestTransferCollapsedSummaryShowsRelation(t *testing.T) {
-	t.Parallel()
-
-	m := newAgentPanelSidebar(t, 40, transferRoster()...)
-	width := m.contentWidth(false)
-
-	assert.Empty(t, m.transferSummaryCollapsed(width), "no relation renders while idle")
-
-	m.SetAgentSwitching(true, "Scout", "Coder")
-	line := ansi.Strip(m.collapsedInfoLine(width))
-	assert.Contains(t, line, transferBoxTitle)
-	assert.Contains(t, line, "Scout")
-	assert.Contains(t, line, "Coder")
-	assert.Contains(t, line, transferArrowHead)
-
-	m.SetAgentActivity("Coder")
-	fireHopTimer(t, m, "Scout", "Coder", transferTimerMin)
-	assert.Empty(t, m.transferSummaryCollapsed(width), "the acknowledged box leaves the band")
-	assert.NotContains(t, ansi.Strip(m.collapsedInfoLine(width)), transferArrowHead)
-
-	m.SetAgentSwitching(false, "Coder", "Scout")
-	line = ansi.Strip(m.collapsedInfoLine(width))
-	assert.Contains(t, line, transferReturnBoxTitle, "the Return state is named in the band")
-	assert.Contains(t, line, "Coder "+transferDot)
-
-	expireReturn(t, m)
-	assert.Empty(t, m.transferSummaryCollapsed(width))
 }
 
 // TestTransferSwitchResultTimers verifies SetAgentSwitching returns the

@@ -25,11 +25,9 @@ func TestBackgroundAgentsCount(t *testing.T) {
 			m.Update(runtime.StreamStarted("root-session", "root"))
 
 			assert.NotContains(t, m.View(), "Background:")
-			assert.NotContains(t, m.collapsedInfoLine(120), "Background:")
 			m.Update(runtime.BackgroundAgentStatus("child-1", "reviewer", true))
 			m.Update(runtime.BackgroundAgentStatus("child-1", "reviewer", true))
 			assert.Contains(t, ansi.Strip(m.View()), "Background: 1 running")
-			assert.Contains(t, ansi.Strip(m.collapsedInfoLine(120)), "Background: 1 running")
 			assert.Equal(t, []string{"root", "reviewer"}, rosterOwners(m))
 			assert.Equal(t, "root", m.workingAgent)
 			assert.Equal(t, "root", m.sessionState.CurrentAgentName())
@@ -39,7 +37,6 @@ func TestBackgroundAgentsCount(t *testing.T) {
 			m.Update(runtime.StreamStopped("root-session", "root", "normal"))
 			m.Update(messages.StreamCancelledMsg{})
 			assert.Contains(t, ansi.Strip(m.View()), "Background: 2 running")
-			assert.Contains(t, ansi.Strip(m.collapsedInfoLine(120)), "Background: 2 running")
 			assert.Empty(t, m.workingAgent)
 			assert.Empty(t, m.sessionStack)
 
@@ -49,7 +46,6 @@ func TestBackgroundAgentsCount(t *testing.T) {
 			assert.Contains(t, ansi.Strip(m.View()), "Background: 1 running")
 			m.Update(runtime.BackgroundAgentStatus("child-2", "reviewer", false))
 			assert.NotContains(t, m.View(), "Background:")
-			assert.NotContains(t, m.collapsedInfoLine(120), "Background:")
 			assert.Equal(t, []string{"root"}, rosterOwners(m))
 		})
 	}
@@ -67,7 +63,6 @@ func TestBackgroundAgentsVisibilityAndClickOwners(t *testing.T) {
 	}
 	m.SetSectionVisibility(SectionVisibility{HideAgents: true})
 	assert.NotContains(t, m.View(), "Background:")
-	assert.NotContains(t, m.collapsedInfoLine(120), "Background:")
 }
 
 func TestBackgroundAgentsSessionReload(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/gitbranch"
@@ -122,8 +124,7 @@ type Model interface {
 	ResetStreamTracking()
 	// HandleClick checks if click is on the star or title and returns true if handled
 	HandleClick(x, y int) bool
-	// HandleClickType returns the type of click (see ClickResult).
-	// For ClickAgent, the second return value is the agent name.
+	// HandleClickType returns the click type and any associated identifier.
 	HandleClickType(x, y int) (ClickResult, string)
 	// IsCollapsed returns whether the sidebar is collapsed
 	IsCollapsed() bool
@@ -420,6 +421,8 @@ type model struct {
 	agentLineOwners []string
 	planData        messages.PlanSidebarDataMsg
 	recentPlans     []plans.Plan
+	plansCollapsed  bool
+	hovered         ClickResult
 	planClickZones  map[int]planClickZone
 }
 
@@ -455,6 +458,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		gitBranchName:    branch,
 		gitBranchWatcher: branchWatcher,
 		preferredWidth:   DefaultWidth,
+		plansCollapsed:   true,
 		sectionGap:       defaultSectionGap,
 		titleInput:       ti,
 		cacheDirty:       true, // Initial render needed
@@ -581,6 +585,9 @@ func (m *model) SetAgentInfo(agentName, modelID, description string, contextLimi
 // SetTeamInfo sets the available agents in the team
 func (m *model) SetTeamInfo(availableAgents []runtime.AgentDetails) {
 	m.availableAgents = availableAgents
+	if m.mode == ModeCollapsed && m.editingTitle {
+		m.updateTitleInputWidth()
+	}
 	m.invalidateCache()
 }
 
@@ -858,6 +865,9 @@ type ClickResult int
 
 const (
 	ClickNone ClickResult = iota
+	ClickModel
+	ClickThinkingLevel
+	ClickPlanSummary
 	ClickPlan
 	ClickPlanBrowser
 	ClickPlanRefresh
@@ -878,7 +888,7 @@ func (m *model) HandleClick(x, y int) bool {
 }
 
 // HandleClickType returns what was clicked (see ClickResult).
-// For ClickAgent or ClickPlan, the second return value is the canonical name.
+// For an agent, plan or thinking control, the second return value identifies the target.
 func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	// Account for left padding
 	adjustedX := x - m.layoutCfg.PaddingLeft
@@ -898,57 +908,31 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	}
 
 	if m.mode == ModeCollapsed {
-		// In collapsed mode, title starts at line 0
-		titleLines := m.titleLineCount()
-
-		// Check if click is within the title area (line 0 to titleLines-1)
-		if y >= 0 && y < titleLines {
-			// Check if click is on the star (first line only, first few chars)
-			if y == 0 && m.sessionHasContent && adjustedX <= starClickWidth {
-				return ClickStar, ""
+		for _, span := range m.computeCollapsedViewModel(m.collapsedContentWidth()).spans() {
+			if y != span.y || adjustedX < span.x || adjustedX >= span.x+ansi.StringWidth(span.text) {
+				continue
 			}
-			// Click is on title area (for double-click to edit)
-			if m.titleGenerated && !m.editingTitle {
-				return ClickTitle, ""
-			}
-		}
-
-		// In collapsed mode, working dir line follows the title section.
-		// A hidden session path renders no line and must not keep a hit target.
-		vm := m.computeCollapsedViewModel(m.contentWidth(false))
-		if vm.PlansSummary != "" && adjustedX < vm.ContentWidth {
-			start := vm.LineCount() - 1 - linesNeeded(lipgloss.Width(vm.PlansSummary), vm.ContentWidth)
-			if y >= start && y < vm.LineCount()-1 {
-				return ClickPlanBrowser, ""
-			}
-		}
-		wdStartY := vm.titleSectionLines()
-		wdLines := linesNeeded(lipgloss.Width(vm.WorkingDir), vm.ContentWidth)
-
-		// The usage reading either shares the working dir line (right-aligned)
-		// or takes its own line(s) right after it. Mirrors RenderCollapsedView.
-		if vm.UsageSummary != "" {
-			usageWidth := lipgloss.Width(vm.UsageSummary)
-			if vm.WorkingDir != "" && vm.WdAndUsageOnOneLine {
-				if y == wdStartY && adjustedX >= vm.ContentWidth-usageWidth {
-					return segmentClickResult(adjustedX - (vm.ContentWidth - usageWidth)), ""
+			switch span.action {
+			case ClickTitle:
+				if m.sessionHasContent && adjustedX <= starClickWidth {
+					return ClickStar, ""
 				}
-			} else {
-				usageStartY := wdStartY
-				if vm.WorkingDir != "" {
-					usageStartY += wdLines
+				if m.titleGenerated && !m.editingTitle {
+					return ClickTitle, ""
 				}
-				if y >= usageStartY && y < usageStartY+linesNeeded(usageWidth, vm.ContentWidth) {
-					offset := (y-usageStartY)*vm.ContentWidth + adjustedX
-					return segmentClickResult(offset), ""
+			case ClickUsage:
+				return segmentClickResult(adjustedX - span.x), ""
+			case ClickThinkingLevel:
+				_, details := m.collapsedModelDetails()
+				ref := details.Model
+				if details.Provider != "" {
+					ref = details.Provider + "/" + ref
 				}
+				return ClickThinkingLevel, ref
+			default:
+				return span.action, ""
 			}
 		}
-
-		if m.workingDirectory != "" && !m.sectionVisibility.HideSessionPath && y >= wdStartY && y < wdStartY+wdLines {
-			return ClickWorkingDir, ""
-		}
-
 		return ClickNone, ""
 	}
 
@@ -994,7 +978,7 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	if agentName, ok := m.agentClickZones[contentY]; ok {
 		return ClickAgent, agentName
 	}
-	if m.sectionVisibility.ShowPlans {
+	if m.hasPlansSection() {
 		if zone, ok := m.planClickZones[contentY]; ok {
 			return zone.kind, zone.name
 		}
@@ -1222,8 +1206,7 @@ func (m *model) workingDirWithBranch() string {
 	return result
 }
 
-// workingDirLine renders the working directory with the sidebar's accent
-// block, shared by the vertical Session tab and the collapsed band. Empty
+// workingDirLine renders the working directory in the vertical Session tab. Empty
 // when the session path is hidden via section visibility.
 func (m *model) workingDirLine() string {
 	if m.workingDirectory == "" || m.sectionVisibility.HideSessionPath {
@@ -1245,17 +1228,23 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := m.SetSize(msg.Width, msg.Height)
 		return m, cmd
-	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
-		if m.mode == ModeVertical {
-			beforeOffset := m.scrollview.ScrollOffset()
-			beforeDragging := m.scrollview.IsDragging()
-			_, cmd := m.scrollview.Update(msg)
-			if m.scrollview.ScrollOffset() != beforeOffset || m.scrollview.IsDragging() != beforeDragging {
-				m.visualGeneration++
+	case tea.MouseMotionMsg:
+		m.updatePointer(msg.X, msg.Y)
+		return m.updateScrollviewInput(msg)
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft && m.mode == ModeVertical {
+			x, y := msg.X-m.xPos, msg.Y-m.yPos
+			if y >= 0 && y < m.height {
+				if action, _ := m.HandleClickType(x, y); action == ClickPlanSummary {
+					m.plansCollapsed = !m.plansCollapsed
+					m.invalidateCache()
+					return m, nil
+				}
 			}
-			return m, cmd
 		}
-		return m, nil
+		return m.updateScrollviewInput(msg)
+	case tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
+		return m.updateScrollviewInput(msg)
 	case *runtime.BackgroundAgentStatusEvent:
 		if msg.SessionID == "" {
 			return m, nil
@@ -1563,8 +1552,7 @@ func (m *model) starIndicator() string {
 }
 
 // computeCollapsedViewModel builds the view model for collapsed mode.
-// This extracts data from the model and computes layout decisions,
-// keeping the model's state separate from rendering concerns.
+// It extracts content from the model; the band lays out the rows.
 func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 	star := m.starIndicator()
 
@@ -1577,64 +1565,69 @@ func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 	default:
 		titleWithStar = star + m.sessionTitle
 	}
+	identity, details := m.collapsedModelDetails()
 	vm := CollapsedViewModel{
-		TitleWithStar:    titleWithStar,
-		WorkingIndicator: m.workingIndicatorCollapsed(),
-		WorkingDir:       m.workingDirLine(),
-		InfoLine:         lipgloss.Wrap(m.collapsedInfoLine(contentWidth), contentWidth, ""),
-		PlansSummary:     toolcommon.TruncateText(m.plansSummary(), contentWidth),
-		ContentWidth:     contentWidth,
+		TitleWithStar: titleWithStar,
+		AgentIdentity: styles.AgentAccentStyleFor(identity).Render(identity),
+		ModelInfo:     collapsedModelInfo(details),
+		PlansSummary:  m.plansSummary(),
+		ContentWidth:  contentWidth,
+	}
+	if details.Model != "" && details.Thinking != "" {
+		vm.Thinking = styles.MutedStyle.Render("(" + collapsedSingleLine(details.Thinking) + ")")
+		vm.CanCycleThinking = true
+	}
+	if m.workingDirectory != "" && !m.sectionVisibility.HideSessionPath {
+		vm.WorkingDir = styles.TabPrimaryStyle.Render(filepath.Base(filepath.Clean(m.workingDirectory)))
+		vm.Branch = styles.MutedStyle.Render(m.gitBranchName)
+	}
+	if m.sessionState.YoloMode() && contentWidth > 0 {
+		padding := 0
+		if contentWidth >= 3 {
+			padding = 1
+		}
+		vm.Yolo = styles.WarningStyle.Bold(true).Reverse(true).Render(strings.Repeat(" ", padding) + clipCollapsed("YOLO", contentWidth-2*padding) + strings.Repeat(" ", padding))
 	}
 	if !m.sectionVisibility.HideUsage {
 		vm.UsageSummary = m.tokenUsageSummary()
 	}
-
-	titleWidth := lipgloss.Width(vm.TitleWithStar)
-	wiWidth := lipgloss.Width(vm.WorkingIndicator)
-	wdWidth := lipgloss.Width(vm.WorkingDir)
-	usageWidth := lipgloss.Width(vm.UsageSummary)
-
-	// Title and indicator fit on one line if:
-	// - editing mode (input is constrained to fit in collapsed mode), OR
-	// - no working indicator AND title fits, OR
-	// - both fit together with gap
-	vm.TitleAndIndicatorOnOneLine = m.editingTitle ||
-		(vm.WorkingIndicator == "" && titleWidth <= contentWidth) ||
-		(vm.WorkingIndicator != "" && titleWidth+minGap+wiWidth <= contentWidth)
-	vm.WdAndUsageOnOneLine = wdWidth+minGap+usageWidth <= contentWidth
-
 	return vm
 }
 
-// CollapsedHeight returns the number of lines needed for collapsed mode.
+func (m *model) collapsedModelDetails() (string, runtime.AgentDetails) {
+	name := m.sessionState.CurrentAgentName()
+	if name == "" {
+		name = m.currentAgent
+	}
+	for _, details := range m.availableAgents {
+		if name == details.Name {
+			return name, details
+		}
+	}
+	if name == m.currentAgent {
+		if provider, model, ok := strings.Cut(m.agentModel, "/"); ok {
+			return name, runtime.AgentDetails{Provider: provider, Model: model}
+		}
+		return name, runtime.AgentDetails{Model: m.agentModel}
+	}
+	return name, runtime.AgentDetails{}
+}
+
+func collapsedModelInfo(details runtime.AgentDetails) string {
+	if details.Model == "" {
+		return ""
+	}
+	return styles.MutedStyle.Render(collapsedSingleLine(details.Model)) + "\n" + styles.MutedStyle.Render(collapsedSingleLine(details.Provider))
+}
+
+// CollapsedHeight returns the number of content rows; there is no divider.
 func (m *model) CollapsedHeight(outerWidth int) int {
-	contentWidth := max(outerWidth-m.layoutCfg.PaddingLeft-m.layoutCfg.PaddingRight, 1)
+	contentWidth := max(0, outerWidth-m.layoutCfg.PaddingLeft-m.layoutCfg.PaddingRight)
 	return m.computeCollapsedViewModel(contentWidth).LineCount()
 }
 
-// collapsedInfoLine returns a one-line summary of the agents, tools, and
-// todos sections for the collapsed band, honoring section visibility.
-func (m *model) collapsedInfoLine(contentWidth int) string {
-	var parts []string
-	appendPart := func(part string) {
-		if part != "" {
-			parts = append(parts, part)
-		}
-	}
-
-	if !m.sectionVisibility.HideAgents {
-		appendPart(m.backgroundAgentsSummary())
-		appendPart(m.agentSummaryCollapsed())
-		appendPart(m.transferSummaryCollapsed(contentWidth))
-	}
-	if !m.sectionVisibility.HideTools {
-		appendPart(m.toolsSummaryCollapsed())
-	}
-	if !m.sectionVisibility.HideTodos {
-		appendPart(m.todosSummaryCollapsed())
-	}
-
-	return strings.Join(parts, styles.MutedStyle.Render(" · "))
+func (m *model) collapsedContentWidth() int {
+	return max(0, m.width-m.layoutCfg.PaddingLeft-m.layoutCfg.PaddingRight)
 }
 
 func (m *model) backgroundAgentsSummary() string {
@@ -1644,101 +1637,61 @@ func (m *model) backgroundAgentsSummary() string {
 	return styles.ActiveStyle.Render(fmt.Sprintf("Background: %d running", len(m.backgroundAgents)))
 }
 
-// agentSummaryCollapsed renders the team roster for the band: the current
-// agent (in its accent color) with its model, then the other agents' names
-// in their own accent colors, so the whole team stays visible like in the
-// vertical Agents section. The active-agents-only filter applies here too
-// (see rosterAgents).
-func (m *model) agentSummaryCollapsed() string {
-	name := m.sessionState.CurrentAgentName()
-	if name == "" {
-		return ""
-	}
-
-	var summary strings.Builder
-	summary.WriteString(styles.AgentAccentStyleFor(name).Render("▶ " + name))
-	if m.agentModel != "" {
-		summary.WriteString(styles.MutedStyle.Render(" " + m.agentModel))
-	}
-	for _, entry := range m.rosterAgents() {
-		if entry.agent.Name == name {
-			continue
-		}
-		summary.WriteString(styles.MutedStyle.Render(" · ") + styles.AgentAccentStyleFor(entry.agent.Name).Render(entry.agent.Name))
-	}
-	return summary.String()
-}
-
-// transferSummaryCollapsed renders the visible transfer presentation for the
-// collapsed band: the box title (Transfer/Return) in muted style followed by
-// the same animated from ─●─► to relation as the vertical box. The whole
-// summary is budgeted to contentWidth — overflowing names are truncated by
-// the shared relation renderer — so the band's height estimate stays honest
-// even with long or wide (CJK) agent names.
-func (m *model) transferSummaryCollapsed(contentWidth int) string {
-	pres, ok := m.visibleTransfer()
-	if !ok {
-		return ""
-	}
-	title := pres.title + " "
-	avail := contentWidth - lipgloss.Width(title)
-	if avail < transferRailCells+1 {
-		// No room for even the bare rail after the title: drop the title.
-		return m.transferRelationLine(pres, max(0, contentWidth))
-	}
-	return styles.MutedStyle.Render(title) + m.transferRelationLine(pres, avail)
-}
-
-// toolsSummaryCollapsed renders the tools/skills counts with the sidebar's
-// accent block, or the loading spinner while the toolset is starting.
-func (m *model) toolsSummaryCollapsed() string {
-	if m.toolsLoading {
-		return m.spinner.View() + styles.TabPrimaryStyle.Render(" loading tools…")
-	}
-
-	var parts []string
-	if m.availableTools > 0 {
-		label := "tools"
-		if m.availableTools == 1 {
-			label = "tool"
-		}
-		parts = append(parts, fmt.Sprintf("%d %s", m.availableTools, label))
-	}
-	if m.availableSkills > 0 {
-		label := "skills"
-		if m.availableSkills == 1 {
-			label = "skill"
-		}
-		parts = append(parts, fmt.Sprintf("%d %s", m.availableSkills, label))
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return styles.TabAccentStyle.Render("█") + styles.TabPrimaryStyle.Render(" "+strings.Join(parts, ", "))
-}
-
-// todosSummaryCollapsed renders the completed/total todo counts with the
-// same status icons as the vertical TO-DO tab.
-func (m *model) todosSummaryCollapsed() string {
-	completed, total := m.todoComp.Counts()
-	if total == 0 {
-		return ""
-	}
-
-	var icon string
-	switch completed {
-	case total:
-		icon = styles.CompletedStyle.Render("✓")
-	case 0:
-		icon = styles.ToBeDoneStyle.Render("◯")
-	default:
-		icon = styles.InProgressStyle.Render("◔")
-	}
-	return icon + styles.TabPrimaryStyle.Render(fmt.Sprintf(" %d/%d todos", completed, total))
-}
-
 func (m *model) collapsedView() string {
-	return RenderCollapsedView(m.computeCollapsedViewModel(m.contentWidth(false)))
+	spans := m.computeCollapsedViewModel(m.collapsedContentWidth()).spans()
+	for i, span := range spans {
+		switch span.action {
+		case ClickModel, ClickThinkingLevel, ClickWorkingDir:
+			spans[i].text = m.hoverText(span.text, span.action)
+		case ClickUsage:
+			if m.hovered == ClickUsageContext || m.hovered == ClickUsage {
+				width := ansi.StringWidth(span.text)
+				cut := min(m.usageContextSegWidth, width)
+				spans[i].text = m.hoverText(ansi.Cut(span.text, 0, cut), ClickUsageContext) + m.hoverText(ansi.Cut(span.text, cut, width), ClickUsage)
+			}
+		}
+	}
+	return renderCollapsedSpans(spans)
+}
+
+func (m *model) hoverText(text string, action ClickResult) string {
+	if action == m.hovered && text != "" {
+		return styles.BaseStyle.Render(ansi.Strip(text))
+	}
+	return text
+}
+
+func (m *model) updatePointer(x, y int) {
+	x, y = x-m.xPos, y-m.yPos
+	action := ClickNone
+	if x >= 0 && x < m.width && y >= 0 && y < m.height {
+		kind, _ := m.HandleClickType(x, y)
+		switch {
+		case m.mode == ModeVertical && kind == ClickPlanSummary:
+			action = kind
+		case m.mode == ModeCollapsed:
+			switch kind {
+			case ClickModel, ClickThinkingLevel, ClickWorkingDir, ClickUsageContext, ClickUsage:
+				action = kind
+			}
+		}
+	}
+	if m.hovered != action {
+		m.hovered = action
+		m.invalidateAnimation()
+	}
+}
+
+func (m *model) updateScrollviewInput(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if m.mode != ModeVertical {
+		return m, nil
+	}
+	beforeOffset, beforeDragging := m.scrollview.ScrollOffset(), m.scrollview.IsDragging()
+	_, cmd := m.scrollview.Update(msg)
+	if m.scrollview.ScrollOffset() != beforeOffset || m.scrollview.IsDragging() != beforeDragging {
+		m.visualGeneration++
+	}
+	return m, cmd
 }
 
 func (m *model) verticalView() string {
@@ -1853,13 +1806,13 @@ func (m *model) renderSections(contentWidth int) []string {
 		appendSection(m.todoComp.Render())
 	}
 	m.planClickZones = nil
-	if m.sectionVisibility.ShowPlans {
+	if m.hasPlansSection() {
 		section, zones := m.plansSection(contentWidth)
 		start := appendSection(section)
 		m.planClickZones = make(map[int]planClickZone)
 		for i, zone := range zones {
 			if zone.kind != ClickNone {
-				m.planClickZones[start+tabHeaderLines+i] = zone
+				m.planClickZones[start+i] = zone
 			}
 		}
 	}
@@ -1922,31 +1875,6 @@ func (m *model) workingIndicator() string {
 	}
 
 	return strings.Join(indicators, "\n")
-}
-
-// workingIndicatorCollapsed returns a single-line version of the working indicator for collapsed mode
-func (m *model) workingIndicatorCollapsed() string {
-	var labels []string
-
-	ragNames, ragGroups := m.groupedRAGIndexing()
-	for _, ragName := range ragNames {
-		strategies := ragGroups[ragName]
-		displayRagName := strings.ReplaceAll(ragName, "_", " ")
-
-		labels = append(labels, "Indexing "+styles.BoldStyle.Render(displayRagName))
-
-		for _, strategy := range strategies {
-			displayStratName := strings.ReplaceAll(strategy.strategyName, "-", " ")
-			progress := m.formatProgress(strategy.state)
-			labels = append(labels, fmt.Sprintf("  • %s%s", styles.BoldStyle.Render(displayStratName), progress))
-		}
-	}
-
-	if len(labels) == 0 {
-		return ""
-	}
-
-	return styles.ActiveStyle.Render(m.spinner.View() + " " + strings.Join(labels, " | "))
 }
 
 func (m *model) formatProgress(state *ragIndexingState) string {
@@ -2989,8 +2917,12 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 func (m *model) updateTitleInputWidth() {
 	if m.mode == ModeCollapsed {
 		starWidth := lipgloss.Width(m.starIndicator())
-		inputWidth := m.contentWidth(false) - starWidth
-		m.titleInput.SetWidth(max(10, inputWidth))
+		width := m.collapsedContentWidth()
+		_, details := m.collapsedModelDetails()
+		modelWidth := clipCollapsed(details.Model, width/2)
+		inputWidth := collapsedTitleWidth(width, modelWidth) - starWidth
+		m.titleInput.SetWidth(max(1, inputWidth))
+		m.titleInput.SetCursor(m.titleInput.Position())
 	} else {
 		m.titleInput.SetWidth(m.titleInput.CharLimit)
 	}
@@ -3016,7 +2948,11 @@ func (m *model) GetSize() (width, height int) {
 }
 
 func (m *model) SetMode(mode Mode) {
+	if m.mode != mode {
+		m.hovered = ClickNone
+	}
 	m.mode = mode
+	m.updateTitleInputWidth()
 	m.invalidateCache()
 }
 

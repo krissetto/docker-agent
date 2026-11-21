@@ -288,7 +288,7 @@ func TestPlanSidebar_RecreatedPageInheritsSharedSnapshot(t *testing.T) {
 	_ = m.activeTab.chatPage.SetSize(160, 40)
 	assert.NotSame(t, oldPage, m.activeTab.chatPage)
 	assert.Same(t, m.tabs[id], m.activeTab)
-	assert.Contains(t, m.activeTab.chatPage.View(), "fresh-plan")
+	assert.Contains(t, m.activeTab.chatPage.View(), "1 plan", "the restored snapshot appears in the collapsed disclosure")
 }
 
 func TestPlanSidebar_BackgroundEventsUpdateEveryPage(t *testing.T) {

@@ -30,6 +30,12 @@ func TestPlanSidebar_ClickRoutesDirectEdit(t *testing.T) {
 				{Name: "release", Version: new(7)},
 			}}})
 			sl := p.computeSidebarLayout()
+			for y, line := range strings.Split(ansi.Strip(p.sidebar.View()), "\n") {
+				if before, _, found := strings.Cut(line, "1 plan"); found {
+					p.handleMouseClick(tea.MouseClickMsg{X: styles.AppPadding + sl.sidebarStartX + ansi.StringWidth(before), Y: y, Button: tea.MouseLeft})
+					break
+				}
+			}
 			lines := strings.Split(ansi.Strip(p.sidebar.View()), "\n")
 			found := false
 			for y, line := range lines {
@@ -75,9 +81,6 @@ func TestPlanSidebar_BandClickOpensBrowser(t *testing.T) {
 				}
 				found = true
 				x, y := styles.AppPadding+strings.Index(line, "Plans"), sl.bandY()+row
-				if sl.bandAtBottom {
-					y++
-				}
 				require.Equal(t, TargetSidebarPlanBrowser, NewHitTest(p).At(x, y))
 				_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				require.NotNil(t, cmd)

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // newLayoutTestPage builds a chatPage large enough for the vertical sidebar
@@ -225,8 +227,7 @@ func TestComputeSidebarLayout_Bottom(t *testing.T) {
 	assert.True(t, sl.isInBand(sl.chatHeight))
 	assert.True(t, sl.isInBand(sl.chatHeight+sl.sidebarHeight-1))
 	assert.False(t, sl.isInBand(sl.chatHeight+sl.sidebarHeight))
-	assert.Equal(t, 0, sl.bandContentY(sl.chatHeight+1),
-		"bottom band renders its divider first, so content starts one line lower")
+	assert.Equal(t, 0, sl.bandContentY(sl.chatHeight), "the bottom band starts with content")
 }
 
 func TestComputeSidebarLayout_NarrowWindowKeepsConfiguredBandEdge(t *testing.T) {
@@ -433,4 +434,57 @@ func TestViewPlacesBandAtConfiguredEdge(t *testing.T) {
 	bottomIdx := sidebarTitleLine(bottom.View())
 	require.GreaterOrEqual(t, bottomIdx, 0)
 	assert.GreaterOrEqual(t, bottomIdx, bottom.computeSidebarLayout().chatHeight, "bottom band renders below the chat")
+}
+
+func TestCollapsedSidebarBandSharesPaintAndHitTargetsWithoutDivider(t *testing.T) {
+	t.Parallel()
+	for _, position := range []msgtypes.SidebarPosition{msgtypes.SidebarRight, msgtypes.SidebarTop, msgtypes.SidebarBottom} {
+		t.Run(string(position), func(t *testing.T) {
+			p := newLayoutTestPage(t, position)
+			p.SetRoutingID("owning-tab")
+			p.sessionState.SetCurrentAgentName("root")
+			p.sidebar.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "openai", Model: "gpt-4", Thinking: "high"}})
+			p.sidebar.SetCollapsed(true)
+			p.sidebar.SetSectionVisibility(sidebar.SectionVisibility{HideSessionPath: true})
+			_, _ = p.sidebar.Update(runtime.SessionTitle("", "long title "+strings.Repeat("界", 90)+"\nlast-title-line"))
+			p.SetSize(p.width, p.height)
+			sl := p.computeSidebarLayout()
+			lines := strings.Split(ansi.Strip(p.renderCollapsedSidebar(sl)), "\n")
+			require.Len(t, lines, 2)
+			assert.Len(t, lines, sl.sidebarHeight)
+			assert.Equal(t, p.height-2, sl.chatHeight)
+			assert.NotContains(t, strings.Join(lines, "\n"), "──")
+			assert.NotContains(t, lines[1], "last-title-line")
+			if sl.showToggle() {
+				assert.True(t, strings.HasSuffix(lines[0], "«"))
+				assert.Equal(t, TargetSidebarToggle, NewHitTest(p).At(styles.AppPadding+sl.innerWidth-1, sl.bandY()))
+			}
+			for _, point := range []struct {
+				text string
+				row  int
+				want MouseTarget
+			}{
+				{"long title", 0, TargetSidebarTitle},
+				{"gpt-4", 0, TargetSidebarModel},
+				{"openai", 1, TargetSidebarModel},
+				{"(high)", 1, TargetSidebarThinkingLevel},
+				{"$", 1, TargetSidebarUsage},
+			} {
+				before, _, found := strings.Cut(lines[point.row], point.text)
+				require.True(t, found, "%q is visible", point.text)
+				x, y := styles.AppPadding+ansi.StringWidth(before), sl.bandY()+point.row
+				assert.Equal(t, point.want, NewHitTest(p).At(x, y))
+				switch point.want {
+				case TargetSidebarModel:
+					_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+					require.NotNil(t, cmd)
+					assert.IsType(t, msgtypes.OpenModelPickerMsg{}, cmd())
+				case TargetSidebarThinkingLevel:
+					_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+					require.NotNil(t, cmd)
+					assert.Equal(t, msgtypes.CycleSidebarThinkingMsg{TabID: "owning-tab", AgentName: "root", ModelRef: "openai/gpt-4"}, cmd())
+				}
+			}
+		})
+	}
 }

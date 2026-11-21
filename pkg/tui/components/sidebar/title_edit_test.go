@@ -152,7 +152,7 @@ func TestSidebar_TitleRegenerating(t *testing.T) {
 	assert.Nil(t, cmd, "should return nil command when stopping")
 }
 
-func TestSidebar_HandleClickType_WrappedTitle_Collapsed(t *testing.T) {
+func TestSidebar_HandleClickType_ClippedTitle_Collapsed(t *testing.T) {
 	t.Parallel()
 
 	sess := session.New()
@@ -164,7 +164,7 @@ func TestSidebar_HandleClickType_WrappedTitle_Collapsed(t *testing.T) {
 	m.titleGenerated = true
 	m.mode = ModeCollapsed
 
-	// Set a narrow width that will cause wrapping
+	// Set a narrow width that will cause clipping
 	m.width = 10
 
 	// Use a title long enough to wrap: "☆ " (2) + "LongTitle" (9) + " ✎" (2) = 13 chars
@@ -172,17 +172,13 @@ func TestSidebar_HandleClickType_WrappedTitle_Collapsed(t *testing.T) {
 
 	paddingLeft := m.layoutCfg.PaddingLeft // 1
 
-	// Title wraps to multiple lines - clicks on any title line should return ClickTitle
-	titleLines := m.titleLineCount()
-	assert.Greater(t, titleLines, 1, "title should wrap to multiple lines")
-
 	// Click on line 0 (first title line) after star should return ClickTitle
 	result, _ := sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "click on first title line should return ClickTitle")
 
-	// Click on line 1 (wrapped title line) should also return ClickTitle
+	// A clipped title never inherits a hit target on the second row.
 	result, _ = sb.HandleClickType(paddingLeft+1, 1)
-	assert.Equal(t, ClickTitle, result, "click on wrapped title line should return ClickTitle")
+	assert.NotEqual(t, ClickTitle, result)
 
 	// Star should still be clickable on line 0
 	result, _ = sb.HandleClickType(paddingLeft+1, 0)
@@ -371,8 +367,8 @@ func TestSidebar_HandleClickType_HiddenPath_Collapsed(t *testing.T) {
 
 	// The row after the title must not keep a copyable hit target; with the
 	// path hidden the usage reading moves up into that row instead.
-	result, _ := sb.HandleClickType(paddingLeft+1, m.titleLineCount())
-	assert.Equal(t, ClickUsageContext, result, "a hidden path must not be clickable; the usage line's context segment takes the row")
+	result, _ := sb.HandleClickType(paddingLeft+1, 1)
+	assert.Equal(t, ClickNone, result, "the hidden path must not own the empty space to the left of usage")
 
 	result, _ = sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "the title stays clickable")
