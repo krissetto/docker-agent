@@ -211,3 +211,22 @@ func TestRemoveNonexistentTab(t *testing.T) {
 	// Should not error — just a no-op.
 	require.NoError(t, store.RemoveTab(ctx, "does-not-exist"))
 }
+
+func TestReorderVisibleTabsKeepsUnavailableSlots(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := t.Context()
+	for _, id := range []string{"first", "unavailable", "last"} {
+		require.NoError(t, store.AddTab(ctx, id, "/saved/"+id))
+	}
+	require.NoError(t, store.SetActiveTab(ctx, "unavailable"))
+	require.NoError(t, store.ReorderVisibleTabs(ctx, []string{"last", "unsaved", "first", "first"}))
+	tabs, active, err := store.GetTabs(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []TabEntry{
+		{SessionID: "last", WorkingDir: "/saved/last"},
+		{SessionID: "unavailable", WorkingDir: "/saved/unavailable"},
+		{SessionID: "first", WorkingDir: "/saved/first"},
+	}, tabs)
+	assert.Equal(t, "unavailable", active)
+}

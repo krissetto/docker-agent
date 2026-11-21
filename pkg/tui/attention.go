@@ -57,12 +57,12 @@ func (m *appModel) refreshTabs() tea.Cmd {
 	}
 	tabs, active := m.supervisor.GetTabs()
 	previous := m.tabBar.Height()
-	m.tabBar.SetTabs(tabs, active)
+	cmd := m.tabBar.SetTabs(tabs, active)
 	m.statusBar.SetShowNewTab(m.tabBar.Height() == 0)
 	if previous != m.tabBar.Height() {
-		return m.resizeAll()
+		return tea.Batch(cmd, m.resizeAll())
 	}
-	return nil
+	return cmd
 }
 
 // replayPendingEvent consumes prompts only as they are opened, synchronously and in FIFO order.

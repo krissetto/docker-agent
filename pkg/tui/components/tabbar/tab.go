@@ -30,9 +30,6 @@ const (
 	// dragSourceColorBoost controls how much the drag source tab is blended toward
 	// the active tab colors when it is not the active tab.
 	dragSourceColorBoost = 0.4
-	// dragBystanderDimAmount controls how much non-dragged tabs are faded toward
-	// their background during drag-and-drop.
-	dragBystanderDimAmount = 0.65
 )
 
 // Tab represents a single rendered tab in the tab bar.
@@ -56,9 +53,8 @@ func (t Tab) MainZoneEnd() int { return t.mainZoneEnd }
 type dragRole int
 
 const (
-	dragRoleNone      dragRole = iota // no drag in progress
-	dragRoleSource                    // this tab is being dragged
-	dragRoleBystander                 // another tab is being dragged; dim this one
+	dragRoleNone   dragRole = iota // no drag in progress
+	dragRoleSource                 // this tab is being dragged
 )
 
 // blendColors mixes two colors by the given ratio (0 = a, 1 = b).
@@ -78,9 +74,6 @@ func blendColors(a, b color.Color, ratio float64) color.Color {
 // the tab's background, so it works in any theme without manual tuning.
 // Indicator colors (running, attention) preserve their semantic hue but are
 // automatically boosted when contrast against the tab background is too low.
-//
-// When role is dragRoleBystander, all foreground colors are faded toward the
-// background to visually de-emphasize tabs that aren't being dragged.
 func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed time.Duration) Tab {
 	title := info.Title
 	if title == "" {
@@ -112,13 +105,6 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	// Close button color derived from this tab's background.
 	closeFg := styles.MutedContrastFg(bgColor)
 
-	// Fade all foreground elements when this tab is a bystander during drag.
-	if role == dragRoleBystander {
-		fgColor = blendColors(fgColor, bgColor, dragBystanderDimAmount)
-		barColor = blendColors(barColor, bgColor, dragBystanderDimAmount)
-		closeFg = blendColors(closeFg, bgColor, dragBystanderDimAmount)
-	}
-
 	// Helper: every segment gets the same background.
 	pad := lipgloss.NewStyle().Background(bgColor)
 
@@ -136,15 +122,9 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		// Attention takes priority over running: replace the streaming dot
 		// with a warning-colored indicator so it's obvious the tab needs action.
 		attnFg := styles.EnsureContrast(styles.Warning, bgColor)
-		if role == dragRoleBystander {
-			attnFg = blendColors(attnFg, bgColor, dragBystanderDimAmount)
-		}
 		content += lipgloss.NewStyle().Foreground(attnFg).Background(bgColor).Bold(true).Render(attentionIndicator)
 	case info.IsRunning && !info.IsActive:
 		runFg := styles.EnsureContrast(styles.TabAccentFg, bgColor)
-		if role == dragRoleBystander {
-			runFg = blendColors(runFg, bgColor, dragBystanderDimAmount)
-		}
 		frame := animation.Card.FrameAt(elapsed)
 		content += lipgloss.NewStyle().Foreground(runFg).Background(bgColor).Render(frame + " ")
 	default:

@@ -1027,6 +1027,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		msg = accepted
 		cmds := []tea.Cmd{m.updateChatCmd(msg)}
+		if m.tabBar != nil {
+			m.tabBar.Update(msg)
+		}
 		// Update working spinner
 		if m.activeTab.chatPage.IsWorking() {
 			model, cmd := m.workingSpinner.Update(msg)
@@ -1068,8 +1071,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCloseTab(msg.SessionID)
 
 	case messages.ReorderTabMsg:
-		m.handleReorderTab(msg)
-		return m, nil
+		cmd := m.handleReorderTab(msg)
+		return m, cmd
 
 	case messages.ToggleSidebarMsg:
 		if m.hideSidebar {
@@ -1140,6 +1143,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.BlurMsg:
 		m.focused = false
+		if m.tabBar != nil {
+			m.tabBar.Update(msg)
+		}
 		return m, nil
 
 	case tea.FocusMsg:
@@ -2168,7 +2174,7 @@ func (m *appModel) applySidebarCollapsed(sessionID string) tea.Cmd {
 }
 
 // handleReorderTab moves a tab from one position to another.
-func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) {
+func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) tea.Cmd {
 	m.supervisor.ReorderTab(msg.FromIdx, msg.ToIdx)
 
 	if m.tuiStore != nil {
@@ -2177,10 +2183,11 @@ func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) {
 		for i, tab := range tabs {
 			ids[i] = m.persistedSessionID(tab.SessionID)
 		}
-		if err := m.tuiStore.ReorderTab(m.ctx(), ids); err != nil {
+		if err := m.tuiStore.ReorderVisibleTabs(m.ctx(), ids); err != nil {
 			slog.Warn("Failed to persist tab reorder", "error", err)
 		}
 	}
+	return m.refreshTabs()
 }
 
 // handleCloseTab closes a session tab.
@@ -2438,6 +2445,9 @@ var (
 
 // handleKeyPress handles all keyboard input with proper priority routing.
 func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.Code == tea.KeyEscape && m.tabBar != nil && (m.tabBar.IsDragging() || m.tabBar.HasFloatingOverlay()) {
+		return m, m.tabBar.Update(msg)
+	}
 	if key.Matches(msg, sidebarPlanCancelKey) && m.sidebarPlanEditInFlight {
 		m.cancelSidebarPlanEdit()
 		return m, nil
@@ -2737,12 +2747,13 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 			adjustedMsg := msg
 			adjustedMsg.X = msg.X - styles.AppPadding
 			adjustedMsg.Y = msg.Y - m.contentHeight - 1
-			if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
-				return m, cmd
-			}
-			return m, nil
+			return m, m.tabBar.Click(adjustedMsg)
 		}
 		return m.forwardDialog(msg)
+	}
+
+	if m.tabBar.IsDragging() && msg.Button != tea.MouseLeft {
+		return m, m.tabBar.Update(msg)
 	}
 
 	region := m.hitTestRegion(msg.Y)
@@ -3176,7 +3187,7 @@ func (m *appModel) composeView() tea.View {
 	baseView := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
 
 	// Handle overlays
-	hasOverlays := m.dialogMgr.Open() || m.notification.Open() || m.completions.Open() || m.tour.Active()
+	hasOverlays := m.tabBar.HasFloatingOverlay() || m.dialogMgr.Open() || m.notification.Open() || m.completions.Open() || m.tour.Active()
 
 	if hasOverlays {
 		baseLayer := lipgloss.NewLayer(baseView)
@@ -3187,6 +3198,10 @@ func (m *appModel) composeView() tea.View {
 		// step it teaches (palette, tool approval…) is never hidden by it.
 		if tourLayer := m.tour.Layer(); tourLayer != nil {
 			allLayers = append(allLayers, tourLayer)
+		}
+
+		if drag := m.tabBar.FloatingOverlay(); drag != nil && !m.dialogMgr.Open() {
+			allLayers = append(allLayers, lipgloss.NewLayer(drag.Content).X(drag.X+styles.AppPadding).Y(m.contentHeight+1))
 		}
 
 		if m.dialogMgr.Open() {
@@ -3309,6 +3324,9 @@ func (m *appModel) Shutdown() {
 // wedged cleanup or arm parallel safety nets.
 func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
+		if m.tabBar != nil {
+			m.tabBar.StopAnimation()
+		}
 		if m.cancelSpeech != nil {
 			m.cancelSpeech()
 		}

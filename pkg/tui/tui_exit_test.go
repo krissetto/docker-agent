@@ -14,6 +14,7 @@ import (
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tour"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -29,6 +31,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // mockChatPage implements chat.Page for testing.
@@ -156,6 +159,65 @@ func TestRootViewCacheInvalidatesOnlyForDirtyAcceptedTick(t *testing.T) {
 		assert.Equal(t, 2, page.views)
 		sub.Stop()
 	})
+}
+
+func TestRootTickAdvancesTabDragAndInvalidatesCache(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m, _ := newTestModel(t)
+		m.activeTab.chatPage = &countingChatPage{text: "stable"}
+		m.ar = animation.NewRuntime()
+		m.tabBar = tabbar.New(m.ar, 0)
+		m.tabBar.SetTabs([]messages.TabInfo{
+			{SessionID: "a", Title: "First", IsActive: true},
+			{SessionID: "b", Title: "Second"},
+			{SessionID: "c", Title: "Third"},
+		}, 0)
+		m.tabBar.View()
+		m.tabBar.Update(tea.MouseClickMsg{X: 2, Button: tea.MouseLeft})
+		cmd := m.tabBar.Update(tea.MouseMotionMsg{X: 50, Button: tea.MouseLeft})
+		require.NotNil(t, cmd)
+		generation := m.tabBar.VisualGeneration()
+		m.viewCacheValid = true
+		m.update(cmd())
+		assert.False(t, m.viewCacheValid)
+		assert.Greater(t, m.tabBar.VisualGeneration(), generation)
+
+		m.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyEscape})
+		assert.False(t, m.tabBar.IsDragging())
+		assert.Zero(t, m.ar.ActiveCount())
+	})
+}
+
+func TestRootCompositesFloatingTabAndCancelsItWhenDialogOpens(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.activeTab.chatPage = &countingChatPage{text: "stable"}
+	m.activeTab.sessionState = &service.SessionState{}
+	m.ready = true
+	m.width, m.contentHeight = 70, 1
+	m.ar = animation.NewRuntime()
+	m.tabBar = tabbar.New(m.ar, 0)
+	m.tabBar.SetWidth(m.width - appPaddingHorizontal)
+	m.tabBar.SetTabs([]messages.TabInfo{
+		{SessionID: "a", Title: "Lifted", IsActive: true},
+		{SessionID: "b", Title: "Nearby"},
+	}, 0)
+	m.View()
+	y := m.contentHeight + 1
+	m.update(tea.MouseClickMsg{X: styles.AppPadding + 2, Y: y, Button: tea.MouseLeft})
+	m.update(tea.MouseMotionMsg{X: styles.AppPadding + 25, Y: y, Button: tea.MouseLeft})
+	layer := m.tabBar.FloatingOverlay()
+	require.NotNil(t, layer)
+	assert.NotContains(t, ansi.Strip(m.tabBar.View()), "Lifted")
+	rows := strings.Split(ansi.Strip(m.View().Content), "\n")
+	require.Greater(t, len(rows), y)
+	prefix, _, found := strings.Cut(rows[y], "Lifted")
+	require.True(t, found)
+	assert.Equal(t, styles.AppPadding+layer.X+2, ansi.StringWidth(prefix))
+
+	m.update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	assert.False(t, m.tabBar.IsDragging())
+	assert.Nil(t, m.tabBar.FloatingOverlay())
+	assert.Zero(t, m.ar.ActiveCount())
 }
 
 // mockEditor implements editor.Editor for testing.

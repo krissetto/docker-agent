@@ -159,6 +159,37 @@ func (s *Store) ReorderTab(ctx context.Context, sessionIDs []string) error {
 	return tx.Commit()
 }
 
+// ReorderVisibleTabs changes the relative order of the stored visible tabs
+// without changing the slots occupied by saved tabs that are unavailable.
+func (s *Store) ReorderVisibleTabs(ctx context.Context, sessionIDs []string) error {
+	saved, _, err := s.GetTabs(ctx)
+	if err != nil {
+		return err
+	}
+	persisted := make(map[string]bool, len(saved))
+	for _, tab := range saved {
+		persisted[tab.SessionID] = true
+	}
+	visible := make(map[string]bool, len(sessionIDs))
+	live := make([]string, 0, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if persisted[id] && !visible[id] {
+			visible[id] = true
+			live = append(live, id)
+		}
+	}
+	order := make([]string, 0, len(saved))
+	for _, tab := range saved {
+		if visible[tab.SessionID] {
+			order = append(order, live[0])
+			live = live[1:]
+		} else {
+			order = append(order, tab.SessionID)
+		}
+	}
+	return s.ReorderTab(ctx, order)
+}
+
 // UpdateTabWorkingDir updates the stored working directory for the given session.
 func (s *Store) UpdateTabWorkingDir(ctx context.Context, sessionID, workingDir string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tabs SET working_dir = ? WHERE session_id = ?`, workingDir, sessionID)
