@@ -1859,7 +1859,6 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 		// Create new reasoning block
 		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-		block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 		block.SetSize(m.contentWidth(), 0)
 
 		blockMsg := &types.Message{
@@ -2278,27 +2277,6 @@ func (m *model) lastMessage() *types.Message {
 	return m.messages[len(m.messages)-1]
 }
 
-// showReasoningAgentBadge reports whether a new reasoning block for agentName
-// should render its agent badge. Mirrors message.sameAgentAsPrevious: the
-// badge is hidden only when the block visually continues content from the
-// same agent (assistant text, reasoning, or tool activity). In particular, a
-// transfer_task tool call is sent by the parent agent, so reasoning from the
-// sub-agent that follows it shows the sub-agent's badge.
-func showReasoningAgentBadge(previous *types.Message, agentName string) bool {
-	if previous == nil || previous.Sender != agentName {
-		return true
-	}
-	switch previous.Type {
-	case types.MessageTypeAssistant,
-		types.MessageTypeAssistantReasoningBlock,
-		types.MessageTypeToolCall,
-		types.MessageTypeToolResult:
-		return false
-	default:
-		return true
-	}
-}
-
 // addReasoningBlock creates a new reasoning block message.
 //
 // Reasoning blocks routinely interleave with an actively streaming assistant
@@ -2319,7 +2297,6 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	}
 
 	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, reasoningblock.WithToolRenderers(m.toolRenderers))
-	block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)
 
@@ -2391,7 +2368,7 @@ func (m *model) createToolCallView(msg *types.Message) layout.Model {
 }
 
 func (m *model) createMessageView(msg *types.Message) layout.Model {
-	view := message.New(m.ar, msg, m.sessionState.PreviousMessage())
+	view := message.New(m.ar, msg, nil)
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }
