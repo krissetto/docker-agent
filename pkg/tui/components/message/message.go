@@ -87,11 +87,14 @@ type messageModel struct {
 	// mdRenderer is reused across renders of an assistant message so that
 	// streamed-in chunks only re-render the trailing block instead of the whole
 	// accumulated markdown each time.
-	mdRenderer        *markdown.IncrementalRenderer
-	streamLines       assistantStreamLines
-	segmentCodeBlocks []markdown.CodeBlock
-	contentBuf        strings.Builder
-	imageScanOffset   int
+	mdRenderer  *markdown.IncrementalRenderer
+	streamLines assistantStreamLines
+	// themeGeneration is the styles palette identity the cached renders were built with.
+	themeGeneration      uint64
+	agentColorGeneration uint64
+	segmentCodeBlocks    []markdown.CodeBlock
+	contentBuf           strings.Builder
+	imageScanOffset      int
 
 	// finalized is set by Finalize() once the message is no longer the active
 	// streaming view. After it is set, Render() still produces correct output,
@@ -361,7 +364,27 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 	return lineIdx >= height-3
 }
 
+// ensureTheme drops every cached render when the palette changes. Cached output
+// embeds colors, so a generation change must rebuild it.
+func (mv *messageModel) ensureTheme() {
+	theme, agent := styles.ThemeGeneration(), styles.AgentColorGeneration()
+	if mv.agentColorGeneration != agent {
+		mv.agentColorGeneration = agent
+		mv.renderCache = renderCache{}
+	}
+	if mv.themeGeneration == theme {
+		return
+	}
+	mv.themeGeneration = theme
+	mv.renderCache = renderCache{}
+	mv.streamLines = assistantStreamLines{}
+	if mv.mdRenderer != nil {
+		mv.mdRenderer.Reset()
+	}
+}
+
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
+	mv.ensureTheme()
 	msg := mv.message
 	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 || len(msg.AssistantMedia) != 0 {
 		return AssistantSegments{}, false
@@ -436,6 +459,7 @@ func (mv *messageModel) View() string {
 // calls with the same inputs (very common during streaming, hover tracking,
 // and from Height()) skip the expensive markdown parse.
 func (mv *messageModel) Render(width int) string {
+	mv.ensureTheme()
 	msg := mv.message
 
 	// Spinner-driven types (MessageTypeSpinner, MessageTypeLoading, and an empty
