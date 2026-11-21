@@ -645,7 +645,7 @@ func TestFollowUpFlow_BusyAgent_UsesRuntimeFollowUpQueue(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "do this next", FollowUp: true})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "do this next", FollowUp: true})
 
 	require.NotNil(t, cmd)
 	assert.IsType(t, followUpSentMsg{}, cmd())
@@ -667,7 +667,7 @@ func TestSteerFlow_BusyAgent_SteersMessage(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "extra context"})
 
 	require.NotNil(t, cmd)
 	assert.Empty(t, p.messageQueue, "steered messages must not enter the local queue")
@@ -688,13 +688,13 @@ func TestOptionUpRestoresAllPendingMessageTypes(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "first steer"})
+	_, steerCmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "first steer"})
 	steerResult := steerCmd()
 	_, _ = p.Update(steerResult)
-	_, followCmd := p.handleSendMsg(messages.SendMsg{Content: "then follow up", FollowUp: true})
+	_, followCmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "then follow up", FollowUp: true})
 	followResult := followCmd()
 	_, _ = p.Update(followResult)
-	p.enqueueMessage(messages.SendMsg{Content: "locally queued", Queue: true})
+	p.enqueueMessage(messages.SendMsg{Composer: true, Content: "locally queued", Queue: true})
 
 	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
 
@@ -715,7 +715,7 @@ func TestConsumedSteerIsNotRestored(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "already consumed"})
+	_, steerCmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "already consumed"})
 	_, _ = p.Update(steerCmd())
 	require.Len(t, p.pendingMessages, 1)
 	p.consumePendingMessage("already consumed")
@@ -738,7 +738,7 @@ func TestSteerFlow_ExplicitQueue_SkipsSteering(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: true})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "for later", Queue: true})
 
 	require.NotNil(t, cmd)
 	require.Len(t, p.messageQueue, 1)
@@ -757,7 +757,7 @@ func TestSteerFlow_QueueSendMode_QueuesPlainSend(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess), WithSendMode(messages.SendModeQueue)).(*chatPage)
 	p.working = true
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "for later"})
 
 	require.NotNil(t, cmd)
 	require.Len(t, p.messageQueue, 1)
@@ -766,7 +766,7 @@ func TestSteerFlow_QueueSendMode_QueuesPlainSend(t *testing.T) {
 
 	// Switching back to steer mid-session restores steering.
 	p.SetSendMode(messages.SendModeSteer)
-	_, cmd = p.handleSendMsg(messages.SendMsg{Content: "right away"})
+	_, cmd = p.handleSendMsg(messages.SendMsg{Composer: true, Content: "right away"})
 	require.NotNil(t, cmd)
 	assert.IsType(t, steerSentMsg{}, cmd())
 	require.Len(t, rt.steered(), 1)
@@ -784,7 +784,7 @@ func TestSteerFlow_SteerRejected_FallsBackToQueue(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "extra context"})
 	require.NotNil(t, cmd)
 
 	failed, ok := cmd().(steerFailedMsg)
@@ -814,7 +814,7 @@ func TestSteerFlow_ForkSkillWhileBusy_Queues(t *testing.T) {
 	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/services please"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "/services please"})
 
 	require.NotNil(t, cmd)
 	require.Len(t, p.messageQueue, 1)
@@ -829,7 +829,7 @@ func TestSteerFlow_NoApp_FallsBackToQueue(t *testing.T) {
 
 	p := newTestChatPage(t)
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "hello"})
+	_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "hello"})
 
 	require.NotNil(t, cmd)
 	require.Len(t, p.messageQueue, 1)

@@ -99,13 +99,14 @@ type LayoutSettings struct {
 	// ActiveAgentsOnly filters the sidebar's Agents roster to agents active
 	// in the current session. Presentation-only: agent cycling and switching
 	// still address the full team.
-	ActiveAgentsOnly bool
-	HideSessionPath  bool
-	HideUsage        bool
-	HideAgents       bool
-	HideTools        bool
-	ShowPlans        bool
-	HideTodos        bool
+	ActiveAgentsOnly       bool
+	HideSessionPath        bool
+	HideUsage              bool
+	HideAgents             bool
+	HideTools              bool
+	ShowPlans              bool
+	HideTodos              bool
+	AlignInputWithMessages bool
 }
 
 // SendMode identifies what happens to a plain send while the agent is
@@ -163,6 +164,7 @@ type Preferences struct {
 	HideToolResults               bool
 	RenderImages                  bool
 	ShowBanner                    bool
+	HideSingleTab                 bool
 	TopMargin                     bool
 	FadeScrollEdges               bool
 	YOLO                          bool

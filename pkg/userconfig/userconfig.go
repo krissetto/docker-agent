@@ -78,7 +78,8 @@ type Settings struct {
 	// Defaults to true when not set.
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
 	// TopMargin adds a blank row above the TUI in terminals taller than 24 rows.
-	TopMargin bool `yaml:"top_margin,omitempty"`
+	TopMargin     bool `yaml:"top_margin,omitempty"`
+	HideSingleTab bool `yaml:"hide_single_tab,omitempty"`
 	// FadeScrollEdges dims viewport edges when content is hidden.
 	// Defaults to true when not set.
 	FadeScrollEdges *bool `yaml:"fade_scroll_edges,omitempty"`
@@ -187,6 +188,8 @@ type LayoutSettings struct {
 	ShowPlans bool `yaml:"show_plans,omitempty"`
 	// HideTodos hides the todo list section in the sidebar.
 	HideTodos bool `yaml:"hide_todos,omitempty"`
+	// AlignInputWithMessages docks the composer under the transcript when a vertical sidebar is visible.
+	AlignInputWithMessages bool `yaml:"align_input_with_messages,omitempty"`
 }
 
 // GetLayout returns the layout settings, falling back to defaults when unset.

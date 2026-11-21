@@ -84,10 +84,10 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	for range 20 {
 		d.Update(down)
 	}
-	require.Equal(t, rowTopMargin, d.selected[tabAppearance], "down must stop at the last row")
+	require.Equal(t, rowAlignInputWithMessages, d.selected[tabAppearance], "down must stop at the last row")
 
 	d.Update(up)
-	require.Equal(t, rowShowBanner, d.selected[tabAppearance])
+	require.Equal(t, rowTopMargin, d.selected[tabAppearance])
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {

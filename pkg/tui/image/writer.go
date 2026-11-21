@@ -134,16 +134,30 @@ func (w *Writer) SetRowOffset(rowOffset int) {
 	}
 }
 
+type ForegroundLayer struct {
+	Bounds       image.Rectangle
+	ImageContent string
+}
+
 // SetContent extracts placements from the text frame and clips them around foreground layers.
-func (w *Writer) SetContent(content string, foreground ...image.Rectangle) string {
+func (w *Writer) SetContent(content string, foreground ...ForegroundLayer) string {
 	clean, overlays := extractOverlays(content)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.enabled || !w.supported {
 		overlays = nil
-	}
-	for _, area := range foreground {
-		overlays = clipOverlays(overlays, area)
+	} else {
+		for _, layer := range foreground {
+			overlays = clipOverlays(overlays, layer.Bounds)
+			if strings.Contains(layer.ImageContent, markerPrefix) {
+				images := extractMarkerOverlays(strings.Split(layer.ImageContent, "\n"))
+				for i := range images {
+					images[i].x += layer.Bounds.Min.X
+					images[i].y += layer.Bounds.Min.Y
+				}
+				overlays = append(overlays, images...)
+			}
+		}
 	}
 	if !sameOverlays(w.base, overlays) {
 		w.base = overlays

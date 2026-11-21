@@ -117,6 +117,7 @@ type (
 		Attachments []Attachment // Attached files or inline content (e.g. pastes)
 		BypassQueue bool         // Process immediately even while the agent is working.
 		Queue       bool         // Force local end-of-turn queueing regardless of the configured send mode.
+		Composer    bool         // Plain composer sends honor the busy-send preference.
 		FollowUp    bool         // Enqueue as a runtime follow-up when the agent is working.
 	}
 

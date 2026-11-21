@@ -23,7 +23,8 @@ func (m *appModel) syncNotificationAvoidance() tea.Cmd {
 	cells := m.notificationOccupied[:0]
 	if m.focusedPanel == PanelEditor && !m.dialogMgr.Open() && !m.paneHidden && m.editorTop() < m.height {
 		if input, ok := m.activeTab.editor.(editor.TextOccupancy); ok {
-			cells = input.AppendOccupiedTextCells(cells, image.Pt(0, m.editorTop()))
+			d := m.composerDock()
+			cells = input.AppendOccupiedTextCells(cells, image.Pt(d.x, d.editorTop))
 		}
 	}
 	m.notificationOccupied = cells

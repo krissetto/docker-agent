@@ -449,3 +449,17 @@ func deriveEmphasisBg(hex string) color.Color {
 	nr, ng, nb := hslToRGB(h, s, l)
 	return lipgloss.Color(RGBToHex(nr, ng, nb))
 }
+
+// raisedEditorColor gives the input its own surface in themes predating editor_bg.
+func raisedEditorColor(colors ThemeColors) color.Color {
+	if colors.EditorBg != "" {
+		return lipgloss.Color(colors.EditorBg)
+	}
+	r, g, b := ColorToRGB(lipgloss.Color(colors.Background))
+	target := 1.0
+	if relativeLuminance(r, g, b) > 0.5 {
+		target = 0
+	}
+	const lift = 0.05
+	return RGBToColor(r+(target-r)*lift, g+(target-g)*lift, b+(target-b)*lift)
+}

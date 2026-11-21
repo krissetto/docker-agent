@@ -146,7 +146,7 @@ func TestWriterClipsSingleVisibleUpscaledMarkerRow(t *testing.T) {
 	assert.NotContains(t, commands, "\x1b_Ga=t,")
 
 	// A foreground mask at the image edge must retain the later row's source offset.
-	writer.SetContent(lines[15], stdimage.Rect(2, 0, 3, 1))
+	writer.SetContent(lines[15], ForegroundLayer{Bounds: stdimage.Rect(2, 0, 3, 1)})
 	commands = writeFrame()
 	require.Equal(t, 1, strings.Count(commands, "\x1b_Ga=p,"))
 	assert.Contains(t, commands, "\x1b[1;4H\x1b_Ga=p,")

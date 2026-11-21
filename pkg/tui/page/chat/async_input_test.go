@@ -67,7 +67,7 @@ func TestAsyncInputRoutesToOriginatingTab(t *testing.T) {
 				t.Cleanup(func() { Cleanup(p) })
 				p.SetRoutingID("origin")
 				p.working = true
-				_, cmd := p.handleSendMsg(messages.SendMsg{Content: "original input", FollowUp: follow})
+				_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "original input", FollowUp: follow})
 				done := make(chan tea.Msg, 1)
 				go func() { done <- cmd() }()
 				<-rt.started
@@ -98,7 +98,7 @@ func TestAsyncInputRejectsReplacementPage(t *testing.T) {
 			a := app.New(t.Context(), rt, sess)
 			old := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 			old.working = true
-			_, cmd := old.handleSendMsg(messages.SendMsg{Content: "old input", FollowUp: follow})
+			_, cmd := old.handleSendMsg(messages.SendMsg{Composer: true, Content: "old input", FollowUp: follow})
 			result := cmd()
 			Cleanup(old)
 			replacement := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
@@ -122,7 +122,7 @@ func TestAsyncInputRetiredWhileEnqueueIsBlocked(t *testing.T) {
 			sess := session.New()
 			p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 			p.working = true
-			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "old input", FollowUp: follow})
+			_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "old input", FollowUp: follow})
 			done := make(chan tea.Msg, 1)
 			go func() { done <- cmd() }()
 			<-rt.started
@@ -144,7 +144,7 @@ func TestAsyncInputRetiredBeforeCommandStarts(t *testing.T) {
 			sess := session.New()
 			p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
 			p.working = true
-			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "cancelled", FollowUp: follow})
+			_, cmd := p.handleSendMsg(messages.SendMsg{Composer: true, Content: "cancelled", FollowUp: follow})
 			Cleanup(p)
 			assert.Nil(t, cmd())
 			assert.Empty(t, rt.steered())
@@ -159,7 +159,7 @@ func TestStaleInputResultDoesNotRedispatchTimers(t *testing.T) {
 	a := app.New(t.Context(), &steerRecordingRuntime{}, sess)
 	old := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	old.working = true
-	_, cmd := old.handleSendMsg(messages.SendMsg{Content: "old"})
+	_, cmd := old.handleSendMsg(messages.SendMsg{Composer: true, Content: "old"})
 	result := cmd()
 	Cleanup(old)
 	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)

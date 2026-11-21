@@ -191,6 +191,11 @@ type Page interface {
 	// standalone adapter, which dispatches all effects as visible.
 	UpdateEffects(msg tea.Msg) (Page, Effects)
 	VisualGeneration() uint64
+	ActiveContextUsage() (used, limit int64, known bool)
+}
+
+func (p *chatPage) ActiveContextUsage() (used, limit int64, known bool) {
+	return p.sidebar.ActiveContextUsage()
 }
 
 func (p *chatPage) VisualGeneration() uint64 { return p.messages.VisualGeneration() }
@@ -199,6 +204,7 @@ func (p *chatPage) SidebarVisualGeneration() uint64 {
 }
 
 type queuedMessage struct {
+	bypassQueue    bool
 	id             string
 	content        string
 	runtimeContent string
@@ -379,6 +385,12 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 	}
 
 	return l
+}
+
+// ComposerColumn is the page-space transcript column, excluding its outer padding.
+func (p *chatPage) ComposerColumn() (x, width int, visible bool) {
+	l := p.computeSidebarLayout()
+	return styles.AppPadding + l.chatStartX, l.chatWidth, l.mode == sidebarVertical
 }
 
 // KeyMap defines key bindings for the chat page
@@ -1133,7 +1145,7 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, notification.WarningCmd("Session is read-only. No new messages can be sent.")
 	}
 
-	if msg.BypassQueue || isBangCommand(msg.Content) {
+	if isBangCommand(msg.Content) {
 		cmd := p.processMessage(msg)
 		return p, cmd
 	}
@@ -1157,7 +1169,7 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// queue holds it until the turn ends. Queue-flagged messages (internal
 	// fallbacks) always queue, and so do fork-mode skills — they spawn
 	// their own stream, which cannot attach to the running one.
-	if msg.Queue || p.app == nil || p.sendMode == msgtypes.SendModeQueue || p.isForkSkillCommand(msg.Content) {
+	if msg.Queue || p.app == nil || !msg.Composer || p.sendMode == msgtypes.SendModeQueue || p.isForkSkillCommand(msg.Content) {
 		cmd := p.enqueueMessage(msg)
 		return p, cmd
 	}
@@ -1183,6 +1195,7 @@ func (p *chatPage) enqueueMessage(msg msgtypes.SendMsg) tea.Cmd {
 	// Add to queue
 	p.pendingSequence++
 	p.messageQueue = append(p.messageQueue, queuedMessage{
+		bypassQueue: msg.BypassQueue,
 		content:     msg.Content,
 		attachments: msg.Attachments,
 		order:       p.pendingSequence,
@@ -1481,6 +1494,7 @@ func (p *chatPage) processNextQueuedMessage() tea.Cmd {
 	msg := msgtypes.SendMsg{
 		Content:     queued.content,
 		Attachments: queued.attachments,
+		BypassQueue: queued.bypassQueue,
 	}
 
 	return p.processMessage(msg)

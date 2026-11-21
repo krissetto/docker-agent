@@ -68,7 +68,7 @@ func TestAsyncInputResultStaysOnOriginTab(t *testing.T) {
 					m.initSessionComponents(tabID, a, sess)
 					origin := m.activeTab
 					_, _ = origin.chatPage.Update(&runtime.StreamStartedEvent{SessionID: sess.ID})
-					_, cmd := m.Update(messages.SendMsg{Content: "original input", FollowUp: followUp})
+					_, cmd := m.Update(messages.SendMsg{Composer: true, Content: "original input", FollowUp: followUp})
 					done := make(chan tea.Msg, 1)
 					go func() { done <- cmd() }()
 					select {
@@ -122,7 +122,7 @@ func TestAsyncInputResultAfterTabLifecycleChange(t *testing.T) {
 				m.bindTabSession(id, original.ID)
 				m.initSessionComponents(id, a, original)
 				_, _ = m.activeTab.chatPage.Update(&runtime.StreamStartedEvent{SessionID: original.ID})
-				_, cmd := m.Update(messages.SendMsg{Content: "old input"})
+				_, cmd := m.Update(messages.SendMsg{Composer: true, Content: "old input"})
 				done := make(chan tea.Msg, 1)
 				go func() { done <- cmd() }()
 				<-rt.started
@@ -180,7 +180,7 @@ func TestHiddenTabDispatchesAsyncSubmission(t *testing.T) {
 				_, _ = origin.chatPage.Update(&runtime.StreamStartedEvent{SessionID: sess.ID})
 				_, _ = m.handleSpawnSession("/other")
 
-				_, cmd := m.Update(messages.RoutedMsg{SessionID: id, Inner: messages.SendMsg{Content: "hidden input", FollowUp: followUp}})
+				_, cmd := m.Update(messages.RoutedMsg{SessionID: id, Inner: messages.SendMsg{Composer: true, Content: "hidden input", FollowUp: followUp}})
 				require.NotNil(t, cmd, "submission is local work, not a visible UI effect")
 				close(rt.release)
 				result := cmd()

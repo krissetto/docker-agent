@@ -56,7 +56,9 @@ const (
 	rowHideToolResults
 	rowRenderImages
 	rowShowBanner
+	rowHideSingleTab
 	rowTopMargin
+	rowAlignInputWithMessages
 	appearanceRowCount
 )
 
@@ -322,6 +324,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Layout.HideSessionPath = !d.current.Layout.HideSessionPath
 		case rowUsage:
 			d.current.Layout.HideUsage = !d.current.Layout.HideUsage
+		case rowAlignInputWithMessages:
+			d.current.Layout.AlignInputWithMessages = !d.current.Layout.AlignInputWithMessages
 		case rowAgents:
 			d.current.Layout.HideAgents = !d.current.Layout.HideAgents
 		case rowActiveAgents:
@@ -344,6 +348,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.RenderImages = !d.current.RenderImages
 		case rowShowBanner:
 			d.current.ShowBanner = !d.current.ShowBanner
+		case rowHideSingleTab:
+			d.current.HideSingleTab = !d.current.HideSingleTab
 		case rowTopMargin:
 			d.current.TopMargin = !d.current.TopMargin
 		}
@@ -441,9 +447,13 @@ func (d *settingsDialog) View() string {
 	width := min(d.ComputeDialogWidth(settingsWidthPercent, settingsMinWidth, settingsMaxWidth), max(8, d.Width()))
 	frame := styles.DialogStyle.Padding(0, 2).Width(width)
 	inner := max(1, width-frame.GetHorizontalFrameSize())
-	height := min(d.Height(), settingsMaxHeight)
+	maxHeight := settingsMaxHeight
+	if d.showVisuals {
+		maxHeight++ // Make room for composer alignment alongside the existing controls.
+	}
+	height := min(d.Height(), maxHeight)
 	if d.Height() >= 28 {
-		height = min(d.Height()-2, settingsMaxHeight)
+		height = min(d.Height()-2, maxHeight)
 	}
 	header := NewContent(inner).AddTitle("Settings").AddSpace().AddContent(d.renderTabBar(inner)).AddSpace().Build()
 	footer := d.renderFooter(inner, max(2, height-frame.GetVerticalFrameSize()-lipgloss.Height(header)-3))
@@ -580,7 +590,11 @@ func (d *settingsDialog) renderAppearanceTab(content *settingsContent, width int
 	toggle(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	toggle(rowRenderImages, "Render images", d.current.RenderImages)
 	toggle(rowShowBanner, "Show startup banner", d.current.ShowBanner)
+	toggle(rowHideSingleTab, "Hide tabs when only one session is open", d.current.HideSingleTab)
 	toggle(rowTopMargin, "Show top margin", d.current.TopMargin)
+	if d.showVisuals {
+		toggle(rowAlignInputWithMessages, "Align input with messages", d.current.Layout.AlignInputWithMessages)
+	}
 }
 
 func (d *settingsDialog) renderPreview() string {
@@ -644,7 +658,7 @@ func (d *settingsDialog) renderFooter(width, maxHeight int) string {
 		switch d.selected[d.tab] {
 		case rowTheme:
 			enter, detail = "open", ""
-		case rowPosition, rowSpacing, rowInfoMode, rowSessionPath, rowUsage, rowAgents, rowActiveAgents, rowTools, rowPlans, rowTodos:
+		case rowPosition, rowSpacing, rowInfoMode, rowSessionPath, rowUsage, rowAgents, rowActiveAgents, rowTools, rowPlans, rowTodos, rowAlignInputWithMessages:
 			detail = "Layout previews live. Esc restores the previous layout."
 		}
 	}
@@ -666,7 +680,6 @@ func (d *settingsDialog) renderFooter(width, maxHeight int) string {
 	if d.confirmYOLO {
 		style = styles.WarningStyle
 	}
-	detail = style.Render(ansi.Wrap(detail, width, ""))
 	bindings := []string{"↑↓", "move", "←→/space", "change", "tab", "category", "enter", enter, "esc", "cancel"}
 	if HelpKeysWidth(bindings...) > width {
 		bindings = bindings[4:]
@@ -674,6 +687,7 @@ func (d *settingsDialog) renderFooter(width, maxHeight int) string {
 	actions := renderSettingsHelp(width, bindings...)
 	parts := []string{"", actions}
 	if detail != "" {
+		detail = style.Render(ansi.Wrap(detail, width, ""))
 		parts = []string{"", detail, actions}
 	}
 	if lipgloss.Height(strings.Join(parts, "\n")) > maxHeight && !d.confirmYOLO {

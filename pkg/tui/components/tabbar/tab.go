@@ -81,7 +81,7 @@ func blendColors(a, b color.Color, ratio float64) color.Color {
 //
 // When role is dragRoleBystander, all foreground colors are faded toward the
 // background to visually de-emphasize tabs that aren't being dragged.
-func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed time.Duration) Tab {
+func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed time.Duration, closeHover float64) Tab {
 	title := info.Title
 	if title == "" {
 		title = defaultTabTitle
@@ -97,7 +97,9 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		fgColor = styles.TabActiveFg
 		barColor = styles.TabBorder // bright accent for focused tab
 	} else {
-		bgColor = styles.TabBg
+		// Keep idle tabs on the shell, rather than giving them a second
+		// raised surface that competes with the active editor.
+		bgColor = styles.Background
 		fgColor = styles.TabInactiveFg
 		barColor = styles.TabInactiveFg // dim accent for inactive tab
 	}
@@ -140,12 +142,12 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 			attnFg = blendColors(attnFg, bgColor, dragBystanderDimAmount)
 		}
 		content += lipgloss.NewStyle().Foreground(attnFg).Background(bgColor).Bold(true).Render(attentionIndicator)
-	case info.IsRunning && !info.IsActive:
+	case info.IsRunning:
 		runFg := styles.EnsureContrast(styles.TabAccentFg, bgColor)
 		if role == dragRoleBystander {
 			runFg = blendColors(runFg, bgColor, dragBystanderDimAmount)
 		}
-		frame := animation.Card.FrameAt(elapsed)
+		frame := animation.TabBusy.FrameAt(elapsed)
 		content += lipgloss.NewStyle().Foreground(runFg).Background(bgColor).Render(frame + " ")
 	default:
 		content += pad.Render(" ")
@@ -154,8 +156,7 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 
 	mainEnd := lipgloss.Width(content)
 
-	closeBtn := lipgloss.NewStyle().Foreground(closeFg).Background(bgColor).Render(closeButtonText)
-	content += closeBtn + pad.Render(" ")
+	content += buttonStyle(bgColor, closeFg, closeHover, 0).Render(closeButtonText + " ")
 
 	width := lipgloss.Width(content)
 
