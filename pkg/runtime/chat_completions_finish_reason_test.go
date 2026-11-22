@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -16,10 +17,12 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 const (
 	ccContent   = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"partial answer"},"finish_reason":null}]}` + "\n\n"
+	ccToolCall  = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":null}]}` + "\n\n"
 	ccUsageOnly = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}` + "\n\n"
 	ccDone      = "data: [DONE]\n\n"
 )
@@ -129,6 +132,56 @@ func TestRunStream_ChatCompletionsFinishReason(t *testing.T) {
 			if tt.wantOutput > 0 {
 				require.NotNil(t, last)
 				assert.Equal(t, tt.want, last.FinishReason)
+				assert.Equal(t, tt.wantOutput, last.OutputTokens)
+			}
+		})
+	}
+}
+
+// TestRunStream_ChatCompletionsContentFilter: a content_filter finish (Azure
+// OpenAI, OpenAI moderation) must end the turn as a refusal, as the Responses
+// API path already does: the tool call streamed before it must not run, and
+// the usage chunk that follows must still be recorded.
+func TestRunStream_ChatCompletionsContentFilter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sse        string
+		wantOutput int64
+	}{
+		{"after a tool call, with usage chunk", ccToolCall + ccFinish("content_filter") + ccUsageOnly + ccDone, 3},
+		{"after text, with usage chunk", ccContent + ccFinish("content_filter") + ccUsageOnly + ccDone, 3},
+		{"after a tool call, no usage chunk", ccToolCall + ccFinish("content_filter") + ccDone, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, requests := newChatCompletionsClient(t, tt.sse)
+
+			var toolRuns atomic.Int64
+			lookup := tools.Tool{
+				Name:       "lookup",
+				Parameters: map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+				Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+					toolRuns.Add(1)
+					return tools.ResultSuccess("ok"), nil
+				},
+			}
+			root := agent.New("root", "test", agent.WithModel(client), agent.WithToolSets(newStubToolSet(nil, []tools.Tool{lookup}, nil)))
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+			require.NoError(t, err)
+
+			sess := session.New(session.WithUserMessage("hi"), session.WithToolsApproved(true))
+			sess.NonInteractive = true
+
+			finish, last := runChatCompletionsTurn(t, rt, sess)
+			assert.Equal(t, chat.FinishReasonRefusal, finish)
+			assert.Zero(t, toolRuns.Load(), "a filtered turn must not run its tool calls")
+			assert.Equal(t, int64(1), requests.Load(), "a refusal ends the run")
+			if tt.wantOutput > 0 {
+				require.NotNil(t, last)
 				assert.Equal(t, tt.wantOutput, last.OutputTokens)
 			}
 		})
