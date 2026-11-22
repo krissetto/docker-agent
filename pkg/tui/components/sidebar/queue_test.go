@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -19,7 +20,7 @@ func TestQueueSection_SingleMessage(t *testing.T) {
 
 	m.SetQueuedMessages("Hello world")
 
-	result := m.queueSection(40)
+	result := ansi.Strip(m.queueSection(40))
 
 	// Should contain the title with count
 	assert.Contains(t, result, "Queue (1)")
@@ -30,8 +31,7 @@ func TestQueueSection_SingleMessage(t *testing.T) {
 	// Should contain the clear hint
 	assert.Contains(t, result, "Ctrl+X to clear")
 
-	// Should use └ prefix for single (last) item
-	assert.Contains(t, result, "└")
+	assert.Contains(t, result, "- Hello world")
 }
 
 func TestQueueSection_MultipleMessages(t *testing.T) {
@@ -42,7 +42,7 @@ func TestQueueSection_MultipleMessages(t *testing.T) {
 
 	m.SetQueuedMessages("First", "Second", "Third")
 
-	result := m.queueSection(40)
+	result := ansi.Strip(m.queueSection(40))
 
 	// Should contain the title with count
 	assert.Contains(t, result, "Queue (3)")
@@ -55,9 +55,8 @@ func TestQueueSection_MultipleMessages(t *testing.T) {
 	// Should contain the clear hint
 	assert.Contains(t, result, "Ctrl+X to clear")
 
-	// Should have tree-style prefixes
-	assert.Contains(t, result, "├") // For non-last items
-	assert.Contains(t, result, "└") // For last item
+	assert.Contains(t, result, "- First")
+	assert.Contains(t, result, "- Third")
 }
 
 func TestQueueSection_LongMessageTruncation(t *testing.T) {

@@ -1,17 +1,14 @@
 package sidebar
 
 import (
-	"strings"
 	"testing"
 
-	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/components/tab"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
@@ -94,17 +91,22 @@ func TestSidebar_AgentClickZones_EveryRenderedLineMapped(t *testing.T) {
 	}
 	assert.Positive(t, counts["agent1"], "agent1 should own rendered lines")
 	assert.Positive(t, counts["agent2"], "agent2 should own rendered lines")
-	// agent2 is a non-current roster agent: its mini-card spans the name line,
-	// the model line and one joined metric line at this width (the compact
-	// vocabulary renders, as agent1's preferred wide metric line would
-	// overflow), and ALL of them must map to it so a click on any card line
-	// switches to the agent.
-	assert.Equal(t, 3, counts["agent2"], "a roster agent owns every line of its card")
+	// agent2 is a non-current roster agent: its roster entry is the name row and
+	// the model row, and both must map to it so a click on either switches to
+	// the agent. Its metric lines live in the usage details block and are owned
+	// by it too.
+	assert.Equal(t, 2, counts["agent2"], "a roster agent owns both rows of its entry")
 
-	// The number of click zones equals the number of owned (non-blank) lines:
-	// every owned line is clickable.
+	// The number of click zones equals the number of owned (non-blank) lines
+	// across the roster and the expanded usage details: every owned line is
+	// clickable.
 	owned := 0
 	for _, owner := range m.agentLineOwners {
+		if owner != "" {
+			owned++
+		}
+	}
+	for _, owner := range m.agentUsageLineOwners {
 		if owner != "" {
 			owned++
 		}
@@ -128,13 +130,12 @@ func TestSidebar_BuildAgentClickZones_NoBlankSeparators(t *testing.T) {
 	m.agentLineOwners = []string{"agent1", "agent2", "agent3"}
 
 	const agentSectionStart = 5
-	m.buildAgentClickZones(agentSectionStart)
+	m.buildAgentClickZones(agentSectionStart, 0)
 
-	const tabHeaderLines = 2
 	require.Len(t, m.agentClickZones, 3)
-	assert.Equal(t, "agent1", m.agentClickZones[agentSectionStart+tabHeaderLines+0])
-	assert.Equal(t, "agent2", m.agentClickZones[agentSectionStart+tabHeaderLines+1])
-	assert.Equal(t, "agent3", m.agentClickZones[agentSectionStart+tabHeaderLines+2])
+	assert.Equal(t, "agent1", m.agentClickZones[agentSectionStart])
+	assert.Equal(t, "agent2", m.agentClickZones[agentSectionStart+1])
+	assert.Equal(t, "agent3", m.agentClickZones[agentSectionStart+2])
 }
 
 // TestSidebar_BuildAgentClickZones_SkipsBlankOwners verifies that blank
@@ -151,40 +152,12 @@ func TestSidebar_BuildAgentClickZones_SkipsBlankOwners(t *testing.T) {
 	m.agentLineOwners = []string{"agent1", "agent1", "", "agent2"}
 
 	const agentSectionStart = 0
-	m.buildAgentClickZones(agentSectionStart)
+	m.buildAgentClickZones(agentSectionStart, 0)
 
-	const tabHeaderLines = 2
 	require.Len(t, m.agentClickZones, 3)
-	assert.Equal(t, "agent1", m.agentClickZones[tabHeaderLines+0])
-	assert.Equal(t, "agent1", m.agentClickZones[tabHeaderLines+1])
-	_, blankMapped := m.agentClickZones[tabHeaderLines+2]
+	assert.Equal(t, "agent1", m.agentClickZones[0])
+	assert.Equal(t, "agent1", m.agentClickZones[1])
+	_, blankMapped := m.agentClickZones[2]
 	assert.False(t, blankMapped, "blank separator line should not be clickable")
-	assert.Equal(t, "agent2", m.agentClickZones[tabHeaderLines+3])
-}
-
-// TestTabHeaderLineCount pins the number of rendered lines that tab.Render emits
-// before the body content starts. buildAgentClickZones hard-codes this value as
-// tabHeaderLines=2 (title row + TabStyle top padding); if tab.Render or TabStyle
-// ever changes its structure, this test fails immediately rather than letting
-// click-zone offsets drift silently.
-func TestTabHeaderLineCount(t *testing.T) {
-	t.Parallel()
-
-	const sentinel = "BODY_LINE_0"
-	rendered := tab.Render("Agents", sentinel, 40)
-	lines := strings.Split(ansi.Strip(rendered), "\n")
-
-	bodyLineIdx := -1
-	for i, l := range lines {
-		if strings.Contains(l, sentinel) {
-			bodyLineIdx = i
-			break
-		}
-	}
-	require.GreaterOrEqual(t, bodyLineIdx, 0, "sentinel body line not found in rendered tab")
-
-	const tabHeaderLines = 2 // must equal the constant in buildAgentClickZones
-	assert.Equal(t, tabHeaderLines, bodyLineIdx,
-		"tab header must be exactly %d lines before the body; update tabHeaderLines in buildAgentClickZones if this changes",
-		tabHeaderLines)
+	assert.Equal(t, "agent2", m.agentClickZones[3])
 }

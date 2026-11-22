@@ -3,6 +3,7 @@ package sidebar
 import (
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -96,9 +97,10 @@ func TestSidebar_HandleClickType(t *testing.T) {
 	// Default PaddingLeft is 1, so coordinates need to account for this
 	paddingLeft := m.layoutCfg.PaddingLeft // 1
 
-	// In vertical mode, the title line is at verticalStarY
-	// Click on the star area (adjusted x = 0-2, so raw x = 1-3)
-	result, _ := sb.HandleClickType(paddingLeft+1, verticalStarY)
+	// In vertical mode, the title starts on the first row
+	// Click on the star area after accounting for left padding.
+	_ = sb.View()
+	result, _ := sb.HandleClickType(paddingLeft+1, 0)
 	assert.Equal(t, ClickStar, result, "click on star area should return ClickStar")
 
 	// Set up a title with titleGenerated=true so ClickTitle can be returned
@@ -108,16 +110,16 @@ func TestSidebar_HandleClickType(t *testing.T) {
 	// Click anywhere on the title area (after star) should return ClickTitle
 	// Star "☆ " = 2 chars, so title area starts at position 2
 	titleX := paddingLeft + 3 // middle of title
-	result, _ = sb.HandleClickType(titleX, verticalStarY)
+	result, _ = sb.HandleClickType(titleX, 0)
 	assert.Equal(t, ClickTitle, result, "click on title area should return ClickTitle")
 
 	// Click at the end (where pencil icon is) should also return ClickTitle
 	pencilX := paddingLeft + 4
-	result, _ = sb.HandleClickType(pencilX, verticalStarY)
+	result, _ = sb.HandleClickType(pencilX, 0)
 	assert.Equal(t, ClickTitle, result, "click on pencil icon area should return ClickTitle")
 
 	// Click elsewhere (wrong y)
-	result, _ = sb.HandleClickType(10, 0)
+	result, _ = sb.HandleClickType(10, 1)
 	assert.Equal(t, ClickNone, result, "click elsewhere should return ClickNone")
 }
 
@@ -176,7 +178,7 @@ func TestSidebar_HandleClickType_WrappedTitle_Collapsed(t *testing.T) {
 	titleLines := m.titleLineCount()
 	assert.Greater(t, titleLines, 1, "title should wrap to multiple lines")
 
-	// Click on line 0 (first title line) after star should return ClickTitle
+	// Click on line 0 (first title line) after the star should return ClickTitle
 	result, _ := sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "click on first title line should return ClickTitle")
 
@@ -210,21 +212,21 @@ func TestSidebar_HandleClickType_WrappedTitle_Vertical(t *testing.T) {
 	paddingLeft := m.layoutCfg.PaddingLeft // 1
 
 	// Title wraps to multiple lines
-	titleLines := m.titleLineCount()
-	assert.Greater(t, titleLines, 1, "title should wrap to multiple lines")
+	_ = sb.View()
+	assert.Greater(t, m.verticalTitleLines, 1, "title should wrap to multiple lines")
 
-	// In vertical mode, title starts at verticalStarY
-	// Click on verticalStarY (first title line) after star should return ClickTitle
-	result, _ := sb.HandleClickType(paddingLeft+3, verticalStarY)
+	// In vertical mode, title starts on the first row
+	// Click on the first title line after the star should return ClickTitle
+	result, _ := sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "click on first title line should return ClickTitle")
 
-	// Click on verticalStarY+1 (wrapped title line) should also return ClickTitle
-	result, _ = sb.HandleClickType(paddingLeft+1, verticalStarY+1)
+	// Click on 1 (wrapped title line) should also return ClickTitle
+	result, _ = sb.HandleClickType(paddingLeft+1, 1)
 	assert.Equal(t, ClickTitle, result, "click on wrapped title line should return ClickTitle")
 
-	// Star should still be clickable on verticalStarY
-	result, _ = sb.HandleClickType(paddingLeft+1, verticalStarY)
-	assert.Equal(t, ClickStar, result, "star should still be clickable on verticalStarY")
+	// Star should still be clickable on the first title line
+	result, _ = sb.HandleClickType(paddingLeft+1, 0)
+	assert.Equal(t, ClickStar, result, "star should still be clickable on the first title line")
 }
 
 func TestSidebar_HandleClickType_NoWrap(t *testing.T) {
@@ -248,15 +250,15 @@ func TestSidebar_HandleClickType_NoWrap(t *testing.T) {
 	paddingLeft := m.layoutCfg.PaddingLeft
 
 	// Title should be on a single line
-	titleLines := m.titleLineCount()
-	assert.Equal(t, 1, titleLines, "title should be on single line when it doesn't wrap")
+	_ = sb.View()
+	assert.Equal(t, 1, m.verticalTitleLines, "title should be on single line when it doesn't wrap")
 
 	// Click on the title area should return ClickTitle
-	result, _ := sb.HandleClickType(paddingLeft+3, verticalStarY)
+	result, _ := sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "click on title should return ClickTitle")
 
 	// Star should still be clickable
-	result, _ = sb.HandleClickType(paddingLeft+1, verticalStarY)
+	result, _ = sb.HandleClickType(paddingLeft+1, 0)
 	assert.Equal(t, ClickStar, result, "star should still be clickable")
 }
 
@@ -277,20 +279,21 @@ func TestSidebar_HandleClickType_WorkingDir_Vertical(t *testing.T) {
 
 	paddingLeft := m.layoutCfg.PaddingLeft
 
-	// In vertical mode, working dir is at verticalStarY + titleLineCount + 1 (empty separator)
-	titleLines := m.titleLineCount()
-	wdY := verticalStarY + titleLines + 1
+	// In vertical mode, working dir follows the title and one separator row
+	_ = sb.View()
+	titleLines := m.verticalTitleLines
+	wdY := titleLines + 1
 
 	// Click on the working directory line
 	result, _ := sb.HandleClickType(paddingLeft+3, wdY)
 	assert.Equal(t, ClickWorkingDir, result, "click on working dir line should return ClickWorkingDir")
 
 	// Click on the title line should still return ClickTitle
-	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY)
+	result, _ = sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "click on title should still return ClickTitle")
 
 	// Click on the empty separator line should return ClickNone
-	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY+titleLines)
+	result, _ = sb.HandleClickType(paddingLeft+3, titleLines)
 	assert.Equal(t, ClickNone, result, "click on separator line should return ClickNone")
 }
 
@@ -341,13 +344,14 @@ func TestSidebar_HandleClickType_HiddenPath_Vertical(t *testing.T) {
 	m.SetSectionVisibility(SectionVisibility{HideSessionPath: true})
 
 	paddingLeft := m.layoutCfg.PaddingLeft
-	wdY := verticalStarY + m.titleLineCount() + 1
+	_ = sb.View()
+	wdY := m.verticalTitleLines + 1
 
 	// The line where the path used to be must not keep a copyable hit target.
 	result, _ := sb.HandleClickType(paddingLeft+3, wdY)
-	assert.Equal(t, ClickNone, result, "a hidden path must not be clickable")
+	assert.NotEqual(t, ClickWorkingDir, result, "a hidden path must not be clickable")
 
-	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY)
+	result, _ = sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "the title stays clickable")
 }
 
@@ -389,4 +393,38 @@ func TestSidebar_WorkingDirectory(t *testing.T) {
 	m.workingDirectory = "~/projects/myapp"
 
 	assert.Equal(t, "~/projects/myapp", sb.WorkingDirectory())
+}
+
+func TestSidebarExpandedTitleAndPathUseVisibleRows(t *testing.T) {
+	t.Parallel()
+
+	m := newVisibilityTestSidebar(t).model
+	m.sessionHasContent, m.titleGenerated = true, true
+	m.sessionTitle = "Title with words that wrap onto another row"
+	m.workingDirectory = "/work/a-long-directory-name-for-demo"
+	m.gitBranchName = "branch-name-that-is-too-long"
+	m.SetSize(24, 8)
+	m.SetMirroredPadding(true)
+	require.NotEmpty(t, m.View())
+	require.True(t, m.cachedNeedsScrollbar)
+	require.Greater(t, m.verticalTitleLines, 1)
+	require.Equal(t, 2, m.workingDirEnd-m.workingDirStart)
+	assert.Contains(t, ansi.Strip(m.cachedLines[m.workingDirStart]), "a-long-directory-nam…")
+	assert.Contains(t, ansi.Strip(m.cachedLines[m.workingDirStart+1]), "branch-name-that-is-…")
+	assert.Equal(t, "/work/a-long-directory-name-for-demo", m.WorkingDirectory(), "copy keeps the full path")
+
+	kind, _ := m.HandleClickType(0, 0)
+	assert.Equal(t, ClickStar, kind)
+	kind, _ = m.HandleClickType(2, 0)
+	assert.Equal(t, ClickTitle, kind, "the first title cell is not part of the star")
+	m.scrollview.SetScrollOffset(1)
+	_ = m.View()
+	kind, _ = m.HandleClickType(1, 0)
+	assert.Equal(t, ClickTitle, kind, "a scrolled title continuation remains editable")
+	kind, _ = m.HandleClickType(1, m.workingDirStart-2)
+	assert.Equal(t, ClickNone, kind, "the gap above the directory stays passive")
+	for y := m.workingDirStart; y < m.workingDirEnd; y++ {
+		kind, _ = m.HandleClickType(1, y-1)
+		assert.Equal(t, ClickWorkingDir, kind, "all directory and branch rows copy the directory")
+	}
 }

@@ -148,7 +148,7 @@ func TestPlanSidebar_StateAndCompactGeometry(t *testing.T) {
 func TestPlanSidebar_ScrollbarAndScrolledRows(t *testing.T) {
 	t.Parallel()
 	m := newPlanSidebar(t)
-	m.SetSize(30, 6)
+	m.SetSize(30, 4)
 	m.setPlans(messages.PlanSidebarDataMsg{Result: plans.ListResult{Plans: []plans.Plan{
 		{Name: "one", Version: new(1)}, {Name: "two", Version: new(2)},
 	}}})

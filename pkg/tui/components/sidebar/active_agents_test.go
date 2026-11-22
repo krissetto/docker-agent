@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
@@ -61,7 +62,7 @@ func TestActiveAgentsOnly_FiltersRosterToSessionParticipants(t *testing.T) {
 
 // TestActiveAgentsOnly_CurrentAgentFallback verifies the roster never goes
 // empty: with no participation recorded anywhere, the current agent still
-// renders, and the header reads the singular "Agent" for the filtered roster.
+// renders.
 func TestActiveAgentsOnly_CurrentAgentFallback(t *testing.T) {
 	t.Parallel()
 
@@ -69,10 +70,6 @@ func TestActiveAgentsOnly_CurrentAgentFallback(t *testing.T) {
 	m.SetActiveAgentsOnly(true)
 
 	assert.Equal(t, []string{"root"}, rosterOwners(m))
-
-	title := renderAgentPanel(m)[0]
-	assert.Contains(t, title, "Agent")
-	assert.NotContains(t, title, "Agents", "the header counts the filtered roster")
 }
 
 // TestActiveAgentsOnly_WorkingAgentVisible verifies an agent that is
@@ -128,10 +125,10 @@ func TestActiveAgentsOnly_TransferParticipantsVisibleWhileRelevant(t *testing.T)
 		"once the presentation clears, an evidence-less participant drops off")
 }
 
-// TestActiveAgentsOnly_PreservesShortcutIndices verifies a filtered roster
-// keeps each agent's original team index for the ^N switch shortcut, so the
-// shortcuts keep addressing the same team positions.
-func TestActiveAgentsOnly_PreservesShortcutIndices(t *testing.T) {
+// / TestActiveAgentsOnly_FilteredRosterRowsCarryNoShortcut verifies a filtered
+// roster renders each kept agent as its two roster rows, with no "^N" shortcut
+// on the name row.
+func TestActiveAgentsOnly_FilteredRosterRowsCarryNoShortcut(t *testing.T) {
 	t.Parallel()
 
 	m := newCompactPanelSidebar(t, 40, activeAgentsRoster()...)
@@ -139,9 +136,10 @@ func TestActiveAgentsOnly_PreservesShortcutIndices(t *testing.T) {
 	m.SetActiveAgentsOnly(true)
 
 	require.Equal(t, []string{"root", "reviewer"}, rosterOwners(m))
-	line1, _ := agentLines(m, "reviewer")
-	assert.Contains(t, line1, "^3", "reviewer keeps its original team shortcut")
-	assert.NotContains(t, line1, "^2")
+	line1, line2 := agentLines(m, "reviewer")
+	assert.Equal(t, "  reviewer", strings.TrimRight(line1, " "), "reviewer's name row")
+	assert.NotEmpty(t, strings.TrimSpace(line2), "reviewer's model row")
+	assert.NotContains(t, line1, "^", "no shortcut on the filtered roster")
 }
 
 // TestActiveAgentsOnly_CollapsedBandFiltered verifies the top/bottom band's

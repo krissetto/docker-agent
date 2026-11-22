@@ -322,8 +322,10 @@ func TestSetLayoutSettingsForwardsInfoModeToSidebar(t *testing.T) {
 		"the default layout renders the compact roster")
 
 	p.SetLayoutSettings(msgtypes.LayoutSettings{SidebarInfoMode: msgtypes.InfoModeDetailed})
-	assert.Contains(t, ansi.Strip(p.View()), "Eff high",
-		"detailed mode renders the labeled agent cards")
+	detailed := ansi.Strip(p.View())
+	require.Contains(t, detailed, "Eff high", "detailed mode renders the per-agent usage details")
+	assert.Less(t, strings.Index(detailed, "Eff high"), strings.Index(detailed, "▶ root"),
+		"the per-agent usage details render above the roster")
 
 	p.SetLayoutSettings(msgtypes.LayoutSettings{})
 	assert.NotContains(t, ansi.Strip(p.View()), "Eff high",

@@ -65,15 +65,13 @@ func (s SectionSpacing) BlankLines() int {
 	}
 }
 
-// SidebarInfoMode identifies how the vertical sidebar's Agents section
-// renders each agent.
+// SidebarInfoMode controls the detail shown in the expanded sidebar's usage area.
 type SidebarInfoMode string
 
 const (
-	// InfoModeCompact is the default two-line-per-agent roster.
+	// InfoModeCompact shows only the session usage summary.
 	InfoModeCompact SidebarInfoMode = "compact"
-	// InfoModeDetailed renders each agent as a mini-card with labeled
-	// Effort / Context / Cost metrics.
+	// InfoModeDetailed adds per-agent Effort / Context / Cost metrics.
 	InfoModeDetailed SidebarInfoMode = "detailed"
 )
 
@@ -89,7 +87,7 @@ func ParseSidebarInfoMode(raw string) SidebarInfoMode {
 
 // LayoutSettings describes the user-customizable TUI layout: where the
 // sidebar sits, which of its optional sections are rendered, how much
-// space separates them, and how the Agents section renders each agent.
+// space separates them, and how much usage detail to show.
 // The zero value is the default layout (sidebar on the right, all sections
 // except Plans visible, normal spacing, compact agent info, full team roster).
 type LayoutSettings struct {

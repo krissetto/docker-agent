@@ -79,7 +79,7 @@ func TestSidebarScrollKeepsChatPaneFresh(t *testing.T) {
 		t.Run(string(position), func(t *testing.T) {
 			p := newLayoutTestPage(t, position)
 			p.SetSize(p.width, p.height)
-			require.NoError(t, p.sidebar.SetTodos(&tools.ToolCallResult{Meta: []todo.Todo{{Status: "pending", Description: strings.Repeat("long TODO ", 100)}}}))
+			require.NoError(t, p.sidebar.SetTodos(&tools.ToolCallResult{Meta: []todo.Todo{{Status: "pending", Description: strings.Repeat("long TODO ", 200)}}}))
 			child := &countingMessages{Model: p.messages}
 			p.messages = child
 			p.messages.AddUserMessage("first message")

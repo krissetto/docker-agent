@@ -45,8 +45,10 @@ func TestAgentRosterShowsPerAgentContextPercent(t *testing.T) {
 
 	assert.Contains(t, agentMetrics(m, "root"), "Ctx 30%",
 		"root's card shows its own labeled context percent")
-	_, rootLine2 := agentLines(m, "root")
-	assert.Contains(t, rootLine2, "anthropic/opus", "model text stays on line 2")
+	rootLine1, rootLine2 := agentLines(m, "root")
+	assert.Equal(t, "▶ root", strings.TrimRight(rootLine1, " "), "row 1 is the marker and name")
+	assert.Equal(t, "  opus", strings.TrimRight(rootLine2, " "), "row 2 shows the bare model")
+	assert.NotContains(t, strings.Join(agentBody(m), "\n"), "%", "roster rows carry no context percent")
 
 	assert.Contains(t, agentMetrics(m, "developer"), "Ctx 42%",
 		"developer's card shows its own labeled context percent")
@@ -117,8 +119,8 @@ func TestAgentContextPercent_BackgroundAgentUsage(t *testing.T) {
 		"the main context gauge keeps tracking the active session, not the background one")
 }
 
-// TestAgentCardMetricLinesFitNarrowWidth verifies the labeled metrics wrap
-// into lines that never exceed the content width at the minimum sidebar
+// / TestAgentCardMetricLinesFitNarrowWidth verifies the usage-details metric lines
+// wrap into lines that never exceed the content width at the minimum sidebar
 // width, instead of colliding with or truncating one another.
 func TestAgentCardMetricLinesFitNarrowWidth(t *testing.T) {
 	t.Parallel()
@@ -130,13 +132,20 @@ func TestAgentCardMetricLinesFitNarrowWidth(t *testing.T) {
 
 	contentWidth := m.contentWidth(false)
 	card := agentCard(m, "root")
-	require.NotEmpty(t, card)
+	require.Len(t, card, 2, "the roster entry is its name and model rows")
 	for _, line := range card {
 		assert.LessOrEqualf(t, lipgloss.Width(line), contentWidth,
-			"card line must fit the content width: %q", line)
+			"roster row must fit the content width: %q", line)
 	}
 
-	metrics := strings.Join(card[2:], "\n")
+	metricLines := agentMetricLines(m, "root")
+	require.NotEmpty(t, metricLines)
+	for _, line := range metricLines {
+		assert.LessOrEqualf(t, lipgloss.Width(line), contentWidth,
+			"metric line must fit the content width: %q", line)
+	}
+
+	metrics := strings.Join(metricLines, "\n")
 	assert.Contains(t, metrics, "Eff high", "the compact effort label keeps its semantic value")
 	assert.NotContains(t, metrics, gaugePattern(4), "the decorative gauge is omitted at the minimum width")
 	assert.Contains(t, metrics, "Ctx 100%", "the compact context label keeps its percent")

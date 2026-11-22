@@ -55,6 +55,7 @@ func (m *model) plansSection(width int) (string, []planClickZone) {
 		lines = append(lines, toolcommon.TruncateText(text, max(1, width)))
 		zones = append(zones, zone)
 	}
+	add(styles.MutedStyle.Render(fmt.Sprintf("All plans (%d)", len(m.planData.Result.Plans))), planClickZone{kind: ClickPlanBrowser})
 	switch {
 	case m.planData.Err != nil:
 		label := "Plans unavailable; refresh to retry"
@@ -80,9 +81,8 @@ func (m *model) plansSection(width int) (string, []planClickZone) {
 			add(styles.MutedStyle.Render(p.Status), zone)
 		}
 	}
-	add(styles.MutedStyle.Render(fmt.Sprintf("All plans (%d)", len(m.planData.Result.Plans))), planClickZone{kind: ClickPlanBrowser})
 	add(styles.MutedStyle.Render("Refresh plans"), planClickZone{kind: ClickPlanRefresh})
-	return m.renderTab("Plans", strings.Join(lines, "\n"), width), zones
+	return styles.RenderComposite(styles.TabPrimaryStyle, strings.Join(lines, "\n")), zones
 }
 
 func (m *model) plansSummary() string {

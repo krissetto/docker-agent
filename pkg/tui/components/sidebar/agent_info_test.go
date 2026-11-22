@@ -196,3 +196,15 @@ func TestSetAgentInfo_CompactionAttribution(t *testing.T) {
 	assert.Empty(t, m.agentCompactionModel)
 	assert.Zero(t, m.agentPrimaryLimit)
 }
+
+func TestSetAgentInfoClearsStaleModelEffort(t *testing.T) {
+	t.Parallel()
+
+	m := newVisibilityTestSidebar(t).model
+	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "openai", Model: "gpt-4o", Thinking: "high"}})
+	m.SetAgentInfo("root", "openai/gpt-4o", "", 0, "", 0)
+	assert.Equal(t, "high", m.availableAgents[0].Thinking)
+
+	m.SetAgentInfo("root", "dmr/ai/llama3.2", "", 0, "", 0)
+	assert.Empty(t, m.availableAgents[0].Thinking, "the old model's effort must not carry over")
+}

@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -36,7 +37,7 @@ func TestTransferOutboundStaysUntilMinDespiteEarlyActivity(t *testing.T) {
 	assert.Equal(t, -1, transferRelationIndex(m), "the minimum window hides the box once activity was seen")
 	assert.False(t, m.transferAnimation.IsActive(), "nothing animated is left once the box hid")
 	require.Len(t, m.agentTransfers, 1, "the logical hop survives its hidden box")
-	assert.Contains(t, renderAgentPanel(m)[0], "↔", "the header keeps hinting at the in-flight delegation")
+	assert.Contains(t, strings.Join(agentBody(m), "\n"), "↔", "the sidebar keeps hinting at the in-flight delegation")
 
 	// The max cutoff of the acknowledged hop is a no-op.
 	fireHopTimer(t, m, "Scout", "Coder", transferTimerMax)
@@ -140,7 +141,7 @@ func TestTransferReturnPresentationAndExpiry(t *testing.T) {
 	expireReturn(t, m)
 	assert.Equal(t, -1, transferRelationIndex(m), "the Return expires on its own window")
 	assert.False(t, m.transferAnimation.IsActive(), "the subscription ends when nothing is animated")
-	assert.NotContains(t, renderAgentPanel(m)[0], "↔", "no delegation is left in flight")
+	assert.NotContains(t, strings.Join(agentBody(m), "\n"), "↔", "no delegation is left in flight")
 }
 
 // TestTransferReturnDoesNotRestoreAckedOuter verifies an outer hop whose box
@@ -162,7 +163,7 @@ func TestTransferReturnDoesNotRestoreAckedOuter(t *testing.T) {
 	assert.Equal(t, -1, transferRelationIndex(m), "the acknowledged outer hop is not restored")
 	assert.False(t, m.transferAnimation.IsActive())
 	require.Len(t, m.agentTransfers, 1, "the outer hop is still tracked logically")
-	assert.Contains(t, renderAgentPanel(m)[0], "↔", "the header still hints at the outer delegation")
+	assert.Contains(t, strings.Join(agentBody(m), "\n"), "↔", "the sidebar still hints at the outer delegation")
 }
 
 // TestTransferCollapsedSummaryShowsRelation verifies the collapsed band's info

@@ -36,10 +36,10 @@ func TestRenderSections_AllVisibleByDefault(t *testing.T) {
 	s := newVisibilityTestSidebar(t)
 	out := renderedSections(s)
 
-	assert.Contains(t, out, "Token Usage")
-	assert.Contains(t, out, "Agent")
-	assert.Contains(t, out, "Tools")
+	assert.Contains(t, out, "◉")
+	assert.Contains(t, out, "▶ root")
 	assert.Contains(t, out, "12 tools available")
+	assert.NotContains(t, out, "──", "the expanded pane does not draw section dividers")
 }
 
 func TestRenderSections_HideUsage(t *testing.T) {
@@ -49,8 +49,8 @@ func TestRenderSections_HideUsage(t *testing.T) {
 	s.SetSectionVisibility(SectionVisibility{HideUsage: true})
 	out := renderedSections(s)
 
-	assert.NotContains(t, out, "Token Usage")
-	assert.Contains(t, out, "Tools", "other sections stay visible")
+	assert.NotContains(t, out, "◉")
+	assert.Contains(t, out, "12 tools available", "other sections stay visible")
 }
 
 func TestRenderSections_HideTools(t *testing.T) {
@@ -61,7 +61,7 @@ func TestRenderSections_HideTools(t *testing.T) {
 	out := renderedSections(s)
 
 	assert.NotContains(t, out, "12 tools available")
-	assert.Contains(t, out, "Token Usage")
+	assert.Contains(t, out, "◉")
 }
 
 func TestRenderSections_HideSessionPath(t *testing.T) {
@@ -72,20 +72,22 @@ func TestRenderSections_HideSessionPath(t *testing.T) {
 	s.gitBranchName = "main"
 
 	out := renderedSections(s)
-	require.Contains(t, out, "~/projects/myapp (main)")
+	require.Contains(t, out, "myapp")
+	assert.NotContains(t, out, "~/projects")
+	require.Contains(t, out, "main")
 	visibleLines := len(s.renderSections(40))
 
 	s.SetSectionVisibility(SectionVisibility{HideSessionPath: true})
 	out = renderedSections(s)
 
-	assert.NotContains(t, out, "~/projects/myapp")
-	assert.NotContains(t, out, "(main)", "the branch suffix goes with the path")
-	assert.Contains(t, out, "Session", "the session tab and title stay visible")
-	assert.Contains(t, out, "Token Usage", "other sections stay visible")
+	assert.NotContains(t, out, "myapp")
+	assert.NotContains(t, out, "main", "the branch goes with the path")
+	assert.Contains(t, out, s.sessionTitle, "the session title stays visible")
+	assert.Contains(t, out, "◉", "other sections stay visible")
 
 	hiddenLines := len(s.renderSections(40))
-	assert.Equal(t, visibleLines-2, hiddenLines,
-		"hiding the path drops its line and separator without leaving a blank row")
+	assert.Equal(t, visibleLines-3, hiddenLines,
+		"hiding the path drops the path, branch, and separator without leaving a blank row")
 }
 
 func TestRenderSections_HideAgentsClearsClickZones(t *testing.T) {
@@ -99,7 +101,7 @@ func TestRenderSections_HideAgentsClearsClickZones(t *testing.T) {
 	s.SetSectionVisibility(SectionVisibility{HideAgents: true})
 	out := renderedSections(s)
 
-	assert.NotContains(t, out, "openai/gpt-4")
+	assert.NotContains(t, out, "gpt-4")
 	assert.Empty(t, s.agentClickZones, "hidden agents must not keep stale click zones")
 }
 
@@ -225,11 +227,11 @@ func TestCollapsedLineCount_GrowsWithInfoLine(t *testing.T) {
 	assert.Equal(t, withoutInfo+1, withInfo, "the info line adds one band line")
 }
 
-// sectionTitleGap returns the number of consecutive blank lines immediately
-// above the rendered line containing title, or -1 when the title is absent.
-func sectionTitleGap(lines []string, title string) int {
+// blockGap returns the number of consecutive blank lines immediately
+// above the rendered line containing text, or -1 when absent.
+func blockGap(lines []string, text string) int {
 	for i, line := range lines {
-		if !strings.Contains(ansi.Strip(line), title) {
+		if !strings.Contains(ansi.Strip(line), text) {
 			continue
 		}
 		gap := 0
@@ -246,11 +248,11 @@ func TestRenderSections_SectionGap(t *testing.T) {
 
 	s := newVisibilityTestSidebar(t)
 
-	for _, gap := range []int{1, 2, 3} {
+	for _, gap := range []int{0, 1, 2} {
 		s.SetSectionGap(gap)
 		lines := s.renderSections(40)
-		assert.Equal(t, gap, sectionTitleGap(lines, "Token Usage"), "gap %d before Token Usage", gap)
-		assert.Equal(t, gap, sectionTitleGap(lines, "Tools"), "gap %d before Tools", gap)
+		assert.Equal(t, gap, blockGap(lines, "◉"), "gap %d before usage", gap)
+		assert.Equal(t, gap, blockGap(lines, "12 tools available"), "gap %d before tools", gap)
 	}
 }
 
@@ -288,7 +290,7 @@ func TestSetSectionGap_NoopWhenUnchanged(t *testing.T) {
 	s.SetSectionGap(defaultSectionGap)
 	assert.False(t, s.cacheDirty, "identical gap must not invalidate the cache")
 
-	s.SetSectionGap(1)
+	s.SetSectionGap(2)
 	assert.True(t, s.cacheDirty)
 }
 

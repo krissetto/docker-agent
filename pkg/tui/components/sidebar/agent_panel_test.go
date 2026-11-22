@@ -47,13 +47,10 @@ func renderAgentPanel(m *model) []string {
 	return strings.Split(out, "\n")
 }
 
-const tabHeaderLines = 2 // tab title + TabStyle top padding before the body
-
-// agentBody returns the ANSI-stripped panel body lines aligned 1:1 with
-// m.agentLineOwners (populated as a side effect of rendering).
-func agentBody(m *model) (body []string) {
+// agentBody returns the panel rows aligned 1:1 with m.agentLineOwners.
+func agentBody(m *model) []string {
 	lines := renderAgentPanel(m)
-	return lines[tabHeaderLines : tabHeaderLines+len(m.agentLineOwners)]
+	return lines[:len(m.agentLineOwners)]
 }
 
 // agentCard returns all ANSI-stripped content lines owned by the named agent:
@@ -69,8 +66,8 @@ func agentCard(m *model, name string) []string {
 	return lines
 }
 
-// agentLines returns the first two ANSI-stripped content lines owned by the
-// named agent: line1 (name + shortcut) and line2 (provider/model).
+// / agentLines returns the two ANSI-stripped roster rows owned by the named
+// agent: line1 (marker and name) and line2 (the muted model).
 func agentLines(m *model, name string) (line1, line2 string) {
 	card := agentCard(m, name)
 	switch len(card) {
@@ -82,14 +79,44 @@ func agentLines(m *model, name string) (line1, line2 string) {
 	return card[0], card[1]
 }
 
-// agentMetrics returns the joined ANSI-stripped metric line(s) of the named
-// agent's card (everything after the name and model lines).
-func agentMetrics(m *model, name string) string {
-	card := agentCard(m, name)
-	if len(card) <= 2 {
-		return ""
+// / agentUsageLines returns the trimmed, ANSI-stripped lines of the expanded
+// per-agent usage block (agentUsageDetails) at the content width, along with
+// each line's owning agent (agentUsageLineOwners; the heading is unowned).
+// The renderer is called directly, so the helper works in either info mode.
+func agentUsageLines(m *model) (lines, owners []string) {
+	out := m.agentUsageDetails(m.contentWidth(false))
+	if out == "" {
+		return nil, nil
 	}
-	return strings.Join(card[2:], "\n")
+	lines = strings.Split(ansi.Strip(out), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " ")
+	}
+	return lines, m.agentUsageLineOwners
+}
+
+// / agentMetricLines returns the metric lines the expanded usage block renders
+// for the named agent: every line owned by that agent after its label row. The
+// label row is the agent's name; the heading and separators are unowned.
+func agentMetricLines(m *model, name string) []string {
+	lines, owners := agentUsageLines(m)
+	var metrics []string
+	for i, owner := range owners {
+		if owner != name {
+			continue
+		}
+		if lines[i] == name {
+			continue
+		}
+		metrics = append(metrics, lines[i])
+	}
+	return metrics
+}
+
+// agentMetrics returns the joined metric line(s) of the named agent from the
+// expanded usage details block (see agentMetricLines).
+func agentMetrics(m *model, name string) string {
+	return strings.Join(agentMetricLines(m, name), "\n")
 }
 
 func TestClassifyThinking(t *testing.T) {
@@ -114,10 +141,11 @@ func TestClassifyThinking(t *testing.T) {
 	}
 }
 
-// TestAgentEntryLayout verifies an agent renders as a labeled mini-card:
-// line 1 carries the name and "^N" shortcut (no description), line 2 the
-// provider/model, and the metric lines the labeled effort gauge, context and
-// cost. Rendered wide enough (56) for the full metric vocabulary.
+// / TestAgentEntryLayout verifies an agent renders as a two-row roster entry:
+// row 1 carries the marker and name, row 2 the bare model (no provider, no
+// shortcut, no description). The labeled metrics live in the expanded usage
+// details, not on the roster. Rendered wide enough (56) for the full metric
+// vocabulary.
 func TestAgentEntryLayout(t *testing.T) {
 	t.Parallel()
 
@@ -126,19 +154,19 @@ func TestAgentEntryLayout(t *testing.T) {
 	)
 
 	line1, line2 := agentLines(m, "root")
-	require.NotEmpty(t, line1)
-	assert.Contains(t, line1, "root", "line 1 shows the agent name")
-	assert.Contains(t, line1, "^1", "line 1 shows the switch shortcut")
-	assert.NotContains(t, line1, "Executive assistant", "description is not shown")
-	assert.Contains(t, line2, "anthropic/claude-opus-4-8", "line 2 shows the provider/model")
+	assert.Equal(t, "▶ root", strings.TrimRight(line1, " "), "row 1 is the marker and name only")
+	assert.Equal(t, "  claude-opus-4-8", strings.TrimRight(line2, " "), "row 2 shows the bare model, no provider")
+	assert.Len(t, agentCard(m, "root"), 2, "the roster entry is exactly two rows")
+
+	body := strings.Join(agentBody(m), "\n")
+	assert.NotContains(t, body, "Executive assistant", "description is not shown anywhere")
+	assert.NotContains(t, body, "anthropic", "the roster carries no provider")
+	assert.NotContains(t, body, "^1", "the roster carries no shortcut")
 
 	metrics := agentMetrics(m, "root")
 	assert.Contains(t, metrics, "Effort "+gaugePattern(4)+" high", "metrics carry the labeled full effort gauge with its value")
 	assert.Contains(t, metrics, "Context —", "metrics carry the labeled context (unknown before any run)")
 	assert.Contains(t, metrics, "Cost —", "metrics carry the labeled cost (unknown before any run)")
-
-	body := strings.Join(agentBody(m), "\n")
-	assert.NotContains(t, body, "Executive assistant", "description is not shown anywhere")
 }
 
 // TestCurrentAgentMarker verifies the current agent is marked with ▶ while the
@@ -160,7 +188,7 @@ func TestCurrentAgentMarker(t *testing.T) {
 	assert.Contains(t, rootLine1, "▶", "current agent is marked with ▶")
 	assert.NotContains(t, firstLine1, "▶", "non-current agents have no marker")
 
-	// Each agent owns exactly its card's content lines; separators are unowned.
+	// Each agent owns exactly its two roster rows; separators are unowned.
 	counts := map[string]int{}
 	blanks := 0
 	for _, owner := range m.agentLineOwners {
@@ -171,15 +199,15 @@ func TestCurrentAgentMarker(t *testing.T) {
 		counts[owner]++
 	}
 	for _, name := range []string{"first", "root", "last"} {
-		assert.Equalf(t, len(agentCard(m, name)), counts[name], "agent %q owns exactly its card lines", name)
-		assert.GreaterOrEqualf(t, counts[name], 3, "agent %q renders at least name, model and one metric line", name)
+		assert.Equalf(t, 2, counts[name], "agent %q owns exactly its two roster rows", name)
+		assert.Equalf(t, len(agentCard(m, name)), counts[name], "agent %q card matches its owned rows", name)
 	}
 	assert.Positive(t, blanks, "entries are separated by blank, unowned lines")
 }
 
-// TestShortcutAtRightmost verifies the "^N" shortcut is the last visible content
-// on the name line: nothing is rendered to the right of it.
-func TestShortcutAtRightmost(t *testing.T) {
+// / TestRosterNameLinesCarryNoShortcut verifies the roster name row holds only
+// the marker and the agent name: no "^N" shortcut, no thinking badge.
+func TestRosterNameLinesCarryNoShortcut(t *testing.T) {
 	t.Parallel()
 
 	m := newAgentPanelSidebar(t, 40,
@@ -187,18 +215,15 @@ func TestShortcutAtRightmost(t *testing.T) {
 		runtime.AgentDetails{Name: "alpha", Provider: "openai", Model: "gpt-5.4-mini", Thinking: "8192"},
 	)
 
-	for _, name := range []string{"root", "alpha"} {
-		line1, _ := agentLines(m, name)
-		line := strings.TrimRight(line1, " ")
-		require.NotEmpty(t, line)
-		assert.Truef(t, strings.HasSuffix(line, "^1") || strings.HasSuffix(line, "^2"),
-			"line for %q must end with its shortcut, got %q", name, line)
-	}
+	line1, _ := agentLines(m, "root")
+	assert.Equal(t, "▶ root", strings.TrimRight(line1, " "), "the current agent's name row")
+	line1, _ = agentLines(m, "alpha")
+	assert.Equal(t, "  alpha", strings.TrimRight(line1, " "), "the other agent's name row")
 }
 
-// TestShortcutColumnAlignment verifies the shortcuts align at a single right
-// column across name lines regardless of name length or badge width.
-func TestShortcutColumnAlignment(t *testing.T) {
+// / TestRosterNamesAlignAtMarkerColumn verifies every name row starts its name at
+// the shared marker column, regardless of name length.
+func TestRosterNamesAlignAtMarkerColumn(t *testing.T) {
 	t.Parallel()
 
 	m := newAgentPanelSidebar(t, 40,
@@ -207,16 +232,14 @@ func TestShortcutColumnAlignment(t *testing.T) {
 		runtime.AgentDetails{Name: "longer-name", Provider: "openai", Model: "gpt-5.4", Thinking: "8192"},
 	)
 
-	end := -1
-	for _, name := range []string{"root", "a", "longer-name"} {
+	want := map[string]string{
+		"root":        "▶ root",
+		"a":           "  a",
+		"longer-name": "  longer-name",
+	}
+	for name, row := range want {
 		line1, _ := agentLines(m, name)
-		line := strings.TrimRight(line1, " ")
-		w := len([]rune(line))
-		if end == -1 {
-			end = w
-		} else {
-			assert.Equalf(t, end, w, "shortcuts for %q must end in a single column", name)
-		}
+		assert.Equalf(t, row, strings.TrimRight(line1, " "), "name row for %q", name)
 	}
 }
 
@@ -253,25 +276,27 @@ func TestEffortVocabularyOnCard(t *testing.T) {
 		"a model with no thinking configuration has no effort metric")
 }
 
-// TestModelLineLeftTruncated verifies the provider/model on line 2 keeps its
-// informative tail (left-truncation with a leading ellipsis) when it overflows.
-func TestModelLineLeftTruncated(t *testing.T) {
+// / TestModelLineRightTruncated verifies the muted model on row 2 is
+// right-truncated with a trailing ellipsis when it overflows the content width.
+func TestModelLineRightTruncated(t *testing.T) {
 	t.Parallel()
 
 	m := newAgentPanelSidebar(t, 28,
 		runtime.AgentDetails{Name: "root", Provider: "anthropic", Model: "opus", Thinking: "high"},
-		runtime.AgentDetails{Name: "agent2", Provider: "anthropic", Model: "claude-sonnet-4-6", Thinking: "off"},
+		runtime.AgentDetails{Name: "agent2", Provider: "anthropic", Model: "claude-sonnet-4-6-preview-2025", Thinking: "off"},
 	)
 
 	_, line2 := agentLines(m, "agent2")
+	line2 = strings.TrimRight(line2, " ")
 	require.NotEmpty(t, line2)
-	assert.Contains(t, line2, "…", "overflowing model is left-truncated with an ellipsis")
-	assert.Contains(t, line2, "-4-6", "informative model tail survives left-truncation")
+	assert.True(t, strings.HasSuffix(line2, "…"), "overflowing model is right-truncated with a trailing ellipsis")
+	assert.True(t, strings.HasPrefix(line2, "  claude-sonnet-4-6-previ"), "the model keeps its leading text")
+	assert.NotContains(t, line2, "2025", "the truncated tail is dropped")
 }
 
-// TestMoreThanNineAgentsNoShortcutBeyond9 verifies agents past the 9th get no
-// "^N" shortcut hint.
-func TestMoreThanNineAgentsNoShortcutBeyond9(t *testing.T) {
+// / TestRosterCarriesNoShortcutForAnyAgent verifies no roster row carries a "^N"
+// shortcut, including the agents past the ninth.
+func TestRosterCarriesNoShortcutForAnyAgent(t *testing.T) {
 	t.Parallel()
 
 	agents := []runtime.AgentDetails{
@@ -288,8 +313,8 @@ func TestMoreThanNineAgentsNoShortcutBeyond9(t *testing.T) {
 	m := newAgentPanelSidebar(t, 40, agents...)
 
 	body := strings.Join(renderAgentPanel(m), "\n")
-	assert.Contains(t, body, "^9", "the 9th agent keeps its shortcut")
-	assert.NotContains(t, body, "^10", "agents beyond the 9th have no shortcut")
+	assert.NotContains(t, body, "^", "no roster row carries a switch shortcut")
+	assert.Len(t, agentCard(m, "root"), 2, "the roster rows still render per agent")
 }
 
 // TestDetailedCardWidthThreshold pins the adaptive compact/wide boundary of
@@ -371,26 +396,24 @@ func TestDetailedCardWidthThreshold(t *testing.T) {
 
 			for name, want := range tt.wantMetrics {
 				card := agentCard(m, name)
-				require.GreaterOrEqualf(t, len(card), 2, "card for %q renders its name and model lines", name)
-				got := make([]string, 0, len(card)-2)
-				for _, line := range card[2:] {
-					got = append(got, strings.TrimRight(line, " "))
-				}
+				require.Lenf(t, card, 2, "roster entry for %q is its name and model rows", name)
+
+				got := agentMetricLines(m, name)
 				assert.Equalf(t, want, got, "metric lines for %q at %d metric columns", name, metricCols)
 
 				metrics := strings.Join(got, "\n")
 				for _, notWant := range tt.notWant {
 					assert.NotContainsf(t, metrics, notWant, "metrics for %q at %d metric columns", name, metricCols)
 				}
-				for _, line := range card {
+				for _, line := range append(card, got...) {
 					assert.LessOrEqualf(t, lipgloss.Width(line), contentCols,
-						"no card line for %q exceeds the content width: %q", name, line)
+						"no line for %q exceeds the content width: %q", name, line)
 				}
 			}
 
 			line1, line2 := agentLines(m, "root")
-			assert.Contains(t, line1, "root", "the name line stays readable")
-			assert.Contains(t, line2, "claude-opus-4-8", "the provider/model tail stays readable")
+			assert.Contains(t, line1, "root", "the name row stays readable")
+			assert.Contains(t, line2, "claude-opus-4-8", "the model row stays readable")
 		})
 	}
 }
@@ -427,7 +450,7 @@ func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 			assert.LessOrEqualf(t, lipgloss.Width(line), width, "line must fit the sidebar width: %q", line)
 		}
 	}
-	cardLines := func() map[string]int {
+	rosterRows := func() map[string]int {
 		counts := map[string]int{}
 		for _, owner := range m.agentLineOwners {
 			if owner != "" {
@@ -440,15 +463,15 @@ func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 	defaultBefore := render(DefaultWidth)
 	compact := strings.Join(defaultBefore, "\n")
 	require.Contains(t, compact, "Eff high · Ctx 30% · Cost $0.13",
-		"the default width joins root's compact metrics on one line")
+		"the default width joins root's compact metrics on one line in the usage details")
 	require.Contains(t, compact, "Eff off · Ctx — · Cost —",
 		"the default width joins scout's compact metrics on one line")
 	require.NotContains(t, compact, "Effort", "the default width drops the full effort label")
 	require.NotContains(t, compact, "Context", "the default width drops the full context label")
 	require.NotContains(t, compact, styles.GaugeFilled, "the default width omits the decorative gauge")
 	require.NotContains(t, compact, styles.GaugeEmpty, "the default width omits the decorative gauge")
-	require.Equal(t, map[string]int{"root": 3, "scout": 3}, cardLines(),
-		"compact cards are three lines: name, model, one joined metric line")
+	require.Equal(t, map[string]int{"root": 2, "scout": 2}, rosterRows(),
+		"roster entries are two rows: name and model")
 	assertFits(defaultBefore, DefaultWidth)
 
 	wideLines := render(48) // metric width 45: this roster's widest joined line fits exactly
@@ -458,8 +481,8 @@ func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 	assert.Contains(t, wide, "Effort "+gaugePattern(0)+" off · Context — · Cost —")
 	assert.NotContains(t, wide, "Eff ", "no compact effort label survives the widening")
 	assert.NotContains(t, wide, "Ctx", "no compact context label survives the widening")
-	assert.Equal(t, map[string]int{"root": 3, "scout": 3}, cardLines(),
-		"wide cards keep the same three-line height: the transition adds no lines")
+	assert.Equal(t, map[string]int{"root": 2, "scout": 2}, rosterRows(),
+		"the roster keeps its two-row height across the vocabulary transition")
 	assertFits(wideLines, 48)
 
 	defaultAfter := render(DefaultWidth)

@@ -18,15 +18,15 @@ import (
 // usage reading line, i.e. the start of the cost segment.
 func dollarOffset(t *testing.T, renderedLine string) int {
 	t.Helper()
-	idx := strings.Index(ansi.Strip(renderedLine), "$")
+	line := ansi.Strip(renderedLine)
+	idx := strings.Index(line, "$")
 	require.GreaterOrEqual(t, idx, 0, "usage reading line must contain a cost figure")
-	return idx
+	return ansi.StringWidth(line[:idx])
 }
 
 // TestSidebar_HandleClickType_Usage_Vertical verifies that the vertical Token
 // Usage reading line splits between ClickUsageContext (glyph, tokens,
-// context %) and ClickUsage (cost, sub-sessions), while the section's title
-// line is no longer a click target.
+// context %) and ClickUsage (cost, sub-sessions).
 func TestSidebar_HandleClickType_Usage_Vertical(t *testing.T) {
 	t.Parallel()
 
@@ -47,13 +47,12 @@ func TestSidebar_HandleClickType_Usage_Vertical(t *testing.T) {
 	require.GreaterOrEqual(t, m.usageReadingLine, 0, "the usage reading line must be recorded")
 	require.Less(t, m.usageReadingLine, m.usageSectionEnd)
 
-	titleLine := m.usageReadingLine - 2 // tab title line + TabStyle top padding line
-	assert.Contains(t, ansi.Strip(m.cachedLines[titleLine]), "Token Usage")
+	assert.NotContains(t, ansi.Strip(strings.Join(m.cachedLines, "\n")), "Token Usage")
 
 	paddingLeft := m.layoutCfg.PaddingLeft
 
-	result, _ := sb.HandleClickType(paddingLeft+2, titleLine)
-	assert.Equal(t, ClickNone, result, "the Token Usage title line must not be a click target")
+	result, _ := sb.HandleClickType(paddingLeft+2, m.usageReadingLine-1)
+	assert.Equal(t, ClickNone, result, "the gap before usage must not be a click target")
 
 	result, _ = sb.HandleClickType(paddingLeft+2, m.usageReadingLine)
 	assert.Equal(t, ClickUsageContext, result, "a click on the token/context segment should report ClickUsageContext")
@@ -305,4 +304,27 @@ func TestSidebar_HandleClickType_Usage_Collapsed_Hidden(t *testing.T) {
 		result, _ := sb.HandleClickType(paddingLeft+3, y)
 		assert.NotEqualf(t, ClickUsage, result, "hidden usage must not be clickable (line %d)", y)
 	}
+}
+
+func TestSidebarUsageActionsFollowWrappedRows(t *testing.T) {
+	t.Parallel()
+
+	m := newVisibilityTestSidebar(t).model
+	m.SetSize(MinWidth, 5)
+	m.compacting = true
+	m.agentCompactionModel = "compaction-model"
+	_ = m.View()
+	require.True(t, m.cachedNeedsScrollbar)
+	require.Positive(t, m.usageCostRow, "the cost wraps below the context")
+
+	m.scrollview.SetScrollOffset(m.usageReadingLine)
+	view := strings.Split(m.View(), "\n")
+	for y := range m.usageCostRow {
+		result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft, y)
+		assert.Equalf(t, ClickUsageContext, result, "visible line %d: %q", y, ansi.Strip(view[y]))
+	}
+	cost := ansi.Strip(view[m.usageCostRow])
+	require.Contains(t, cost, "$")
+	result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft+dollarOffset(t, cost), m.usageCostRow)
+	assert.Equal(t, ClickUsage, result)
 }

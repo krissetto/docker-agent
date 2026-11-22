@@ -500,7 +500,7 @@ func WithLayoutSettings(settings msgtypes.LayoutSettings) PageOption {
 	return func(p *chatPage) {
 		p.layoutSettings = settings
 		p.sidebar.SetSectionVisibility(sectionVisibility(settings))
-		p.sidebar.SetSectionGap(settings.SectionSpacing.BlankLines())
+		p.sidebar.SetSectionGap(sidebarSectionGap(settings.SectionSpacing))
 		p.sidebar.SetAgentInfoMode(agentInfoMode(settings.SidebarInfoMode))
 		p.sidebar.SetActiveAgentsOnly(settings.ActiveAgentsOnly)
 	}
@@ -518,6 +518,11 @@ func WithInterruptMode(mode msgtypes.InterruptMode) PageOption {
 	return func(p *chatPage) {
 		p.interruptMode = mode
 	}
+}
+
+// The continuous pane uses one fewer row of whitespace at each preference level.
+func sidebarSectionGap(spacing msgtypes.SectionSpacing) int {
+	return spacing.BlankLines() - 1
 }
 
 // sectionVisibility maps layout settings to the sidebar's visibility config.
@@ -1654,7 +1659,7 @@ func (p *chatPage) SetSidebarSettings(settings SidebarSettings) {
 func (p *chatPage) SetLayoutSettings(settings msgtypes.LayoutSettings) tea.Cmd {
 	p.layoutSettings = settings
 	p.sidebar.SetSectionVisibility(sectionVisibility(settings))
-	p.sidebar.SetSectionGap(settings.SectionSpacing.BlankLines())
+	p.sidebar.SetSectionGap(sidebarSectionGap(settings.SectionSpacing))
 	p.sidebar.SetAgentInfoMode(agentInfoMode(settings.SidebarInfoMode))
 	p.sidebar.SetActiveAgentsOnly(settings.ActiveAgentsOnly)
 	if p.width <= 0 || p.height <= 0 {

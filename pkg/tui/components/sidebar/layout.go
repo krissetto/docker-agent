@@ -4,37 +4,20 @@ import "github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 
 // Layout constants for sidebar elements.
 const (
-	// treePrefixWidth is the width of tree-structure prefixes like "├ " and "└ ".
-	treePrefixWidth = 2
-
 	// agentMarkerWidth is the fixed width of an agent line's leading marker cell
 	// (the ▶ current-agent / spinner glyph plus a trailing space). Non-current
 	// agents pad this column so their names stay aligned.
 	agentMarkerWidth = 2
 
-	// agentShortcutWidth is the fixed width of an agent line's trailing "^N"
-	// switch-shortcut column, kept constant so the shortcuts align at the right
-	// edge whether or not a given agent has one.
-	agentShortcutWidth = 2
-
-	// rowGlyphOnlyMinWidth is the content-column breakpoint (near MinWidth) below
-	// which a compact agent line's thinking gauge collapses to a single cell so
-	// the name column keeps usable room.
-	rowGlyphOnlyMinWidth = 22
-
 	// starClickWidth is the clickable area width for the star indicator.
 	starClickWidth = 2
-
-	// verticalStarY is the Y position of the star in vertical mode.
-	// Line 0: tab title, Line 1: TabStyle top padding, Line 2: star + title.
-	verticalStarY = 2
 
 	// minGap is the minimum gap between elements when laying out side-by-side.
 	minGap = 2
 
 	// defaultSectionGap is the default number of blank lines between sidebar
 	// sections in vertical mode (the "normal" section spacing).
-	defaultSectionGap = 2
+	defaultSectionGap = 1
 
 	// DefaultWidth is the default sidebar width in vertical mode.
 	DefaultWidth = 40
@@ -53,7 +36,7 @@ const (
 //
 //	|<-- outerWidth (m.width) ----------------------->|
 //	|<-PL->|<-- contentWidth -->|<-SG->|<-SW->|
-//	|      |   Tab Title────────|      |  │   |
+//	|      |   Session title    |      |  │   |
 //	|      |   Content here     |      |  │   |
 //	|      |                    |      |  │   |
 //
@@ -81,7 +64,7 @@ func DefaultLayoutConfig() LayoutConfig {
 type Metrics struct {
 	// OuterWidth is the total width allocated to the sidebar.
 	OuterWidth int
-	// ContentWidth is the width available for actual content (tabs, text, etc.).
+	// ContentWidth is the width available for actual content (text, etc.).
 	ContentWidth int
 	// ScrollbarVisible indicates whether the scrollbar will be rendered.
 	ScrollbarVisible bool

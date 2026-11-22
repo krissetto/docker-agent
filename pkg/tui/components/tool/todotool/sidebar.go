@@ -1,13 +1,13 @@
 package todotool
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
-	"github.com/docker/docker-agent/pkg/tui/components/tab"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -82,11 +82,12 @@ func (c *SidebarComponent) Render() string {
 		return cached
 	}
 
-	var lines []string
+	completed, total := c.Counts()
+	lines := []string{styles.MutedStyle.Render(fmt.Sprintf("%d/%d todos", completed, total))}
 	for _, todo := range c.todos {
 		lines = append(lines, c.renderTodoLine(todo))
 	}
-	rendered := c.renderTab("TO-DO", strings.Join(lines, "\n"))
+	rendered := strings.Join(lines, "\n")
 
 	if c.renderCache == nil || len(c.renderCache) >= renderCacheCap {
 		c.renderCache = make(map[int]string, 2)
@@ -115,8 +116,4 @@ func (c *SidebarComponent) renderTodoLine(todoItem todo.Todo) string {
 	}
 
 	return styles.TabPrimaryStyle.Render(style.Render(b.String()))
-}
-
-func (c *SidebarComponent) renderTab(title, content string) string {
-	return tab.Render(title, content, c.width)
 }

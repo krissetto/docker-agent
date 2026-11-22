@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/gitbranch"
@@ -28,7 +30,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
-	"github.com/docker/docker-agent/pkg/tui/components/tab"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -44,17 +45,11 @@ const (
 	ModeCollapsed
 )
 
-// AgentInfoMode selects how the vertical sidebar's Agents section renders
-// each agent. The zero value is the compact roster.
+// AgentInfoMode controls whether the expanded Usage block includes per-agent metrics.
 type AgentInfoMode int
 
 const (
-	// AgentInfoCompact renders each agent as a two-line entry: name with
-	// thinking badge and shortcut, then provider/model with the context
-	// percentage. This is the default.
 	AgentInfoCompact AgentInfoMode = iota
-	// AgentInfoDetailed renders each agent as a mini-card with labeled
-	// Effort / Context / Cost metric lines.
 	AgentInfoDetailed
 )
 
@@ -107,8 +102,7 @@ type Model interface {
 	SetSectionVisibility(v SectionVisibility)
 	// SetSectionGap sets the number of blank lines between sidebar sections.
 	SetSectionGap(lines int)
-	// SetAgentInfoMode selects how the vertical Agents section renders each
-	// agent: the compact two-line roster (default) or detailed mini-cards.
+	// SetAgentInfoMode controls whether expanded Usage includes per-agent metrics.
 	SetAgentInfoMode(mode AgentInfoMode)
 	// SetActiveAgentsOnly filters the Agents roster (vertical panel and
 	// collapsed band) to agents active in the current session instead of the
@@ -158,7 +152,7 @@ type Model interface {
 	IsScrollbarDragging() bool
 	// VisualGeneration increments whenever an update changes rendered sidebar state.
 	VisualGeneration() uint64
-	// WorkingDirectory returns the working directory path displayed in the sidebar.
+	// WorkingDirectory returns the actionable full working directory path.
 	WorkingDirectory() string
 	EditPlan(name, tabID string) tea.Cmd
 }
@@ -400,27 +394,26 @@ type model struct {
 
 	// Agent click zones: maps content line index to agent name for click detection
 	agentClickZones map[int]string // content line -> agent name
-	// Token Usage click zone: the content-line index of the reading line
-	// (glyph/tokens/context/cost/sub-sessions), and the half-open range of any
-	// budget lines below it, recorded while rendering. usageReadingLine is -1
-	// when the section is hidden. The section's "Token Usage" title line is
-	// deliberately excluded — it is not a click target.
-	usageReadingLine int
-	usageSectionEnd  int
+	// Rendered row ranges use content coordinates, before scrolling.
+	verticalTitleLines int
+	workingDirStart    int
+	workingDirEnd      int
+	usageReadingLine   int // -1 when hidden
+	usageCostRow       int // relative to usageReadingLine
+	usageCostColumn    int
+	usageSectionEnd    int
 	// usageContextSegWidth is the lipgloss.Width of the reading line's context
 	// segment (glyph + token count + context %/compacting marker + ⚠ capped
 	// marker), recorded by tokenUsageLine while rendering. HandleClickType uses
 	// it to split a click on the reading line between the context dialog and
 	// the cost dialog.
 	usageContextSegWidth int
-	// agentLineOwners records, per rendered agent-section body line, which agent
-	// emitted it (empty for blank separators). It is produced during agentInfo
-	// rendering so click zones can be registered explicitly rather than inferred
-	// from blank-line heuristics.
-	agentLineOwners []string
-	planData        messages.PlanSidebarDataMsg
-	recentPlans     []plans.Plan
-	planClickZones  map[int]planClickZone
+	// Row ownership keeps click zones independent of wrapping and section spacing.
+	agentLineOwners      []string
+	agentUsageLineOwners []string
+	planData             messages.PlanSidebarDataMsg
+	recentPlans          []plans.Plan
+	planClickZones       map[int]planClickZone
 }
 
 // New creates a new sidebar bound to the given session state.
@@ -431,7 +424,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 	ti.Prompt = "" // No prompt to maximize usable width in collapsed sidebar
 
 	rawDir, _ := getwd()
-	wd, branch := formatWorkingDirectory(rawDir)
+	branch := currentBranch(rawDir)
 	branchWatcher, _ := watchBranch(ctx, rawDir)
 
 	m := &model{
@@ -451,7 +444,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 			scrollview.WithWheelStep(1),
 			scrollview.WithKeyMap(nil), // Sidebar has no keyboard scroll — only mouse
 		),
-		workingDirectory: wd,
+		workingDirectory: rawDir,
 		gitBranchName:    branch,
 		gitBranchWatcher: branchWatcher,
 		preferredWidth:   DefaultWidth,
@@ -528,7 +521,7 @@ func (m *model) SetTokenUsage(event *runtime.TokenUsageEvent) {
 	m.sessionUsage[event.SessionID] = &usage
 
 	// Record the per-agent snapshot and the session→agent cost attribution
-	// in the shared session state so the agent roster and the agent-details
+	// in the shared session state so detailed Usage and the agent-details
 	// dialog can show per-agent context usage and cumulative cost.
 	// Background agent tasks reach this path too: their usage events are
 	// forwarded out-of-band by the runtime.
@@ -565,19 +558,32 @@ func (m *model) SetAgentInfo(agentName, modelID, description string, contextLimi
 	// Parse "provider/model" format using first slash to handle model names containing slashes
 	// (e.g., "dmr/ai/llama3.2" → Provider="dmr", Model="ai/llama3.2").
 	for i := range m.availableAgents {
-		if m.availableAgents[i].Name == agentName && modelID != "" {
-			if provider, modelName, found := strings.Cut(modelID, "/"); found {
-				m.availableAgents[i].Provider = provider
-				m.availableAgents[i].Model = modelName
-			} else {
-				// No slash in modelID; treat the whole string as model name
-				m.availableAgents[i].Model = modelID
-			}
-			break
+		agent := &m.availableAgents[i]
+		if agent.Name != agentName || modelID == "" {
+			continue
 		}
+		provider, modelName := splitAgentModel(modelID)
+		if modelID != agent.Model && (agent.Model != modelName || agent.Provider != provider) {
+			// Do not present the previous model's effort while awaiting team metadata.
+			agent.Thinking = ""
+		}
+		if provider != "" && modelID != agent.Model {
+			agent.Provider = provider
+			agent.Model = modelName
+		} else {
+			agent.Model = modelID
+		}
+		break
 	}
 	m.invalidateCache()
 	return nil
+}
+
+func splitAgentModel(id string) (provider, name string) {
+	if provider, name, ok := strings.Cut(id, "/"); ok && provider != "" {
+		return provider, name
+	}
+	return "", id
 }
 
 // SetTeamInfo sets the available agents in the team
@@ -752,9 +758,7 @@ func (m *model) resyncTransferPresentation(prev transferPresentation, prevOK boo
 	return m.transferAnimation.Start()
 }
 
-// delegationInFlight reports whether any transfer_task hop is still running
-// or a Return is being presented; it drives the Agents header's ↔ marker so
-// the relation stays hinted even after the box acknowledged.
+// delegationInFlight keeps the transfer status visible after its box is acknowledged.
 func (m *model) delegationInFlight() bool {
 	return len(m.agentTransfers) > 0 || m.agentReturn != nil
 }
@@ -815,7 +819,7 @@ func (m *model) SetSectionGap(lines int) {
 	m.invalidateCache()
 }
 
-// SetAgentInfoMode selects how the vertical Agents section renders each agent.
+// SetAgentInfoMode controls whether expanded Usage includes per-agent metrics.
 func (m *model) SetAgentInfoMode(mode AgentInfoMode) {
 	if m.agentInfoMode == mode {
 		return
@@ -861,7 +865,7 @@ func (m *model) IsScrollbarDragging() bool {
 	return m.scrollview.IsDragging()
 }
 
-// WorkingDirectory returns the working directory path displayed in the sidebar.
+// WorkingDirectory returns the actionable full working directory path.
 func (m *model) WorkingDirectory() string {
 	return m.workingDirectory
 }
@@ -965,46 +969,33 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 		return ClickNone, ""
 	}
 
-	// In vertical mode, the title starts at verticalStarY
-	scrollOffset := m.scrollview.ScrollOffset()
-	contentY := y + scrollOffset // Convert viewport Y to content Y
-	titleLines := m.titleLineCount()
-
-	// The scrollbar and its gap are not content: clicks there must reach the
-	// scrollview, not the content click zones.
-	if m.cachedNeedsScrollbar && adjustedX >= m.contentWidth(true) {
+	// The padding, scrollbar, and its gap are not content.
+	if y < 0 || y >= m.viewportHeight() || adjustedX >= m.contentWidth(m.cachedNeedsScrollbar) {
 		return ClickNone, ""
 	}
+	contentY := y + m.scrollview.ScrollOffset()
 
-	// Check if click is within the title area
-	if contentY >= verticalStarY && contentY < verticalStarY+titleLines {
-		// Check if click is on the star (first line only, first few chars)
-		if contentY == verticalStarY && m.sessionHasContent && adjustedX <= starClickWidth {
+	if contentY < m.verticalTitleLines {
+		if contentY == 0 && m.sessionHasContent && adjustedX < lipgloss.Width(m.starIndicator()) {
 			return ClickStar, ""
 		}
-		// Click is on title area (for double-click to edit)
 		if m.titleGenerated && !m.editingTitle {
 			return ClickTitle, ""
 		}
 	}
-
-	// Working dir is at: verticalStarY + titleLines (title) + 1 (empty separator).
-	// A hidden session path renders no line and must not keep a hit target.
-	if m.workingDirectory != "" && !m.sectionVisibility.HideSessionPath && contentY == verticalStarY+titleLines+1 {
+	if !m.sectionVisibility.HideSessionPath && contentY >= m.workingDirStart && contentY < m.workingDirEnd {
 		return ClickWorkingDir, ""
 	}
-
-	// Check if click is on the Token Usage reading line or a budget line
-	// below it. The section title line is not a click target.
-	if contentY == m.usageReadingLine {
-		return segmentClickResult(adjustedX), ""
-	}
-	if m.usageReadingLine >= 0 && contentY > m.usageReadingLine && contentY < m.usageSectionEnd {
+	if !m.sectionVisibility.HideUsage && m.usageReadingLine >= 0 && contentY >= m.usageReadingLine && contentY < m.usageSectionEnd {
+		row := contentY - m.usageReadingLine
+		if row < m.usageCostRow || (row == m.usageCostRow && adjustedX < m.usageCostColumn) {
+			return ClickUsageContext, ""
+		}
 		return ClickUsage, ""
 	}
 
 	// Check if click is on an agent name
-	if agentName, ok := m.agentClickZones[contentY]; ok {
+	if agentName, ok := m.agentClickZones[contentY]; ok && !m.sectionVisibility.HideAgents {
 		return ClickAgent, agentName
 	}
 	if m.sectionVisibility.ShowPlans {
@@ -1047,7 +1038,7 @@ func (m *model) LoadFromSession(sess *session.Session) {
 	}
 
 	// Reseed the per-agent cost state from the restored tree so each agent's
-	// historical spend shows on its card immediately (see SeedRestoredCosts).
+	// historical spend shows in detailed Usage immediately (see SeedRestoredCosts).
 	// Per-agent context stays unknown until the agent runs again.
 	m.sessionState.SeedRestoredCosts(sess)
 
@@ -1083,7 +1074,7 @@ func (m *model) LoadFromSession(sess *session.Session) {
 
 	// Load working directory from session
 	if sess.WorkingDir != "" {
-		m.workingDirectory = pathx.ShortenHome(sess.WorkingDir)
+		m.workingDirectory = sess.WorkingDir
 		if m.gitBranchWatcher != nil {
 			m.gitBranchName = m.gitBranchWatcher.SetDir(sess.WorkingDir)
 		} else {
@@ -1215,29 +1206,20 @@ func contextGaugeStyle(level styles.ContextGaugeLevel, normal lipgloss.Style) li
 // formatWorkingDirectory formats a raw directory path for display,
 // replacing the home prefix with ~/. Returns the display path and the
 // current git branch (empty if not in a repo).
-func formatWorkingDirectory(rawDir string) (display, branch string) {
-	if rawDir == "" {
-		return "", ""
-	}
-	return pathx.ShortenHome(rawDir), currentBranch(rawDir)
-}
-
 // workingDirWithBranch returns the working directory path with the git branch
 // appended in muted style, suitable for rendering in the sidebar.
 func (m *model) workingDirWithBranch() string {
 	if m.workingDirectory == "" {
 		return ""
 	}
-	result := m.workingDirectory
+	result := pathx.ShortenHome(m.workingDirectory)
 	if m.gitBranchName != "" {
 		result += styles.MutedStyle.Render(" (" + m.gitBranchName + ")")
 	}
 	return result
 }
 
-// workingDirLine renders the working directory with the sidebar's accent
-// block, shared by the vertical Session tab and the collapsed band. Empty
-// when the session path is hidden via section visibility.
+// workingDirLine renders the collapsed band's path and branch on one line.
 func (m *model) workingDirLine() string {
 	if m.workingDirectory == "" || m.sectionVisibility.HideSessionPath {
 		return ""
@@ -1680,11 +1662,11 @@ func (m *model) agentSummaryCollapsed() string {
 	if m.agentModel != "" {
 		summary.WriteString(styles.MutedStyle.Render(" " + m.agentModel))
 	}
-	for _, entry := range m.rosterAgents() {
-		if entry.agent.Name == name {
+	for _, agent := range m.rosterAgents() {
+		if agent.Name == name {
 			continue
 		}
-		summary.WriteString(styles.MutedStyle.Render(" · ") + styles.AgentAccentStyleFor(entry.agent.Name).Render(entry.agent.Name))
+		summary.WriteString(styles.MutedStyle.Render(" · ") + styles.AgentAccentStyleFor(agent.Name).Render(agent.Name))
 	}
 	return summary.String()
 }
@@ -1786,7 +1768,7 @@ func (m *model) verticalView() string {
 	// Pass 1: render without scrollbar to count lines
 	lines := m.renderSections(contentWidthNoScroll)
 	totalLines := len(lines)
-	needsScrollbar := totalLines > m.height
+	needsScrollbar := totalLines > m.viewportHeight()
 
 	// Pass 2: if scrollbar needed, re-render with narrower content width
 	if needsScrollbar {
@@ -1813,10 +1795,39 @@ func (m *model) renderFromCache() string {
 		regionWidth += m.layoutCfg.ScrollbarGap + scrollbar.Width
 	}
 
-	m.scrollview.SetSize(regionWidth, m.height)
+	height := m.viewportHeight()
+	m.scrollview.SetSize(regionWidth, height)
 	m.scrollview.SetContent(m.cachedLines, len(m.cachedLines))
+	view := m.scrollview.View()
+	if !m.showYoloFooter() {
+		return view
+	}
 
-	return m.scrollview.View()
+	// The footer sits on the last row, even when the viewport does not fill.
+	width := m.contentWidth(false)
+	badge := styles.TabAccentStyle.Reverse(true).Render(ansi.Truncate(" YOLO ", width, ""))
+	shortcut := styles.MutedStyle.Render("^y")
+	line := badge
+	if ansi.StringWidth(badge)+3 <= width {
+		line += " " + shortcut
+	}
+	align := lipgloss.Right
+	if m.layoutCfg.PaddingRight > 0 {
+		align = lipgloss.Left
+	}
+	return view + strings.Repeat("\n", m.height-1-strings.Count(view, "\n")) +
+		lipgloss.PlaceHorizontal(width, align, line)
+}
+
+func (m *model) showYoloFooter() bool {
+	return m.height > 1 && !m.sectionVisibility.HideTools && m.sessionState.YoloMode()
+}
+
+func (m *model) viewportHeight() int {
+	if m.showYoloFooter() {
+		return m.height - 1
+	}
+	return m.height
 }
 
 // renderSections renders all sidebar sections and returns them as lines.
@@ -1824,11 +1835,6 @@ func (m *model) renderFromCache() string {
 // returns the index of the section's first line so click zones can be anchored.
 func (m *model) renderSections(contentWidth int) []string {
 	var lines []string
-	// tabHeaderLines is the fixed number of lines a renderTab wrapper adds
-	// before a section's body: the tab title line plus the TabStyle top
-	// padding line (mirrored in buildAgentClickZones).
-	const tabHeaderLines = 2
-
 	appendSection := func(section string) int {
 		if section == "" {
 			return len(lines)
@@ -1844,16 +1850,17 @@ func (m *model) renderSections(contentWidth int) []string {
 	}
 
 	appendSection(m.sessionInfo(contentWidth))
-	// Track the Token Usage reading line (glyph/tokens/context/cost) and the
-	// end of the section (covering any budget lines below it) so a click can
-	// be routed to the context or cost dialog. The title line is excluded.
+	// Budget rows are part of the cost click target.
 	m.usageReadingLine, m.usageSectionEnd = -1, -1
+	m.agentUsageLineOwners = nil
+	agentUsageStart := 0
 	if !m.sectionVisibility.HideUsage {
-		sectionStart := appendSection(m.tokenUsage(contentWidth))
-		m.usageReadingLine = sectionStart + tabHeaderLines
+		m.usageReadingLine = appendSection(m.tokenUsage(contentWidth))
 		m.usageSectionEnd = len(lines)
+		if m.agentInfoMode == AgentInfoDetailed && !m.sectionVisibility.HideAgents {
+			agentUsageStart = appendSection(m.agentUsageDetails(contentWidth))
+		}
 	}
-	appendSection(m.queueSection(contentWidth))
 
 	// Track where agent entries start so we can detect clicks on agent names
 	agentSectionStart := len(lines)
@@ -1862,7 +1869,9 @@ func (m *model) renderSections(contentWidth int) []string {
 	} else {
 		agentSectionStart = appendSection(m.agentInfo(contentWidth))
 	}
-	m.buildAgentClickZones(agentSectionStart)
+	m.buildAgentClickZones(agentSectionStart, agentUsageStart)
+
+	appendSection(m.queueSection(contentWidth))
 
 	if !m.sectionVisibility.HideTools {
 		appendSection(m.toolsetInfo(contentWidth))
@@ -1876,10 +1885,10 @@ func (m *model) renderSections(contentWidth int) []string {
 	if m.sectionVisibility.ShowPlans {
 		section, zones := m.plansSection(contentWidth)
 		start := appendSection(section)
-		m.planClickZones = make(map[int]planClickZone)
+		m.planClickZones = make(map[int]planClickZone, len(zones))
 		for i, zone := range zones {
 			if zone.kind != ClickNone {
-				m.planClickZones[start+tabHeaderLines+i] = zone
+				m.planClickZones[start+i] = zone
 			}
 		}
 	}
@@ -2002,15 +2011,26 @@ func (m *model) computeUsageStats() usageStats {
 }
 
 func (m *model) tokenUsage(contentWidth int) string {
-	body := m.tokenUsageLine()
-	if b := m.budgetLine(contentWidth); b != "" {
-		body += "\n" + b
+	reading := m.renderTokenUsageLine(styles.MutedStyle)
+	m.usageCostRow = 0
+	m.usageCostColumn = m.usageContextSegWidth
+	if ansi.StringWidth(reading) > contentWidth {
+		contextRows := paneText(ansi.Cut(reading, 0, m.usageContextSegWidth), contentWidth)
+		cost := ansi.Cut(reading, m.usageContextSegWidth+1, ansi.StringWidth(reading))
+		m.usageCostRow = strings.Count(contextRows, "\n") + 1
+		m.usageCostColumn = 0
+		reading = contextRows + "\n" + paneText(cost, contentWidth)
+	} else {
+		reading = paneText(reading, contentWidth)
 	}
-	return m.renderTab("Token Usage", body, contentWidth)
+	if b := m.budgetLine(contentWidth); b != "" {
+		reading += "\n" + paneText(b, contentWidth)
+	}
+	return reading
 }
 
-// tokenUsageLine renders the usage line shared by the vertical Token Usage
-// tab and the collapsed band: token glyph, count, context %, cost, and the
+// tokenUsageLine renders the reading shared by the expanded pane and the
+// collapsed band: token glyph, count, context %, cost, and the
 // sub-session count, all with the same styling. The context reading warns as
 // it nears the compaction threshold and reads "compacting…" while a
 // compaction runs. It also records usageContextSegWidth, the rendered width
@@ -2018,14 +2038,18 @@ func (m *model) tokenUsage(contentWidth int) string {
 // capped marker), so HandleClickType can split a click on the reading line
 // between the context and cost dialogs.
 func (m *model) tokenUsageLine() string {
+	return m.renderTokenUsageLine(styles.NoStyle)
+}
+
+func (m *model) renderTokenUsageLine(contextStyle lipgloss.Style) string {
 	s := m.computeUsageStats()
 
-	line := styles.MutedStyle.Render(styles.TokenGlyph+" ") + toolcommon.FormatTokenCount(s.tokens)
+	line := styles.MutedStyle.Render(styles.TokenGlyph+" ") + contextStyle.Render(toolcommon.FormatTokenCount(s.tokens))
 	switch {
 	case m.compacting:
 		line += " " + styles.WarningStyle.Render("(compacting…)")
 	case s.contextPct != "":
-		line += " " + contextGaugeStyle(s.contextLevel, styles.NoStyle).Render("("+s.contextPct+")")
+		line += " " + contextGaugeStyle(s.contextLevel, contextStyle).Render("("+s.contextPct+")")
 	}
 
 	if m.agentCompactionModel != "" {
@@ -2060,11 +2084,7 @@ func (m *model) tokenUsageSummary() string {
 // budget nearing its ceiling reads the same way a context gauge nearing
 // compaction does.
 //
-// Per-agent attribution is deliberately not repeated here: the Agents
-// section already reports each agent's cost in AgentInfoDetailed mode, so a
-// second per-agent breakdown under every budget would be duplicate reading
-// in the sidebar's tightest column. The structured per-agent split is still
-// carried on the budget_usage event for programmatic consumers.
+// Budget readings show their own totals; detailed Usage shows per-agent spend.
 func (m *model) budgetLine(contentWidth int) string {
 	b := m.budgetUsage
 	if b == nil || len(b.Budgets) == 0 {
@@ -2171,15 +2191,20 @@ func (m *model) sessionInfo(contentWidth int) string {
 		titleLine = star + m.sessionTitle
 	}
 
-	lines := []string{titleLine}
-
-	// The separator only exists for the path line, so a hidden path leaves
-	// no blank row behind.
-	if wd := m.workingDirLine(); wd != "" {
-		lines = append(lines, "", wd)
+	title := paneText(titleLine, contentWidth)
+	m.verticalTitleLines = strings.Count(title, "\n") + 1
+	m.workingDirStart, m.workingDirEnd = 0, 0
+	if m.workingDirectory == "" || m.sectionVisibility.HideSessionPath {
+		return title
 	}
 
-	return m.renderTab("Session", strings.Join(lines, "\n"), contentWidth)
+	directory := paneText(ansi.Truncate(filepath.Base(m.workingDirectory), contentWidth, "…"), contentWidth)
+	if m.gitBranchName != "" {
+		directory += "\n" + paneText(styles.MutedStyle.Render(ansi.Truncate(m.gitBranchName, contentWidth, "…")), contentWidth)
+	}
+	m.workingDirStart = m.verticalTitleLines + 1
+	m.workingDirEnd = m.workingDirStart + strings.Count(directory, "\n") + 1
+	return title + "\n\n" + directory
 }
 
 // queueSection renders the queued messages section
@@ -2188,64 +2213,31 @@ func (m *model) queueSection(contentWidth int) string {
 		return ""
 	}
 
-	maxMsgWidth := contentWidth - treePrefixWidth
-	var lines []string
+	maxMsgWidth := contentWidth - 2
+	label := styles.MutedStyle.Render(fmt.Sprintf("Queue (%d)", len(m.queuedMessages)))
+	lines := []string{label}
 
-	for i, msg := range m.queuedMessages {
-		// Determine prefix based on position
-		var prefix string
-		if i == len(m.queuedMessages)-1 {
-			prefix = styles.MutedStyle.Render("└ ")
-		} else {
-			prefix = styles.MutedStyle.Render("├ ")
-		}
-
-		// Truncate message and add prefix
-		truncated := toolcommon.TruncateText(msg, maxMsgWidth)
-		lines = append(lines, prefix+truncated)
+	for _, msg := range m.queuedMessages {
+		prefix := styles.MutedStyle.Render("- ")
+		lines = append(lines, prefix+toolcommon.TruncateText(msg, maxMsgWidth))
 	}
 
 	// Add hint for clearing
 	lines = append(lines, styles.MutedStyle.Render("  Ctrl+X to clear"))
 
-	title := fmt.Sprintf("Queue (%d)", len(m.queuedMessages))
-	return m.renderTab(title, strings.Join(lines, "\n"), contentWidth)
+	return paneText(strings.Join(lines, "\n"), contentWidth)
 }
 
 // agentInfo renders the Agents panel: every roster agent (the whole team,
 // or only the session-active agents under the active-agents-only filter —
-// see rosterAgents) as a multi-line entry —
-// the compact two-line roster (see renderAgentLine) or a detailed mini-card
-// (see renderAgentCard), per the configured AgentInfoMode — with a blank
-// separator line between entries. The current agent is marked with ▶ (or the
-// spinner while it works); the other agents pad that marker column so their
-// names stay aligned. Descriptions are deliberately omitted. While a
-// transfer_task runs, the innermost hop renders as a compact box below the
-// whole roster — after a blank breathing line — so the roster itself stays
-// uninterrupted (see renderTransferPanel). Each content line is owned by its
-// agent (agentLineOwners) so click zones can be registered explicitly (see
-// buildAgentClickZones) and a click on any entry line switches to that agent;
-// separators and the transfer box carry an empty owner so they stay
-// unclickable.
+// see rosterAgents) as a name and model on two clickable lines. Separators
+// and the transfer presentation carry no owner and are not clickable.
 func (m *model) agentInfo(contentWidth int) string {
+	m.agentLineOwners = nil
 	// Read current agent from session state so sidebar updates when agent is switched
 	currentAgent := m.sessionState.CurrentAgentName()
 	if currentAgent == "" {
-		return ""
-	}
-	roster := m.rosterAgents()
-
-	agentTitle := "Agent"
-	if len(roster) > 1 {
-		agentTitle = "Agents"
-	}
-	if m.delegationInFlight() {
-		agentTitle += " ↔"
-	}
-
-	renderAgent := m.compactAgentRenderer(roster, contentWidth)
-	if m.agentInfoMode == AgentInfoDetailed {
-		renderAgent = m.detailedAgentRenderer(roster, contentWidth)
+		currentAgent = m.currentAgent
 	}
 
 	var bodyLines, owners []string
@@ -2253,61 +2245,59 @@ func (m *model) agentInfo(contentWidth int) string {
 		bodyLines = append(bodyLines, line)
 		owners = append(owners, owner)
 	}
-	for _, entry := range roster {
-		// Separate entries with a blank, unowned line so they stay visually
-		// distinct without being attributed to (or made clickable for) any agent.
+	breathingRow := func() {
 		if len(bodyLines) > 0 {
 			add("", "")
 		}
-		current := entry.agent.Name == currentAgent
-		for _, line := range renderAgent(entry.agent, entry.index, current) {
-			add(line, entry.agent.Name)
+	}
+	roster := m.rosterAgents()
+	if len(roster) == 0 && currentAgent != "" {
+		// AgentInfo can arrive before TeamInfo on startup.
+		roster = []runtime.AgentDetails{{Name: currentAgent}}
+	}
+	for _, agent := range roster {
+		breathingRow()
+		for _, line := range m.renderAgentLine(agent, contentWidth, agent.Name == currentAgent) {
+			add(line, agent.Name)
 		}
 	}
 	// The visible transfer presentation renders as a compact box below the
 	// whole roster, after a blank breathing line; every one of its lines is
 	// unowned so the box stays unclickable.
 	if pres, ok := m.visibleTransfer(); ok {
-		add("", "")
+		breathingRow()
 		for _, line := range m.renderTransferPanel(pres, contentWidth) {
+			add(line, "")
+		}
+	} else if m.delegationInFlight() {
+		breathingRow()
+		for line := range strings.SplitSeq(paneText(styles.MutedStyle.Render("↔ Transfer in progress"), contentWidth), "\n") {
 			add(line, "")
 		}
 	}
 	if summary := m.backgroundAgentsSummary(); summary != "" {
-		add("", "")
+		breathingRow()
 		for line := range strings.SplitSeq(lipgloss.NewStyle().Width(contentWidth).Render(summary), "\n") {
 			add(line, "")
 		}
 	}
 	m.agentLineOwners = owners
-
-	return m.renderTab(agentTitle, strings.Join(bodyLines, "\n"), contentWidth)
+	if len(bodyLines) == 0 {
+		return ""
+	}
+	return styles.RenderComposite(styles.TabPrimaryStyle, strings.Join(bodyLines, "\n"))
 }
 
-// agentRenderer renders one roster agent's content lines at a layout
-// precomputed for the whole panel.
-type agentRenderer func(agent runtime.AgentDetails, index int, current bool) []string
-
-// rosterAgent is one Agents-roster entry: the agent's details plus its
-// original team index, preserved under filtering so the ^N switch shortcut
-// keeps addressing the same team position.
-type rosterAgent struct {
-	agent runtime.AgentDetails
-	index int
-}
-
-// rosterAgents returns the agents the Agents section presents, each with its
-// original team index. With the active-agents-only filter off this is the
-// whole team; with it on, only agents active in the current session (see
-// agentActiveInSession). Filtering is presentation-only: agent cycling and
-// switching still operate on the full team.
-func (m *model) rosterAgents() []rosterAgent {
-	roster := make([]rosterAgent, 0, len(m.availableAgents))
-	for i, agent := range m.availableAgents {
-		if m.activeAgentsOnly && !m.agentActiveInSession(agent.Name) {
-			continue
+// rosterAgents returns the whole team unless the presentation-only active filter is on.
+func (m *model) rosterAgents() []runtime.AgentDetails {
+	if !m.activeAgentsOnly {
+		return m.availableAgents
+	}
+	roster := make([]runtime.AgentDetails, 0, len(m.availableAgents))
+	for _, agent := range m.availableAgents {
+		if m.agentActiveInSession(agent.Name) {
+			roster = append(roster, agent)
 		}
-		roster = append(roster, rosterAgent{agent: agent, index: i})
 	}
 	return roster
 }
@@ -2318,7 +2308,11 @@ func (m *model) rosterAgents() []rosterAgent {
 // presentation, or an agent with recorded participation in this session — a
 // usage snapshot or an attributed cost, live or restored.
 func (m *model) agentActiveInSession(name string) bool {
-	if name == m.sessionState.CurrentAgentName() || name == m.workingAgent {
+	current := m.sessionState.CurrentAgentName()
+	if current == "" {
+		current = m.currentAgent
+	}
+	if name == current || name == m.workingAgent {
 		return true
 	}
 	for _, agentName := range m.backgroundAgents {
@@ -2341,41 +2335,30 @@ func (m *model) agentActiveInSession(name string) bool {
 	return ok
 }
 
-// compactAgentRenderer precomputes the compact roster's shared column widths
-// once — so every entry aligns and the badge width is not recomputed per
-// agent — and returns the per-agent two-line renderer (see renderAgentLine).
-func (m *model) compactAgentRenderer(roster []rosterAgent, contentWidth int) agentRenderer {
-	glyphOnly := contentWidth < rowGlyphOnlyMinWidth
-	badgeWidth := badgeColumnWidth(roster, glyphOnly)
-	nameWidth := max(1, contentWidth-agentMarkerWidth-minGap-badgeWidth-1-agentShortcutWidth)
-	return func(agent runtime.AgentDetails, index int, current bool) []string {
-		return m.renderAgentLine(agent, index, contentWidth, nameWidth, badgeWidth, glyphOnly, current)
+// agentUsageDetails keeps the opt-in per-agent breakdown separate from the roster.
+func (m *model) agentUsageDetails(contentWidth int) string {
+	m.agentUsageLineOwners = nil
+	roster := m.rosterAgents()
+	if len(roster) == 0 {
+		return ""
 	}
-}
-
-// detailedAgentRenderer precomputes the detailed card layout's shared widths
-// and returns the per-agent mini-card renderer (see renderAgentCard). The
-// metric vocabulary adapts to the roster: cards render the wide forms — full
-// "Effort"/"Context" labels with the decorative six-cell gauge — only when
-// every agent's preferred joined metric line fits the width the metric lines
-// actually get (the content width minus the card's agentMarkerWidth indent),
-// i.e. exactly the widths where every wide card keeps a single metric line.
-// If any agent's joined line would overflow, all cards use the compact
-// vocabulary (Eff/Ctx, no gauge) so the panel speaks one language and each
-// card stays as short as the width allows.
-func (m *model) detailedAgentRenderer(roster []rosterAgent, contentWidth int) agentRenderer {
-	metricWidth := contentWidth - agentMarkerWidth
-	narrow := false
-	for _, entry := range roster {
-		if lipgloss.Width(joinSegments(m.metricSegments(entry.agent, false))) > metricWidth {
-			narrow = true
-			break
+	indent := min(agentMarkerWidth, contentWidth-1)
+	width := contentWidth - indent
+	narrow := slices.ContainsFunc(roster, func(agent runtime.AgentDetails) bool {
+		return lipgloss.Width(joinSegments(m.metricSegments(agent, false))) > width
+	})
+	lines := []string{styles.MutedStyle.Render(ansi.Truncate("Per-agent usage", contentWidth, "…"))}
+	m.agentUsageLineOwners = append(m.agentUsageLineOwners, "")
+	padding := strings.Repeat(" ", indent)
+	for _, agent := range roster {
+		lines = append(lines, styles.AgentAccentStyleFor(agent.Name).Render(ansi.Truncate(agent.Name, contentWidth, "…")))
+		m.agentUsageLineOwners = append(m.agentUsageLineOwners, agent.Name)
+		for _, line := range m.metricLines(agent, width, narrow) {
+			lines = append(lines, padding+ansi.Truncate(line, width, "…"))
+			m.agentUsageLineOwners = append(m.agentUsageLineOwners, agent.Name)
 		}
 	}
-	nameWidth := max(1, contentWidth-agentMarkerWidth-minGap-agentShortcutWidth)
-	return func(agent runtime.AgentDetails, index int, current bool) []string {
-		return m.renderAgentCard(agent, index, contentWidth, nameWidth, narrow, current)
-	}
+	return styles.RenderComposite(styles.TabPrimaryStyle, strings.Join(lines, "\n"))
 }
 
 // thinkingKind classifies an agent's raw thinking wire label into the badge
@@ -2418,54 +2401,6 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
-}
-
-// thinkingBadge returns the styled right-aligned badge for an agent's thinking
-// label and the compact single-cell form used in the compact roster's
-// glyph-only degradation step. Both are empty when the agent has no thinking
-// configuration. The vocabulary carries no ✻ glyph: the effort gauge is the
-// only visual language for thinking.
-func thinkingBadge(label string) (badge, compact string) {
-	kind, tokens := classifyThinking(label)
-	switch kind {
-	case thinkingNone:
-		return "", ""
-	case thinkingOff:
-		// Capable but disabled: a dim empty gauge, distinct from a non-capable
-		// model (which renders nothing). The compact form is a single empty cell.
-		cell := lipgloss.NewStyle().Foreground(styles.TextMuted).Faint(true).Render(styles.GaugeEmpty)
-		return toolcommon.EffortGaugeEmpty(), cell
-	case thinkingAdaptive:
-		auto := styles.ThinkingBadgeStyle.Render("auto")
-		return auto, auto
-	case thinkingTokens:
-		return styles.ThinkingBadgeStyle.Render(styles.TokenGlyph + " " + toolcommon.FormatTokenCount(tokens)),
-			styles.ThinkingBadgeStyle.Render(styles.TokenGlyph)
-	default: // thinkingLevel
-		level, ok := effort.Parse(label)
-		if !ok {
-			// Unknown/future level word: a plain text badge so it still renders.
-			b := styles.ThinkingBadgeStyle.Render(label)
-			return b, b
-		}
-		return toolcommon.EffortGauge(level), toolcommon.EffortFillStyle(level).Render(styles.GaugeFilled)
-	}
-}
-
-// badgeColumnWidth returns the widest thinking badge across the roster so every
-// compact agent line reserves the same badge column and the badges stay
-// aligned. glyphOnly selects the single-cell compact form used near MinWidth.
-func badgeColumnWidth(roster []rosterAgent, glyphOnly bool) int {
-	w := 0
-	for _, entry := range roster {
-		full, compact := thinkingBadge(entry.agent.Thinking)
-		b := full
-		if glyphOnly {
-			b = compact
-		}
-		w = max(w, lipgloss.Width(b))
-	}
-	return w
 }
 
 // effortSegment builds the labeled effort metric for an agent's thinking
@@ -2550,124 +2485,25 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", max(0, width-lipgloss.Width(s)))
 }
 
-// padLeft pads a (possibly styled) string with leading spaces to width, i.e.
-// right-aligns it within the column.
-func padLeft(s string, width int) string {
-	return strings.Repeat(" ", max(0, width-lipgloss.Width(s))) + s
-}
-
-// renderAgentLine renders a single agent in the compact roster as two lines:
-//
-//	▶ name            <thinking> ^N
-//	  provider/model         <ctx%>
-//
-// Line 1: the name is left-aligned in its accent color, the thinking badge is
-// right-aligned in a shared column, and the "^N" switch shortcut sits flush
-// against the right edge. The current agent is marked with ▶ (or the spinner
-// while it — or any agent — is working); other agents pad the marker column so
-// the names stay aligned. Line 2: the indented provider/model, left-truncated
-// so its informative tail survives, with the agent's latest known context
-// usage percentage right-aligned once the agent has run (background agent
-// tasks included). The description is omitted. Agents past the 9th have no
-// shortcut.
-func (m *model) renderAgentLine(agent runtime.AgentDetails, index, contentWidth, nameWidth, badgeWidth int, glyphOnly, current bool) []string {
+func (m *model) renderAgentLine(agent runtime.AgentDetails, contentWidth int, current bool) []string {
 	agentStyle := styles.AgentAccentStyleFor(agent.Name)
-
+	indent := min(agentMarkerWidth, contentWidth-1)
+	width := contentWidth - indent
 	var marker string
-	switch {
-	case m.workingAgent == agent.Name:
-		marker = agentStyle.Render(m.spinner.RawFrame())
-	case current:
-		marker = agentStyle.Render("▶")
+	if indent > 0 {
+		switch {
+		case m.workingAgent == agent.Name:
+			marker = agentStyle.Render(m.spinner.RawFrame())
+		case current:
+			marker = agentStyle.Render("▶")
+		}
 	}
-	left := padRight(marker, agentMarkerWidth) + agentStyle.Render(toolcommon.TruncateText(agent.Name, nameWidth))
-
-	badge, compact := thinkingBadge(agent.Thinking)
-	if glyphOnly {
-		badge = compact
+	name := padRight(marker, indent) + agentStyle.Render(ansi.Truncate(agent.Name, width, "…"))
+	modelName := agent.Model
+	if modelName == "" && agent.Name == m.currentAgent {
+		_, modelName = splitAgentModel(m.agentModel)
 	}
-
-	var shortcut string
-	if index >= 0 && index < 9 {
-		shortcut = styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
-	}
-
-	right := padLeft(badge, badgeWidth) + " " + padLeft(shortcut, agentShortcutWidth)
-	gap := max(1, contentWidth-lipgloss.Width(left)-lipgloss.Width(right))
-	line1 := left + strings.Repeat(" ", gap) + right
-
-	modelText := agent.Model
-	if agent.Provider != "" {
-		modelText = agent.Provider + "/" + agent.Model
-	}
-	ctxPercent := m.agentContextPercent(agent.Name)
-	ctxStyle := contextGaugeStyle(m.agentContextGaugeLevel(agent.Name), styles.MutedStyle)
-	modelWidth := contentWidth - agentMarkerWidth
-	if ctxPercent != "" {
-		modelWidth -= lipgloss.Width(ctxPercent) + 1
-	}
-	model := toolcommon.TruncateTextLeft(modelText, max(1, modelWidth))
-	line2 := strings.Repeat(" ", agentMarkerWidth) + styles.MutedStyle.Render(model)
-	if ctxPercent != "" {
-		gap := max(1, contentWidth-lipgloss.Width(line2)-lipgloss.Width(ctxPercent))
-		line2 += strings.Repeat(" ", gap) + ctxStyle.Render(ctxPercent)
-	}
-
-	return []string{line1, line2}
-}
-
-// renderAgentCard renders a single agent in the detailed roster as a
-// borderless mini-card:
-//
-//	▶ name                             ^N
-//	  provider/model
-//	  Effort ▰▰▰▰▱▱ high · Context 30% · Cost $0.13
-//
-// Line 1: the name is left-aligned in its accent color and the "^N" switch
-// shortcut sits flush against the right edge. The current agent is marked
-// with ▶ (or the spinner while it — or any agent — is working); other agents
-// pad the marker column so the names stay aligned. Line 2: the indented
-// provider/model, left-truncated so its informative tail survives. The
-// remaining line(s) carry the labeled metrics, flowed to the width (see
-// flowMetricLines): wide cards label effort with the full six-cell gauge
-// while narrow cards compact the labels (Eff/Ctx) and keep the semantic
-// effort value in place of the gauge — a roster-wide adaptive choice (see
-// detailedAgentRenderer) — context keeps the warning/critical coloring, and
-// cost is the agent's cumulative attributed cost. The description is
-// omitted. Agents past the 9th have no shortcut.
-func (m *model) renderAgentCard(agent runtime.AgentDetails, index, contentWidth, nameWidth int, narrow, current bool) []string {
-	agentStyle := styles.AgentAccentStyleFor(agent.Name)
-
-	var marker string
-	switch {
-	case m.workingAgent == agent.Name:
-		marker = agentStyle.Render(m.spinner.RawFrame())
-	case current:
-		marker = agentStyle.Render("▶")
-	}
-	left := padRight(marker, agentMarkerWidth) + agentStyle.Render(toolcommon.TruncateText(agent.Name, nameWidth))
-
-	var shortcut string
-	if index >= 0 && index < 9 {
-		shortcut = styles.MutedStyle.Render(fmt.Sprintf("^%d", index+1))
-	}
-	right := padLeft(shortcut, agentShortcutWidth)
-	gap := max(1, contentWidth-lipgloss.Width(left)-lipgloss.Width(right))
-	line1 := left + strings.Repeat(" ", gap) + right
-
-	modelText := agent.Model
-	if agent.Provider != "" {
-		modelText = agent.Provider + "/" + agent.Model
-	}
-	model := toolcommon.TruncateTextLeft(modelText, max(1, contentWidth-agentMarkerWidth))
-	line2 := strings.Repeat(" ", agentMarkerWidth) + styles.MutedStyle.Render(model)
-
-	lines := []string{line1, line2}
-	indent := strings.Repeat(" ", agentMarkerWidth)
-	for _, metricLine := range m.metricLines(agent, contentWidth-agentMarkerWidth, narrow) {
-		lines = append(lines, indent+metricLine)
-	}
-	return lines
+	return []string{name, strings.Repeat(" ", indent) + styles.MutedStyle.Render(ansi.Truncate(modelName, width, "…"))}
 }
 
 // metricUnknown marks a metric whose value cannot be known yet (an agent that
@@ -2712,13 +2548,11 @@ func (m *model) metricLines(agent runtime.AgentDetails, width int, narrow bool) 
 // columns. Narrow cards flow every segment greedily in order, sharing lines
 // wherever they fit, so the metrics take as few lines as possible. Wide
 // cards join all segments on one line — the adaptive vocabulary choice (see
-// detailedAgentRenderer) picks wide only when that line fits — with a
+// agentUsageDetails) picks wide only when that line fits — with a
 // defensive degradation should it not: the first segment (effort, when
 // present) takes a dedicated line and the rest flow greedily, unless even
 // alone it overflows, in which case it degrades to its compact minimal form
-// and flows with the rest. Segments are never truncated: at the sidebar's
-// minimum width every minimal form fits, and narrower widths auto-collapse
-// the sidebar before this matters.
+// and flows with the rest.
 func flowMetricLines(segments []metricSegment, width int, narrow bool) []string {
 	if len(segments) == 0 {
 		return nil
@@ -2903,25 +2737,22 @@ func (m *model) renderTransferPanel(t transferPresentation, contentWidth int) []
 	}
 }
 
-// buildAgentClickZones populates agentClickZones from the explicit per-line
-// ownership recorded by agentInfo while rendering. agentSectionStart is the
-// index of the agent section's first rendered line; the renderTab wrapper adds
-// a fixed 2-line header (tab title + TabStyle top padding) before the body, so
-// body line j maps to content line agentSectionStart+tabHeaderLines+j. Lines
-// with no owner (blank separators) are not registered.
-func (m *model) buildAgentClickZones(agentSectionStart int) {
+// buildAgentClickZones maps roster and detailed usage owners onto content rows.
+func (m *model) buildAgentClickZones(agentSectionStart, agentUsageStart int) {
 	m.agentClickZones = make(map[int]string)
-
-	const tabHeaderLines = 2 // tab title + TabStyle top padding
-	for j, owner := range m.agentLineOwners {
-		if owner == "" {
-			continue
+	for j, owner := range m.agentUsageLineOwners {
+		if owner != "" {
+			m.agentClickZones[agentUsageStart+j] = owner
 		}
-		m.agentClickZones[agentSectionStart+tabHeaderLines+j] = owner
+	}
+	for j, owner := range m.agentLineOwners {
+		if owner != "" {
+			m.agentClickZones[agentSectionStart+j] = owner
+		}
 	}
 }
 
-// toolsetInfo renders the current toolset status information
+// toolsetInfo renders the current toolset status information.
 func (m *model) toolsetInfo(contentWidth int) string {
 	var lines []string
 
@@ -2941,7 +2772,7 @@ func (m *model) toolsetInfo(contentWidth int) string {
 		label    string
 		shortcut string
 	}{
-		{m.sessionState.YoloMode(), "YOLO mode enabled", "^y"},
+		{m.sessionState.YoloMode() && !m.showYoloFooter(), "YOLO mode enabled", "^y"},
 		{m.sessionState.HideToolResults(), "Tool output hidden", "^o"},
 		{m.sessionState.SplitDiffView(), "Split Diff View", "/split-diff"},
 	}
@@ -2956,7 +2787,10 @@ func (m *model) toolsetInfo(contentWidth int) string {
 		lines = append(lines, working)
 	}
 
-	return m.renderTab("Tools", lipgloss.JoinVertical(lipgloss.Top, lines...), contentWidth)
+	if len(lines) == 0 {
+		return ""
+	}
+	return paneText(strings.Join(lines, "\n"), contentWidth)
 }
 
 // renderToolsStatus renders the tools available/loading status line
@@ -2968,7 +2802,7 @@ func (m *model) renderToolsStatus() string {
 		return m.spinner.View() + styles.TabPrimaryStyle.Render(" Loading tools…")
 	}
 	if m.availableTools > 0 {
-		return styles.TabAccentStyle.Render("█") + styles.TabPrimaryStyle.Render(fmt.Sprintf(" %d tools available", m.availableTools))
+		return styles.MutedStyle.Render(fmt.Sprintf("%d tools available", m.availableTools))
 	}
 	return ""
 }
@@ -2979,7 +2813,7 @@ func (m *model) renderSkillsStatus() string {
 	if m.availableSkills == 1 {
 		label = "skill available"
 	}
-	return styles.TabAccentStyle.Render("█") + styles.TabPrimaryStyle.Render(fmt.Sprintf(" %d %s", m.availableSkills, label))
+	return styles.MutedStyle.Render(fmt.Sprintf("%d %s", m.availableSkills, label))
 }
 
 // renderToggleIndicator renders a toggle status with its keyboard shortcut
@@ -3003,8 +2837,8 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 }
 
 // updateTitleInputWidth sets the title input viewport width.
-// In vertical mode the input is wide enough to show the full text — the tab
-// body's lipgloss Width wraps it visually. In collapsed mode the input is
+// In vertical mode the input is wide enough to show the full text — the pane
+// wraps it visually. In collapsed mode the input is
 // constrained to the single available line so it scrolls horizontally instead.
 func (m *model) updateTitleInputWidth() {
 	if m.mode == ModeCollapsed {
@@ -3060,8 +2894,8 @@ func (m *model) SetMirroredPadding(mirrored bool) {
 	m.invalidateCache()
 }
 
-func (m *model) renderTab(title, content string, contentWidth int) string {
-	return tab.Render(title, content, contentWidth)
+func paneText(content string, width int) string {
+	return styles.RenderComposite(styles.TabPrimaryStyle.Width(width), content)
 }
 
 // metrics computes the layout metrics for the current render.

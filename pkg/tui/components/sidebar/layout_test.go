@@ -1,13 +1,17 @@
 package sidebar
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollbar"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
@@ -189,5 +193,82 @@ func BenchmarkSidebarVerticalView_NoCache(b *testing.B) {
 		// Invalidate cache before each render to force full re-render
 		m.invalidateCache()
 		_ = m.verticalView()
+	}
+}
+
+func TestExpandedYoloFooterStaysPinnedWhileContentScrolls(t *testing.T) {
+	t.Parallel()
+
+	m := newVisibilityTestSidebar(t).model
+	t.Cleanup(m.ar.Stop)
+	m.SetSize(40, 6)
+	m.SetPosition(10, 20)
+	m.sessionState.SetYoloMode(true)
+	m.sessionState.SetHideToolResults(true)
+
+	lines := strings.Split(m.View(), "\n")
+	require.Len(t, lines, 6)
+	assert.True(t, strings.HasSuffix(ansi.Strip(lines[5]), "YOLO  ^y"))
+	assert.Contains(t, ansi.Strip(strings.Join(m.cachedLines, "\n")), "Tool output hidden")
+	assert.NotContains(t, strings.Join(m.cachedLines, "\n"), "YOLO")
+	kind, _ := m.HandleClickType(m.layoutCfg.PaddingLeft, 5)
+	assert.Equal(t, ClickNone, kind, "the footer is not a scroll-content row")
+	barX := m.scrollview.ScrollbarX()
+	assert.Nil(t, m.SetScrollbarPointer(barX, 25), "hovering the footer must not reveal the scrollbar")
+	assert.NotNil(t, m.SetScrollbarPointer(barX, 24), "hovering the last viewport row reveals the scrollbar")
+	m.ClearScrollbarPointer()
+
+	m.scrollview.ScrollToBottom()
+	scrolled := strings.Split(m.View(), "\n")
+	require.Len(t, scrolled, len(lines))
+	assert.NotEqual(t, lines[0], scrolled[0])
+	assert.Equal(t, lines[5], scrolled[5], "the badge stays pinned")
+
+	m.sessionState.SetYoloMode(false)
+	m.Update(messages.SessionToggleChangedMsg{})
+	assert.NotContains(t, m.View(), "YOLO")
+	assert.Equal(t, 6, m.scrollview.VisibleHeight())
+}
+
+func TestExpandedRosterUpdatesModelWithoutShowingProvider(t *testing.T) {
+	t.Parallel()
+
+	m := newVisibilityTestSidebar(t).model
+	t.Cleanup(m.ar.Stop)
+	m.SetTeamInfo(nil)
+	m.SetAgentInfo("root", "openai/gpt-4o", "", 0, "", 0)
+	m.SetSize(MinWidth, 20)
+	startup := ansi.Strip(m.View())
+	assert.Contains(t, startup, "▶ root")
+	assert.Contains(t, startup, "gpt-4o", "AgentInfo can arrive before TeamInfo")
+	assert.NotContains(t, startup, "openai")
+
+	m.SetTeamInfo([]runtime.AgentDetails{
+		{Name: "root", Provider: "openai", Model: "gpt-4o", Thinking: "high"},
+		{Name: "reviewer", Provider: "anthropic", Model: "claude-sonnet"},
+	})
+	initial := ansi.Strip(m.View())
+	assert.Contains(t, initial, "▶ root")
+	assert.Contains(t, initial, "gpt-4o")
+	assert.Contains(t, initial, "claude-sonnet")
+	assert.NotContains(t, initial, "openai")
+	assert.NotContains(t, initial, "anthropic")
+	assert.NotContains(t, initial, "▰")
+
+	m.sessionState.SetCurrentAgentName("reviewer")
+	m.SetAgentInfo("reviewer", "dmr/ai/llama3.2", "", 0, "", 0)
+	updated := ansi.Strip(m.View())
+	assert.Contains(t, updated, "▶ reviewer")
+	assert.Contains(t, updated, "gpt-4o", "the other agent's model is unchanged")
+	assert.Contains(t, updated, "ai/llama3.2", "slashes in the model name survive")
+	assert.NotContains(t, updated, "dmr/")
+	assert.NotContains(t, updated, "claude-sonnet")
+	assert.NotContains(t, updated, "▶ root")
+	for y, row := range strings.Split(updated, "\n") {
+		if strings.Contains(row, "ai/llama3.2") {
+			kind, agent := m.HandleClickType(m.layoutCfg.PaddingLeft+agentMarkerWidth, y)
+			assert.Equal(t, ClickAgent, kind)
+			assert.Equal(t, "reviewer", agent)
+		}
 	}
 }

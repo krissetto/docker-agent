@@ -77,7 +77,7 @@ func expireReturn(t *testing.T, m *model) {
 // TestTransferPanelContentAndPlacement verifies the in-flight transfer renders
 // as a compact three-line box — muted bordered title, source ─●─► destination
 // relation — below the whole roster after a blank breathing line, all unowned
-// so it stays unclickable, and that the Agents header keeps its ↔ marker.
+// so it stays unclickable.
 func TestTransferPanelContentAndPlacement(t *testing.T) {
 	t.Parallel()
 
@@ -88,15 +88,15 @@ func TestTransferPanelContentAndPlacement(t *testing.T) {
 	idx := transferRelationIndex(m)
 	require.GreaterOrEqual(t, idx, 0, "a transfer relation line should render")
 
-	// The roster stays uninterrupted: each agent keeps its card lines and the
+	// The roster stays uninterrupted: each agent keeps its two rows and the
 	// blank separators, then the breathing line and the three box lines follow.
 	assert.Equal(t, []string{
-		"root", "root", "root", "",
-		"Scout", "Scout", "Scout", "",
-		"Coder", "Coder", "Coder",
+		"root", "root", "",
+		"Scout", "Scout", "",
+		"Coder", "Coder",
 		"", "", "", "",
 	}, m.agentLineOwners)
-	require.Len(t, body, 15)
+	require.Len(t, body, 12)
 	assert.Equal(t, len(body)-2, idx, "the relation line is the box's middle line")
 	assert.Empty(t, strings.TrimSpace(body[len(body)-4]), "a blank breathing line precedes the box")
 
@@ -115,9 +115,6 @@ func TestTransferPanelContentAndPlacement(t *testing.T) {
 	for _, line := range []string{top, relation, bottom} {
 		assert.Equal(t, contentWidth, lipgloss.Width(line), "the box spans the full content width")
 	}
-
-	title := renderAgentPanel(m)[0]
-	assert.Contains(t, title, "Agents ↔", "the header keeps its switching marker")
 }
 
 // TestTransferPanelBelowRosterAnyOrder verifies the box always sits below the
@@ -138,9 +135,9 @@ func TestTransferPanelBelowRosterAnyOrder(t *testing.T) {
 	require.GreaterOrEqual(t, idx, 0)
 
 	assert.Equal(t, []string{
-		"Coder", "Coder", "Coder", "",
-		"middle", "middle", "middle", "",
-		"Scout", "Scout", "Scout",
+		"Coder", "Coder", "",
+		"middle", "middle", "",
+		"Scout", "Scout",
 		"", "", "", "",
 	}, m.agentLineOwners, "nothing is inserted inside the roster")
 	assert.Equal(t, len(body)-2, idx, "the box stays at the bottom of the panel body")
@@ -464,7 +461,7 @@ func TestTransferStackNestedRestore(t *testing.T) {
 	expireReturn(t, m)
 	assert.Equal(t, -1, transferRelationIndex(m), "no box once all hops returned")
 	assert.False(t, m.transferAnimation.IsActive(), "the final Return's expiry ends the animation subscription")
-	assert.NotContains(t, renderAgentPanel(m)[0], "↔", "the header marker clears with the stack")
+	assert.NotContains(t, strings.Join(agentBody(m), "\n"), "↔", "the transfer marker clears with the stack")
 }
 
 // TestTransferStackOutOfOrderStop verifies a stop pops its matching hop (the
@@ -678,5 +675,5 @@ func TestNoTransferPanelWhenIdle(t *testing.T) {
 	body := strings.Join(agentBody(m), "\n")
 	assert.NotContains(t, body, transferBoxTitle)
 	assert.NotContains(t, body, "╭")
-	assert.NotContains(t, renderAgentPanel(m)[0], "↔")
+	assert.NotContains(t, body, "↔")
 }

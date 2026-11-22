@@ -221,9 +221,9 @@ func TestAgentCardCostRepeatedRestoreAndSwitch(t *testing.T) {
 	assert.InDelta(t, 0.04, m.computeUsageStats().totalCost, 1e-9)
 }
 
-// TestAgentCardSingleMetricsLineAtWideWidth verifies all three labeled
-// metrics share one line when the sidebar is wide enough to hold them — the
-// design's ideal three-line card.
+// / TestAgentCardSingleMetricsLineAtWideWidth verifies an agent's labeled metrics
+// share one line in the expanded usage details when the sidebar is wide enough
+// to hold them, beneath the agent's label row.
 func TestAgentCardSingleMetricsLineAtWideWidth(t *testing.T) {
 	t.Parallel()
 
@@ -232,10 +232,10 @@ func TestAgentCardSingleMetricsLineAtWideWidth(t *testing.T) {
 	)
 	recordAgentUsageWithCost(m, "session-root", "root", 30_000, 100_000, 0.1284)
 
-	card := agentCard(m, "root")
-	require.Len(t, card, 3, "name, model and one combined metrics line")
+	metrics := agentMetricLines(m, "root")
+	require.Len(t, metrics, 1, "one combined metrics line in the usage details")
 	assert.Equal(t, "Effort "+gaugePattern(4)+" high · Context 30% · Cost $0.13",
-		strings.TrimSpace(card[2]))
+		strings.TrimSpace(metrics[0]))
 }
 
 // previewSidebar builds the deterministic three-agent roster used by the
@@ -254,7 +254,7 @@ func previewSidebar(t *testing.T, width int) *model {
 }
 
 // previewLines renders the Agents panel and strips the trailing-space padding
-// the tab body adds to every line, leaving the visible content for exact
+// the agent panel adds to some lines, leaving the visible content for exact
 // comparison.
 func previewLines(m *model) []string {
 	lines := renderAgentPanel(m)
@@ -265,78 +265,80 @@ func previewLines(m *model) []string {
 	return out
 }
 
-// TestAgentCardPreview_DefaultWidth pins the exact ANSI-stripped Agents panel
-// at the default sidebar width (40 → 39 content columns, 37 metric columns).
-// It doubles as the visual reference for the mini-card design at its most
-// common width: root's preferred wide joined metric line (45 columns) cannot
-// fit, so the roster adapts to the compact vocabulary and every card joins
-// its metrics on a single line — three lines per card, the issue #3856
-// vertical-space fix.
+// / TestAgentCardPreview_DefaultWidth pins the exact ANSI-stripped roster and the
+// per-agent metric lines at the default sidebar width (40 → 39 content columns,
+// 37 metric columns). The roster is the two-row entry for every agent; root's
+// preferred wide joined metric line (45 columns) cannot fit, so the usage
+// details adopt the compact vocabulary and join each agent's metrics on one line.
 func TestAgentCardPreview_DefaultWidth(t *testing.T) {
 	t.Parallel()
 
 	m := previewSidebar(t, DefaultWidth)
-	got := previewLines(m)
 
-	want := []string{
-		"Agents ────────────────────────────────",
+	wantRoster := []string{
+		"▶ root",
+		"  claude-opus-4-8",
 		"",
-		"▶ root                               ^1",
-		"  anthropic/claude-opus-4-8",
-		"  Eff high · Ctx 30% · Cost $0.13",
+		"  scout",
+		"  gpt-5.4-mini",
 		"",
-		"  scout                              ^2",
-		"  openai/gpt-5.4-mini",
-		"  Eff off · Ctx 6% · Cost $0.0042",
-		"",
-		"  writer                             ^3",
-		"  google/gemini-flash",
-		"  Ctx — · Cost —",
+		"  writer",
+		"  gemini-flash",
 	}
-	require.Equal(t, want, got, "default-width preview changed:\n%s", strings.Join(got, "\n"))
+	require.Equal(t, wantRoster, previewLines(m), "default-width roster changed")
+
+	wantMetrics := map[string][]string{
+		"root":   {"  Eff high · Ctx 30% · Cost $0.13"},
+		"scout":  {"  Eff off · Ctx 6% · Cost $0.0042"},
+		"writer": {"  Ctx — · Cost —"},
+	}
+	for name, want := range wantMetrics {
+		assert.Equalf(t, want, agentMetricLines(m, name), "default-width usage details for %q", name)
+	}
 }
 
-// TestAgentCardPreview_MinWidth pins the exact ANSI-stripped Agents panel at
-// the minimum sidebar width (20 → 19 content columns, 17 metric columns):
-// the metric labels compact to Eff/Ctx, the effort value replaces the
-// decorative six-cell gauge while staying visible, and the compact segments
-// pack greedily — scout's "Eff off · Ctx 6%" (16 columns) shares a line
-// while root's "Eff high · Ctx 30%" (18 columns) would overflow and wraps.
+// / TestAgentCardPreview_MinWidth pins the exact ANSI-stripped roster and the
+// per-agent metric lines at the minimum sidebar width (20 → 19 content columns,
+// 17 metric columns): the roster rows stay the same two-row entries, while the
+// usage details compact their labels to Eff/Ctx, keep the effort value in place
+// of the gauge, and pack greedily — scout's "Eff off · Ctx 6%" shares a line
+// while root's "Eff high · Ctx 30%" would overflow and wraps.
 func TestAgentCardPreview_MinWidth(t *testing.T) {
 	t.Parallel()
 
 	m := previewSidebar(t, MinWidth)
-	got := previewLines(m)
 
-	want := []string{
-		"Agents ────────────",
+	wantRoster := []string{
+		"▶ root",
+		"  claude-opus-4-8",
 		"",
-		"▶ root           ^1",
-		"  …/claude-opus-4-8",
-		"  Eff high",
-		"  Ctx 30%",
-		"  Cost $0.13",
+		"  scout",
+		"  gpt-5.4-mini",
 		"",
-		"  scout          ^2",
-		"  …nai/gpt-5.4-mini",
-		"  Eff off · Ctx 6%",
-		"  Cost $0.0042",
-		"",
-		"  writer         ^3",
-		"  …gle/gemini-flash",
-		"  Ctx — · Cost —",
+		"  writer",
+		"  gemini-flash",
 	}
-	require.Equal(t, want, got, "min-width preview changed:\n%s", strings.Join(got, "\n"))
+	require.Equal(t, wantRoster, previewLines(m), "min-width roster changed")
+
+	wantMetrics := map[string][]string{
+		"root":   {"  Eff high", "  Ctx 30%", "  Cost $0.13"},
+		"scout":  {"  Eff off · Ctx 6%", "  Cost $0.0042"},
+		"writer": {"  Ctx — · Cost —"},
+	}
+	for name, want := range wantMetrics {
+		assert.Equalf(t, want, agentMetricLines(m, name), "min-width usage details for %q", name)
+	}
 }
 
-// TestAgentCardPreviewLineInvariants guards the layout invariants behind the
-// pinned previews at both reference widths: every rendered line fits the
-// content width and each card carries exactly one provider/model line.
+// / TestAgentCardPreviewLineInvariants guards the layout invariants behind the
+// pinned previews at both reference widths: every roster row and every
+// usage-details line fits the content width, and each roster entry carries
+// exactly one model row.
 func TestAgentCardPreviewLineInvariants(t *testing.T) {
 	t.Parallel()
 
-	// Informative model-name tails: they survive the left-truncation of the
-	// model line at narrow widths and appear on no other card line.
+	// Informative model-name tails: they survive the right-truncation of the
+	// model row at narrow widths and appear on no other roster row.
 	modelTails := map[string]string{
 		"root":   "claude-opus-4-8",
 		"scout":  "gpt-5.4-mini",
@@ -347,17 +349,27 @@ func TestAgentCardPreviewLineInvariants(t *testing.T) {
 		contentWidth := m.contentWidth(false)
 		for _, line := range previewLines(m) {
 			assert.LessOrEqualf(t, lipgloss.Width(line), contentWidth,
-				"width %d: line %q must fit the content width", width, line)
+				"width %d: roster line %q must fit the content width", width, line)
+		}
+		for _, line := range agentUsageLinesOnly(m) {
+			assert.LessOrEqualf(t, lipgloss.Width(line), contentWidth,
+				"width %d: usage line %q must fit the content width", width, line)
 		}
 		for name, tail := range modelTails {
-			modelLines := 0
+			modelRows := 0
 			for _, line := range agentCard(m, name) {
 				if strings.Contains(line, tail) {
-					modelLines++
+					modelRows++
 				}
 			}
-			assert.Equalf(t, 1, modelLines,
-				"width %d: card %q must contain exactly one model line", width, name)
+			assert.Equalf(t, 1, modelRows,
+				"width %d: roster entry %q must contain exactly one model row", width, name)
 		}
 	}
+}
+
+// agentUsageLinesOnly returns just the usage-details lines, for width checks.
+func agentUsageLinesOnly(m *model) []string {
+	lines, _ := agentUsageLines(m)
+	return lines
 }
