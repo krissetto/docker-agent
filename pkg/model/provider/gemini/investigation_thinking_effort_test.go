@@ -30,7 +30,7 @@ func TestInvestigation_GeminiEffortThinkingWire(t *testing.T) {
 				Model:          tc.model,
 				ThinkingBudget: &latest.ThinkingBudget{Effort: tc.level},
 			}}}
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 			require.NotNil(t, config.ThinkingConfig)
 			assert.True(t, config.ThinkingConfig.IncludeThoughts)
 			assert.Equal(t, genai.ThinkingLevel(""), config.ThinkingConfig.ThinkingLevel)
@@ -55,7 +55,7 @@ func TestInvestigation_GeminiEffortThinkingWire(t *testing.T) {
 				Model:          tc.model,
 				ThinkingBudget: &latest.ThinkingBudget{Effort: tc.level},
 			}}}
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 			require.NotNil(t, config.ThinkingConfig)
 			assert.True(t, config.ThinkingConfig.IncludeThoughts)
 			assert.Equal(t, tc.want, config.ThinkingConfig.ThinkingLevel)
