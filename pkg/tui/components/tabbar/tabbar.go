@@ -99,7 +99,9 @@ type TabBar struct {
 
 	drag dragState
 
-	visualGeneration uint64
+	runningFrames       animation.FrameCache
+	dimmedRunningFrames animation.FrameCache
+	visualGeneration    uint64
 }
 
 // KeyMap defines key bindings for the tab bar.
@@ -422,7 +424,7 @@ func (t *TabBar) View() string {
 				role = dragRoleBystander
 			}
 		}
-		allTabs[i] = renderTab(info, t.maxTitleLen, role, t.ar.Now())
+		allTabs[i] = t.renderTab(info, role, t.ar.Now())
 		totalWidth += allTabs[i].Width()
 	}
 	totalWidth += plusButtonWidth

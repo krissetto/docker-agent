@@ -167,3 +167,28 @@ func (s *immediateScheduler) Now() time.Time { return s.now }
 func (s *immediateScheduler) Tick(d time.Duration, f func(time.Time) tea.Msg) tea.Cmd {
 	return func() tea.Msg { s.now = s.now.Add(d); return f(s.now) }
 }
+
+func BenchmarkTransferRailDraw(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		mode Mode
+	}{
+		{"Vertical", ModeVertical},
+		{"Collapsed", ModeCollapsed},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			m := buildStreamingSidebar(b, 0)
+			m.SetMode(tc.mode)
+			m.SetAgentSwitching(true, "root", "helper")
+			b.Cleanup(m.transferAnimation.Stop)
+			_ = m.View()
+
+			b.ReportAllocs()
+			for b.Loop() {
+				m.transferAnimationFrame += transferFramesPerStep
+				m.invalidateAnimation()
+				_ = m.View()
+			}
+		})
+	}
+}

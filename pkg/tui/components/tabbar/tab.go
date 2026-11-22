@@ -21,8 +21,6 @@ const (
 	closeButtonText = " ×"
 	// accentBar is the leading vertical bar that indicates focus state.
 	accentBar = "▎"
-	// runningIndicator is shown before the title when the tab's session is streaming.
-	// Cycles through braille spinner frames when animated.
 	// attentionIndicator is shown before the title when the tab needs attention,
 	// replacing the running indicator to signal that user action is required.
 	attentionIndicator = "! "
@@ -81,13 +79,13 @@ func blendColors(a, b color.Color, ratio float64) color.Color {
 //
 // When role is dragRoleBystander, all foreground colors are faded toward the
 // background to visually de-emphasize tabs that aren't being dragged.
-func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed time.Duration) Tab {
+func (t *TabBar) renderTab(info messages.TabInfo, role dragRole, elapsed time.Duration) Tab {
 	title := info.Title
 	if title == "" {
 		title = defaultTabTitle
 	}
-	if r := []rune(title); len(r) > maxTitleLen {
-		title = string(r[:maxTitleLen-1]) + "…"
+	if r := []rune(title); len(r) > t.maxTitleLen {
+		title = string(r[:t.maxTitleLen-1]) + "…"
 	}
 
 	// Pick colors based on focus state.
@@ -141,12 +139,7 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		}
 		content += lipgloss.NewStyle().Foreground(attnFg).Background(bgColor).Bold(true).Render(attentionIndicator)
 	case info.IsRunning && !info.IsActive:
-		runFg := styles.EnsureContrast(styles.TabAccentFg, bgColor)
-		if role == dragRoleBystander {
-			runFg = blendColors(runFg, bgColor, dragBystanderDimAmount)
-		}
-		frame := animation.Card.FrameAt(elapsed)
-		content += lipgloss.NewStyle().Foreground(runFg).Background(bgColor).Render(frame + " ")
+		content += t.runningIndicator(role, elapsed)
 	default:
 		content += pad.Render(" ")
 	}
@@ -164,4 +157,21 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		mainZoneEnd: mainEnd,
 		width:       width,
 	}
+}
+
+// runningIndicator is only used for inactive tabs, so they share one frame set
+// except for drag bystanders, whose foreground is dimmed.
+func (t *TabBar) runningIndicator(role dragRole, elapsed time.Duration) string {
+	cache := &t.runningFrames
+	if role == dragRoleBystander {
+		cache = &t.dimmedRunningFrames
+	}
+	return cache.Frame(styles.ThemeGeneration(), animation.Card.Len(), animation.Card.FrameIndexAt(elapsed), func(i int) string {
+		bg := styles.TabBg
+		fg := styles.EnsureContrast(styles.TabAccentFg, bg)
+		if role == dragRoleBystander {
+			fg = blendColors(fg, bg, dragBystanderDimAmount)
+		}
+		return lipgloss.NewStyle().Foreground(fg).Background(bg).Render(animation.Card.Frame(i) + " ")
+	})
 }

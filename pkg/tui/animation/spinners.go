@@ -19,6 +19,9 @@ func NewSpinner(frames Frames, frameDuration time.Duration) Spinner {
 	return Spinner{frames: slices.Clone(frames), frameDuration: frameDuration}
 }
 
+// Frame returns the raw glyph at the given frame index.
+func (s Spinner) Frame(index int) string { return s.frames[index] }
+
 func (s Spinner) FrameAt(elapsed time.Duration) string {
 	return s.frames.TimedFrame(elapsed, s.frameDuration)
 }

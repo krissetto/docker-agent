@@ -387,6 +387,7 @@ type model struct {
 	// divided down to the rail phase (see transferPhase).
 	transferAnimation      animation.Subscription
 	transferAnimationFrame int
+	transferRailFrames     animation.FrameCache
 
 	ctx func() context.Context
 
@@ -2769,7 +2770,10 @@ func (m *model) transferPhase() int {
 // the animation-only render path. The arrow head is left unstyled so the tab
 // body's primary style keeps it clearly visible.
 func (m *model) transferRailView() string {
-	phase := m.transferPhase()
+	return m.transferRailFrames.Frame(styles.ThemeGeneration(), transferRailCells, m.transferPhase(), renderTransferRail)
+}
+
+func renderTransferRail(phase int) string {
 	var rail strings.Builder
 	for i := range transferRailCells {
 		if i == phase {

@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // transferRoster is a 3-agent roster whose current agent is "root" (set by
@@ -679,4 +680,53 @@ func TestNoTransferPanelWhenIdle(t *testing.T) {
 	assert.NotContains(t, body, transferBoxTitle)
 	assert.NotContains(t, body, "╭")
 	assert.NotContains(t, renderAgentPanel(m)[0], "↔")
+}
+
+func TestTransferRailFramesFollowTheme(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+
+	theme := *styles.DefaultTheme()
+	styles.ApplyTheme(&theme)
+	m := newAgentPanelSidebar(t, 40, transferRoster()...)
+	m.SetAgentSwitching(true, "Scout", "Coder")
+
+	checkFrames := func() []string {
+		t.Helper()
+		var styledFrames []string
+		track := styles.MutedStyle.Render(transferTrack)
+		dot := styles.SpinnerDotsHighlightStyle.Render(transferDot)
+		for i := range transferRailCells + 1 {
+			phase := i % transferRailCells
+			m.transferAnimationFrame = i * transferFramesPerStep
+			want := strings.Repeat(track, phase) + dot + strings.Repeat(track, transferRailCells-1-phase) + transferArrowHead
+			got := m.transferRelationLine(transferPresentation{}, transferRailCells+1)
+			require.Equal(t, want, got)
+			require.Equal(t, transferRailCells+1, lipgloss.Width(got))
+			require.Contains(t, m.transferSummaryCollapsed(40), want)
+			m.invalidateAnimation()
+			require.Contains(t, ansi.Strip(m.View()), ansi.Strip(want))
+			styledFrames = append(styledFrames, got)
+		}
+		return styledFrames
+	}
+	before := checkFrames()
+
+	// Mutate the same theme in place to simulate reapplying the same reference.
+	m.transferAnimationFrame = transferFramesPerStep
+	m.invalidateAnimation()
+	require.Contains(t, ansi.Strip(m.View()), ansi.Strip(before[1]))
+	phase := m.transferAnimationFrame
+	theme.Colors.TextMuted = "#112233"
+	theme.Colors.Highlight = "#ffaa00"
+	styles.ApplyTheme(&theme)
+	_, _ = m.Update(messages.ThemeChangedMsg{})
+	require.Equal(t, phase, m.transferAnimationFrame)
+	require.True(t, m.transferAnimation.IsActive())
+	first := m.View()
+	after := checkFrames()
+	require.Contains(t, ansi.Strip(first), ansi.Strip(after[1]))
+	for i := range before {
+		require.NotEqual(t, before[i], after[i])
+	}
 }

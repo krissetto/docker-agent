@@ -1019,6 +1019,11 @@ var currentTheme atomic.Pointer[Theme]
 
 var spinnerPalette atomic.Pointer[[4]lipgloss.Style]
 
+var themeGeneration atomic.Uint64
+
+// ThemeGeneration identifies the applied styles, including reloads of the same theme.
+func ThemeGeneration() uint64 { return themeGeneration.Load() }
+
 // CurrentSpinnerPalette returns the spinner label styles in descending brightness.
 // The returned palette is read-only, and its identity changes on each theme application.
 func CurrentSpinnerPalette() *[4]lipgloss.Style {
@@ -1117,6 +1122,8 @@ func ApplyTheme(theme *Theme) {
 
 	// Clear style sequence cache (used by RenderComposite)
 	clearStyleSeqCache()
+
+	themeGeneration.Add(1)
 
 	// Let dependent packages invalidate their own memoized rendering
 	// (e.g. the markdown renderer's style cache).
