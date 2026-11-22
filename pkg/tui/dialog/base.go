@@ -15,6 +15,7 @@ type (
 	BaseDialog    = common.BaseDialog
 	ConfirmKeyMap = common.ConfirmKeyMap
 	Content       = common.Content
+	Action        = common.Action
 )
 
 func DefaultConfirmKeyMap() ConfirmKeyMap {

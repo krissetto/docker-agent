@@ -54,6 +54,7 @@ type ElicitationDialog struct {
 	multiChecked  map[int][]bool
 	multiCursor   map[int]int // focused option of multiselect fields
 	currentField  int
+	footerFocused bool
 	keyMap        elicitationKeyMap
 	fieldErrors   map[int]string  // validation error messages per field
 	responseInput textinput.Model // free-form text input used when len(fields) == 0
@@ -218,6 +219,15 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				if action.Code == tea.KeyEscape {
+					cmd := d.CancelDialogCmd()
+					return d, cmd
+				}
+				return d.submit()
+			}
 			return d.handleMouseClick(msg)
 		}
 		return d, nil
@@ -228,6 +238,15 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	if key.Matches(msg, d.keyMap.Tab, d.keyMap.ShiftTab) {
+		d.traverseForm(key.Matches(msg, d.keyMap.ShiftTab))
+		return d, nil
+	}
+	if d.footerFocused && key.Matches(msg, d.keyMap.Enter) && d.Actions.Selected() == 1 {
+		cmd := d.CancelDialogCmd()
+		return d, cmd
+	}
+
 	switch {
 	case key.Matches(msg, d.keyMap.Space) && !d.isTextInputField() && !d.hasFreeFormInput():
 		// Space toggles a multiselect option, and cycles forward through
@@ -239,7 +258,7 @@ func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 		d.moveSelection(1)
 		return d, nil
 	case key.Matches(msg, d.keyMap.Escape):
-		cmd := d.close(tools.ElicitationActionCancel, nil)
+		cmd := d.CancelDialogCmd()
 		return d, cmd
 	case key.Matches(msg, d.keyMap.Up):
 		// Up/down navigate within selection fields (enum/boolean)
@@ -248,15 +267,12 @@ func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 	case key.Matches(msg, d.keyMap.Down):
 		d.moveSelection(1)
 		return d, nil
-	case key.Matches(msg, d.keyMap.ShiftTab):
-		d.moveFocus(-1)
-		return d, nil
-	case key.Matches(msg, d.keyMap.Tab):
-		d.moveFocus(1)
-		return d, nil
 	case key.Matches(msg, d.keyMap.Enter):
 		return d.submit()
 	default:
+		if d.footerFocused {
+			return d, nil
+		}
 		return d.updateCurrentInput(msg)
 	}
 }
@@ -334,12 +350,34 @@ func (d *ElicitationDialog) updateCurrentInput(msg tea.KeyPressMsg) (layout.Mode
 	return d, nil
 }
 
-func (d *ElicitationDialog) moveFocus(delta int) {
-	if len(d.fields) == 0 {
-		return
+// traverseForm keeps the fields in the Tab order and appends Submit and Cancel.
+func (d *ElicitationDialog) traverseForm(reverse bool) {
+	count := max(1, len(d.fields))
+	index := d.currentField
+	if d.footerFocused {
+		index = count + d.Actions.Selected()
 	}
-	newField := (d.currentField + delta + len(d.fields)) % len(d.fields)
-	d.focusField(newField)
+	delta := 1
+	if reverse {
+		delta = -1
+	}
+	index = (index + delta + count + 2) % (count + 2)
+	switch {
+	case index >= count:
+		d.footerFocused = true
+		d.Actions.Select(index - count)
+		if d.hasFreeFormInput() {
+			d.responseInput.Blur()
+		} else {
+			d.inputs[d.currentField].Blur()
+		}
+	case d.hasFreeFormInput():
+		d.footerFocused = false
+		d.Actions.Select(0)
+		d.responseInput.Focus()
+	default:
+		d.focusField(index)
+	}
 }
 
 // focusField moves focus to the specified field index.
@@ -351,6 +389,8 @@ func (d *ElicitationDialog) focusField(idx int) {
 		d.inputs[d.currentField].Blur()
 	}
 	d.currentField = idx
+	d.footerFocused = false
+	d.Actions.Select(0)
 	// Only focus text input for fields that use it
 	if d.isTextInputField() {
 		d.inputs[d.currentField].Focus()
@@ -553,39 +593,16 @@ func (d *ElicitationDialog) View() string {
 		RenderSeparator(l.contentWidth),
 	}
 	parts = append(parts, strings.Split(d.scrollview.View(), "\n")...)
-	parts = append(parts, "", RenderHelpKeys(l.contentWidth, d.helpPairs()...))
-
-	return styles.DialogStyle.Width(l.dialogWidth).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
-}
-
-// helpPairs returns key/description pairs for the dialog's bottom help line,
-// in left-to-right display order.
-func (d *ElicitationDialog) helpPairs() []string {
-	var pairs []string
-	if d.hasSelectionFields() {
-		pairs = append(pairs, "↑/↓", "select")
-	}
-	if slices.ContainsFunc(d.fields, func(f elicitform.Field) bool { return f.Type == "multiselect" }) {
-		pairs = append(pairs, "space", "toggle")
-	}
-	if len(d.fields) > 0 {
-		pairs = append(pairs, "tab", "next field")
-	}
-	pairs = append(pairs, "enter", "submit", "esc", "cancel")
-	if d.scrollview.NeedsScrollbar() {
-		pairs = append(pairs, "pgup/pgdn", "scroll")
-	}
-	return pairs
-}
-
-// hasSelectionFields returns true if any field uses selection-based input (boolean, enum or multiselect).
-func (d *ElicitationDialog) hasSelectionFields() bool {
+	help := ""
 	for _, field := range d.fields {
-		if field.Type == "boolean" || field.Type == "enum" || field.Type == "multiselect" {
-			return true
+		if field.Type == "multiselect" {
+			help = RenderHelpKeys(l.contentWidth, "space", "toggle")
+			break
 		}
 	}
-	return false
+	parts = append(parts, help, d.Actions.Render(l.contentWidth, lipgloss.Right, Action{Label: "Submit", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape}))
+
+	return styles.DialogStyle.Width(l.dialogWidth).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 }
 
 func (d *ElicitationDialog) renderField(content *Content, i int, field elicitform.Field, contentWidth int) fieldGeometry {
@@ -811,4 +828,8 @@ func renderMarkdownMessage(message string, contentWidth int) string {
 		return styles.DialogContentStyle.Width(contentWidth).Render(message)
 	}
 	return strings.TrimRight(rendered, "\n")
+}
+
+func (d *ElicitationDialog) CancelDialogCmd() tea.Cmd {
+	return d.close(tools.ElicitationActionCancel, nil)
 }

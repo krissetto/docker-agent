@@ -204,6 +204,7 @@ func TestPlanBrowserStatusFlow(t *testing.T) {
 	statusDialog, ok := openMsg.Model.(*planStatusDialog)
 	require.True(t, ok)
 	assert.Equal(t, 3, statusDialog.version, "the displayed version guards the write")
+	statusDialog.SetSize(100, 40)
 	assert.Contains(t, statusDialog.View(), "release")
 	assert.Contains(t, statusDialog.View(), "v3")
 

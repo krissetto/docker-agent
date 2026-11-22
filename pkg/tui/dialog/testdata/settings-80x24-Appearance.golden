@@ -1,6 +1,6 @@
 ╭──────────────────────────────────────────────────────────────────────────╮
 │                                 Settings                                 │
-│                                                                          │
+│  ──────────────────────────────────────────────────────────────────────  │
 │              Appearance   ·   Behavior   ·   Notifications               │
 │                                                                          │
 │  › Theme                                                  ‹ default ›    │
@@ -19,6 +19,6 @@
 │    [x] Tools                                                             │
 │    [ ] Plans                                                             │
 │                                                                          │
-│                                                                          │
-│      ↑↓ move  ←→/space change  tab category  enter open  esc cancel      │
+│                  ↑↓ move  ←→/space change  tab category                  │
+│                                                      Open ↵   Cancel     │
 ╰──────────────────────────────────────────────────────────────────────────╯

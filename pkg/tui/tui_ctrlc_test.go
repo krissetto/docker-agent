@@ -36,27 +36,21 @@ func TestCtrlC_NoDialog_OpensExitConfirmation(t *testing.T) {
 		"ctrl+c with no dialog should open the exit confirmation dialog")
 }
 
-func TestCtrlC_OnOtherDialog_StacksExitConfirmation(t *testing.T) {
+func TestCtrlC_OnOtherDialog_CancelsDialog(t *testing.T) {
 	t.Parallel()
 
 	m, _ := newTestModel(t)
+	_, _ = m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	require.True(t, m.dialogMgr.Open())
 
-	// Open an arbitrary, non-exit dialog first.
-	_, cmd := m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
-	applyOpenDialogMsgs(t, m, cmd)
-	require.True(t, m.dialogMgr.Open(), "help dialog should be open")
-	require.False(t, m.dialogMgr.TopIsExitConfirmation(),
-		"help dialog should be on top, not exit confirmation")
-
-	// Press ctrl+c — must stack the exit confirmation, not exit immediately.
-	_, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	applyOpenDialogMsgs(t, m, cmd)
-
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	msgs := collectMsgs(cmd)
-	assert.False(t, hasMsg[tea.QuitMsg](msgs),
-		"first ctrl+c on a non-exit dialog must NOT quit the program")
-	assert.True(t, m.dialogMgr.TopIsExitConfirmation(),
-		"ctrl+c on a non-exit dialog should put the exit confirmation on top")
+	assert.False(t, hasMsg[tea.QuitMsg](msgs))
+	require.True(t, hasMsg[dialog.CloseDialogMsg](msgs))
+	for _, msg := range msgs {
+		_, _ = m.Update(msg)
+	}
+	assert.False(t, m.dialogMgr.Open())
 }
 
 func TestCtrlC_OnExitConfirmation_ForwardsAndExits(t *testing.T) {

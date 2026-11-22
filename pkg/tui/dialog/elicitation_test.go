@@ -384,7 +384,7 @@ func TestElicitationDialog_FieldsBelowFold_AreReachable(t *testing.T) {
 	// Tab through every field; each one must end up within the scroll viewport.
 	for i := range 15 {
 		for dialog.currentField != i {
-			dialog.moveFocus(1)
+			dialog.traverseForm(false)
 		}
 		_ = dialog.View()
 		offset := dialog.scrollview.ScrollOffset()

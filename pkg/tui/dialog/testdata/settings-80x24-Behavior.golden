@@ -1,6 +1,6 @@
 ╭──────────────────────────────────────────────────────────────────────────╮
 │                                 Settings                                 │
-│                                                                          │
+│  ──────────────────────────────────────────────────────────────────────  │
 │              Appearance   ·   Behavior   ·   Notifications               │
 │                                                                          │
 │  ── While agent is working ────────────────────────────────────────      │
@@ -19,6 +19,6 @@
 │    Background compaction threshold                           ‹ 70 % ›    │
 │    [ ] Lean UI by default                                                │
 │                                                                          │
-│                                                                          │
-│     ↑↓ move  ←→/space change  tab category  enter apply  esc cancel      │
+│                  ↑↓ move  ←→/space change  tab category                  │
+│                                                     Apply ↵   Cancel     │
 ╰──────────────────────────────────────────────────────────────────────────╯

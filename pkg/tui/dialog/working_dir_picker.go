@@ -81,8 +81,8 @@ const (
 	// filterInput(1) + space(1) = 2
 	dirPickerBrowseFilterRows = 2
 
-	// Content rows below the list: space(1) + helpKeys(1) = 2
-	dirPickerFooterRows = 2
+	// Content rows below the list: space, shortcuts, and actions.
+	dirPickerFooterRows = 3
 
 	// Total vertical overhead = chrome + header + footer + section-specific rows
 	dirPickerOverheadSimple = dirPickerContentOffsetY*2 + dirPickerHeaderRows + dirPickerFooterRows
@@ -545,6 +545,11 @@ func (d *workingDirPickerDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 	if msg.Button != tea.MouseLeft {
 		return d, nil
 	}
+	view := d.View()
+	row, col := d.Position()
+	if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+		return d.Update(action)
+	}
 
 	// Check tab clicks
 	if clicked := d.tabClickTarget(msg.X, msg.Y); clicked >= 0 {
@@ -711,7 +716,7 @@ func (d *workingDirPickerDialog) View() string {
 
 	builder := NewContent(regionWidth).
 		AddTitle("New Session: Select Working Directory").
-		AddSpace().
+		AddSeparator().
 		AddContent(d.renderTabs(regionWidth)).
 		AddSpace()
 
@@ -722,7 +727,8 @@ func (d *workingDirPickerDialog) View() string {
 	builder.
 		AddContent(d.renderActiveList(contentWidth)).
 		AddSpace().
-		AddHelpKeys(d.helpKeys()...)
+		AddHelpKeys(d.helpKeys()...).
+		AddContent(d.Actions.Render(regionWidth, lipgloss.Right, Action{Label: "Select directory", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape}))
 
 	return styles.DialogStyle.Width(dialogWidth).Render(builder.Build())
 }
@@ -741,11 +747,11 @@ func (d *workingDirPickerDialog) renderActiveList(contentWidth int) string {
 
 // helpKeys returns the key/label pairs displayed at the bottom of the dialog.
 func (d *workingDirPickerDialog) helpKeys() []string {
-	keys := []string{"↑/↓", "navigate", "tab/shift+tab", "section", "enter", "select"}
+	keys := []string{"↑/↓", "navigate", "tab/shift+tab", "section"}
 	if label := d.pinHelpLabel(); label != "" {
 		keys = append(keys, "ctrl+p", label)
 	}
-	return append(keys, "esc", "cancel")
+	return keys
 }
 
 func (d *workingDirPickerDialog) renderTabs(width int) string {

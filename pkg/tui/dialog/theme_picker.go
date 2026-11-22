@@ -129,6 +129,14 @@ func (d *themePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.Position()
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
+
 		dbl, changed := d.handleListClick(msg, d.lineToThemeIndex)
 		switch {
 		case dbl:
@@ -141,15 +149,18 @@ func (d *themePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
-			return d, tea.Sequence(
-				closeDialogCmd(),
-				core.CmdHandler(messages.ThemeCancelPreviewMsg{OriginalRef: d.originalThemeRef}),
-			)
+			cmd := d.CancelDialogCmd()
+			return d, cmd
 		case key.Matches(msg, d.keyMap.Up):
 			cmd := d.navigateAndPreview(-1)
 			return d, cmd
@@ -259,12 +270,12 @@ func (d *themePickerDialog) View() string {
 
 	content := NewContent(d.regionWidth(contentWidth)).
 		AddTitle("Select Theme").
-		AddSpace().
+		AddSeparator().
 		AddContent(d.textInput.View()).
 		AddSeparator().
 		AddContent(scrollableContent).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", "esc", "cancel").
+		AddContent(d.Actions.Render(d.regionWidth(contentWidth), lipgloss.Right, Action{Label: "Use theme", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape})).
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)
@@ -368,4 +379,8 @@ func (d *themePickerDialog) filterThemes() (selectionChanged bool) {
 		newRef = d.filtered[d.selected].Ref
 	}
 	return newRef != prevRef
+}
+
+func (d *themePickerDialog) CancelDialogCmd() tea.Cmd {
+	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.ThemeCancelPreviewMsg{OriginalRef: d.originalThemeRef}))
 }

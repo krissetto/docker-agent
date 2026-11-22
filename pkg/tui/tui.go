@@ -1972,7 +1972,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 
 	// Rebuild all per-session UI components.
 	m.initSessionComponents(activeID, m.application, newSess)
-	m.clearDialogScrollbarPointer()
+	m.updateDialogCmd(dialog.CloseAllDialogsMsg{})
 	m.dialogMgr = dialog.NewWithAnimation(m.ar)
 	m.supervisor.SetRunnerTitle(activeID, "")
 	m.activeTab.sessionState.SetSessionTitle("")
@@ -2497,16 +2497,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	keys := core.GetKeys()
 
-	// The quit key is intercepted before any dialog handling so that every
-	// dialog reacts to it consistently:
-	//   - With no dialog open: open the exit confirmation dialog.
-	//   - With any other dialog open: stack the exit confirmation on top so
-	//     that the user can confirm exit (a second quit key or Y exits) or
-	//     cancel it (N/Esc) and return to the original dialog.
-	//   - With the exit confirmation already on top: forward the key so it
-	//     can exit the program via its own Yes binding.
+	// The quit key cancels a dialog, opens the exit confirmation when no
+	// dialog is open, and confirms exit when that confirmation is on top.
 	if key.Matches(msg, keys.Quit) {
-		if m.dialogMgr.TopIsExitConfirmation() {
+		if m.dialogMgr.Open() {
 			return m.forwardDialog(msg)
 		}
 		return m, core.CmdHandler(dialog.OpenDialogMsg{
@@ -3256,7 +3250,8 @@ func (m *appModel) composeView() tea.View {
 	baseView := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
 
 	// Handle overlays
-	hasOverlays := m.dialogMgr.Open() || m.notification.Open() || m.completions.Open() || m.tour.Active()
+	dialogVisible := m.dialogMgr.Open() || dialog.AnimatingClose(m.dialogMgr)
+	hasOverlays := dialogVisible || m.notification.Open() || m.completions.Open() || m.tour.Active()
 
 	if hasOverlays {
 		var layers []*lipgloss.Layer
@@ -3267,7 +3262,7 @@ func (m *appModel) composeView() tea.View {
 			layers = append(layers, tourLayer)
 		}
 
-		if m.dialogMgr.Open() {
+		if dialogVisible {
 			dialogLayers := m.dialogMgr.GetLayers()
 			layers = append(layers, dialogLayers...)
 		}

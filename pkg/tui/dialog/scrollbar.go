@@ -42,6 +42,9 @@ func (d *manager) updateTopAnimation(tick animation.TickMsg) tea.Cmd {
 	top := d.TopDialog()
 	if view := dialogScrollview(top); view != nil {
 		view.UpdateScrollbarAnimation(tick)
+		if e := &d.stack[len(d.stack)-1]; tick.Dirty() && e.resize.anim.Running() {
+			e.prepareResize()
+		}
 		return nil
 	}
 	if _, ok := top.(animation.Stopper); ok {

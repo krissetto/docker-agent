@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/browser"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -56,7 +57,24 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+			if d.url != "" {
+				cmd := d.openURLInBrowser()
+				return d, cmd
+			}
+		}
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -68,14 +86,9 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			cmd := d.respond(tools.ElicitationActionDecline)
 			return d, cmd
 		case key.Matches(msg, d.escape):
-			cmd := d.respond(tools.ElicitationActionCancel)
+			cmd := d.CancelDialogCmd()
 			return d, cmd
 		case key.Matches(msg, d.openBrowser):
-			cmd := d.openURLInBrowser()
-			return d, cmd
-		}
-	case tea.MouseClickMsg:
-		if d.url != "" {
 			cmd := d.openURLInBrowser()
 			return d, cmd
 		}
@@ -124,7 +137,11 @@ func (d *URLElicitationDialog) View() string {
 
 	content.AddHelp("Press Y when you have completed the action, or N to decline.")
 	content.AddSpace()
-	content.AddHelpKeys("Y", "confirm", "N", "decline", "o", "open", "esc", "cancel")
+	content.AddContent(d.Actions.Render(contentWidth, lipgloss.Right, []Action{{Label: "Cancel", Key: tea.KeyEscape}, {Label: "Decline", Key: 'n', Badge: "N"}, {Label: "Open", Key: 'o', Badge: "O"}, {Label: "Confirm", Key: 'y', Badge: "Y"}}...))
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content.Build())
+}
+
+func (d *URLElicitationDialog) CancelDialogCmd() tea.Cmd {
+	return d.respond(tools.ElicitationActionCancel)
 }

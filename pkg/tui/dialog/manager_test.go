@@ -234,6 +234,7 @@ func TestManagerRevealsScrollbarAfterAdjustedPointerAndScroll(t *testing.T) {
 	mgr := NewWithAnimation(clock).(*manager)
 	mgr.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	mgr.Update(OpenDialogMsg{Model: &d})
+	finishDialogAnimation(t, mgr, clock)
 	mgr.stack[0].offsetX, mgr.stack[0].offsetY = 3, 2
 	mgr.GetLayers()
 	row, _ := d.Position()
@@ -272,12 +273,13 @@ func TestManagerRevealsScrollbarAfterAdjustedPointerAndScroll(t *testing.T) {
 	require.False(t, clock.HasActive())
 }
 
-func TestManagerDrawsSettingsScrollbarOnFirstResizedFrame(t *testing.T) {
+func TestManagerDrawsSettingsScrollbarAtItsAnimatedPosition(t *testing.T) {
 	clock := animation.NewRuntimeWithScheduler(&dialogScrollbarClock{now: time.Unix(1, 0)})
 	mgr := NewWithAnimation(clock).(*manager)
 	mgr.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
 	mgr.Update(OpenDialogMsg{Model: d})
+	finishDialogAnimation(t, mgr, clock)
 	mgr.GetLayers()
 	require.True(t, d.body.NeedsScrollbar())
 
@@ -315,9 +317,10 @@ func TestManagerDrawsSettingsScrollbarOnFirstResizedFrame(t *testing.T) {
 	require.Equal(t, " ", cell(oldX), "the old scrollbar has faded out")
 
 	mgr.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
-	first := cell(x)
-	require.Equal(t, x, d.body.ScrollbarX(), "the resized track must be under the pointer")
-	require.Equal(t, "│", first, "the first resized layer must paint the scrollbar")
+	require.Equal(t, x, d.body.ScrollbarX(), "concrete hitboxes belong to the target view")
+	require.Equal(t, "│", cell(oldX), "the first resize frame still uses the old rectangle")
+	finishDialogAnimation(t, mgr, clock)
+	require.Equal(t, "│", cell(x), "the settled scrollbar is under the pointer")
 }
 
 func TestSettingsValueKeysRevealSnapBackToSelection(t *testing.T) {
@@ -401,12 +404,14 @@ func TestManagerRoutesTicksAndTeardownToToolConfirmation(t *testing.T) {
 	mgr.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	require.True(t, clock.HasActive())
 	mgr.Update(OpenDialogMsg{Model: NewExitConfirmationDialog()})
+	finishDialogAnimation(t, mgr, clock)
 	require.False(t, clock.HasActive(), "a covered dialog releases its ticks")
 	mgr.Update(CloseDialogMsg{})
-
+	finishDialogAnimation(t, mgr, clock)
 	mgr.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	require.True(t, clock.HasActive())
 	mgr.Update(CloseDialogMsg{})
+	finishDialogAnimation(t, mgr, clock)
 	require.False(t, clock.HasActive(), "closing stops the dialog's animation")
 
 	open()
@@ -424,6 +429,7 @@ func TestManagerMovesScrollbarAnimationWithWorkingDirSection(t *testing.T) {
 	mgr.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	d := NewWorkingDirPickerDialog(t.Context(), nil, favorites, nil, "/").(*workingDirPickerDialog)
 	mgr.Update(OpenDialogMsg{Model: d})
+	finishDialogAnimation(t, mgr, clock)
 	mgr.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	require.Equal(t, sectionPinned, d.section)
 	mgr.View()
@@ -441,4 +447,19 @@ func TestManagerMovesScrollbarAnimationWithWorkingDirSection(t *testing.T) {
 	require.True(t, clock.HasActive())
 	mgr.ClearScrollbarPointer()
 	require.False(t, clock.HasActive(), "pane and focus changes clear the active section")
+}
+
+func finishDialogAnimation(t *testing.T, mgr *manager, clock *animation.Runtime) {
+	t.Helper()
+	cmd := clock.EnsureRunning()
+	for range 100 {
+		if cmd == nil {
+			break
+		}
+		tick, ok := clock.Accept(cmd().(animation.TickMsg))
+		require.True(t, ok)
+		mgr.Update(tick)
+		cmd = clock.Continue()
+	}
+	require.False(t, clock.HasActive())
 }

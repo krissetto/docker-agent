@@ -47,10 +47,24 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogWarningStyle); ok {
+				return d.Update(action)
+			}
+		}
 	case tea.KeyPressMsg:
-		if cmd := HandleQuit(msg); cmd != nil {
+		if msg.Keystroke() == "esc" || HandleQuit(msg) != nil {
+			cmd := d.CancelDialogCmd()
 			return d, cmd
 		}
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 
 		model, cmd, handled := HandleConfirmKeys(msg, d.keyMap,
 			func() (layout.Model, tea.Cmd) {
@@ -60,10 +74,8 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				)
 			},
 			func() (layout.Model, tea.Cmd) {
-				return d, tea.Sequence(
-					core.CmdHandler(CloseDialogMsg{}),
-					core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeReject("")}),
-				)
+				cmd := d.CancelDialogCmd()
+				return d, cmd
 			},
 		)
 		if handled {
@@ -97,7 +109,7 @@ func (d *maxIterationsDialog) View() string {
 		AddSpace().
 		AddContent(styles.DialogQuestionStyle.Width(contentWidth).Render(wrapDisplayText(questionText, contentWidth))).
 		AddSpace().
-		AddHelpKeys("Y", "yes", "N", "no").
+		AddContent(d.Actions.Render(contentWidth, lipgloss.Right, []Action{{Label: "No", Key: 'n'}, {Label: "Yes", Key: 'y'}}...)).
 		Build()
 
 	// DialogWarningStyle already includes Padding(1, 2)
@@ -136,3 +148,10 @@ func wrapDisplayText(text string, maxWidth int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+func (d *maxIterationsDialog) CancelDialogCmd() tea.Cmd {
+	return tea.Sequence(core.CmdHandler(CloseDialogMsg{}), core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeReject("")}))
+}
+
+// KeepOpenOnOutsideClick requires an explicit answer to this runtime prompt.
+func (d *maxIterationsDialog) KeepOpenOnOutsideClick() bool { return true }

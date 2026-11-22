@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/docker/go-units"
 
 	"github.com/docker/docker-agent/pkg/fsx"
@@ -224,7 +225,21 @@ func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.updateInput(msg, d.filterEntries)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.Position()
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
+
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -343,7 +358,7 @@ func (d *filePickerDialog) View() string {
 	helpRow1, helpRow2 := d.filePickerHelpKeysRows(d.regionWidth(contentWidth))
 	content := NewContent(d.regionWidth(contentWidth)).
 		AddTitle("Attach File").
-		AddSpace().
+		AddSeparator().
 		AddContent(dirLine).
 		AddContent(d.textInput.View()).
 		AddSeparator().
@@ -351,6 +366,7 @@ func (d *filePickerDialog) View() string {
 		AddSpace().
 		AddHelpKeys(helpRow1...).
 		AddHelpKeys(helpRow2...).
+		AddContent(d.Actions.Render(d.regionWidth(contentWidth), lipgloss.Right, Action{Label: "Select", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape})).
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)
@@ -398,13 +414,11 @@ func (d *filePickerDialog) filePickerHelpKeysRows(contentWidth int) (row1, row2 
 	}
 	all := []string{
 		"↑/↓", "navigate",
-		"enter", "select",
-		"esc", "close",
 		"alt+h", hiddenLabel,
 		"alt+i", ignoredLabel,
 	}
 	if HelpKeysWidth(all...) <= contentWidth {
 		return all, nil
 	}
-	return all[:8], all[8:]
+	return all[:4], all[4:]
 }

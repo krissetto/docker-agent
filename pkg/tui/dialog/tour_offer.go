@@ -3,6 +3,7 @@ package dialog
 import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -64,14 +65,28 @@ func (d *tourOfferDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		switch {
 		case key.Matches(msg, d.keyMap.Yes):
 			return d, tourOfferClose(TourOfferAccepted)
 		case key.Matches(msg, d.keyMap.Never):
 			return d, tourOfferClose(TourOfferNever)
 		case key.Matches(msg, d.keyMap.Later):
-			return d, tourOfferClose(TourOfferLater)
+			cmd := d.CancelDialogCmd()
+			return d, cmd
 		}
 	}
 
@@ -112,7 +127,7 @@ func (d *tourOfferDialog) View() string {
 
 	body := content.
 		AddSpace().
-		AddHelpKeys("↵", "take the tour", "N", "not now", "D", "never").
+		AddContent(d.Actions.Render(contentWidth, lipgloss.Right, []Action{{Label: "Take the tour", Key: 'y'}, {Label: "Not now", Key: 'n', Badge: "N"}, {Label: "Never", Key: 'd', Badge: "D"}}...)).
 		Build()
 
 	return styles.DialogStyle.
@@ -124,3 +139,5 @@ func (d *tourOfferDialog) View() string {
 func (d *tourOfferDialog) Bindings() []key.Binding {
 	return []key.Binding{}
 }
+
+func (d *tourOfferDialog) CancelDialogCmd() tea.Cmd { return tourOfferClose(TourOfferLater) }

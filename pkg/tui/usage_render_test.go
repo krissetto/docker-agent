@@ -73,6 +73,8 @@ func TestTokenUsageRefreshesVisibleUsage(t *testing.T) {
 		t.Run(map[bool]string{false: "sidebar", true: "cost dialog"}[costDialog], func(t *testing.T) {
 			root, _, _ := frozenClockRoot(t, 120, 40)
 			if costDialog {
+				root.dialogMgr = dialog.New() // No transition: this test compares settled accounting frames.
+				root.dialogMgr.SetSize(120, 40)
 				_, _ = root.Update(dialog.OpenDialogMsg{Model: dialog.NewCostDialog(root.application.Session())})
 			} else {
 				root.hideSidebar = false

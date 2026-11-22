@@ -38,7 +38,7 @@ func TestSettingsDialogFitsTerminal(t *testing.T) {
 					assert.LessOrEqual(t, lipgloss.Width(view), size.width, "tab %d row %d", tab, row)
 					assert.LessOrEqual(t, lipgloss.Height(view), size.height, "tab %d row %d", tab, row)
 					assert.Contains(t, ansi.Strip(d.body.View()), "›", "focused row must remain visible: tab %d row %d", tab, row)
-					assert.Contains(t, settingsPlainText(view), "esc cancel")
+					assert.NotContains(t, settingsPlainText(view), "esc cancel")
 					assert.Equal(t, view, d.View(), "repeated rendering must be stable")
 				}
 			}
@@ -114,11 +114,11 @@ func TestSettingsDialogContextualHelp(t *testing.T) {
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	view := ansi.Strip(d.View())
-	assert.Contains(t, view, "enter open")
+	assert.Contains(t, view, "Open ↵")
 	assert.NotContains(t, view, "Theme changes save immediately")
 	assert.NotContains(t, view, "Changes are saved only when applied.")
 	d.selected[tabAppearance] = rowPosition
-	assert.Contains(t, ansi.Strip(d.View()), "enter apply")
+	assert.Contains(t, ansi.Strip(d.View()), "Apply ↵")
 
 	d.tab = tabBehavior
 	d.selected[tabBehavior] = rowRestoreTabs
@@ -131,12 +131,12 @@ func TestSettingsDialogContextualHelp(t *testing.T) {
 		require.True(t, d.confirmYOLO)
 		require.False(t, d.current.YOLO)
 		view := ansi.Strip(d.View())
-		assert.Contains(t, settingsPlainText(view), "enter confirm")
+		assert.Contains(t, settingsPlainText(view), "Confirm ↵")
 		assert.Contains(t, settingsPlainText(view), "Press again to enable.")
 		assert.LessOrEqual(t, lipgloss.Height(view), size.height)
 		d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 		require.True(t, d.current.YOLO)
-		assert.Contains(t, ansi.Strip(d.View()), "enter apply")
+		assert.Contains(t, ansi.Strip(d.View()), "Apply ↵")
 		d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	}
 }
@@ -307,7 +307,7 @@ func TestSettingsDialogWideShortTerminal(t *testing.T) {
 			d.Update(tea.WindowSizeMsg{Width: 140, Height: height})
 			view := d.View()
 			assert.LessOrEqual(t, lipgloss.Height(view), height, "height %d, plans %t", height, showPlans)
-			assert.Contains(t, settingsPlainText(view), "esc cancel")
+			assert.NotContains(t, settingsPlainText(view), "esc cancel")
 		}
 	}
 }
@@ -385,7 +385,7 @@ func TestSettingsDialogTitleSpacing(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	lines := strings.Split(ansi.Strip(d.View()), "\n")
 	assert.Contains(t, lines[1], "Settings")
-	assert.Empty(t, strings.TrimSpace(strings.Trim(lines[2], "│")))
+	assert.Contains(t, lines[2], "────")
 	assert.Contains(t, lines[3], "Appearance")
 }
 
@@ -503,7 +503,7 @@ func TestSettingsDialogVeryShortConfirmationFits(t *testing.T) {
 	view := d.View()
 	assert.LessOrEqual(t, lipgloss.Height(view), 13)
 	assert.Contains(t, settingsPlainText(view), "No confirmation. Press again to enable.")
-	assert.Contains(t, settingsPlainText(view), "esc cancel")
+	assert.NotContains(t, settingsPlainText(view), "esc cancel")
 	assert.False(t, d.current.YOLO)
 }
 

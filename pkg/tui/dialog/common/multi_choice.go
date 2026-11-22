@@ -128,7 +128,7 @@ func defaultMultiChoiceKeyMap() multiChoiceKeyMap {
 		Escape: key.NewBinding(key.WithKeys("esc")),
 		Up:     key.NewBinding(key.WithKeys("up")),
 		Down:   key.NewBinding(key.WithKeys("down")),
-		Tab:    key.NewBinding(key.WithKeys("tab")),
+		Tab:    key.NewBinding(key.WithKeys("tab", "shift+tab")),
 	}
 }
 
@@ -201,9 +201,7 @@ func (d *multiChoiceDialog) computeHelpAndButtonsWidth() int {
 		numOptions++
 	}
 
-	helpParts := []string{
-		keyStyle.Render("Esc") + " " + helpStyle.Render("cancel"),
-	}
+	var helpParts []string
 	if numOptions > 0 {
 		helpParts = append(helpParts, keyStyle.Render("↑/↓ "+formatKeyRange(numOptions))+" "+helpStyle.Render("select"))
 	} else {
@@ -324,7 +322,7 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 	if d.selected == selectionCustom {
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
-			cmd := d.sendResult(MultiChoiceResult{IsCancelled: true})
+			cmd := d.CancelDialogCmd()
 			return d, cmd
 		case key.Matches(msg, d.keyMap.Enter):
 			return d.submitDefault()
@@ -370,7 +368,7 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 
 	switch {
 	case key.Matches(msg, d.keyMap.Escape):
-		cmd := d.sendResult(MultiChoiceResult{IsCancelled: true})
+		cmd := d.CancelDialogCmd()
 		return d, cmd
 
 	case key.Matches(msg, d.keyMap.Enter):
@@ -567,6 +565,9 @@ func (d *multiChoiceDialog) sendResult(result MultiChoiceResult) tea.Cmd {
 		}),
 	)
 }
+
+// ResizeFooterRows includes the custom action row above the bottom frame.
+func (d *multiChoiceDialog) ResizeFooterRows() int { return d.BaseDialog.ResizeFooterRows() + 1 }
 
 // View renders the dialog.
 func (d *multiChoiceDialog) View() string {
@@ -770,9 +771,7 @@ func (d *multiChoiceDialog) renderHelpAndButtons(contentWidth int) string {
 		numOptions++
 	}
 
-	helpParts := []string{
-		keyStyle.Render("Esc") + " " + helpStyle.Render("cancel"),
-	}
+	var helpParts []string
 	if numOptions > 0 {
 		helpParts = append(helpParts, keyStyle.Render("↑/↓ "+formatKeyRange(numOptions))+" "+helpStyle.Render("select"))
 	} else {
@@ -781,15 +780,9 @@ func (d *multiChoiceDialog) renderHelpAndButtons(contentWidth int) string {
 	helpText := strings.Join(helpParts, "  ")
 
 	// Button styles
-	defaultBtnStyle := lipgloss.NewStyle().
-		Foreground(styles.Background).
-		Background(styles.Accent).
-		Padding(0, 2).
-		Bold(true)
+	defaultBtnStyle := PillStyle(true).Padding(0, 2)
 
-	normalBtnStyle := lipgloss.NewStyle().
-		Foreground(styles.TextMuted).
-		Padding(0, 2)
+	normalBtnStyle := PillStyle(false).Padding(0, 2)
 
 	var secondaryBtn, primaryBtn string
 
@@ -851,4 +844,8 @@ func (d *multiChoiceDialog) Position() (row, col int) {
 	d.contentAbsCol = contentCol
 
 	return row, col
+}
+
+func (d *multiChoiceDialog) CancelDialogCmd() tea.Cmd {
+	return d.sendResult(MultiChoiceResult{IsCancelled: true})
 }

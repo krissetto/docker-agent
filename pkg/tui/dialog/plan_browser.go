@@ -509,7 +509,7 @@ func (d *planBrowserDialog) View() string {
 
 	content := NewContent(regionWidth).
 		AddTitle(title).
-		AddSpace().
+		AddSeparator().
 		AddContent(filterView).
 		AddSeparator().
 		AddContent(scrollableContent).
@@ -769,7 +769,20 @@ func (d *planDeleteConfirmDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -806,7 +819,7 @@ func (d *planDeleteConfirmDialog) View() string {
 		AddSpace().
 		AddQuestion(fmt.Sprintf("Delete shared plan %q at version %d? This cannot be undone.", d.name, d.version)).
 		AddSpace().
-		AddHelpKeys("Y", "delete", "N/esc", "cancel").
+		AddContent(d.Actions.Render(contentWidth, lipgloss.Right, []Action{{Label: "Cancel", Key: tea.KeyEscape}, {Label: "Delete", Key: 'y', Badge: "Y"}}...)).
 		Build()
 
 	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)

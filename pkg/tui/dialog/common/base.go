@@ -6,6 +6,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -36,6 +37,13 @@ func DefaultConfirmKeyMap() ConfirmKeyMap {
 // It handles size management, position calculation, and common UI patterns.
 type BaseDialog struct {
 	width, height int
+	Actions       ActionBar
+}
+
+// ResizeFooterRows reports the action and frame rows attached to the bottom
+// edge during resize. Dialogs with a custom footer or frame can override it.
+func (b *BaseDialog) ResizeFooterRows() int {
+	return b.Actions.height + styles.DialogStyle.GetPaddingBottom() + styles.DialogStyle.GetBorderBottomSize()
 }
 
 // SetSize updates the dialog dimensions.
@@ -100,7 +108,7 @@ func ContentEndRow(dialogRow, dialogHeight int) int {
 
 // RenderTitle renders a dialog title with the given style and width.
 func RenderTitle(title string, contentWidth int, style lipgloss.Style) string {
-	return style.Width(contentWidth).Render(title)
+	return style.Width(max(1, contentWidth)).Render(ansi.Truncate(title, max(1, contentWidth), "…"))
 }
 
 // RenderSeparator renders a horizontal separator line.
@@ -136,6 +144,9 @@ func helpKeysLine(bindings ...string) string {
 
 	var parts []string
 	for i := 0; i < len(bindings); i += 2 {
+		if bindings[i+1] == "scroll" || strings.EqualFold(bindings[i], "esc") {
+			continue
+		}
 		keyPart := styles.HighlightWhiteStyle.Render(bindings[i])
 		descPart := styles.SecondaryStyle.Render(bindings[i+1])
 		parts = append(parts, keyPart+" "+descPart)
@@ -150,7 +161,11 @@ func RenderHelpKeys(contentWidth int, bindings ...string) string {
 	if len(bindings) == 0 || len(bindings)%2 != 0 {
 		return ""
 	}
-	return styles.BaseStyle.Width(contentWidth).Align(lipgloss.Center).Render(helpKeysLine(bindings...))
+	line := helpKeysLine(bindings...)
+	if line == "" {
+		return ""
+	}
+	return styles.BaseStyle.Width(contentWidth).Align(lipgloss.Center).Render(line)
 }
 
 // HelpKeysWidth returns the rendered width of the given key bindings laid out
@@ -225,7 +240,9 @@ func (dc *Content) AddContent(content string) *Content {
 
 // AddHelpKeys adds key binding help at the bottom.
 func (dc *Content) AddHelpKeys(bindings ...string) *Content {
-	dc.parts = append(dc.parts, RenderHelpKeys(dc.width, bindings...))
+	if help := RenderHelpKeys(dc.width, bindings...); help != "" {
+		dc.parts = append(dc.parts, help)
+	}
 	return dc
 }
 

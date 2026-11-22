@@ -67,7 +67,7 @@ func TestTourOfferDialog_View(t *testing.T) {
 
 	view := d.View()
 	assert.Contains(t, view, "Welcome to docker agent")
-	assert.Contains(t, view, "take the tour")
+	assert.Contains(t, view, "Take the tour")
 	assert.NotContains(t, view, "usage data")
 
 	withNotice := NewTourOfferDialog(true)

@@ -53,9 +53,9 @@ func TestURLElicitationDialog_View(t *testing.T) {
 	assert.Contains(t, view, "MCP Server Request")
 	assert.Contains(t, view, "Please visit the URL")
 	assert.Contains(t, view, "https://example.com/callback")
-	assert.Contains(t, view, "confirm")
-	assert.Contains(t, view, "cancel")
-	assert.Contains(t, view, "open") // New "open" key binding
+	assert.Contains(t, view, "Confirm")
+	assert.Contains(t, view, "Cancel")
+	assert.Contains(t, view, "Open") // New "open" key binding
 }
 
 func TestURLElicitationDialog_HasOpenKeyBinding(t *testing.T) {

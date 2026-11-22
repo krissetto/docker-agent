@@ -247,8 +247,6 @@ func TestFilePickerHelpKeysRows(t *testing.T) {
 	row1, row2 := d.filePickerHelpKeysRows(20)
 	assert.Equal(t, []string{
 		"↑/↓", "navigate",
-		"enter", "select",
-		"esc", "close",
 		"alt+h", "show hidden",
 	}, row1)
 	assert.Equal(t, []string{
@@ -259,8 +257,6 @@ func TestFilePickerHelpKeysRows(t *testing.T) {
 	row1, row2 = d.filePickerHelpKeysRows(200)
 	assert.Equal(t, []string{
 		"↑/↓", "navigate",
-		"enter", "select",
-		"esc", "close",
 		"alt+h", "show hidden",
 		"alt+i", "show ignored",
 	}, row1)

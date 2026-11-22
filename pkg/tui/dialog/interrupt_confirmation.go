@@ -3,6 +3,7 @@ package dialog
 import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -61,7 +62,20 @@ func (d *interruptConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogWarningStyle); ok {
+				return d.Update(action)
+			}
+		}
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		switch {
 		case key.Matches(msg, d.keyMap.Yes):
 			return d, tea.Sequence(
@@ -92,7 +106,7 @@ func (d *interruptConfirmationDialog) View() string {
 		AddSpace().
 		AddQuestion("Stop the current response?").
 		AddSpace().
-		AddHelpKeys("Y", "yes", "N", "no").
+		AddContent(d.Actions.Render(contentWidth, lipgloss.Right, []Action{{Label: "No", Key: 'n'}, {Label: "Yes", Key: 'y'}}...)).
 		Build()
 
 	return styles.DialogStyle.

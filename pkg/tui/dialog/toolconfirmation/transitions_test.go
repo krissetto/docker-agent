@@ -134,14 +134,12 @@ func TestConfirmationScrollForwarding(t *testing.T) {
 	}
 }
 
-func TestConfirmationIgnoresNonActionsAndQuits(t *testing.T) {
+func TestConfirmationIgnoresNonActionsAndRejectsOnQuit(t *testing.T) {
 	t.Parallel()
 
 	state := &trackedSessionState{}
 	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), state)
 	for _, msg := range []tea.Msg{
-		tea.KeyPressMsg{Code: tea.KeyEscape},
-		tea.KeyPressMsg{Code: tea.KeyEnter},
 		tea.KeyPressMsg{Code: 'x', Text: "x"},
 		tea.MouseClickMsg{Button: tea.MouseRight},
 	} {
@@ -150,6 +148,9 @@ func TestConfirmationIgnoresNonActionsAndQuits(t *testing.T) {
 	}
 	_, cmd := d.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	require.NotNil(t, cmd)
-	assert.Equal(t, tea.QuitMsg{}, cmd())
+	msgs := testutil.CollectMsgs(cmd)
+	resume, ok := testutil.FindMsg[RuntimeResumeMsg](msgs)
+	require.True(t, ok)
+	assert.Equal(t, runtime.ResumeReject(""), resume.Request)
 	assert.Nil(t, state.changes)
 }

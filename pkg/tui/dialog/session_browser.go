@@ -237,6 +237,14 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.Position()
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
+
 		// Scrollbar clicks already handled above; this handles list item clicks
 		if msg.Button == tea.MouseLeft {
 			if idx := d.mouseYToSessionIndex(msg.Y); idx >= 0 {
@@ -257,6 +265,11 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -575,7 +588,7 @@ func (d *sessionBrowserDialog) View() string {
 		idFooter = styles.MutedStyle.Render("ID: ") + styles.SecondaryStyle.Render(d.filtered[d.selected].ID)
 	}
 
-	secondHelpLine := []string{"enter", "load"}
+	var secondHelpLine []string
 	if d.workspace.enabled() {
 		var workspaceDesc string
 		switch d.workspaceFilter {
@@ -588,11 +601,10 @@ func (d *sessionBrowserDialog) View() string {
 		}
 		secondHelpLine = append(secondHelpLine, "ctrl+g", workspaceDesc)
 	}
-	secondHelpLine = append(secondHelpLine, "esc", "close")
 
 	content := NewContent(regionWidth).
 		AddTitle(title).
-		AddSpace().
+		AddSeparator().
 		AddContent(d.textInput.View()).
 		AddSeparator().
 		AddContent(scrollableContent).
@@ -601,6 +613,7 @@ func (d *sessionBrowserDialog) View() string {
 		AddSpace().
 		AddHelpKeys("↑/↓", "navigate", "ctrl+s", "star", "ctrl+f", filterDesc, "ctrl+y", "copy id", "ctrl+d", "delete").
 		AddHelpKeys(secondHelpLine...).
+		AddContent(d.Actions.Render(regionWidth, lipgloss.Right, Action{Label: "Load", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape})).
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)

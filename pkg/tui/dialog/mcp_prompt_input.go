@@ -119,6 +119,11 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
 			return d.handleMouseClick(msg)
 		}
 		return d, nil
@@ -236,13 +241,12 @@ func (d *MCPPromptInputDialog) View() string {
 		}
 	}
 
-	help := RenderHelpKeys(contentWidth, "↑/↓", "navigate", "enter", "execute", "esc", "cancel")
+	help := d.Actions.Render(contentWidth, lipgloss.Right, Action{Label: "Execute", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape})
 
-	parts := []string{title}
+	parts := []string{title, separator}
 	if description != "" {
 		parts = append(parts, "", description)
 	}
-	parts = append(parts, separator)
 	parts = append(parts, inputsList...)
 	parts = append(parts, "", help)
 
@@ -269,11 +273,10 @@ func (d *MCPPromptInputDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.M
 
 	// Compute the Y offset where fields start by measuring the rendered header.
 	var headerParts []string
-	headerParts = append(headerParts, RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle))
+	headerParts = append(headerParts, RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle), RenderSeparator(contentWidth))
 	if d.promptInfo.Description != "" {
 		headerParts = append(headerParts, "", styles.DialogContentStyle.Width(contentWidth).Render(d.promptInfo.Description))
 	}
-	headerParts = append(headerParts, RenderSeparator(contentWidth))
 	y := ContentStartRow(dialogRow, lipgloss.JoinVertical(lipgloss.Left, headerParts...))
 
 	clickY := msg.Y

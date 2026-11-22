@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -53,7 +54,24 @@ func (d *oauthAuthorizationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogWarningStyle); ok {
+				return d.Update(action)
+			}
+		}
 	case tea.KeyPressMsg:
+		if msg.Keystroke() == "esc" {
+			cmd := d.CancelDialogCmd()
+			return d, cmd
+		}
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -64,8 +82,8 @@ func (d *oauthAuthorizationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d, core.CmdHandler(CloseDialogMsg{ElicitationID: d.elicitationID})
 			},
 			func() (layout.Model, tea.Cmd) {
-				_ = d.app.ResumeElicitation(d.ctx(), tools.ElicitationActionDecline, nil, d.elicitationID)
-				return d, core.CmdHandler(CloseDialogMsg{ElicitationID: d.elicitationID})
+				cmd := d.CancelDialogCmd()
+				return d, cmd
 			},
 		)
 		if handled {
@@ -97,7 +115,8 @@ func (d *oauthAuthorizationDialog) View() string {
 	instructions := "After authorizing in your browser, return here and the agent will continue automatically."
 
 	content := NewContent(contentWidth).
-		AddContent(styles.DialogTitleInfoStyle.Width(contentWidth).Render("\U0001F510 OAuth Authorization Required")).
+		AddContent(RenderTitle("\U0001F510 OAuth Authorization Required", contentWidth, styles.DialogTitleInfoStyle)).
+		AddSeparator().
 		AddSpace().
 		AddContent(serverInfo).
 		AddSpace().
@@ -105,11 +124,16 @@ func (d *oauthAuthorizationDialog) View() string {
 		AddSpace().
 		AddHelp(instructions).
 		AddSpace().
-		AddHelpKeys("Y", "authorize", "N", "decline").
+		AddContent(d.Actions.Render(contentWidth, lipgloss.Right, []Action{{Label: "Decline", Key: 'n'}, {Label: "Authorize", Key: 'y', Badge: "Y"}}...)).
 		Build()
 
 	return styles.DialogWarningStyle.
 		Padding(1, 2).
 		Width(dialogWidth).
 		Render(content)
+}
+
+func (d *oauthAuthorizationDialog) CancelDialogCmd() tea.Cmd {
+	_ = d.app.ResumeElicitation(d.ctx(), tools.ElicitationActionDecline, nil, d.elicitationID)
+	return core.CmdHandler(CloseDialogMsg{ElicitationID: d.elicitationID})
 }

@@ -66,6 +66,7 @@ type toolConfirmationDialog struct {
 	keyMap            toolconfirm.KeyMap
 	sessionState      ConfirmationSessionState
 	scrollView        messages.Model
+	optionFocus       int
 	permissionPattern string // cached permission pattern for this tool call
 }
 
@@ -92,8 +93,7 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	maxDialogHeight := height * toolConfirmDialogHeightPercent / 100
 
 	// Measure fixed UI elements using the same rendering as View()
-	titleStyle := styles.DialogTitleStyle.Width(contentWidth)
-	title := titleStyle.Render(toolconfirm.Title)
+	title := common.RenderTitle(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
 	titleHeight := lipgloss.Height(title)
 
 	separator := common.RenderSeparator(contentWidth)
@@ -124,25 +124,24 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	row, col := d.Position()
 	x := col + styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
 	// View() places the arguments below the title, the separator, and one
-	// blank row. The title wraps in narrow dialogs, so use measured heights.
+	// blank row. Use the same measured header geometry as View.
 	y := row + styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop() + titleHeight + separatorHeight + 1
 	return d.scrollView.SetPosition(x, y)
 }
 
 // renderOptions renders the Y/N/T/B/A decision block: the option
-// segments laid out by optionRows, one centered help-keys line per row.
-// The width shares optionRows' clamp so a laid-out row never wraps
-// inside common.RenderHelpKeys.
+// segments laid out by optionRows, one centered line of pills per row.
 func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
 	contentWidth = max(contentWidth, toolConfirmMinOptionWidth)
 	rows := d.optionRows(contentWidth)
 	lines := make([]string, len(rows))
 	for i, row := range rows {
-		bindings := make([]string, 0, len(row)*2)
+		parts := make([]string, 0, len(row))
 		for _, seg := range row {
-			bindings = append(bindings, seg.action, seg.label)
+			index := strings.Index(toolconfirm.ActionKeys, seg.action)
+			parts = append(parts, common.PillStyle(index == d.optionFocus).Render(seg.action+" "+seg.label))
 		}
-		lines[i] = common.RenderHelpKeys(contentWidth, bindings...)
+		lines[i] = lipgloss.PlaceHorizontal(contentWidth, lipgloss.Center, strings.Join(parts, "  "))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -354,6 +353,7 @@ func NewToolConfirmationDialog(ar *animation.Runtime, msg *runtime.ToolCallConfi
 		keyMap:            toolconfirm.DefaultKeyMap(),
 		scrollView:        scrollView,
 		permissionPattern: pattern,
+		optionFocus:       1,
 	}
 }
 
@@ -458,10 +458,25 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, hover
 
 	case tea.KeyPressMsg:
-		if cmd := common.HandleQuit(msg); cmd != nil {
+		if common.HandleQuit(msg) != nil {
+			cmd := d.CancelDialogCmd()
 			return d, cmd
 		}
 
+		switch msg.Keystroke() {
+		case "tab":
+			d.optionFocus = (d.optionFocus + 1) % len(toolconfirm.ActionKeys)
+			return d, nil
+		case "shift+tab":
+			d.optionFocus = (d.optionFocus + len(toolconfirm.ActionKeys) - 1) % len(toolconfirm.ActionKeys)
+			return d, nil
+		case "enter":
+			decision, _ := toolconfirm.DecisionForAction(toolconfirm.ActionKeys[d.optionFocus : d.optionFocus+1])
+			return d.executeAction(decision)
+		case "esc":
+			cmd := d.CancelDialogCmd()
+			return d, cmd
+		}
 		if decision, ok := d.keyMap.DecisionFor(msg); ok {
 			return d.executeAction(decision)
 		}
@@ -528,6 +543,7 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 	for _, seg := range row {
 		if relX >= seg.startX && relX < seg.endX {
 			if decision, ok := toolconfirm.DecisionForAction(seg.action); ok {
+				d.optionFocus = strings.Index(toolconfirm.ActionKeys, seg.action)
 				return d.executeAction(decision)
 			}
 			return d, nil
@@ -537,14 +553,19 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 	return d, nil
 }
 
+// ResizeFooterRows pins the decision rows and the bottom frame during resize.
+func (d *toolConfirmationDialog) ResizeFooterRows() int {
+	_, width := d.dialogDimensions()
+	return d.BaseDialog.ResizeFooterRows() + len(d.optionRows(width))
+}
+
 // View renders the tool confirmation dialog
 func (d *toolConfirmationDialog) View() string {
 	dialogWidth, contentWidth := d.dialogDimensions()
 
 	dialogStyle := styles.DialogStyle.Width(dialogWidth)
 
-	titleStyle := styles.DialogTitleStyle.Width(contentWidth)
-	title := titleStyle.Render(toolconfirm.Title)
+	title := common.RenderTitle(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
 
 	// Separator
 	separator := common.RenderSeparator(contentWidth)
@@ -585,3 +606,14 @@ func (d *toolConfirmationDialog) Position() (row, col int) {
 	dialogHeight := lipgloss.Height(renderedDialog)
 	return common.CenterPosition(d.Width(), d.Height(), dialogWidth, dialogHeight)
 }
+
+// CancelDialogCmd rejects the pending call without opening a reason chooser.
+func (d *toolConfirmationDialog) CancelDialogCmd() tea.Cmd {
+	return tea.Sequence(
+		core.CmdHandler(common.CloseDialogMsg{}),
+		core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.Reject.Resume("", "")}),
+	)
+}
+
+// KeepOpenOnOutsideClick requires an explicit answer to this runtime prompt.
+func (d *toolConfirmationDialog) KeepOpenOnOutsideClick() bool { return true }

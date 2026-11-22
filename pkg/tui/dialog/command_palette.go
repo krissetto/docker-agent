@@ -83,6 +83,14 @@ func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.Position()
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
+
 		// Scrollbar clicks already handled above; this handles list item clicks.
 		if dbl, _ := d.handleListClick(msg, d.lineToCmdIndex); dbl {
 			cmd := d.executeSelected()
@@ -91,6 +99,11 @@ func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -271,12 +284,12 @@ func (d *commandPaletteDialog) View() string {
 
 	content := NewContent(d.regionWidth(contentWidth)).
 		AddTitle("Commands").
-		AddSpace().
+		AddSeparator().
 		AddContent(d.textInput.View()).
 		AddSeparator().
 		AddContent(scrollableContent).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "execute", "esc", "close").
+		AddContent(d.Actions.Render(d.regionWidth(contentWidth), lipgloss.Right, Action{Label: "Execute", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape})).
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)

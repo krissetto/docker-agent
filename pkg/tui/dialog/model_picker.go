@@ -158,6 +158,14 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.Position()
+			if action, ok := d.ApplyActionClick(msg, view, row, col, styles.DialogStyle); ok {
+				return d.Update(action)
+			}
+		}
+
 		if dbl, _ := d.handleListClick(msg, d.lineToModelIndex); dbl {
 			cmd := d.handleSelection()
 			return d, cmd
@@ -165,6 +173,11 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
+		action, handled := d.ApplyActionKey(msg, d.View)
+		if handled {
+			return d, nil
+		}
+		msg = action
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -376,7 +389,7 @@ func (d *modelPickerDialog) View() string {
 
 	contentBuilder := NewContent(d.regionWidth(contentWidth)).
 		AddTitle("Select Model").
-		AddSpace().
+		AddSeparator().
 		AddContent(d.textInput.View())
 
 	if d.errMsg != "" {
@@ -394,7 +407,8 @@ func (d *modelPickerDialog) View() string {
 		AddSeparator().
 		AddContent(details).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", d.refresh.Help().Key, d.refresh.Help().Desc, "esc", "cancel").
+		AddHelpKeys(d.refresh.Help().Key, d.refresh.Help().Desc).
+		AddContent(d.Actions.Render(d.regionWidth(contentWidth), lipgloss.Right, Action{Label: "Use model", Key: tea.KeyEnter}, Action{Label: "Cancel", Key: tea.KeyEscape})).
 		Build()
 	contentBuildDuration := time.Since(contentBuildStart)
 
