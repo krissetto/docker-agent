@@ -22,7 +22,6 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
-	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
@@ -145,7 +144,6 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			httpClient.Transport = &bearerTokenTransport{source: tokenSource, base: httpClient.Transport}
 		}
 
-		baseURL := clientBaseURL(backend, cfg.Provider, cfg.BaseURL)
 		client, err := genai.NewClient(ctx, &genai.ClientConfig{
 			APIKey:     apiKey,
 			Project:    project,
@@ -153,7 +151,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			Backend:    backend,
 			HTTPClient: httpClient,
 			HTTPOptions: genai.HTTPOptions{
-				BaseURL: baseURL,
+				BaseURL: cfg.BaseURL,
 			},
 		})
 		if err != nil {
@@ -1095,15 +1093,4 @@ func providerOption(cfg *latest.ModelConfig, name string) string {
 		return v
 	}
 	return ""
-}
-
-// clientBaseURL returns the endpoint handed to the genai SDK. The catalog
-// endpoint is Google's generic API host, so Vertex AI clears it (omitted or
-// default) and the SDK picks its regional endpoint. Any explicit endpoint is
-// honored for both backends.
-func clientBaseURL(backend genai.Backend, provider, baseURL string) string {
-	if backend == genai.BackendVertexAI && catalog.IsDefaultEndpoint(provider, baseURL) {
-		return ""
-	}
-	return baseURL
 }

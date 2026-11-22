@@ -7,34 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
-
-func TestClientBaseURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		backend genai.Backend
-		baseURL string
-		want    string
-	}{
-		{name: "vertex unset uses SDK regional default", backend: genai.BackendVertexAI, want: ""},
-		{name: "vertex catalog endpoint is cleared", backend: genai.BackendVertexAI, baseURL: "https://generativelanguage.googleapis.com/", want: ""},
-		{name: "vertex explicit endpoint is honored", backend: genai.BackendVertexAI, baseURL: "https://proxy.example.com/vertex", want: "https://proxy.example.com/vertex"},
-		{name: "gemini api unset stays SDK default", backend: genai.BackendGeminiAPI, want: ""},
-		{name: "gemini api explicit endpoint is honored", backend: genai.BackendGeminiAPI, baseURL: "https://proxy.example.com/gemini", want: "https://proxy.example.com/gemini"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, clientBaseURL(tt.backend, "google", tt.baseURL))
-		})
-	}
-}
 
 // The genai SDK reads GOOGLE_GEMINI_BASE_URL from the process environment when no
 // endpoint is configured, so an unset model endpoint leaves the override to the SDK.
