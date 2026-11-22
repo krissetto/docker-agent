@@ -12,6 +12,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 )
 
 func TestStreamAdapter_CloseBeforeRecv(t *testing.T) {
@@ -790,5 +791,32 @@ func TestStreamAdapter_InvalidFunctionCallFails(t *testing.T) {
 			_, err := adapter.Recv()
 			require.ErrorIs(t, err, io.EOF)
 		})
+	}
+}
+
+func TestInvalidFunctionCallClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []genai.FinishReason{genai.FinishReasonMalformedFunctionCall, genai.FinishReasonUnexpectedToolCall} {
+		for _, message := range []string{"", "lookup(timeout=30", "lookup(limit=500", "lookup(limit=429", "lookup(q=token limit", "lookup(q=unexpected EOF"} {
+			t.Run(string(reason)+"/"+message, func(t *testing.T) {
+				t.Parallel()
+				err := invalidFunctionCall(&genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+					FinishReason: reason, FinishMessage: message,
+				}}})
+				require.ErrorIs(t, err, ErrInvalidFunctionCall)
+				require.ErrorContains(t, err, string(reason))
+				require.ErrorContains(t, err, message)
+				err = fmt.Errorf("error receiving from stream: %w", err)
+				retryable, rateLimited, retryAfter := modelerrors.ClassifyModelError(err)
+				assert.False(t, retryable)
+				assert.False(t, rateLimited)
+				assert.Zero(t, retryAfter)
+				assert.False(t, modelerrors.IsContextOverflowError(err))
+				assert.Empty(t, modelerrors.OverflowKindOf(err))
+				assert.False(t, modelerrors.IsStreamTruncationError(err))
+				assert.Equal(t, err.Error(), modelerrors.FormatError(err))
+			})
+		}
 	}
 }
