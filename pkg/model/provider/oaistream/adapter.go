@@ -20,8 +20,11 @@ import (
 
 // StreamAdapter adapts the OpenAI stream to our interface
 type StreamAdapter struct {
-	stream             *ssestream.Stream[openai.ChatCompletionChunk]
-	lastFinishReason   chat.FinishReason
+	stream           *ssestream.Stream[openai.ChatCompletionChunk]
+	lastFinishReason chat.FinishReason
+	// heldFinishReason is a stop/length held back until the usage chunk
+	// arrives; emitted at EOF if no usage chunk ever comes.
+	heldFinishReason   chat.FinishReason
 	toolCalls          map[int]string
 	trackUsage         bool
 	serviceTier        string
@@ -43,6 +46,12 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		err := a.stream.Err()
 		if err != nil {
 			return chat.MessageStreamResponse{}, WrapOpenAIError(err)
+		}
+		if held := a.heldFinishReason; held != "" {
+			a.heldFinishReason = ""
+			return chat.MessageStreamResponse{
+				Choices: []chat.MessageStreamChoice{{FinishReason: held}},
+			}, nil
 		}
 		return chat.MessageStreamResponse{}, io.EOF
 	}
@@ -67,6 +76,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 		finishReasonStr := choice.FinishReason
 		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() && (finishReasonStr == "stop" || finishReasonStr == "length") {
+			a.heldFinishReason = chat.FinishReason(finishReasonStr)
 			finishReasonStr = ""
 		}
 
@@ -201,6 +211,10 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// into a synthetic stop before the runtime sees the delta.
 		if len(openaiResponse.Choices) == 0 {
 			finishReason := a.lastFinishReason
+			if a.heldFinishReason != "" {
+				finishReason = a.heldFinishReason
+				a.heldFinishReason = ""
+			}
 			if finishReason == chat.FinishReasonNull || finishReason == "" {
 				finishReason = chat.FinishReasonStop
 			}
