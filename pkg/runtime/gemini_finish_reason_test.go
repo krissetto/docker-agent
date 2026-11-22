@@ -90,7 +90,7 @@ func TestRunStream_GeminiTerminalFinishReasons(t *testing.T) {
 
 			var stopped *StreamStoppedEvent
 			var failed *ErrorEvent
-			for ev := range rt.RunStream(t.Context(), sess) {
+			for ev := range rt.runExecution(t.Context(), sess) {
 				switch e := ev.(type) {
 				case *ErrorEvent:
 					failed = e
@@ -104,7 +104,13 @@ func TestRunStream_GeminiTerminalFinishReasons(t *testing.T) {
 			} else {
 				require.Nil(t, failed)
 				require.NotNil(t, stopped)
-				assert.Equal(t, tt.want, stopped.FinishReason)
+				var finish chat.FinishReason
+				for _, msg := range sess.OwnMessages() {
+					if msg.Message.Role == chat.MessageRoleAssistant {
+						finish = msg.Message.FinishReason
+					}
+				}
+				assert.Equal(t, tt.want, finish)
 			}
 			assert.Zero(t, toolRuns.Load(), "a truncated, refused or failed turn must not run tools")
 		})
@@ -151,7 +157,7 @@ func TestRunStream_GeminiInvalidFunctionCallFallback(t *testing.T) {
 				sess := session.New(session.WithUserMessage("hi"))
 				sess.NonInteractive = true
 				var content string
-				for ev := range rt.RunStream(t.Context(), sess) {
+				for ev := range rt.runExecution(t.Context(), sess) {
 					switch e := ev.(type) {
 					case *ErrorEvent:
 						t.Errorf("unexpected error: %s", e.Error)

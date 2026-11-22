@@ -758,15 +758,16 @@ func TestCycleAgentThinkingLevel_Gemini4(t *testing.T) {
 			root := agent.New("root", "test", agent.WithModel(model))
 			r := &LocalRuntime{
 				team: team.New(team.WithAgents(root)),
-				modelSwitcherCfg: &modelcatalog.Config{
+				modelSwitcherCfg: &ModelSwitcherConfig{
 					ProviderRegistry: testProviderRegistry(),
 					EnvProvider:      environment.NewMapEnvProvider(map[string]string{"GOOGLE_API_KEY": "test-key"}),
 				},
 			}
 
+			h := sessionSessionFor(t, r, "root")
 			var got []effort.Level
 			for range tt.wantCycle {
-				level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+				level, err := h.CycleThinkingLevel(t.Context())
 				require.NoError(t, err)
 				got = append(got, level)
 			}
