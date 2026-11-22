@@ -98,7 +98,7 @@ Control how much the model "thinks" before responding:
 | OpenAI     | string     | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`                  | `medium` (always-reasoning models only) |
 | Anthropic  | int or str | 1024–32768 tokens, or `adaptive`, `adaptive/<effort>`, effort level | off                              |
 | Gemini 2.5 | int        | 0 (off), -1 (dynamic), or token count                               | -1 (dynamic)                     |
-| Gemini 3   | string     | `minimal`, `low`, `medium`, `high`                                  | varies                           |
+| Gemini 3+  | string     | `minimal` (Gemini 3), `low`, `medium`, `high`, `xhigh` (Hydrogen/Neon) | varies |
 | All        | string/int | `none` or `0` clears Docker Agent's local config                    | —                                |
 
 `none` and `0` are not universal API-level disable switches. On genuine OpenAI

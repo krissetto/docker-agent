@@ -26,7 +26,7 @@ Docker Agent exposes this through a single `thinking_budget` field on any named 
 | OpenAI              | string     | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; `xhigh` on gpt-5.2+, `max` on gpt-5.6+; API-level `none` on GPT-5.x from 5.6 onward and GPT-6 Sol/Luna, `minimal` dropped on gpt-5.6+ | `medium` (API default) |
 | Anthropic           | int or str | 1024–32768 tokens, or `minimal`–`max`, `adaptive`, `adaptive/<effort>`, `none`          | off                |
 | Gemini 2.5          | int        | `0` (off), `-1` (dynamic), or token count (max 24576 / 32768)                           | `-1` (dynamic)     |
-| Gemini 3            | string     | `minimal`, `low`, `medium`, `high`                                                      | API default (model-dependent) |
+| Gemini 3+ | string | `minimal` (Gemini 3), `low`, `medium`, `high`, `xhigh` (`gemini-4-hydrogen` / `gemini-4-neon`) | API default (model-dependent) |
 | AWS Bedrock         | int or str | 1024–32768 tokens (`minimal`–`max` mapped to tokens); `adaptive`, `adaptive/<effort>` for Opus 4.6+ (rejected by older Claude models) | off                |
 | Docker Model Runner | int or str | token count, `minimal`–`max` (mapped to tokens), `adaptive` (unlimited), `none`         | engine default     |
 
@@ -181,7 +181,7 @@ See the [Anthropic provider page](../../providers/anthropic/index.md#task-budget
 
 ## Google Gemini
 
-Gemini 2.5 and Gemini 3 use different formats.
+Gemini 2.5 and Gemini 3+ use different formats.
 
 ### Gemini 2.5 (token budget)
 
@@ -203,10 +203,20 @@ models:
     thinking_budget: 8192   # fixed token budget (max 24576 for Flash, 32768 for Pro)
 ```
 
-### Gemini 3 (level-based)
+### Gemini 3+ (level-based)
 
 ```yaml
 models:
+  gemini4-neon:
+    provider: google
+    model: gemini-4-neon
+    thinking_budget: xhigh    # low | medium | high | xhigh (Hydrogen and Neon)
+
+  gemini4-carbon:
+    provider: google
+    model: gemini-4-carbon
+    thinking_budget: high     # low | medium | high (Carbon and Argon)
+
   gemini3-flash:
     provider: google
     model: gemini-3-flash
@@ -308,7 +318,7 @@ models:
     thinking_budget: 0
 ```
 
-`none` and `0` clear Docker Agent's thinking configuration — no thinking parameter is sent. Models that always reason (OpenAI o-series, gpt-5 through gpt-5.5, GPT-6 Astra, Gemini 3) then fall back to the API's default behavior and still reason internally; GPT-5.x from 5.6 onward and GPT-6 Sol/Luna send `none` as a real API value that genuinely disables reasoning.
+`none` and `0` clear Docker Agent's thinking configuration — no thinking parameter is sent. Models that always reason (OpenAI o-series, gpt-5 through gpt-5.5, GPT-6 Astra, Gemini 3+) then fall back to the API's default behavior and still reason internally; GPT-5.x from 5.6 onward and GPT-6 Sol/Luna send `none` as a real API value that genuinely disables reasoning.
 
 Local models and other OpenAI-compatible backends may reason by default even when
 `thinking_budget` is cleared. Use
