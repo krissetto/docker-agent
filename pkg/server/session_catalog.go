@@ -416,7 +416,7 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	if err := decodeSessionJSON(c, &req); err != nil {
 		return sessionRequestError("invalid request body")
 	}
-	if strings.TrimSpace(req.AgentName) == "" {
+	if strings.TrimSpace(req.AgentName) == "" && (req.AgentName != "" || req.ParentSessionID != "") {
 		return echo.NewHTTPError(http.StatusBadRequest, "agent_name is required")
 	}
 	if req.SessionID != "" {
@@ -450,7 +450,9 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 		ToolsApproved: req.ToolsApproved,
 		Permissions:   req.Permissions,
 	}
-	template.SetAttribute(sessionAgentAttribute, req.AgentName)
+	if req.AgentName != "" {
+		template.SetAttribute(sessionAgentAttribute, req.AgentName)
+	}
 	if source != "" {
 		template.SetAttribute(sessionSourceAttribute, source)
 	}
@@ -476,7 +478,19 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	if err != nil {
 		return sessionHTTPError(err)
 	}
-	return c.JSON(http.StatusCreated, sessionMetadata(handle.Metadata()))
+	metadata := sessionMetadata(handle.Metadata())
+	if c.QueryParam("view") == "created" {
+		// Capture canonical create-time fields without opening a second observer.
+		created, err := handle.Snapshot(c.Request().Context())
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		if created == nil || created.ID != handle.ID() {
+			return errors.New("invalid created session snapshot")
+		}
+		return c.JSON(http.StatusCreated, api.SessionCreated{SessionMetadata: metadata, Session: created, ParentSessionID: created.ParentID})
+	}
+	return c.JSON(http.StatusCreated, metadata)
 }
 
 func (sm *SessionManager) createHTTPSession(ctx context.Context, registry runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding) (runtime.SessionHandle, error) {
@@ -484,8 +498,10 @@ func (sm *SessionManager) createHTTPSession(ctx context.Context, registry runtim
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
 	}
 	// Stamp only the detached template; the runtime owns durable publication.
-	sess.AgentName = binding.AgentName
-	sess.SetAttribute(sessionAgentAttribute, binding.AgentName)
+	if binding.AgentName != "" {
+		sess.AgentName = binding.AgentName
+		sess.SetAttribute(sessionAgentAttribute, binding.AgentName)
+	}
 	handle, err := registry.CreateSession(ctx, sess, binding)
 	if err != nil {
 		return nil, err

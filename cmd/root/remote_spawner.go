@@ -15,6 +15,10 @@ func (b *remoteBackend) remoteSpawner(services app.Services, sessions runtime.Se
 	if b == nil || b.flags == nil || services == nil || sessions == nil {
 		return nil
 	}
+	transport, ok := sessions.(*runtime.SessionTransport)
+	if !ok {
+		return nil
+	}
 	return func(ctx context.Context, workingDir string) (tui.SpawnedSession, error) {
 		// Workspace values are opaque server paths. Never stat, normalize against
 		// the client cwd, or chdir into them.
@@ -22,15 +26,33 @@ func (b *remoteBackend) remoteSpawner(services app.Services, sessions runtime.Se
 			workingDir = b.flags.remoteWorkingDir
 		}
 		req := b.flags.createSessionRequest(workingDir)
-		sess := session.New(session.WithAgentName(services.CurrentAgentInfo(ctx).Name), session.WithWorkingDir(workingDir), session.WithToolsApproved(req.ToolsApproved), session.WithSafetyPolicy(req.SafetyPolicy))
+		// The Kit owns both ends of this connection; let its workspace runtime
+		// choose the default from the current team generation. Standalone remote
+		// clients can still talk to older servers that require an explicit name.
+		var agentName, model string
+		if !b.flags.managedAPI {
+			remote, ok := services.(*runtime.RemoteServices)
+			if !ok {
+				return tui.SpawnedSession{}, runtime.ErrUnsupported
+			}
+			var err error
+			agentName, err = remote.DefaultAgentName(ctx)
+			if err != nil {
+				return tui.SpawnedSession{}, err
+			}
+			if len(b.flags.modelOverrides) != 0 && b.handle != nil && b.handle.AgentName() == agentName {
+				model = b.model
+			}
+		}
+		sess := session.New(session.WithAgentName(agentName), session.WithWorkingDir(workingDir), session.WithToolsApproved(req.ToolsApproved), session.WithSafetyPolicy(req.SafetyPolicy))
 		if p := req.GlobalPermissions; p != nil && !p.IsEmpty() {
 			sess.Permissions = &session.PermissionsConfig{Allow: p.AllowPatterns(), Ask: p.AskPatterns(), Deny: p.DenyPatterns()}
 		}
-		handle, err := sessions.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName, Model: b.model})
+		handle, created, err := transport.CreateSessionView(ctx, sess, runtime.SessionBinding{AgentName: agentName, Model: model})
 		if err != nil {
 			return tui.SpawnedSession{}, err
 		}
-		return b.remoteAttachedApp(ctx, services, sessions, handle)
+		return b.remoteCreatedApp(ctx, services, sessions, handle, created)
 	}
 }
 
@@ -79,11 +101,7 @@ func (b *remoteBackend) Restorer(services app.Services, sessions runtime.Session
 	}
 }
 
-func (b *remoteBackend) remoteAttachedApp(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, handle runtime.SessionHandle) (tui.SpawnedSession, error) {
-	sess, err := handle.Snapshot(ctx)
-	if err != nil {
-		return tui.SpawnedSession{}, err
-	}
+func (b *remoteBackend) remoteCreatedApp(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, handle runtime.SessionHandle, sess *session.Session) (tui.SpawnedSession, error) {
 	if sess == nil || sess.ID != handle.ID() {
 		return tui.SpawnedSession{}, errors.New("invalid remote session snapshot")
 	}

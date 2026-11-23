@@ -31,6 +31,7 @@ func newRemoteClient(address, tokenFile string) (*runtime.Client, error) {
 }
 
 func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client, transport *runtime.SessionTransport, req runtime.CreateSessionRequest) (runtime.SessionHandle, *session.Session, error) {
+	b.startupView = nil
 	id := req.ResumeSessionID
 	if session.IsRelativeSessionRef(id) {
 		rows, err := transport.ListSessionSummaries(ctx, runtime.SessionSummaryOptions{})
@@ -63,7 +64,7 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	}
 	if id != "" {
 		var err error
-		prepared, prepareErr := transport.PrepareSessionView(ctx, id)
+		prepared, prepareErr := b.prepareStartupView(ctx, transport, id)
 		err = prepareErr
 		if err == nil {
 			defer prepared.Abort()
@@ -84,6 +85,9 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 			committed, commitErr := prepared.Commit(ctx)
 			err = commitErr
 			handle, sess = committed.SessionHandle, committed.Info.Session
+			if commitErr == nil {
+				b.startupView = &committed
+			}
 		}
 
 		if err != nil {
@@ -166,7 +170,18 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	}
 	sess.AgentName = handle.AgentName()
 	sess.HideToolResults = req.HideToolResults
+	if b.startupView != nil {
+		b.startupView.Info.Session = sess
+		b.startupView.Info.Binding.Model = handle.Metadata().Model
+	}
 	return handle, sess, nil
+}
+
+func (b *remoteBackend) prepareStartupView(ctx context.Context, transport *runtime.SessionTransport, id string) (runtime.PreparedSessionView, error) {
+	if b.flags.managedAPIAttach {
+		return transport.PrepareSessionViewMetadata(ctx, id)
+	}
+	return transport.PrepareSessionView(ctx, id)
 }
 
 func (f *runExecFlags) shouldRestoreInitialTab(useTUI bool, args []string, settings *userconfig.Settings) bool {
@@ -199,7 +214,7 @@ func (b *remoteBackend) restoreInitialSession(ctx context.Context, transport *ru
 		}
 	}
 	for _, id := range ids {
-		prepared, err := transport.PrepareSessionView(ctx, id)
+		prepared, err := b.prepareStartupView(ctx, transport, id)
 		if err != nil {
 			var sessionErr *runtime.SessionError
 			if errors.As(err, &sessionErr) && (sessionErr.Kind == runtime.SessionErrorNotFound || sessionErr.Kind == runtime.SessionErrorWrongSession) {
@@ -216,6 +231,7 @@ func (b *remoteBackend) restoreInitialSession(ctx context.Context, transport *ru
 		if err != nil {
 			return nil, nil, err
 		}
+		b.startupView = &committed
 		return committed.SessionHandle, committed.Info.Session, nil
 	}
 	return nil, nil, nil

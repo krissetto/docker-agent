@@ -2,6 +2,7 @@ package root
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -378,4 +380,117 @@ func TestRemoteExecUsesCanonicalSession(t *testing.T) {
 func writeReadyOpening(t *testing.T, w http.ResponseWriter, info runtime.PreparedSessionViewInfo) {
 	t.Helper()
 	require.NoError(t, json.NewEncoder(w).Encode(api.SessionOpened[runtime.PreparedSessionViewInfo, runtime.SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: info, Metadata: api.SessionMetadata{SessionID: info.SessionID, AgentName: info.ActiveAgentName, Model: info.Binding.Model}, Status: api.SessionStatus[runtime.SessionState]{SessionID: info.SessionID, AgentName: info.ActiveAgentName, State: runtime.SessionStateSettled}}))
+}
+
+func largeRemoteResume(tb testing.TB) (string, *session.Session, *atomic.Int64, *atomic.Int64) {
+	tb.Helper()
+	sess := session.New(session.WithID("large"), session.WithAgentName("root"), session.WithWorkingDir("/workspace"), session.WithSafetyPolicy(session.SafetyPolicyAutonomous), session.WithTitle("Durable title"), session.WithAttributes(map[string]string{sessionActorSourceAttribute: "team.yaml", runtime.SessionAgentAttribute: "root"}))
+	body := strings.Repeat("conversation history ", 200)
+	for i := range 1600 {
+		sess.AddMessage(session.UserMessage(fmt.Sprintf("message %d: %s", i, body)))
+	}
+	info := runtime.PreparedSessionViewInfo{SessionID: sess.ID, RootSessionID: sess.ID, Session: sess, ActiveAgentName: "root", Binding: runtime.SessionBinding{AgentName: "root"}, WorkingDir: sess.WorkingDir}
+	header := info
+	header.Session = sess.MetadataSnapshot()
+	var requests, bytesSent atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var response any
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath:
+			response = map[string]any{"version": api.SessionAPIVersion, "view": "summary", "sessions": []runtime.SessionSummaryEntry{{SessionID: sess.ID, Source: "team.yaml", WorkingDir: sess.WorkingDir}}}
+		case r.Method == http.MethodGet && r.URL.Query().Get("view") == "prepare-info":
+			if r.URL.Query().Get("projection") == api.SessionViewMetadataProjection {
+				response = map[string]any{"version": api.SessionAPIVersion, "view": "prepare-info", "projection": api.SessionViewMetadataProjection, "info": header}
+			} else {
+				response = map[string]any{"version": api.SessionAPIVersion, "view": "prepare-info", "info": info}
+			}
+		case r.Method == http.MethodPatch && r.URL.Query().Get("view") == "open-view":
+			var edit runtime.SessionEdit
+			if err := json.NewDecoder(r.Body).Decode(&edit); err != nil || edit.ViewConfirmation == nil || edit.ViewConfirmation.Validate(info) != nil {
+				http.Error(w, "unconfirmed opening", http.StatusBadRequest)
+				return
+			}
+			response = api.SessionOpened[runtime.PreparedSessionViewInfo, runtime.SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: info, Metadata: api.SessionMetadata{SessionID: sess.ID, AgentName: "root"}, Status: api.SessionStatus[runtime.SessionState]{SessionID: sess.ID, AgentName: "root", State: runtime.SessionStateSettled}}
+		default:
+			tb.Errorf("unexpected request: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		data, err := json.Marshal(response)
+		if err != nil {
+			tb.Error(err)
+			http.Error(w, "encoding failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		bytesSent.Add(int64(len(data)))
+		_, _ = w.Write(data)
+	}))
+	tb.Cleanup(server.Close)
+	return server.URL, sess, &requests, &bytesSent
+}
+
+func TestManagedResumeReusesConfirmedLargeSession(t *testing.T) {
+	for _, ref := range []string{"large", "-1"} {
+		t.Run(ref, func(t *testing.T) {
+			address, want, requests, bytesSent := largeRemoteResume(t)
+			b := &remoteBackend{flags: &runExecFlags{managedAPIAttach: true, remoteAddress: address, sessionID: ref, remoteWorkingDir: want.WorkingDir}, agentFileName: "team.yaml"}
+			rt, sessions, sess, cleanup, err := b.CreateSession(t.Context(), nil, b.CreateSessionRequest(want.WorkingDir))
+			require.NoError(t, err)
+			defer cleanup()
+			a, err := initialRunApp(t.Context(), b, rt, sessions, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt))
+			require.NoError(t, err)
+			defer a.Close()
+			assert.Same(t, b.handle, a.SessionHandle())
+			assert.Equal(t, want.GetAllMessages(), a.Session().GetAllMessages())
+			assert.Equal(t, want.Title, a.Session().Title)
+			assert.Equal(t, want.GetSafetyPolicy(), a.Session().GetSafetyPolicy())
+			count := int64(2)
+			if ref == "-1" {
+				count++
+			}
+			assert.Equal(t, count, requests.Load(), "one prepare and one open, plus summary for -1")
+			assert.Less(t, bytesSent.Load(), int64(8<<20), "only the opening transports the transcript")
+		})
+	}
+}
+
+func BenchmarkManagedLargeSessionStartup(b *testing.B) {
+	for _, reuse := range []bool{false, true} {
+		name := "legacy_prepare_and_reopen"
+		if reuse {
+			name = "metadata_prepare_and_reuse"
+		}
+		b.Run(name, func(b *testing.B) {
+			address, want, requests, bytesSent := largeRemoteResume(b)
+			b.ReportAllocs()
+			for b.Loop() {
+				ctx, cancel := context.WithCancel(b.Context())
+				backend := &remoteBackend{flags: &runExecFlags{managedAPIAttach: reuse, remoteAddress: address, sessionID: want.ID, remoteWorkingDir: want.WorkingDir}, agentFileName: "team.yaml"}
+				rt, sessions, sess, cleanup, err := backend.CreateSession(ctx, nil, backend.CreateSessionRequest(want.WorkingDir))
+				if err != nil {
+					cancel()
+					b.Fatal(err)
+				}
+				binding := runtime.SessionBinding{AgentName: "root"}
+				var a *app.App
+				if reuse {
+					a, err = initialRunApp(ctx, backend, rt, sessions, sess, binding, app.WithRuntimeServices(rt))
+				} else {
+					a = app.New(ctx, sessions, sess, binding, app.WithRuntimeServices(rt))
+				}
+				if a != nil {
+					a.Close()
+				}
+				cleanup()
+				cancel()
+				if err != nil || a.SessionHandle() == nil || a.Session().ItemCount() != want.ItemCount() {
+					b.Fatalf("startup did not retain the canonical session: %v", err)
+				}
+			}
+			b.ReportMetric(float64(bytesSent.Load())/float64(b.N), "wire-B/op")
+			b.ReportMetric(float64(requests.Load())/float64(b.N), "requests/op")
+		})
+	}
 }

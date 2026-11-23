@@ -123,5 +123,6 @@ func (r *SessionTransport) CreateSessionWithID(ctx context.Context, sess *sessio
 	if !slices.Contains(info.Capabilities, "session_explicit_ids") {
 		return nil, sessionUnsupported(id, "create_session_with_id")
 	}
-	return r.createSession(ctx, sess, binding, id)
+	handle, _, err := r.createSession(ctx, sess, binding, id, false)
+	return handle, err
 }

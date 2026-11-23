@@ -411,6 +411,9 @@ type appModel struct {
 	// when --working-dir was explicitly supplied on the CLI outside a sandbox;
 	// a directory carried by the spawn request still wins.
 	defaultNewSessionDir string
+	asyncSessionSpawn    bool
+	spawnContext         func() context.Context
+	cancelSpawns         context.CancelFunc
 
 	// The independent panel shares canonical session data, not sidebar presentation.
 	panelSettings            messages.PanelSettings
@@ -721,6 +724,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	}
 
 	initialSessionState := service.NewSessionState(initialApp.Session())
+	_, asyncSessionSpawn := initialApp.SessionRuntime().(*runtime.SessionTransport)
+	spawnCtx, cancelSpawns := context.WithCancel(ctx)
 	sessID := initialApp.Session().ID
 
 	m := &appModel{
@@ -740,6 +745,9 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		editors:                       map[string]editor.Editor{},
 		sessionStates:                 map[string]*service.SessionState{sessID: initialSessionState},
 		application:                   initialApp,
+		asyncSessionSpawn:             asyncSessionSpawn,
+		spawnContext:                  func() context.Context { return spawnCtx },
+		cancelSpawns:                  cancelSpawns,
 		ctx:                           tuiCtx,
 		sessionState:                  initialSessionState,
 		history:                       historyStore,
@@ -1532,6 +1540,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.SpawnSessionMsg:
 		return m.handleSpawnSession(msg.WorkingDir)
+
+	case spawnedSessionMsg:
+		return m.finishSpawnSession(msg)
 
 	case messages.SwitchTabMsg:
 		if msg.Workspace {
@@ -2739,22 +2750,51 @@ func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
 		return m.openWorkingDirPicker()
 	}
 
-	// Spawn the new session
+	ctx, owner := m.ctx(), m.supervisor
+	if m.asyncSessionSpawn {
+		ctx = m.spawnContext()
+	}
+	spawn := func() spawnedSessionMsg {
+		session, err := owner.PrepareSpawn(ctx, workingDir)
+		return spawnedSessionMsg{session: session, workingDir: workingDir, err: err}
+	}
+	if m.asyncSessionSpawn {
+		return m, func() tea.Msg { return spawn() }
+	}
+	return m.finishSpawnSession(spawn())
+}
+
+type spawnedSessionMsg struct {
+	session    supervisor.SpawnedSession
+	workingDir string
+	err        error
+}
+
+func (m *appModel) finishSpawnSession(msg spawnedSessionMsg) (tea.Model, tea.Cmd) {
+	if m.contextClosed {
+		if msg.session.App != nil {
+			msg.session.App.Close()
+		}
+		return m, nil
+	}
 	ctx := m.ctx()
-	sessionID, err := m.supervisor.SpawnSession(ctx, workingDir)
+	id, err := "", msg.err
+	if err == nil {
+		id, err = m.supervisor.AddSpawnedSession(ctx, msg.session, msg.workingDir)
+	}
 	if err != nil {
 		return m, notification.ErrorCmd("Failed to spawn session: " + err.Error())
 	}
-
-	// Persist the new tab (for new tabs, persisted ID == runtime tab ID).
 	if m.tuiStore != nil {
-		if err := m.tuiStore.AddTab(ctx, sessionID, workingDir); err != nil {
+		workingDir := msg.workingDir
+		if msg.session.Session.WorkingDir != "" {
+			workingDir = msg.session.Session.WorkingDir
+		}
+		if err := m.tuiStore.AddTab(ctx, id, workingDir); err != nil {
 			slog.WarnContext(ctx, "Failed to persist new tab", "error", err)
 		}
 	}
-
-	// Switch to the new session
-	return m.handleSwitchTab(sessionID)
+	return m.handleSwitchTab(id)
 }
 
 // openWorkingDirPicker opens the working directory picker dialog.
@@ -5034,6 +5074,9 @@ func (m *appModel) shutdownTimeoutOrDefault() time.Duration {
 func (m *appModel) cleanupManagedResources() {
 	m.cleanupOnce.Do(func() {
 		m.gitReviewScopes.closeAll()
+		if m.cancelSpawns != nil {
+			m.cancelSpawns()
+		}
 		if m.cancelThemes != nil {
 			m.cancelThemes()
 		}
@@ -5091,6 +5134,9 @@ func (m *appModel) cleanupAll() {
 		m.stopReviewAnimations()
 		m.gitReviewScopes.closeAll()
 		m.contextClosed = true
+		if m.cancelSpawns != nil {
+			m.cancelSpawns()
+		}
 		m.cancelSessionOpening()
 		if m.hostedLoad != nil {
 			m.hostedLoad.cancel()

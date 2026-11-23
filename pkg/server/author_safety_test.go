@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -158,4 +159,30 @@ func TestCanonicalAuthorSafetyFailedBuildRetryUsesCurrentDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stored, 1)
 	assert.Equal(t, session.SafetyPolicyStrict, stored[0].GetSafetyPolicy(), "the retry uses the current author's default")
+}
+
+func TestCanonicalCreateViewUsesTeamDefaultAndReturnsCanonicalSession(t *testing.T) {
+	store := authorSafetyStore(t)
+	factory := &factoryRecorder{store: store, safety: latest.SafetyModeBalanced}
+	srv, _ := newFactoryServer(t, factory, &memorySource{data: "agents: {}"})
+	workspace := t.TempDir()
+	for range 2 {
+		body, err := json.Marshal(sessionCreateRequest{Source: "agent", WorkingDir: workspace})
+		require.NoError(t, err)
+		rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions?view=created", string(body), "")
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var created api.SessionCreated
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		require.NotNil(t, created.Session)
+		assert.Equal(t, "root", created.AgentName)
+		assert.Equal(t, created.SessionID, created.Session.ID)
+		assert.Equal(t, "agent", created.Session.AttributesSnapshot()[sessionSourceAttribute])
+		assert.Equal(t, "root", created.Session.AttributesSnapshot()[sessionAgentAttribute])
+		assert.Equal(t, session.SafetyPolicyBalanced, created.Session.GetSafetyPolicy())
+		assert.Empty(t, created.Session.MessagesSnapshot())
+		stored, err := store.GetSession(t.Context(), created.SessionID)
+		require.NoError(t, err)
+		assert.Equal(t, "root", stored.AgentName)
+	}
+	assert.Len(t, factory.built(), 1, "subsequent tabs reuse the workspace runtime")
 }

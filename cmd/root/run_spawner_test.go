@@ -496,3 +496,27 @@ func TestLeanSessionForkWithoutModelSwitcherKeepsStoredOverride(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "test/override", stored.AgentModelOverrides["worker"])
 }
+
+func TestBorrowedNewTabUsesTeamDefaultRatherThanRuntimeSelection(t *testing.T) {
+	workingDir := t.TempDir()
+	store := session.NewInMemorySessionStore()
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
+		agent.New("worker", "worker instructions", agent.WithModel(rootTestProvider{})),
+		agent.New("root", "root instructions", agent.WithModel(rootTestProvider{})),
+	)), runtime.WithCurrentAgent("worker"), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	sessions := owner.Runtime()
+	flags := &runExecFlags{agentName: "worker"}
+	flags.runConfig.WorkingDir = workingDir
+	selected := session.New(session.WithAgentName("worker"), session.WithWorkingDir(workingDir))
+	original := app.New(t.Context(), sessions, selected, runtime.SessionBinding{AgentName: "worker"}, app.WithRuntimeServices(rt))
+	t.Cleanup(original.Close)
+	spawned, err := flags.createSessionSpawner(nil, rt, sessions)(t.Context(), workingDir)
+	require.NoError(t, err)
+	t.Cleanup(spawned.App.Close)
+	require.NotNil(t, spawned.App.SessionHandle())
+	assert.Equal(t, "root", spawned.App.SessionHandle().AgentName())
+	assert.Equal(t, "worker", original.SessionHandle().AgentName())
+}

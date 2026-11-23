@@ -211,30 +211,41 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 
 // SpawnSession creates and adds a new session.
 func (s *Supervisor) SpawnSession(ctx context.Context, workingDir string) (string, error) {
+	spawned, err := s.PrepareSpawn(ctx, workingDir)
+	if err != nil {
+		return "", err
+	}
+	return s.AddSpawnedSession(ctx, spawned, workingDir)
+}
+
+// PrepareSpawn creates a session without routing its presentation yet.
+func (s *Supervisor) PrepareSpawn(ctx context.Context, workingDir string) (SpawnedSession, error) {
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
 	if closed {
-		return "", runtime.ErrSessionClosed
+		return SpawnedSession{}, runtime.ErrSessionClosed
 	}
 	if s.spawner == nil {
-		return "", errors.New("session spawning is not available")
+		return SpawnedSession{}, errors.New("session spawning is not available")
 	}
+	return s.spawner(ctx, workingDir)
+}
 
-	spawned, err := s.spawner(ctx, workingDir)
-	if err != nil {
-		return "", err
-	}
+// AddSpawnedSession adopts a session and starts routing its presentation.
+func (s *Supervisor) AddSpawnedSession(ctx context.Context, spawned SpawnedSession, workingDir string) (string, error) {
 	cleanup := spawned.Cleanup
 	if spawned.Ownership == RuntimeBorrowed {
 		cleanup = nil
 	}
-
-	sessionID, err := s.AddSession(ctx, spawned.App, spawned.Session, workingDir, cleanup)
-	if err != nil {
-		return "", err
+	if spawned.Session != nil && spawned.Session.WorkingDir != "" {
+		workingDir = spawned.Session.WorkingDir
 	}
-	return sessionID, nil
+	sessionID, err := s.AddSession(ctx, spawned.App, spawned.Session, workingDir, cleanup)
+	if err != nil && spawned.App != nil {
+		spawned.App.Close()
+	}
+	return sessionID, err
 }
 
 func sessionStateRunning(state runtime.SessionState) bool {

@@ -59,12 +59,23 @@ func NewSessionTransport(client *Client, opts ...SessionTransportOption) (*Sessi
 }
 
 func (r *SessionTransport) CreateSession(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, error) {
-	return r.createSession(ctx, sess, binding, "")
+	handle, _, err := r.createSession(ctx, sess, binding, "", false)
+	return handle, err
 }
 
-func (r *SessionTransport) createSession(ctx context.Context, sess *session.Session, binding SessionBinding, desiredID string) (SessionHandle, error) {
+// CreateSessionView returns the server's canonical session alongside its handle.
+// Older servers omit the requested projection, so read the snapshot only then.
+func (r *SessionTransport) CreateSessionView(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, *session.Session, error) {
+	handle, created, err := r.createSession(ctx, sess, binding, "", true)
+	if err == nil && created == nil {
+		created, err = handle.Snapshot(ctx)
+	}
+	return handle, created, err
+}
+
+func (r *SessionTransport) createSession(ctx context.Context, sess *session.Session, binding SessionBinding, desiredID string, withView bool) (SessionHandle, *session.Session, error) {
 	if sess == nil {
-		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
+		return nil, nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
 	}
 	template := sess.Clone()
 	request := api.SessionCreateRequest{
@@ -74,17 +85,28 @@ func (r *SessionTransport) createSession(ctx context.Context, sess *session.Sess
 		WorkingDir: template.WorkingDir, SafetyPolicy: template.SafetyPolicy,
 		ToolsApproved: template.ToolsApproved, Permissions: template.Permissions,
 	}
-	var metadata remoteSessionMetadata
-	if err := r.client.sessionJSON(ctx, http.MethodPost, api.SessionAPIPath, request, &metadata); err != nil {
-		return nil, err
+	endpoint := api.SessionAPIPath
+	if withView {
+		endpoint += "?view=created"
 	}
-	if metadata.SessionID == "" {
-		return nil, errors.New("session create response has empty session_id")
+	var result api.SessionCreated
+	if err := r.client.sessionJSON(ctx, http.MethodPost, endpoint, request, &result); err != nil {
+		return nil, nil, err
 	}
-	if desiredID != "" && metadata.SessionID != desiredID {
-		return nil, errors.New("session create response differs from requested session_id")
+	if result.SessionID == "" {
+		return nil, nil, errors.New("session create response has empty session_id")
 	}
-	return &remoteSession{runtime: r, sessionID: metadata.SessionID, metadata: metadata.runtime()}, nil
+	if desiredID != "" && result.SessionID != desiredID {
+		return nil, nil, errors.New("session create response differs from requested session_id")
+	}
+	if result.Session != nil {
+		if result.Session.ID != result.SessionID {
+			return nil, nil, errors.New("session create projection differs from response session_id")
+		}
+		result.Session.AgentName = result.AgentName
+		result.Session.ParentID = result.ParentSessionID
+	}
+	return &remoteSession{runtime: r, sessionID: result.SessionID, metadata: remoteSessionMetadata(result.SessionMetadata).runtime()}, result.Session, nil
 }
 
 func (r *SessionTransport) SessionByID(id string) (SessionHandle, error) {
@@ -1483,16 +1505,29 @@ func (s *remoteSession) AwaitWorkflow(ctx context.Context) (WorkflowSettlement, 
 // ConfirmedSessionViewInfo reads the server's confirmed identity without
 // reserving, publishing, or starting a session owner.
 func (r *SessionTransport) ConfirmedSessionViewInfo(ctx context.Context, id string) (PreparedSessionViewInfo, error) {
+	return r.confirmedSessionViewInfo(ctx, id, "")
+}
+
+func (r *SessionTransport) confirmedSessionViewInfo(ctx context.Context, id, projection string) (PreparedSessionViewInfo, error) {
 	var response struct {
-		Version int                     `json:"version"`
-		View    string                  `json:"view"`
-		Info    PreparedSessionViewInfo `json:"info"`
+		Version    int                     `json:"version"`
+		View       string                  `json:"view"`
+		Projection string                  `json:"projection"`
+		Info       PreparedSessionViewInfo `json:"info"`
 	}
-	if err := r.client.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"/"+url.PathEscape(id)+"?view=prepare-info", nil, &response); err != nil {
+	endpoint := api.SessionAPIPath + "/" + url.PathEscape(id) + "?view=prepare-info"
+	if projection != "" {
+		endpoint += "&projection=" + projection
+	}
+	if err := r.client.sessionJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
 		return PreparedSessionViewInfo{}, err
 	}
-	if response.Version != sessionWireVersion || response.View != "prepare-info" {
+	if response.Version != sessionWireVersion || response.View != "prepare-info" || response.Projection != projection {
 		return PreparedSessionViewInfo{}, UnsupportedSessionOperation(id, "prepare_view")
+	}
+	if projection == api.SessionViewMetadataProjection && response.Info.Attach != nil && response.Info.Session != nil {
+		// Metadata carries one session header for both representations of the child.
+		response.Info.Attach.Session = response.Info.Session.Clone()
 	}
 	return r.validateSessionViewInfo(id, response.Info)
 }
@@ -1535,7 +1570,17 @@ func (r *SessionTransport) validateSessionViewInfo(id string, info PreparedSessi
 // owns no reservation across HTTP requests; Commit revalidates and publishes in
 // one authenticated open_view request.
 func (r *SessionTransport) PrepareSessionView(ctx context.Context, id string) (PreparedSessionView, error) {
-	info, err := r.ConfirmedSessionViewInfo(ctx, id)
+	return r.prepareSessionView(ctx, id, "")
+}
+
+// PrepareSessionViewMetadata confirms identity without transferring transcript
+// data during preparation. Commit still returns the full canonical view.
+func (r *SessionTransport) PrepareSessionViewMetadata(ctx context.Context, id string) (PreparedSessionView, error) {
+	return r.prepareSessionView(ctx, id, api.SessionViewMetadataProjection)
+}
+
+func (r *SessionTransport) prepareSessionView(ctx context.Context, id, projection string) (PreparedSessionView, error) {
+	info, err := r.confirmedSessionViewInfo(ctx, id, projection)
 	if err != nil {
 		return nil, err
 	}

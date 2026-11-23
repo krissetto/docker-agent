@@ -119,7 +119,11 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 	}
 	identity := f.freshViewOwnerIdentity(initial)
 	if initial.ParentID != "" {
-		identity, err = resolve(ctx, initial.ID)
+		if remote, ok := b.(*remoteBackend); ok && remote.startupView != nil {
+			identity, err = remoteViewIdentity(ctx, f.sessionViewScope, f.sessionViewSource, sessions, remote.startupView.Info)
+		} else {
+			identity, err = resolve(ctx, initial.ID)
+		}
 		if err != nil {
 			return err
 		}

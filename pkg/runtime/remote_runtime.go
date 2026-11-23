@@ -70,6 +70,21 @@ func (r *RemoteServices) resolvedAgent(ctx context.Context) (string, latest.Agen
 	return name, latest.AgentConfig{}
 }
 
+// DefaultAgentName resolves the source default without consulting a tab's agent.
+func (r *RemoteServices) DefaultAgentName(ctx context.Context) (string, error) {
+	cfg, err := r.client.GetAgent(ctx, r.agentFilename)
+	if err != nil {
+		return "", err
+	}
+	if cfg == nil || len(cfg.Agents) == 0 {
+		return "", errors.New("remote source has no agents")
+	}
+	if _, ok := cfg.Agents.Lookup("root"); ok {
+		return "root", nil
+	}
+	return cfg.Agents.First().Name, nil
+}
+
 func (r *RemoteServices) CurrentAgentName(ctx context.Context) string {
 	name, _ := r.resolvedAgent(ctx)
 	return name

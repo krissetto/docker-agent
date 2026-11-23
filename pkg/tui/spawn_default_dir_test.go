@@ -250,3 +250,25 @@ func TestPrivateForkPreservesSelectedAgentBeforePersistence(t *testing.T) {
 	require.Equal(t, "selected-model", source.AgentModelOverrides["selected-agent"])
 	require.Nil(t, root.application.SessionHandle(), "legacy presentation-only embedder never invents execution")
 }
+
+func TestRemoteSpawnDoesNotBlockUpdate(t *testing.T) {
+	t.Parallel()
+	spy := &spySpawner{}
+	m := newSpawnTestModel(t, spy, WithRemoteWorkspace("/server/workspace"))
+	m.asyncSessionSpawn = true
+	m.spawnContext = t.Context
+	t.Cleanup(m.supervisor.Shutdown)
+	initial := m.supervisor.ActiveID()
+	_, cmd := m.Update(messages.SpawnSessionMsg{})
+	require.NotNil(t, cmd)
+	assert.Empty(t, spy.dirs, "the event loop must not call the potentially slow spawner")
+	assert.Equal(t, initial, m.supervisor.ActiveID())
+	result, ok := firstOfType[spawnedSessionMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	require.NoError(t, result.err)
+	assert.Equal(t, []string{"/server/workspace"}, spy.dirs)
+	assert.Equal(t, 1, m.supervisor.Count(), "observation must start only once Update can admit the tab")
+	_, _ = m.Update(result)
+	assert.Equal(t, result.session.Session.ID, m.supervisor.ActiveID())
+	assert.NotNil(t, m.supervisor.GetRunner(initial))
+}

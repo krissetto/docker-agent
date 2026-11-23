@@ -130,7 +130,18 @@ func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
 				}
 				switch {
 				case r.URL.Query().Get("view") == "prepare-info":
-					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"version": 2, "view": "prepare-info", "info": info}))
+					response := map[string]any{"version": api.SessionAPIVersion, "view": "prepare-info"}
+					if r.URL.Query().Get("projection") == api.SessionViewMetadataProjection {
+						response["projection"] = api.SessionViewMetadataProjection
+						info.Session = info.Session.MetadataSnapshot()
+						if info.Attach != nil {
+							attach := *info.Attach
+							attach.Session = nil
+							info.Attach = &attach
+						}
+					}
+					response["info"] = info
+					assert.NoError(t, json.NewEncoder(w).Encode(response))
 				case r.Method == http.MethodPatch && r.URL.Query().Get("view") == "open-view":
 					writeReadyOpening(t, w, info)
 				case strings.HasSuffix(r.URL.Path, "/snapshot"):
@@ -171,7 +182,8 @@ func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
 				}
 				require.Equal(t, want, initial.ID)
 				require.NoError(t, flags.configureSessionViewHost(t.Context(), backend, services, sessions, initial, backend.Spawner(services, sessions), cleanup))
-				application := app.New(t.Context(), sessions, initial, sessionSessionBinding(t.Context(), services, initial), app.WithRuntimeServices(services))
+				application, err := initialRunApp(t.Context(), backend, services, sessions, initial, sessionSessionBinding(t.Context(), services, initial), app.WithRuntimeServices(services))
+				require.NoError(t, err)
 				model := tui.New(t.Context(), backend.Spawner(services, sessions), application, initial.WorkingDir, flags.sessionViewHost.Shutdown, tui.WithSupervisor(flags.sessionViewHost), tui.WithSessionRestorer(backend.Restorer(services, sessions)))
 				tabs, _ := flags.sessionViewHost.GetTabs()
 				count := 1

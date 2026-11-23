@@ -69,8 +69,9 @@ type SessionResource[State ~string] struct {
 }
 
 type SessionCreateRequest struct {
-	SessionID       string `json:"session_id,omitempty"`
-	Source          string `json:"source,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Source    string `json:"source,omitempty"`
+	// AgentName may be empty for root creation to select the team default.
 	AgentName       string `json:"agent_name"`
 	Model           string `json:"model,omitempty"`
 	Title           string `json:"title,omitempty"`
@@ -95,6 +96,15 @@ type SessionMetadata struct {
 	ThinkingLevels     []effort.Level      `json:"thinking_levels,omitempty"`
 	ThinkingLevel      effort.Level        `json:"thinking_level,omitempty"`
 	Capabilities       SessionCapabilities `json:"capabilities"`
+}
+
+// SessionCreated is the create response with view=created. Metadata stays
+// at the top level so the ordinary create response remains compatible.
+type SessionCreated struct {
+	SessionMetadata
+
+	Session         *session.Session `json:"session,omitempty"`
+	ParentSessionID string           `json:"parent_session_id,omitempty"`
 }
 
 type SessionCapabilities struct {

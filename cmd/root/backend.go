@@ -205,6 +205,7 @@ func (b *localBackend) Close() error {
 // remoteBackend talks to a docker-agent server.
 type remoteBackend struct {
 	restoreInitialTab bool
+	startupView       *runtime.CommittedSessionView
 	handle            runtime.SessionHandle
 	flags             *runExecFlags
 	agentFileName     string

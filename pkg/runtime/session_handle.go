@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
@@ -224,12 +225,42 @@ func (v *localSessionRuntimeView) SwitchAgent(ctx context.Context, sessionID, ta
 }
 
 func (v *localSessionRuntimeView) AuthorSafetyDefault(sess *session.Session) session.SafetyPolicy {
-	if a, err := v.runtime.teamForSession(sess).Agent(sess.AgentName); err == nil && a != nil {
+	tm, release, err := v.runtime.teamForCreation()
+	if err != nil {
+		return ""
+	}
+	defer release()
+	if a, err := tm.AgentOrDefault(sess.AgentName); err == nil {
 		if s := a.Safety(); s != "" {
 			return session.SafetyPolicy(s)
 		}
 	}
-	return session.SafetyPolicy(v.runtime.teamForSession(sess).RuntimeSafety())
+	return session.SafetyPolicy(tm.RuntimeSafety())
+}
+
+// DefaultAgentName resolves the current team's default, not a selected session agent.
+func (r *LocalRuntime) DefaultAgentName() (string, error) {
+	tm, release, err := r.teamForCreation()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	defaultAgent, err := tm.DefaultAgent()
+	if err != nil {
+		return "", err
+	}
+	return defaultAgent.Name(), nil
+}
+
+func (r *LocalRuntime) teamForCreation() (*team.Team, func(), error) {
+	if r.teamEnvironments == nil {
+		return r.team, func() {}, nil
+	}
+	lease, err := r.teamEnvironments.AcquireCurrent()
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return lease.Environment().Team(), func() { _ = lease.Release(context.WithoutCancel(r.lifetime())) }, nil
 }
 
 func (v *localSessionRuntimeView) InspectSessionTree(ctx context.Context, rootSessionID string) (*subagent.Snapshot, error) {

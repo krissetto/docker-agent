@@ -654,9 +654,14 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
 		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
 	}
+	application, err := initialRunApp(ctx, b, rt, sessions, sess, binding, opts...)
+	if err != nil {
+		return err
+	}
+	defer application.Close()
 	runErr := func() error {
 		if f.lean {
-			return f.runLeanTUI(ctx, rt, sessions, sess, binding, spawner, cleanup, args, opts...)
+			return f.runLeanTUI(ctx, application, spawner, cleanup, args)
 		}
 		if cassettePath != "" {
 			// Record keystrokes and clicks alongside the model traffic so a
@@ -665,9 +670,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				rec = recorder.New(m)
 				return rec
 			}
-			return runTUIWrapped(ctx, rt, sessions, sess, binding, spawner, cleanup, tuiOptions, wrap, opts...)
+			return runTUIWrapped(ctx, application, spawner, cleanup, tuiOptions, wrap)
 		}
-		return runTUI(ctx, rt, sessions, sess, binding, spawner, cleanup, tuiOptions, opts...)
+		return runTUIWrapped(ctx, application, spawner, cleanup, tuiOptions, nil)
 	}()
 	if rec != nil && rec.HasInput() {
 		writeGeneratedTUITest(ctx, out, rec, cassettePath, agentFileName)
@@ -1351,14 +1356,21 @@ func withTitleGenerator(_ context.Context, _ app.Services, opts []app.Opt) []app
 	return append(opts, app.WithAutomaticTitles())
 }
 
-// runLeanTUI builds the App and drives the standalone lean TUI, used when
+func initialRunApp(ctx context.Context, b backend, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, opts ...app.Opt) (*app.App, error) {
+	opts = withTitleGenerator(ctx, rt, opts)
+	if remote, ok := b.(*remoteBackend); ok && remote.startupView != nil {
+		view := *remote.startupView
+		remote.startupView = nil
+		return app.NewResolved(ctx, sessions, view, opts...)
+	}
+	return app.New(ctx, sessions, sess, binding, opts...), nil
+}
+
+// runLeanTUI drives the standalone lean TUI, used when
 // --lean is set. Unlike the full TUI it renders to the normal terminal buffer
 // (no alternate screen) and sends the first/queued messages itself rather than
 // through the App's bubbletea command pipeline.
-func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, spawner tui.SessionSpawner, cleanup func(), args []string, opts ...app.Opt) error {
-	opts = withTitleGenerator(ctx, rt, opts)
-	a := app.New(ctx, sessions, sess, binding, opts...)
-
+func (f *runExecFlags) runLeanTUI(ctx context.Context, a *app.App, spawner tui.SessionSpawner, cleanup func(), args []string) error {
 	firstMessage, err := readInitialMessage(args)
 	if err != nil {
 		return err
@@ -1374,7 +1386,7 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions
 	// Prefer the session's working directory so the lean status bar shows
 	// where the tools operate — e.g. the worktree from --worktree, not the
 	// process CWD it was launched from.
-	wd := sess.WorkingDir
+	wd := a.Session().WorkingDir
 	if wd == "" {
 		wd, _ = os.Getwd()
 	}
@@ -1391,7 +1403,7 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions
 			}
 		}()
 	}
-	restoreSession := leanSessionRestorer(spawner, rt.SessionStore(), a)
+	restoreSession := leanSessionRestorer(spawner, a.SessionStore(), a)
 	if f.sessionViewHost != nil {
 		restoreSession = func(ctx context.Context, id, _ string) (*app.App, func(), error) {
 			if id == a.Session().ID {
@@ -1401,9 +1413,9 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions
 			return restored, nil, err
 		}
 	}
-	spawnSession := leanSessionSpawner(spawner, rt.SessionStore())
+	spawnSession := leanSessionSpawner(spawner, a.SessionStore())
 	if f.sessionViewHost != nil {
-		spawnSession = leanSessionSpawner(spawner, rt.SessionStore(), f.restoreHostedSession)
+		spawnSession = leanSessionSpawner(spawner, a.SessionStore(), f.restoreHostedSession)
 	}
 	return leantui.Run(ctx, leantui.Config{
 		App:                    a,
@@ -1728,7 +1740,14 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, services 
 
 // spawnBorrowedSession opens a fresh session on the shared session registry.
 func (f *runExecFlags) spawnBorrowedSession(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, workingDir string) (tui.SpawnedSession, error) {
-	agentName := services.CurrentAgentInfo(ctx).Name
+	local, ok := services.(*runtime.LocalRuntime)
+	if !ok {
+		return tui.SpawnedSession{}, runtime.ErrUnsupported
+	}
+	agentName, err := local.DefaultAgentName()
+	if err != nil {
+		return tui.SpawnedSession{}, err
+	}
 	spawnReq := f.createSessionRequest(workingDir)
 	spawnReq.AgentName = agentName
 	newSess := session.New(
@@ -1767,7 +1786,7 @@ type ownedSessionResources struct {
 // spawnOwnedSession retains the ordinary fresh-session behavior on top of the
 // same private resource construction used by host-owned view acquisition.
 func (f *runExecFlags) spawnOwnedSession(ctx context.Context, agentSource config.Source, store session.Store, workingDir string) (tui.SpawnedSession, error) {
-	resources, err := f.buildOwnedSessionResources(ctx, agentSource, store, workingDir)
+	resources, err := f.buildOwnedSessionResourcesForAgent(ctx, agentSource, store, workingDir, "")
 	if err != nil {
 		return tui.SpawnedSession{}, err
 	}
