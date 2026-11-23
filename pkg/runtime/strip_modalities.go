@@ -133,6 +133,9 @@ func partMediaKind(part chat.MessagePart) string {
 		}
 	case chat.MessagePartTypeDocument:
 		if part.Document != nil {
+			if len(part.Document.Source.InlineData) == 0 && part.Document.Source.InlineText != "" {
+				return ""
+			}
 			return mimeMediaKind(part.Document.MimeType)
 		}
 	}

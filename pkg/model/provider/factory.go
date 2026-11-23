@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 type Factory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
@@ -197,6 +199,9 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 		opts = append(opts, options.WithGateway(""))
 	}
 	providerType := resolveProviderType(enhancedCfg)
+	if providerType == "google" && budget.IsDisabled() && !globalOptions.NoThinking() {
+		warnVertexThinkingCannotBeDisabled(ctx, enhancedCfg)
+	}
 	factory, ok := r.factory(providerType)
 	if !ok {
 		slog.ErrorContext(ctx, "Unknown provider type", "type", providerType)
@@ -223,6 +228,17 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	// createRuleBasedRouter is left bare — its routed targets go through
 	// resolveRoutedModel → createDirectProvider and end up wrapped here.
 	return instrumentProvider(p), nil
+}
+
+// Only Model Garden's Anthropic publisher reaches a native Claude client.
+func warnVertexThinkingCannotBeDisabled(ctx context.Context, cfg *latest.ModelConfig) {
+	if publisher, _ := cfg.ProviderOpts["publisher"].(string); !strings.EqualFold(publisher, "anthropic") {
+		return
+	}
+	if model, ok := modelinfo.LookupClaude5(cfg.Model); ok && !model.CanDisableThinking {
+		slog.WarnContext(ctx, "model cannot disable thinking; thinking_budget none or 0 is sent as adaptive thinking with low effort",
+			"model", cfg.Model, "provider", "google")
+	}
 }
 
 var defaultFactories map[string]Factory

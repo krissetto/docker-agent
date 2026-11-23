@@ -131,3 +131,19 @@ func TestDecide(t *testing.T) {
 		})
 	}
 }
+
+func TestDecideExplicitTextIgnoresBinaryMIMECapabilities(t *testing.T) {
+	t.Parallel()
+	for _, mime := range []string{"application/json", "application/xml", "application/octet-stream", "image/png"} {
+		doc := chat.Document{Name: "resource", MimeType: mime, Source: chat.DocumentSource{InlineText: "provided as text"}}
+		got, reason := attachment.Decide(doc, textOnlyCaps())
+		if got != attachment.StrategyTXT || reason != "" {
+			t.Errorf("explicit text for %s: got %v, %q", mime, got, reason)
+		}
+		doc.Source.InlineData = []byte("binary takes precedence")
+		got, _ = attachment.Decide(doc, textOnlyCaps())
+		if got != attachment.StrategyDrop {
+			t.Errorf("unsupported binary for %s: got %v", mime, got)
+		}
+	}
+}

@@ -110,7 +110,7 @@ func embedServer(t *testing.T, status int, body string, captured *batchEmbedRequ
 	geminiintegration.Require(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "/v1beta/models/gemini-embedding-001:batchEmbedContents", r.URL.Path)
+		assert.Equal(t, "/v1/models/gemini-embedding-001:batchEmbedContents", r.URL.Path)
 		if captured != nil {
 			raw, err := io.ReadAll(r.Body)
 			assert.NoError(t, err)
@@ -282,7 +282,7 @@ func TestCreateBatchEmbedding_Embedding2DeveloperAPI(t *testing.T) {
 	result, err := client.CreateBatchEmbedding(t.Context(), []string{"first", "second"})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"/v1beta/models/gemini-embedding-2:batchEmbedContents"}, *paths)
+	require.Equal(t, []string{"/v1/models/gemini-embedding-2:batchEmbedContents"}, *paths)
 	requests, ok := (*bodies)[0]["requests"].([]any)
 	require.True(t, ok)
 	require.Len(t, requests, 2)
@@ -308,12 +308,12 @@ func TestCreateBatchEmbedding_VertexPredict(t *testing.T) {
 		{"embeddings":{"values":[0.1,0.2],"statistics":{"token_count":3,"truncated":false}}},
 		{"embeddings":{"values":[0.3,0.4],"statistics":{"token_count":4,"truncated":false}}}
 	],"metadata":{"billableCharacterCount":11}}`)
-	client := newVertexEmbedClient(t, "gemini-embedding-001", srv.URL, map[string]any{"output_dimensionality": 2})
+	client := newVertexEmbedClient(t, "text-embedding-005", srv.URL, map[string]any{"output_dimensionality": 2})
 
 	result, err := client.CreateBatchEmbedding(t.Context(), []string{"first", "second"})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"/v1beta1/publishers/google/models/gemini-embedding-001:predict"}, *paths)
+	require.Equal(t, []string{"/v1beta1/publishers/google/models/text-embedding-005:predict"}, *paths)
 	body := (*bodies)[0]
 	assert.Equal(t, []any{map[string]any{"content": "first"}, map[string]any{"content": "second"}}, body["instances"])
 	assert.Equal(t, map[string]any{"outputDimensionality": float64(2)}, body["parameters"])

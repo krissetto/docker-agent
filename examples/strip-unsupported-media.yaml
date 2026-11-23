@@ -4,7 +4,7 @@
 # and an explicit `capabilities` override always wins over the models.dev
 # catalogue.
 #
-# Manual validation (needs OPENAI_API_KEY in the environment):
+# Manual validation (needs GROQ_API_KEY and OPENAI_API_KEY in the environment):
 #
 #   task build
 #
@@ -22,7 +22,7 @@
 #
 #   # 3. Override: same text-only model, but `capabilities.image: true` makes
 #   #    the declaration authoritative — no strip entry appears and the image
-#   #    reaches the provider. (gpt-3.5-turbo genuinely rejects images, so the
+#   #    reaches the provider. (llama-3.1-8b-instant genuinely rejects images, so the
 #   #    provider-side 400 error is the PROOF that the override was respected
 #   #    and the runtime no longer silently protected the call.)
 #   ./bin/docker-agent run --exec examples/strip-unsupported-media.yaml -a override \
@@ -32,16 +32,16 @@
 # Cleanup: rm /tmp/strip-media.log
 models:
   text-only:
-    provider: openai
-    model: gpt-3.5-turbo # models.dev input modalities: text only
+    provider: groq
+    model: llama-3.1-8b-instant # models.dev input modalities: text only
 
   vision:
     provider: openai
     model: gpt-4o # models.dev input modalities: text, image, pdf
 
   claims-vision:
-    provider: openai
-    model: gpt-3.5-turbo
+    provider: groq
+    model: llama-3.1-8b-instant
     capabilities:
       image: true # override wins: the runtime must NOT strip images
 

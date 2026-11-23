@@ -54,7 +54,7 @@ agents:
 
   # BLUE Player
   player_blue:
-    model: openai/gpt-4.1-nano
+    model: openai/gpt-4.1-mini
     description: A Tic-Tac-Toe player
     instruction: |
       You know how to play Tic-Tac-Toe. You will be playing against another agent in a game organized by a third agent.

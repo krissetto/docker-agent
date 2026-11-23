@@ -24,6 +24,15 @@ provider clients (OpenAI, Anthropic, Google) and their dependencies. With
 `tinygo` or `-ldflags="-s -w"` plus `wasm-opt` you can roughly halve it; we
 have not optimised the size.
 
+## Vertex AI (optional build)
+
+Add `-tags docker_agent_wasm_cloud` to the build command to enable Gemini on
+Vertex AI and Vertex AI Model Garden. The default build supports the Gemini
+Developer API only. See [cloud-vertex.yaml](examples/cloud-vertex.yaml) for an
+example. Pass a short-lived Google OAuth access token in the JS host's `env`
+object as `GOOGLE_OAUTH_ACCESS_TOKEN` (or the model's `token_key`). The browser
+build does not perform Application Default Credentials discovery.
+
 ## Run (Node smoke test)
 
 ```sh

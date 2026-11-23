@@ -90,7 +90,7 @@ models:
 
   openai-rerank:
     provider: openai
-    model: gpt-4.1-nano
+    model: gpt-4.1-mini
     max_tokens: 64000
 
   gemini-rerank:

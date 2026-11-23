@@ -9,7 +9,6 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
-	"github.com/docker/docker-agent/pkg/model/provider/gemini"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
@@ -20,9 +19,7 @@ var demoProviders = provider.NewRegistry(map[string]provider.Factory{
 	"anthropic": func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (provider.Provider, error) {
 		return anthropic.NewClient(ctx, cfg, env, opts...)
 	},
-	"google": func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (provider.Provider, error) {
-		return gemini.NewClient(ctx, cfg, env, opts...)
-	},
+	"google":                 googleFactory,
 	"openai":                 openaiFactory,
 	"openai_chatcompletions": openaiFactory,
 	"openai_responses":       openaiFactory,

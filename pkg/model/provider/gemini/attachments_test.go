@@ -93,6 +93,15 @@ func TestConvertDocumentGemini_Drop_NoContent(t *testing.T) {
 	assert.Nil(t, part, "should be nil when no inline content")
 }
 
+func TestConvertDocument_JSONText(t *testing.T) {
+	t.Parallel()
+	doc := chat.Document{Name: "settings.json", MimeType: "application/json", Source: chat.DocumentSource{InlineText: `{"enabled":true}`}}
+	part, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
+	require.NoError(t, err)
+	require.NotNil(t, part)
+	assert.Contains(t, part.Text, doc.Source.InlineText)
+}
+
 func TestConvertDocumentGeminiAudio(t *testing.T) {
 	t.Parallel()
 	for _, mime := range []string{"audio/wav", "audio/mpeg", "audio/ogg", "audio/pcm; rate=24000"} {

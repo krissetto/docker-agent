@@ -10,7 +10,8 @@
 //   - Other publishers: Vertex AI's OpenAI-compatible `/chat/completions`
 //     endpoint.
 //
-// Authentication uses Google Cloud Application Default Credentials.
+// Authentication uses Google Cloud Application Default Credentials, or the
+// token source given to NewClientWithTokenSource.
 //
 // Usage in agent config:
 //
@@ -35,16 +36,14 @@ import (
 
 	"golang.org/x/oauth2/google"
 
-	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/anthropic/vertex"
-	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
+	"github.com/docker/docker-agent/pkg/model/provider/internal/deepcopy"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
-	"github.com/docker/docker-agent/pkg/modelsdev"
-	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // cloudPlatformScope is the OAuth2 scope required for Vertex AI API access.
@@ -55,14 +54,9 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 // Locations: lowercase letters, digits, hyphens (e.g. us-central1).
 var validGCPIdentifier = regexp.MustCompile(`^[a-z][a-z0-9-]{1,29}$`)
 
-// Client is the subset of provider.Provider returned by NewClient. Both
-// anthropic.Client and openai.Client satisfy it, so the caller can treat
-// the two Model Garden code paths uniformly.
-type Client interface {
-	ID() modelsdev.ID
-	CreateChatCompletionStream(ctx context.Context, messages []chat.Message, tools []tools.Tool) (chat.MessageStream, error)
-	BaseConfig() base.Config
-}
+// Client is the canonical provider contract returned by NewClient. Both
+// anthropic.Client and openai.Client satisfy it.
+type Client = contracts.Provider
 
 // IsModelGardenConfig returns true when the ModelConfig describes a
 // non-Gemini model on Vertex AI (i.e. the "publisher" provider_opt is set
@@ -87,18 +81,25 @@ func IsModelGardenConfig(cfg *latest.ModelConfig) bool {
 // replaces ADC and survives reconstruction.
 func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Client, error) {
 	o := options.Apply(opts...)
+	opts = options.FromModelOptions(o)
 	if o.TokenSource() != nil {
-		return NewClientWithTokenSource(ctx, cfg, env, o.TokenSource(), options.FromModelOptions(o)...)
+		return NewClientWithTokenSource(ctx, cfg, env, o.TokenSource(), opts...)
 	}
 	project, location, err := resolveProjectLocation(ctx, cfg, env)
 	if err != nil {
 		return nil, err
 	}
-	rewritten := withModelsDevProvider(cfg)
-	if strings.EqualFold(publisher(cfg), "anthropic") {
-		return vertex.NewClient(ctx, rewritten, env, project, location, opts...)
+	rewritten, err := withModelsDevProvider(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return newOpenAIClient(ctx, rewritten, env, project, location, opts...)
+	var client Client
+	if strings.EqualFold(publisher(cfg), "anthropic") {
+		client, err = vertex.NewClient(ctx, rewritten, env, project, location, opts...)
+	} else {
+		client, err = newOpenAIClient(ctx, rewritten, env, project, location, opts...)
+	}
+	return withDispatchConfig(client, cfg, err)
 }
 
 // NewClientWithTokenSource is NewClient authenticated with source instead of
@@ -114,23 +115,46 @@ func NewClientWithTokenSource(ctx context.Context, cfg *latest.ModelConfig, env 
 		return nil, err
 	}
 	opts = append(opts, options.WithTokenSource(source))
-	rewritten := withModelsDevProvider(cfg)
-	if strings.EqualFold(publisher(cfg), "anthropic") {
-		return vertex.NewClientWithTokenSource(ctx, rewritten, env, project, location, source, opts...)
+	rewritten, err := withModelsDevProvider(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return newOpenAIClientWithTokenSource(ctx, rewritten, env, project, location, source, opts...)
+	var client Client
+	if strings.EqualFold(publisher(cfg), "anthropic") {
+		client, err = vertex.NewClientWithTokenSource(ctx, rewritten, env, project, location, source, opts...)
+	} else {
+		client, err = newOpenAIClientWithTokenSource(ctx, rewritten, env, project, location, source, opts...)
+	}
+	return withDispatchConfig(client, cfg, err)
+}
+
+func withDispatchConfig(client Client, cfg *latest.ModelConfig, err error) (Client, error) {
+	if err != nil {
+		return nil, err
+	}
+	if setter, ok := client.(interface{ SetDispatchConfig(cfg *latest.ModelConfig) }); ok {
+		copied, err := deepcopy.Value(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("vertex ai: copying dispatch configuration: %w", err)
+		}
+		setter.SetDispatchConfig(copied)
+	}
+	return client, nil
 }
 
 // withModelsDevProvider returns a deep copy of cfg with its Provider field
 // rewritten so that `Provider + "/" + Model` becomes a valid models.dev key.
 // The original cfg is never mutated so callers — and the wider runtime —
 // keep their "google" provider view.
-func withModelsDevProvider(cfg *latest.ModelConfig) *latest.ModelConfig {
-	out := cfg.Clone()
+func withModelsDevProvider(cfg *latest.ModelConfig) (*latest.ModelConfig, error) {
+	out, err := deepcopy.Value(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("vertex ai: copying model configuration: %w", err)
+	}
 	if p := modelsDevProvider(cfg); p != "" {
 		out.Provider = p
 	}
-	return out
+	return out, nil
 }
 
 // modelsDevProvider returns the models.dev provider key that hosts the model
@@ -205,17 +229,8 @@ func resolveProjectLocation(ctx context.Context, cfg *latest.ModelConfig, env en
 	return project, location, nil
 }
 
-// openAIBaseURL is Vertex AI's OpenAI-compatible endpoint for a project.
-// https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-partner-models#openai_sdk
-func openAIBaseURL(project, location string) string {
-	return "https://" + location + "-aiplatform.googleapis.com/v1beta1/projects/" +
-		url.PathEscape(project) + "/locations/" + url.PathEscape(location) + "/endpoints/openapi"
-}
-
 // newOpenAIClient creates a client pointing at Vertex AI's OpenAI-compatible
 // endpoint. It uses Google Application Default Credentials for authentication.
-// The token is resolved per request, so an expired token is refreshed by the
-// OAuth2 source instead of being cached at construction.
 func newOpenAIClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, opts ...options.Opt) (*openai.Client, error) {
 	slog.DebugContext(ctx, "Creating Vertex AI Model Garden client",
 		"publisher", publisher(cfg),
@@ -232,17 +247,24 @@ func newOpenAIClient(ctx context.Context, cfg *latest.ModelConfig, env environme
 	return newOpenAIClientWithTokenSource(ctx, cfg, env, project, location, func(context.Context) (string, error) {
 		token, err := tokenSource.Token()
 		if err != nil {
-			return "", fmt.Errorf("failed to get GCP access token: %w", err)
+			return "", err
 		}
 		return token.AccessToken, nil
 	}, opts...)
 }
 
-// newOpenAIClientWithTokenSource creates the OpenAI-compatible client with a
-// request-time token source. The OpenAI provider owns the bearer header, so no
-// static token key is set and provider_opts that belong to Vertex are stripped.
+// openAIBaseURL is Vertex AI's OpenAI-compatible endpoint for a project.
+// https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-partner-models#openai_sdk
+func openAIBaseURL(project, location string) string {
+	return "https://" + location + "-aiplatform.googleapis.com/v1beta1/projects/" +
+		url.PathEscape(project) + "/locations/" + url.PathEscape(location) + "/endpoints/openapi"
+}
+
 func newOpenAIClientWithTokenSource(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, tokenSource options.TokenSource, opts ...options.Opt) (*openai.Client, error) {
-	oaiCfg := cfg.Clone()
+	oaiCfg, err := deepcopy.Value(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("vertex ai: copying OpenAI configuration: %w", err)
+	}
 	oaiCfg.BaseURL = openAIBaseURL(project, location)
 	oaiCfg.TokenKey = ""
 

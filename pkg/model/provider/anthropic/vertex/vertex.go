@@ -78,20 +78,8 @@ func newClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, errors.New("vertex AI requires a GCP location")
 	}
 
-	// With a token source the factory needs the transport options too. Apply
-	// the options once here and hand the factory their round-tripped form, so
-	// each option function runs exactly once.
-	factoryOpts := opts
-	var globalOptions options.ModelOptions
-	if source != nil {
-		globalOptions = options.Apply(opts...)
-		factoryOpts = options.FromModelOptions(globalOptions)
-	}
-
-	// Config validation (thinking_display, ...) runs inside
-	// NewClientFromFactory before the factory below, so configuration errors
-	// surface without requiring GCP credentials.
-	anthropicClient, err := anthropic.NewClientFromFactory(ctx, cfg, env, func(ctx context.Context) (anthropicsdk.Client, error) {
+	// Validate the config before discovering credentials and apply transport options once.
+	anthropicClient, err := anthropic.NewClientFromFactoryWithOptions(ctx, cfg, env, func(ctx context.Context, globalOptions options.ModelOptions) (anthropicsdk.Client, error) {
 		creds, err := credentials(ctx, source)
 		if err != nil {
 			return anthropicsdk.Client{}, err
@@ -118,16 +106,21 @@ func newClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// SDK v2's Vertex middleware takes the body anthropic_version from the
 		// anthropic-version header, which otherwise carries the SDK's own API
 		// date. Vertex requires the Vertex API version, so set it explicitly.
-		sdkOptions := []option.RequestOption{
+		var sdkOptions []option.RequestOption
+		if source == nil && globalOptions.TransportWrapper() != nil {
+			// WithCredentials adds OAuth around this transport.
+			sdkOptions = append(sdkOptions, option.WithHTTPClient(wrappedHTTPClient(ctx, globalOptions)))
+		}
+		sdkOptions = append(sdkOptions,
 			sdkvertex.WithCredentials(ctx, location, project, creds),
 			option.WithAPIKey(""),
 			option.WithHeader("anthropic-version", vertexAnthropicVersion),
-		}
+		)
 		if source != nil {
 			sdkOptions = append(sdkOptions, tokenSourceOptions(ctx, globalOptions, source)...)
 		}
 		return anthropicsdk.NewClient(sdkOptions...), nil
-	}, factoryOpts...)
+	}, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -161,11 +154,9 @@ func credentials(ctx context.Context, source options.TokenSource) (*google.Crede
 // as-is, so the SDK never overrides the Authorization header that the
 // middleware sets from the request context.
 func tokenSourceOptions(ctx context.Context, globalOptions options.ModelOptions, source options.TokenSource) []option.RequestOption {
-	httpClient := httpclient.NewHTTPClient(ctx)
-	globalOptions.WrapTransport(ctx, httpClient)
 	return []option.RequestOption{
 		option.WithMiddleware(bearerTokenMiddleware(source)),
-		option.WithHTTPClient(httpClient),
+		option.WithHTTPClient(wrappedHTTPClient(ctx, globalOptions)),
 	}
 }
 
@@ -187,4 +178,10 @@ func bearerTokenMiddleware(source options.TokenSource) option.Middleware {
 		req.Header.Set("Authorization", "Bearer "+token)
 		return next(req)
 	}
+}
+
+func wrappedHTTPClient(ctx context.Context, globalOptions options.ModelOptions) *http.Client {
+	client := httpclient.NewHTTPClient(ctx)
+	globalOptions.WrapTransport(ctx, client)
+	return client
 }

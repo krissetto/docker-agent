@@ -54,7 +54,7 @@ func TestGatewayProviderRequests(t *testing.T) {
 		},
 		{
 			provider: "google", model: "gemini-2.5-flash", factory: googleTestFactory,
-			path: "/gateway/v1beta/models/gemini-2.5-flash:streamGenerateContent", forward: "https://generativelanguage.googleapis.com/",
+			path: "/gateway/v1/models/gemini-2.5-flash:streamGenerateContent", forward: "https://generativelanguage.googleapis.com/",
 			authHeader: "X-Goog-Api-Key",
 			response:   "event: keepalive\ndata: {}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n",
 		},

@@ -20,9 +20,11 @@ Docker Agent reads the first credential it finds from these environment variable
 | `GOOGLE_CLOUD_PROJECT`      | GCP project used when `GOOGLE_GENAI_USE_VERTEXAI` is enabled or for Vertex AI Model Garden. |
 | `GOOGLE_CLOUD_LOCATION`     | GCP region for Vertex AI (defaults to the SDK default).                             |
 
+When the model sets no `base_url`, the Google SDK's endpoint override applies: `GOOGLE_GEMINI_BASE_URL` for the Gemini Developer API or `GOOGLE_VERTEX_BASE_URL` for Vertex AI. An explicit `base_url` takes precedence, even when it equals the default endpoint.
+
 Explicit `provider_opts.project` or `provider_opts.location` selects Vertex AI regardless of the flag.
 
-On the Gemini Developer API, a model or [custom provider](../custom/index.md) that sets `token_key` reads its key from that variable instead of `GOOGLE_API_KEY` / `GEMINI_API_KEY`. The Vertex AI backends use Application Default Credentials and ignore `token_key`.
+On the Gemini Developer API, a model or [custom provider](../custom/index.md) that sets `token_key` reads its key from that variable instead of `GOOGLE_API_KEY` / `GEMINI_API_KEY`. When `token_key` is `GOOGLE_API_KEY`, `GEMINI_API_KEY` remains a fallback. Native Vertex AI backends ignore `token_key` and use Application Default Credentials unless a Go host supplies a token source.
 
 ```bash
 # Gemini Developer API
@@ -319,6 +321,24 @@ Gemini SDK:
 - **Other publishers** (e.g. `meta`, `mistral`) use Vertex AI's
   OpenAI-compatible `/chat/completions` endpoint.
 
+For Claude, the SDK puts the model in the URL and `anthropic_version` in the
+request body. ADC OAuth authenticates the request; `token_key` does not replace
+ADC, and the client clears any inherited Anthropic `X-Api-Key` header.
+
+`native_compaction` and `cache_diagnostics` are rejected by the current Vertex
+client. Anthropic documents Google Cloud beta support for on-demand compaction;
+that service feature is **not integrated** here. Structured output also requires
+an explicit organization-policy allowance. Mythos 5/5.1 have limited-access
+announcements but no dedicated Google card in the 2026-10-13 audit; this proves
+neither unavailability nor account entitlement. See [Claude access paths](../anthropic/index.md#claude-access-paths)
+for model IDs, evidence and policy prerequisites.
+
+Title and compaction clones keep the selected Model Garden transport.
+Claude requests remain on the Anthropic-native Vertex endpoints, with the model
+in the URL and `anthropic_version: vertex-2023-10-16` in the body. Project,
+location, regional/global host selection and Google OAuth authentication survive
+cloning; clones never switch to the direct Claude API or send its API key.
+
 ### Authentication
 
 Vertex AI uses Google Cloud Application Default Credentials (ADC). Make sure you
@@ -328,7 +348,17 @@ are authenticated:
 gcloud auth application-default login
 ```
 
+Go embedders can instead supply a request-context token source through
+`vertexai.NewClientWithTokenSource` or `options.WithTokenSource`. Unlike
+`token_key`, that source replaces ADC, including credential-file and metadata
+lookups, and is preserved across clones. HTTP transport wrappers are preserved on both authentication paths;
+ADC still applies OAuth authorization around the wrapped transport.
+
 ### Configuration
+
+Use the location listed in the specific model's vendor documentation. Anthropic
+specifies global or multi-region endpoints for models newer than Sonnet 4.6;
+do not reuse an older model's single-region example.
 
 ```yaml
 models:
@@ -337,14 +367,14 @@ models:
     model: claude-sonnet-5
     provider_opts:
       project: my-gcp-project       # GCP project ID (or set GOOGLE_CLOUD_PROJECT)
-      location: us-east5             # GCP region (or set GOOGLE_CLOUD_LOCATION)
+      location: global              # Use a location supported by this model (or GOOGLE_CLOUD_LOCATION)
       publisher: anthropic           # Model publisher (anthropic, meta, etc.)
 ```
 
 | Option      | Description                                                                          |
 | ----------- | ------------------------------------------------------------------------------------ |
 | `project`   | GCP project ID. Falls back to `GOOGLE_CLOUD_PROJECT` env var                         |
-| `location`  | GCP region (e.g. `us-east5`, `us-central1`). Falls back to `GOOGLE_CLOUD_LOCATION`   |
+| `location`  | Model-supported location (global, multi-region or region). Falls back to `GOOGLE_CLOUD_LOCATION`   |
 | `publisher`  | Model publisher (e.g. `anthropic`, `meta`, `mistral`). Must not be `google`          |
 
 > [!NOTE]

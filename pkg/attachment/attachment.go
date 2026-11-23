@@ -37,20 +37,16 @@ const (
 // Decide returns the routing Strategy for a document given the current model's
 // capabilities.
 //
-// Algorithm:
-//  1. If the model does not support the document's MIME type → (Drop, reason).
-//  2. If Source.InlineData is non-empty → (B64, "").
-//  3. If Source.InlineText is non-empty → (TXT, "").
-//  4. Otherwise → (Drop, "no inline content").
+// Explicit inline text is sent as text regardless of its resource MIME type.
 func Decide(doc chat.Document, mc modelinfo.ModelCapabilities) (Strategy, string) {
+	if len(doc.Source.InlineData) == 0 && doc.Source.InlineText != "" {
+		return StrategyTXT, ""
+	}
 	if !mc.Supports(doc.MimeType) {
 		return StrategyDrop, fmt.Sprintf("model does not support MIME type %q", doc.MimeType)
 	}
 	if len(doc.Source.InlineData) > 0 {
 		return StrategyB64, ""
-	}
-	if doc.Source.InlineText != "" {
-		return StrategyTXT, ""
 	}
 	return StrategyDrop, "no inline content"
 }

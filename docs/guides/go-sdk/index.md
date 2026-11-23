@@ -848,13 +848,28 @@ The wrapper receives the already-instrumented transport (OpenTelemetry, SSE deco
 **Supported providers:** Anthropic, OpenAI, Gemini (GeminiAPI backend), Bedrock. Works in both direct and gateway/proxy mode.
 
 > [!WARNING]
-> **Vertex AI not supported**
+> **Vertex AI authentication**
 >
-> Vertex AI uses an ADC-managed HTTP client that Docker Agent cannot intercept. When a transport wrapper is set, Docker Agent falls back to the GeminiAPI backend instead of Vertex AI — a debug message is logged.
+> Gemini on Vertex AI supports transport wrappers when `options.WithTokenSource` supplies the access token. Without an explicit token source, a wrapper selects the Gemini API backend instead of the ADC-managed Vertex client. Model Garden accepts transport wrappers with both ADC and host-managed credentials.
 
 In **gateway mode** the wrapper is called on every LLM request because gateway clients are rebuilt each call for short-lived auth tokens. In **direct mode** it is called once at client construction. Rate-limit responses (HTTP 429) are classified as non-retryable by the runtime and cause the model chain to skip to the next fallback, so wrappers that track per-request outcomes will observe these as failures rather than retried calls.
 
 Returning `nil` from your wrapper function is not allowed; Docker Agent logs a warning and keeps the original transport instead.
+
+## Vertex AI Request-Time Authentication and Cloning
+
+Go hosts can supply `options.WithTokenSource` for Gemini on Vertex AI and for
+Vertex AI Model Garden. Model Garden also accepts the more specific
+`vertexai.NewClientWithTokenSource` constructor; its explicit source takes
+precedence over the option and bypasses ADC. The source receives the request
+context and is kept by `provider.Clone` when the client was created through a
+provider registry. Set it for the intended Google provider only, not for
+unrelated routed providers.
+
+A Model Garden client uses its catalogue identity for capability lookups, but
+`BaseConfig().CloneSource()` keeps the original Google dispatch configuration.
+This preserves the Vertex transport, endpoint, and credentials for clones
+made for tasks such as title generation or compaction.
 
 ## Using Different Providers
 
