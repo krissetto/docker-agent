@@ -162,6 +162,8 @@ models:
 
 ### Gemini 3+ (Level-based)
 
+For Gemini 4, use a named effort level or omit `thinking_budget` to let the model decide. If a model inherits a numeric budget, Docker Agent leaves the thinking level at the API default rather than sending a legacy token count.
+
 ```yaml
 models:
   gemini-neon:

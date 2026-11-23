@@ -576,9 +576,13 @@ func (c *Client) buildConfig(ctx context.Context) (*genai.GenerateContentConfig,
 func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) bool {
 	level, ok := c.gemini3ThinkingLevel(c.ModelConfig.ThinkingBudget.Effort)
 	if !ok {
-		// No recognized effort string — fall back to token-based if tokens are set.
+		// Gemini 3 retains a token-budget fallback. Later models use their API default.
 		if c.ModelConfig.ThinkingBudget.Tokens != 0 {
-			slog.Warn("Gemini 3+ models use thinkingLevel, not thinkingBudget tokens; falling back to token-based config",
+			if !modelinfo.SupportsLegacyGeminiThinkingBudget(c.ModelConfig.Model) {
+				slog.Warn("Ignoring numeric thinking_budget for level-based Gemini model; using the API default", "model", c.ModelConfig.Model)
+				return true
+			}
+			slog.Warn("Gemini 3 model configured with a numeric thinking_budget; using legacy token-based config",
 				"model", c.ModelConfig.Model,
 				"tokens", c.ModelConfig.ThinkingBudget.Tokens,
 			)

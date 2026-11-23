@@ -416,6 +416,13 @@ func UsesThinkingLevel(modelID string) bool {
 	return ok
 }
 
+// SupportsLegacyGeminiThinkingBudget reports whether a level-based Gemini model
+// retains Gemini 3's compatibility fallback for numeric thinking budgets.
+func SupportsLegacyGeminiThinkingBudget(modelID string) bool {
+	major, _, ok := geminiGeneration(modelID)
+	return ok && major == 3
+}
+
 // IsBedrockClaudeID reports whether a model identifier looks like an Anthropic
 // Claude model on AWS Bedrock.
 //
