@@ -91,7 +91,7 @@ func TestBackgroundAgentsWrappedCountClickTargets(t *testing.T) {
 	m.SetSize(MinWidth, 8)
 	m.Update(runtime.BackgroundAgentStatus("child", "reviewer", true))
 	m.View()
-	require.True(t, m.cachedNeedsScrollbar)
+	require.True(t, m.scrollview.NeedsScrollbar())
 	m.scrollview.ScrollToBottom()
 	m.View()
 

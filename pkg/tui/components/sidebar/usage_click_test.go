@@ -168,7 +168,7 @@ func TestSidebar_HandleClickType_Usage_Vertical_ScrollbarNotUsage(t *testing.T) 
 
 	_ = sb.View()
 
-	require.True(t, m.cachedNeedsScrollbar, "the sidebar must overflow for this test")
+	require.True(t, m.scrollview.NeedsScrollbar(), "the sidebar must overflow for this test")
 	require.GreaterOrEqual(t, m.usageReadingLine, 0)
 
 	paddingLeft := m.layoutCfg.PaddingLeft

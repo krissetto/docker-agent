@@ -72,11 +72,6 @@ func buildStreamingSidebar(tb testing.TB, nTodos int) *model {
 	return m
 }
 
-// TestAnimationFastPathMatchesFullRebuild guarantees the animation-only render
-// fast path (single pass, reusing the cached scrollbar decision) produces byte
-// identical output to a full two-pass rebuild for the same state. The spinner
-// frame is not advanced between the two renders, so any difference would be a
-// rendering bug introduced by the optimization rather than animation.
 func TestAnimationFastPathMatchesFullRebuild(t *testing.T) {
 	t.Parallel()
 	for _, n := range []int{0, 1, 5, 50, 120, 300} {
@@ -84,7 +79,7 @@ func TestAnimationFastPathMatchesFullRebuild(t *testing.T) {
 			t.Parallel()
 			m := buildStreamingSidebar(t, n)
 
-			// Full two-pass rebuild (hard invalidation).
+			// Full rebuild.
 			m.invalidateCache()
 			want := m.View()
 			require.False(t, m.layoutDirty)
@@ -146,8 +141,7 @@ func BenchmarkStreamingViewAnimationFrame(b *testing.B) {
 	}
 }
 
-// BenchmarkStreamingViewFullRebuild measures the previous behavior, where every
-// spinner tick forced a full two-pass rebuild.
+// BenchmarkStreamingViewFullRebuild measures the cost of invalidating the whole sidebar.
 func BenchmarkStreamingViewFullRebuild(b *testing.B) {
 	for _, n := range []int{0, 50, 120, 300} {
 		m := buildStreamingSidebar(b, n)

@@ -153,7 +153,7 @@ func TestPlanSidebar_ScrollbarAndScrolledRows(t *testing.T) {
 		{Name: "one", Version: new(1)}, {Name: "two", Version: new(2)},
 	}}})
 	m.View()
-	require.True(t, m.cachedNeedsScrollbar)
+	require.True(t, m.scrollview.NeedsScrollbar())
 	for contentY, zone := range m.planClickZones {
 		if zone.kind != ClickPlan {
 			continue

@@ -395,14 +395,8 @@ func TestDetailedCardWidthThreshold(t *testing.T) {
 	}
 }
 
-// TestDetailedCardResizeAcrossThreshold drives SetSize/View across the
-// roster's adaptive threshold through the realistic default width —
-// DefaultWidth (40, metric width 37: root's 45-column joined line overflows,
-// compact) → outer width 48 (metric width 45: every joined line fits, wide)
-// → DefaultWidth again — and verifies each rendering carries only its own
-// vocabulary at one joined metric line per three-line card, no line
-// overflows the sidebar width, and returning to the default width
-// reproduces the exact default rendering: nothing stale survives.
+// TestDetailedCardResizeAcrossThreshold checks that cards switch between compact
+// and full metric labels as the sidebar widens and narrows again.
 func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 	t.Parallel()
 
@@ -451,7 +445,7 @@ func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 		"compact cards are three lines: name, model, one joined metric line")
 	assertFits(defaultBefore, DefaultWidth)
 
-	wideLines := render(48) // metric width 45: this roster's widest joined line fits exactly
+	wideLines := render(50) // metric width 45: this roster's widest joined line fits exactly
 	wide := strings.Join(wideLines, "\n")
 	assert.Contains(t, wide, "Effort "+gaugePattern(4)+" high · Context 30% · Cost $0.13",
 		"widening restores the full labels and gauge on one joined line")
@@ -460,7 +454,7 @@ func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 	assert.NotContains(t, wide, "Ctx", "no compact context label survives the widening")
 	assert.Equal(t, map[string]int{"root": 3, "scout": 3}, cardLines(),
 		"wide cards keep the same three-line height: the transition adds no lines")
-	assertFits(wideLines, 48)
+	assertFits(wideLines, 50)
 
 	defaultAfter := render(DefaultWidth)
 	assert.Equal(t, defaultBefore, defaultAfter,

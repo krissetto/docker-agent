@@ -25,7 +25,6 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/tab"
@@ -391,12 +390,10 @@ type model struct {
 	ctx func() context.Context
 
 	// Render cache to avoid re-rendering sections on every frame during scroll
-	cachedLines          []string // Cached rendered lines
-	cachedWidth          int      // Width used for cached render
-	cachedNeedsScrollbar bool     // Whether scrollbar is needed for cached render
-	cacheDirty           bool     // True when cache needs rebuild
-	layoutDirty          bool     // True when a change may alter line count/scrollbar visibility (not just an animation frame)
-	visualGeneration     uint64
+	cachedLines      []string // Cached rendered lines
+	cacheDirty       bool     // True when cache needs rebuild
+	layoutDirty      bool     // Reapply scrollview geometry before rendering
+	visualGeneration uint64
 
 	// Agent click zones: maps content line index to agent name for click detection
 	agentClickZones map[int]string // content line -> agent name
@@ -448,6 +445,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		ragIndexing:       make(map[string]*ragIndexingState),
 		sessionState:      sessionState,
 		scrollview: scrollview.New(
+			scrollview.WithReserveScrollbarSpace(true),
 			scrollview.WithWheelStep(1),
 			scrollview.WithKeyMap(nil), // Sidebar has no keyboard scroll — only mouse
 		),
@@ -458,8 +456,8 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		sectionGap:       defaultSectionGap,
 		titleInput:       ti,
 		cacheDirty:       true, // Initial render needed
-		layoutDirty:      true, // First render must probe scrollbar visibility
-		usageReadingLine: -1,   // No usage zone recorded until the first render
+		layoutDirty:      true,
+		usageReadingLine: -1, // No usage zone recorded until the first render
 	}
 	m.scrollview.SetAnimationRuntime(ar)
 
@@ -498,21 +496,12 @@ func (m *model) stopSpinner() {
 	m.spinner.Stop()
 }
 
-// invalidateCache marks the sidebar render cache as dirty so it will be rebuilt
-// on the next View(). Use this for changes that may alter the rendered content
-// AND its line layout (todos, sizing, agents, theme, …): the next View()
-// re-probes scrollbar visibility via the two-pass render.
 func (m *model) invalidateCache() {
 	m.cacheDirty = true
 	m.layoutDirty = true
 	m.visualGeneration++
 }
 
-// invalidateAnimation marks the cache dirty for an animation-only change, i.e. a
-// spinner or the transfer-box rail advancing one frame. Those glyph swaps keep
-// every line's width and the line count constant, so scrollbar visibility cannot
-// change; the next View() can therefore skip the scrollbar-probe pass and render
-// the sections only once.
 func (m *model) invalidateAnimation() {
 	m.cacheDirty = true
 	m.visualGeneration++
@@ -972,7 +961,7 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 
 	// The scrollbar and its gap are not content: clicks there must reach the
 	// scrollview, not the content click zones.
-	if m.cachedNeedsScrollbar && adjustedX >= m.contentWidth(true) {
+	if adjustedX >= m.contentWidth(true) {
 		return ClickNone, ""
 	}
 
@@ -1021,7 +1010,7 @@ func (m *model) titleLineCount() int {
 	if !m.titleGenerated || m.sessionTitle == "" {
 		return 1
 	}
-	contentWidth := m.contentWidth(false)
+	contentWidth := m.contentWidth(m.mode == ModeVertical)
 	if contentWidth <= 0 {
 		return 1
 	}
@@ -1739,60 +1728,15 @@ func (m *model) collapsedView() string {
 }
 
 func (m *model) verticalView() string {
-	contentWidthNoScroll := m.contentWidth(false)
-
-	// Use cached render if available and width hasn't changed
-	if !m.cacheDirty && len(m.cachedLines) > 0 && m.cachedWidth == contentWidthNoScroll {
-		return m.renderFromCache()
+	if m.layoutDirty {
+		m.scrollview.SetSize(m.contentWidth(false), m.height)
+		m.layoutDirty = false
 	}
-
-	// Animation-only fast path: when only a spinner frame changed, the line count
-	// and scrollbar visibility are unchanged, so reuse the cached scrollbar
-	// decision and render the sections a single time instead of the two-pass probe.
-	if !m.layoutDirty && len(m.cachedLines) > 0 && m.cachedWidth == contentWidthNoScroll {
-		width := contentWidthNoScroll
-		if m.cachedNeedsScrollbar {
-			width = m.contentWidth(true)
-		}
-		m.cachedLines = m.renderSections(width)
+	if m.cacheDirty {
+		m.cachedLines = m.renderSections(m.scrollview.ContentWidth())
+		m.scrollview.SetContent(m.cachedLines, len(m.cachedLines))
 		m.cacheDirty = false
-		return m.renderFromCache()
 	}
-
-	// Two-pass rendering: first check if scrollbar is needed
-	// Pass 1: render without scrollbar to count lines
-	lines := m.renderSections(contentWidthNoScroll)
-	totalLines := len(lines)
-	needsScrollbar := totalLines > m.height
-
-	// Pass 2: if scrollbar needed, re-render with narrower content width
-	if needsScrollbar {
-		contentWidthWithScroll := m.contentWidth(true)
-		lines = m.renderSections(contentWidthWithScroll)
-	}
-
-	// Cache the rendered lines
-	m.cachedLines = lines
-	m.cachedWidth = contentWidthNoScroll
-	m.cachedNeedsScrollbar = needsScrollbar
-	m.cacheDirty = false
-	m.layoutDirty = false
-
-	return m.renderFromCache()
-}
-
-// renderFromCache renders the sidebar from cached lines using the scrollview
-// component which guarantees fixed-width output and a pinned scrollbar.
-func (m *model) renderFromCache() string {
-	// Compute the scrollview region width: content + gap + scrollbar (if needed)
-	regionWidth := m.contentWidth(m.cachedNeedsScrollbar)
-	if m.cachedNeedsScrollbar {
-		regionWidth += m.layoutCfg.ScrollbarGap + scrollbar.Width
-	}
-
-	m.scrollview.SetSize(regionWidth, m.height)
-	m.scrollview.SetContent(m.cachedLines, len(m.cachedLines))
-
 	return m.scrollview.View()
 }
 
@@ -3041,18 +2985,8 @@ func (m *model) renderTab(title, content string, contentWidth int) string {
 	return tab.Render(title, content, contentWidth)
 }
 
-// metrics computes the layout metrics for the current render.
-// scrollbarVisible should be true if the scrollbar will be shown.
-func (m *model) metrics(scrollbarVisible bool) Metrics {
-	return m.layoutCfg.Compute(m.width, scrollbarVisible)
-}
-
-// contentWidth returns the width available for content in the current mode.
-// For horizontal mode, scrollbar is never shown.
-// For vertical mode, this is a preliminary estimate; actual scrollbar visibility
-// is determined during render.
-func (m *model) contentWidth(scrollbarVisible bool) int {
-	return m.metrics(scrollbarVisible).ContentWidth
+func (m *model) contentWidth(reserveScrollbar bool) int {
+	return m.layoutCfg.Compute(m.width, reserveScrollbar).ContentWidth
 }
 
 // IsCollapsed returns whether the sidebar is collapsed

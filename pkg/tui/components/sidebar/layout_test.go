@@ -1,8 +1,10 @@
 package sidebar
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -93,6 +95,25 @@ func TestLayoutConfigCompute(t *testing.T) {
 			assert.Equal(t, tt.wantContentWidth, metrics.ContentWidth)
 			assert.Equal(t, tt.scrollbarVisible, metrics.ScrollbarVisible)
 		})
+	}
+}
+
+func TestVerticalSidebarReservesScrollbarSpace(t *testing.T) {
+	t.Parallel()
+
+	m := New(animation.NewRuntime(), t.Context(), &service.SessionState{}).(*model)
+	m.titleGenerated = true
+	m.sessionTitle = strings.Repeat("x", 38)
+	for _, height := range []int{50, 5} {
+		m.SetSize(40, height)
+		rows := strings.Split(ansi.Strip(m.View()), "\n")
+		assert.Equal(t, height == 5, m.scrollview.NeedsScrollbar())
+		assert.Equal(t, 37, strings.Count(rows[verticalStarY], "x"))
+		assert.Equal(t, 1, strings.Count(rows[verticalStarY+1], "x"))
+		click, _ := m.HandleClickType(1, verticalStarY+1)
+		assert.Equal(t, ClickTitle, click)
+		click, _ = m.HandleClickType(39, verticalStarY)
+		assert.Equal(t, ClickNone, click)
 	}
 }
 

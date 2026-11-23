@@ -28,8 +28,7 @@ func makeTodos(n int) *tools.ToolCallResult {
 
 // BenchmarkSidebarStreamingTodos reproduces issue #3123: while the agent is
 // working, the sidebar invalidates its whole render cache on every 14 FPS
-// spinner tick and rebuilds all sections — including the full todo list, twice
-// when it overflows (two-pass scrollbar layout). This benchmark measures that
+// spinner tick and rebuilds all sections, including the full todo list. This measures that
 // per-frame rebuild cost across todo-list sizes; the cost should stay flat, not
 // grow with the list length.
 func BenchmarkSidebarStreamingTodos(b *testing.B) {
@@ -37,7 +36,7 @@ func BenchmarkSidebarStreamingTodos(b *testing.B) {
 		b.Run(fmt.Sprintf("todos=%d", n), func(b *testing.B) {
 			m := New(animation.NewRuntime(), b.Context(), service.NewSessionState(session.New())).(*model)
 			m.SetMode(ModeVertical)
-			m.SetSize(40, 40) // small height so the long list overflows (two-pass)
+			m.SetSize(40, 40) // small height so the long list overflows
 			m.workingAgent = "root"
 			if err := m.SetTodos(makeTodos(n)); err != nil {
 				b.Fatal(err)

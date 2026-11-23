@@ -401,7 +401,7 @@ func TestTransferAnimationTickKeepsLayoutClean(t *testing.T) {
 	m := newAgentPanelSidebar(t, 40, transferRoster()...)
 	m.SetAgentSwitching(true, "Scout", "Coder")
 
-	_ = m.View() // settle the cache and the scrollbar probe
+	_ = m.View()
 	require.False(t, m.layoutDirty)
 	linesBefore := len(m.cachedLines)
 
