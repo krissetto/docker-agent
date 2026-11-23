@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -297,6 +298,30 @@ func TestModelSwitcherUsesPinnedAgent(t *testing.T) {
 	require.Len(t, models, 1)
 	assert.Equal(t, "gpt-4o", models[0].BaseConfig().ModelConfig.Model)
 	assert.Equal(t, "gpt-4o", worker.Model(handle.driver.scopeModels(t.Context())).BaseConfig().ModelConfig.Model)
+}
+
+func TestModelSwitcherOffersLatestAnthropicModels(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	r := &LocalRuntime{
+		team: team.New(team.WithAgents(agent.New("root", "test", agent.WithModel(newConfigProvider(latest.ModelConfig{Provider: "openai", Model: "gpt-5"}))))),
+		modelSwitcherCfg: &ModelSwitcherConfig{
+			ProviderRegistry: provider.NewRegistry(map[string]provider.Factory{"anthropic": provider.Adapt(anthropic.NewClient)}),
+			EnvProvider:      environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test-key"}),
+			ModelsStore:      modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot()),
+		},
+	}
+	handle := sessionSessionFor(t, r, "root")
+	choices := handle.AvailableModels(ctx)
+	for _, modelID := range []string{"claude-fable-5-2", "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"} {
+		ref := "anthropic/" + modelID
+		require.Contains(t, refs(choices), ref)
+		require.NoError(t, handle.SetModel(ctx, ref))
+		model := sessionModel(t, handle).BaseConfig().ModelConfig
+		assert.Equal(t, "anthropic", model.Provider)
+		assert.Equal(t, modelID, model.Model)
+	}
 }
 
 func TestModelSwitcherWithoutConfigIsUnsupported(t *testing.T) {

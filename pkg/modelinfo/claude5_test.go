@@ -23,8 +23,10 @@ func TestLookupClaude5(t *testing.T) {
 		{"claude-sonnet-5-5", Claude5Model{ChecksThinkingPrefix: true}},
 		{"claude-fable-5", Claude5Model{}},
 		{"claude-fable-5-1", Claude5Model{ChecksThinkingPrefix: true}},
+		{"claude-fable-5-2", Claude5Model{ChecksThinkingPrefix: true}},
 		{"claude-mythos-5", Claude5Model{BedrockMantleOnly: true}},
 		{"claude-mythos-5-1", Claude5Model{}},
+		{"claude-mythos-5-2", Claude5Model{ChecksThinkingPrefix: true}},
 
 		{"anthropic.claude-opus-5-5", Claude5Model{ChecksThinkingPrefix: true}},
 		{"us.anthropic.claude-sonnet-5-5-v1:0", Claude5Model{ChecksThinkingPrefix: true}},
@@ -65,7 +67,7 @@ func TestClaude5Capabilities(t *testing.T) {
 
 	ids := []string{
 		"claude-haiku-5-5", "claude-opus-5", "claude-opus-5-5", "claude-sonnet-5", "claude-sonnet-5-5",
-		"claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1",
+		"claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "claude-mythos-5", "claude-mythos-5-1", "claude-mythos-5-2",
 		"us.anthropic.claude-haiku-5-5",
 	}
 	for _, id := range ids {
