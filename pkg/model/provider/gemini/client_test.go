@@ -68,17 +68,47 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 	}})
 
 	tests := []struct {
-		name          string
-		model         string
-		opts          []options.Opt
-		wantThinking  bool
-		wantMinTokens bool
+		name         string
+		model        string
+		opts         []options.Opt
+		wantThinking bool
+		wantLevel    genai.ThinkingLevel
+		maxTokens    int64
+		wantTokens   int32
 	}{
 		{
-			name:         "title generation omits thinking config",
+			name:       "title generation omits thinking for non-thinking image model",
+			model:      "gemini-2.5-flash-image",
+			opts:       []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			maxTokens:  128,
+			wantTokens: 128,
+		},
+		{
+			name:         "title generation uses low thinking and adds output headroom for Gemini 3",
 			model:        "gemini-3-flash",
 			opts:         []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
-			wantThinking: false,
+			wantThinking: true,
+			maxTokens:    128,
+			wantLevel:    genai.ThinkingLevelLow,
+			wantTokens:   512,
+		},
+		{
+			name:         "title generation uses low thinking and adds output headroom for Gemini 4",
+			model:        "gemini-4-neon",
+			opts:         []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			wantThinking: true,
+			maxTokens:    128,
+			wantLevel:    genai.ThinkingLevelLow,
+			wantTokens:   512,
+		},
+		{
+			name:         "title generation preserves existing Gemini 4 output headroom",
+			model:        "gemini-4-neon",
+			opts:         []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			wantThinking: true,
+			maxTokens:    1024,
+			wantLevel:    genai.ThinkingLevelLow,
+			wantTokens:   1024,
 		},
 		{
 			name:         "MCP sampling omits thinking for non-thinking image model",
@@ -87,18 +117,20 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			wantThinking: false,
 		},
 		{
-			name:          "MCP sampling disables Gemini 3 thinking",
-			model:         "gemini-3-flash",
-			opts:          []options.Opt{options.WithNoThinking()},
-			wantThinking:  true,
-			wantMinTokens: true,
+			name:         "MCP sampling uses low Gemini 3 thinking",
+			model:        "gemini-3-flash",
+			opts:         []options.Opt{options.WithNoThinking()},
+			wantThinking: true,
+			wantLevel:    genai.ThinkingLevelLow,
+			wantTokens:   512,
 		},
 		{
-			name:          "MCP sampling disables Gemini 4 thinking",
-			model:         "gemini-4-neon",
-			opts:          []options.Opt{options.WithNoThinking()},
-			wantThinking:  true,
-			wantMinTokens: true,
+			name:         "MCP sampling uses low Gemini 4 thinking",
+			model:        "gemini-4-neon",
+			opts:         []options.Opt{options.WithNoThinking()},
+			wantThinking: true,
+			wantLevel:    genai.ThinkingLevelLow,
+			wantTokens:   512,
 		},
 		{
 			name:         "MCP sampling disables Gemini 2.5 thinking",
@@ -117,11 +149,13 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 					Provider:       "google",
 					Model:          tt.model,
 					ThinkingBudget: &latest.ThinkingBudget{Effort: "high"},
+					MaxTokens:      new(tt.maxTokens),
 				},
 				ModelOptions: options.Apply(append(tt.opts, options.WithModelsDevStore(store))...),
 			}}
 
 			config := mustBuildConfig(t, client)
+			assert.Equal(t, tt.wantTokens, config.MaxOutputTokens)
 			if !tt.wantThinking {
 				assert.Nil(t, config.ThinkingConfig)
 				return
@@ -129,9 +163,9 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 
 			require.NotNil(t, config.ThinkingConfig)
 			assert.False(t, config.ThinkingConfig.IncludeThoughts)
-			if tt.wantMinTokens {
-				assert.Equal(t, genai.ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
-				assert.GreaterOrEqual(t, config.MaxOutputTokens, int32(200))
+			if tt.wantLevel != "" {
+				assert.Equal(t, tt.wantLevel, config.ThinkingConfig.ThinkingLevel)
+				assert.Nil(t, config.ThinkingConfig.ThinkingBudget)
 				return
 			}
 			require.NotNil(t, config.ThinkingConfig.ThinkingBudget)
