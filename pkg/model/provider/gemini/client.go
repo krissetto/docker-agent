@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -491,14 +492,18 @@ func extractMimeType(dataURLPrefix string) string {
 }
 
 // BuildConfig creates GenerateContentConfig from model config.
-func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
+func (c *Client) buildConfig(ctx context.Context) (*genai.GenerateContentConfig, error) {
 	// Set before the NoThinking early return so every request (chat, rerank,
 	// title, compaction) is billed on the same tier.
 	config := &genai.GenerateContentConfig{
 		ServiceTier: genai.ServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 	}
 	if c.ModelConfig.MaxTokens != nil {
-		config.MaxOutputTokens = int32(*c.ModelConfig.MaxTokens) //nolint:gosec // user-configured token count; realistic values fit in int32
+		tokens, err := tokenCount("max_tokens", *c.ModelConfig.MaxTokens)
+		if err != nil {
+			return nil, err
+		}
+		config.MaxOutputTokens = tokens
 	}
 	if c.ModelConfig.Temperature != nil {
 		config.Temperature = new(float32(*c.ModelConfig.Temperature))
@@ -523,7 +528,7 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	// See https://ai.google.dev/gemini-api/docs/thinking
 	if c.ModelOptions.NoThinking() {
 		if c.ModelOptions.GeneratingTitle() {
-			return config
+			return config, nil
 		}
 
 		if modelinfo.ResolveReasoningSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID()) != modelinfo.ReasoningUnsupported {
@@ -549,10 +554,13 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 		}
 	} else if c.ModelConfig.ThinkingBudget != nil {
 		config.ThinkingConfig = &genai.ThinkingConfig{IncludeThoughts: true}
-		if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
-			c.applyGemini3ThinkingLevel(config)
-		} else {
-			c.applyGemini25ThinkingBudget(config)
+		if !modelinfo.UsesThinkingLevel(c.ModelConfig.Model) || !c.applyGemini3ThinkingLevel(config) {
+			tokens, err := tokenCount("thinking_budget", int64(c.ModelConfig.ThinkingBudget.Tokens))
+			if err != nil {
+				return nil, err
+			}
+			config.ThinkingConfig.ThinkingBudget = &tokens
+			slog.DebugContext(ctx, "Gemini request using thinking_budget", "budget_tokens", tokens)
 		}
 	}
 
@@ -561,11 +569,11 @@ func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 		config.ResponseJsonSchema = structuredOutput.Schema
 	}
 
-	return config
+	return config, nil
 }
 
 // applyGemini3ThinkingLevel applies level-based thinking for Gemini 3+ models.
-func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) {
+func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) bool {
 	level, ok := c.gemini3ThinkingLevel(c.ModelConfig.ThinkingBudget.Effort)
 	if !ok {
 		// No recognized effort string — fall back to token-based if tokens are set.
@@ -574,8 +582,7 @@ func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) 
 				"model", c.ModelConfig.Model,
 				"tokens", c.ModelConfig.ThinkingBudget.Tokens,
 			)
-			c.applyGemini25ThinkingBudget(config)
-			return
+			return false
 		}
 		level = genai.ThinkingLevelHigh // default
 	}
@@ -585,6 +592,7 @@ func (c *Client) applyGemini3ThinkingLevel(config *genai.GenerateContentConfig) 
 		"model", c.ModelConfig.Model,
 		"level", level,
 	)
+	return true
 }
 
 // gemini3ThinkingLevel maps an effort string to a model-supported Gemini ThinkingLevel.
@@ -608,11 +616,11 @@ func (c *Client) gemini3ThinkingLevel(effortStr string) (genai.ThinkingLevel, bo
 	return genai.ThinkingLevel(strings.ToUpper(s)), true
 }
 
-// applyGemini25ThinkingBudget applies token-based thinking for Gemini 2.5 and other models.
-func (c *Client) applyGemini25ThinkingBudget(config *genai.GenerateContentConfig) {
-	tokens := c.ModelConfig.ThinkingBudget.Tokens
-	config.ThinkingConfig.ThinkingBudget = new(int32(tokens)) //nolint:gosec // user-configured thinking budget fits in int32
-	slog.Debug("Gemini request using thinking_budget", "budget_tokens", tokens)
+func tokenCount(field string, n int64) (int32, error) {
+	if n < math.MinInt32 || n > math.MaxInt32 {
+		return 0, fmt.Errorf("%s is outside the Gemini API's int32 range: %d", field, n)
+	}
+	return int32(n), nil
 }
 
 // builtInTools returns Gemini built-in tools enabled via provider_opts.
@@ -857,7 +865,10 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, errors.New("at least one message is required")
 	}
 
-	config := c.buildConfig(ctx)
+	config, err := c.buildConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
 	imageOutputEnabled := c.ImageOutputEnabled(ctx)
 
 	if c.wantsImageResponseModalities(imageOutputEnabled) {
@@ -975,7 +986,10 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	// Start with standard config from model definition (respects max_tokens,
 	// temperature, top_p, etc. from the model config).
 	// If the user hasn't configured these, we rely on Gemini API defaults.
-	cfg := c.buildConfig(ctx)
+	cfg, err := c.buildConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// Override with reranking-specific structured output schema.
 	cfg.ResponseMIMEType = "application/json"

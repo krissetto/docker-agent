@@ -2,8 +2,8 @@ package gemini
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"google.golang.org/genai"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -156,7 +157,7 @@ func TestCreateChatCompletionStream_ToolCallReplay(t *testing.T) {
 				delta := chat.MessageDelta{}
 				for {
 					response, err := stream.Recv()
-					if err == io.EOF {
+					if errors.Is(err, io.EOF) {
 						break
 					}
 					require.NoError(t, err)

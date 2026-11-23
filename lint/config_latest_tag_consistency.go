@@ -11,7 +11,7 @@ import (
 // pkg/config/latest/ keep their `json` and `yaml` struct tags in sync with
 // respect to the omit-when-empty modifier:
 //
-//   - both tags carry `omitempty` (or `omitzero` on the json side), or
+//   - both tags carry `omitempty` or `omitzero`, or
 //   - neither tag carries an omit modifier.
 //
 // Mismatched modifiers silently produce different serialisations depending
@@ -26,9 +26,9 @@ import (
 //
 // Recognised modifiers:
 //   - json: `omitempty`, `omitzero` (the latter introduced in Go 1.24)
-//   - yaml: `omitempty`
+//   - yaml: `omitempty`, `omitzero` (supported by goccy/go-yaml)
 //
-// Fields without a `yaml` tag are skipped — yaml.v3 derives a default name
+// Fields without a `yaml` tag are skipped — the YAML encoder derives a default name
 // from the field, which is a separate concern handled elsewhere.
 var ConfigLatestTagConsistency = &cop.Func{
 	Meta: cop.Meta{
@@ -56,23 +56,23 @@ var ConfigLatestTagConsistency = &cop.Func{
 				return
 			}
 
-			jsonOmit, jsonMod := jsonOmitModifier(j)
-			yamlOmit := y.Has("omitempty")
+			jsonOmit, jsonMod := omitModifier(j)
+			yamlOmit, yamlMod := omitModifier(y)
 
 			if jsonOmit != yamlOmit {
 				p.Reportf(field.Tag,
 					"json and yaml tags disagree on omit-when-empty: json has %q, yaml has %q (field %s)",
-					modifierLabel(jsonOmit, jsonMod), modifierLabel(yamlOmit, "omitempty"),
+					modifierLabel(jsonOmit, jsonMod), modifierLabel(yamlOmit, yamlMod),
 					cop.FieldNames(field))
 			}
 		})
 	},
 }
 
-// jsonOmitModifier reports whether the json tag opts out of empty values,
+// omitModifier reports whether the tag opts out of empty values,
 // returning the specific modifier that triggered the match (omitempty or
 // omitzero). When neither is present, it returns false and "".
-func jsonOmitModifier(opts cop.TagOptions) (bool, string) {
+func omitModifier(opts cop.TagOptions) (bool, string) {
 	switch {
 	case opts.Has("omitempty"):
 		return true, "omitempty"

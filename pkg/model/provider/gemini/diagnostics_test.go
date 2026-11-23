@@ -39,7 +39,7 @@ func TestNewRequestShape_Minimal(t *testing.T) {
 		apiSurface: apiSurfaceGeminiAPI,
 	}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 	config.Tools = client.builtInTools()
 
 	shape := newRequestShape(client, config, 0, false)
@@ -75,7 +75,7 @@ func TestNewRequestShape_ToolsAndBuiltIns(t *testing.T) {
 		apiSurface: apiSurfaceVertexAI,
 	}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 	config.Tools = client.builtInTools()
 
 	requestTools := []tools.Tool{
@@ -110,7 +110,7 @@ func TestNewRequestShape_ResponseModalitiesNormalized(t *testing.T) {
 	t.Parallel()
 
 	client := &Client{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image"}}}
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 	config.ResponseModalities = []string{" text ", "IMAGE", "text", ""}
 
 	shape := newRequestShape(client, config, 0, false)
@@ -135,7 +135,7 @@ func TestNewRequestShape_NoThinkingRequested(t *testing.T) {
 			ModelOptions: options.Apply(options.WithNoThinking(), options.WithModelsDevStore(store)),
 		},
 	}
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	shape := newRequestShape(client, config, 0, false)
 
@@ -156,7 +156,7 @@ func TestNewRequestShape_StructuredOutputPresent(t *testing.T) {
 			})),
 		},
 	}
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	shape := newRequestShape(client, config, 0, false)
 
@@ -201,7 +201,7 @@ func TestNewRequestShape_OutputCapabilityUsesResolvedValue(t *testing.T) {
 				},
 				apiSurface: apiSurfaceGeminiAPI,
 			}
-			config := client.buildConfig(t.Context())
+			config := mustBuildConfig(t, client)
 
 			shape := newRequestShape(client, config, 0, tt.resolvedEnabled)
 			assert.Equal(t, tt.wantKnown, shape.OutputCapabilityKnown)
@@ -222,7 +222,7 @@ func TestRequestShape_LogAttrsNeverLeaksToolSchemas(t *testing.T) {
 	const marker = "SECRET_TOOL_DESCRIPTION_MARKER"
 
 	client := &Client{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash"}}}
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	requestTools := []tools.Tool{
 		{Name: "danger_tool", Description: marker, Parameters: map[string]any{"type": "object", "properties": map[string]any{marker: map[string]any{"type": "string"}}}},

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"syscall/js"
+
+	"github.com/docker/docker-agent/cmd/wasm/internal/authority"
 )
 
 func jsonJS(data []byte) js.Value { return js.Global().Get("JSON").Call("parse", string(data)) }
@@ -22,7 +24,7 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 	if v := opts.Get("token"); v.Type() == js.TypeString {
 		token = v.String()
 	}
-	client, err := newAuthorityClient(opts.Get("url").String(), token)
+	client, err := authority.NewClient(opts.Get("url").String(), token)
 	if err != nil {
 		return throwingError(err.Error())
 	}
@@ -66,7 +68,7 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 		return newPromise(func(resolve, reject func(any)) {
 			resources.Go(func() {
 				defer rejectJSPanic(reject)
-				data, err := client.request(clientCtx, method, path, body)
+				data, err := client.Request(clientCtx, method, path, body)
 				if err != nil {
 					reject(jsError(err))
 					return
@@ -119,7 +121,7 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 					defer mu.Unlock()
 					delete(subscriptions, key)
 				}()
-				err := client.observe(ctx, id, since, epoch, func(message authorityMessage) bool {
+				err := client.Observe(ctx, id, since, epoch, func(message authority.Message) bool {
 					data, err := json.Marshal(message)
 					if err != nil {
 						return false

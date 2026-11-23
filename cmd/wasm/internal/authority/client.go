@@ -1,4 +1,4 @@
-package main
+package authority
 
 import (
 	"bufio"
@@ -17,22 +17,22 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 )
 
-// authorityClient is transport-only: execution and lifecycle ownership stay on the server.
-type authorityClient struct {
+// Client is transport-only: execution and lifecycle ownership stay on the server.
+type Client struct {
 	base  string
 	token string
 	http  *http.Client
 }
 
-func newAuthorityClient(base, token string) (*authorityClient, error) {
+func NewClient(base, token string) (*Client, error) {
 	u, err := url.Parse(base)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("authority URL must be an HTTP(S) origin or base path without credentials, query, or fragment")
 	}
-	return &authorityClient{base: strings.TrimRight(base, "/") + api.SessionAPIPath, token: token, http: http.DefaultClient}, nil
+	return &Client{base: strings.TrimRight(base, "/") + api.SessionAPIPath, token: token, http: http.DefaultClient}, nil
 }
 
-func (c *authorityClient) request(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
+func (c *Client) Request(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var data []byte
@@ -74,13 +74,13 @@ func (c *authorityClient) request(ctx context.Context, method, path string, body
 	return data, nil
 }
 
-type authoritySnapshot = api.SessionSnapshot[string, string, json.RawMessage]
+type snapshot = api.SessionSnapshot[string, string, json.RawMessage]
 
-type authorityMessage = api.SessionStreamMessage[string, string, json.RawMessage]
+type Message = api.SessionStreamMessage[string, string, json.RawMessage]
 
-// observe preserves canonical messages, assembles chunked snapshots, and exposes
+// Observe preserves canonical messages, assembles chunked snapshots, and exposes
 // gaps as resnapshot barriers rather than presenting stale events as new work.
-func (c *authorityClient) observe(ctx context.Context, id string, since *uint64, epoch string, onMessage func(authorityMessage) bool) error {
+func (c *Client) Observe(ctx context.Context, id string, since *uint64, epoch string, onMessage func(Message) bool) error {
 	path := "/" + url.PathEscape(id) + "/events"
 	if since != nil {
 		q := url.Values{"since": {strconv.FormatUint(*since, 10)}}
@@ -115,14 +115,14 @@ func (c *authorityClient) observe(ctx context.Context, id string, since *uint64,
 	var data []string
 	var frameBytes int
 	var chunkCursor uint64
-	var baseline *authoritySnapshot
+	var baseline *snapshot
 	var ready bool
 	var lastSequence uint64
 	consume := func() (bool, error) {
 		if len(data) == 0 {
 			return true, nil
 		}
-		var msg authorityMessage
+		var msg Message
 		err := json.Unmarshal([]byte(strings.Join(data, "\n")), &msg)
 		data = nil
 		frameBytes = 0
@@ -154,7 +154,7 @@ func (c *authorityClient) observe(ctx context.Context, id string, since *uint64,
 			if !assembling || msg.Cursor != chunkCursor {
 				return false, errors.New("invalid snapshot ending")
 			}
-			var snap authoritySnapshot
+			var snap snapshot
 			if err := json.Unmarshal(chunks, &snap); err != nil {
 				return false, err
 			}

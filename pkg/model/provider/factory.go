@@ -241,8 +241,6 @@ func warnVertexThinkingCannotBeDisabled(ctx context.Context, cfg *latest.ModelCo
 	}
 }
 
-var defaultFactories map[string]Factory
-
 // EmptyRegistry returns a registry with no provider factories. It is useful
 // for components that support running without models; it cannot construct a
 // concrete provider until factories are explicitly supplied to NewRegistry.

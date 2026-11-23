@@ -3,6 +3,8 @@ package gemini
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,7 +121,7 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 				ModelOptions: options.Apply(append(tt.opts, options.WithModelsDevStore(store))...),
 			}}
 
-			config := client.buildConfig(t.Context())
+			config := mustBuildConfig(t, client)
 			if !tt.wantThinking {
 				assert.Nil(t, config.ThinkingConfig)
 				return
@@ -164,7 +166,7 @@ func TestBuildConfig_NoThinkingNonReasoningPreservesStructuredOutput(t *testing.
 		),
 	}}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	assert.Nil(t, config.ThinkingConfig)
 	assert.Equal(t, "application/json", config.ResponseMIMEType)
@@ -232,7 +234,7 @@ func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
 				},
 			}
 
-			config := client.buildConfig(t.Context())
+			config := mustBuildConfig(t, client)
 
 			require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 			assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -392,7 +394,7 @@ func TestBuildConfig_Gemini3_ThinkingLevel(t *testing.T) {
 				},
 			}
 
-			config := client.buildConfig(t.Context())
+			config := mustBuildConfig(t, client)
 
 			require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 			assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -416,7 +418,7 @@ func TestBuildConfig_NoThinkingBudget(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	// When no ThinkingBudget is set, ThinkingConfig should not be configured
 	assert.Nil(t, config.ThinkingConfig, "ThinkingConfig should not be set when ThinkingBudget is nil")
@@ -436,7 +438,7 @@ func TestBuildConfig_Gemini3_FallbackToTokens(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -460,7 +462,7 @@ func TestBuildConfig_Gemini3_DefaultEffort(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -509,7 +511,7 @@ func TestBuildConfig_CaseInsensitiveModel(t *testing.T) {
 				client.ModelConfig.ThinkingBudget = &latest.ThinkingBudget{Effort: "medium"}
 			}
 
-			config := client.buildConfig(t.Context())
+			config := mustBuildConfig(t, client)
 
 			require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 			assert.Equal(t, tt.expectThinkingLevel, config.ThinkingConfig.ThinkingLevel, "ThinkingLevel should match")
@@ -733,7 +735,7 @@ func TestBuildConfig_ThinkingFromBudget(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig(t.Context())
+	config := mustBuildConfig(t, client)
 
 	// ThinkingConfig should be set from ThinkingBudget
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set from ThinkingBudget")
@@ -839,5 +841,27 @@ func TestConvertMessagesToGemini_ToolResponseMatching(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func mustBuildConfig(t *testing.T, client *Client) *genai.GenerateContentConfig {
+	t.Helper()
+	cfg, err := client.buildConfig(t.Context())
+	require.NoError(t, err)
+	return cfg
+}
+
+func TestBuildConfigRejectsTokenOverflow(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int64{math.MinInt32 - 1, math.MaxInt32 + 1} {
+		c := &Client{Config: base.Config{ModelConfig: latest.ModelConfig{MaxTokens: &n}}}
+		_, err := c.buildConfig(t.Context())
+		require.ErrorContains(t, err, "max_tokens")
+		if strconv.IntSize == 64 {
+			c.ModelConfig.MaxTokens = nil
+			c.ModelConfig.ThinkingBudget = &latest.ThinkingBudget{Tokens: int(n)}
+			_, err = c.buildConfig(t.Context())
+			require.ErrorContains(t, err, "thinking_budget")
+		}
 	}
 }
