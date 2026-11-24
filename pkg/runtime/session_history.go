@@ -8,7 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"sort"
+	"slices"
 
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/session"
@@ -44,6 +44,8 @@ type historyCursor struct {
 	BeforePosition  int    `json:"b"`
 	HistoryRevision uint64 `json:"r"`
 	StorageBefore   int64  `json:"k,omitempty"`
+	ItemPosition    int    `json:"p,omitempty"`
+	ItemStorageKey  int64  `json:"i,omitempty"`
 }
 
 func NormalizeHistoryLimits(in SessionHistoryLimits) (SessionHistoryLimits, error) {
@@ -70,11 +72,16 @@ func encodeHistoryCursor(cursor historyCursor) string {
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
-func decodeHistoryCursor(raw string) (historyCursor, error) {
+const (
+	historyPageCursorVersion = 1
+	historyItemCursorVersion = 2
+)
+
+func decodeHistoryCursor(raw string, version int) (historyCursor, error) {
 	if len(raw) > 5462 {
 		return historyCursor{}, ErrHistoryCursorInvalid
 	}
-	data, err := base64.RawURLEncoding.DecodeString(raw)
+	data, err := base64.RawURLEncoding.Strict().DecodeString(raw)
 	if err != nil || len(data) < sha256.Size || len(data) > 4096 {
 		return historyCursor{}, ErrHistoryCursorInvalid
 	}
@@ -85,23 +92,32 @@ func decodeHistoryCursor(raw string) (historyCursor, error) {
 		return historyCursor{}, ErrHistoryCursorInvalid
 	}
 	var cursor historyCursor
-	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Version != 1 || cursor.SessionID == "" || cursor.Epoch == "" || cursor.AnchorPosition < 0 || cursor.BeforePosition < 0 || cursor.BeforePosition > cursor.AnchorPosition {
+	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Version != version || cursor.SessionID == "" || cursor.Epoch == "" || cursor.AnchorPosition < 0 || cursor.BeforePosition < 0 || cursor.BeforePosition > cursor.AnchorPosition {
 		return historyCursor{}, ErrHistoryCursorInvalid
 	}
 	return cursor, nil
 }
 
-func historyRange(positions []int) []sessionHistoryRange {
-	if len(positions) == 0 {
+const historyOmittedResponseByteLimit = "item_exceeds_response_byte_limit"
+
+func (snapshot SessionSnapshot) HistoryOmittedRanges() []api.SessionHistoryOmittedRange {
+	if snapshot.History == nil {
 		return nil
 	}
-	// Positions arrive descending. Compress adjacent omissions to a bounded list.
-	out := make([]sessionHistoryRange, 0, min(len(positions), maxHistoryItems))
-	for _, pos := range positions {
-		out = append(out, sessionHistoryRange{StartPosition: pos, EndPosition: pos + 1, Reason: "item_exceeds_item_byte_limit"})
+	var ranges []api.SessionHistoryOmittedRange
+	add := func(positions []int, reason string) {
+		for _, position := range positions {
+			omitted := api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: reason}
+			if cursor := snapshot.HistoryItemCursors[position]; cursor != "" {
+				omitted.Items = []api.SessionHistoryOmittedItem{{Position: position, Cursor: cursor}}
+			}
+			ranges = append(ranges, omitted)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].StartPosition < out[j].StartPosition })
-	return out
+	add(snapshot.History.OmittedPositions, "item_exceeds_item_byte_limit")
+	add(snapshot.History.OmittedResponsePositions, historyOmittedResponseByteLimit)
+	slices.SortFunc(ranges, func(a, b api.SessionHistoryOmittedRange) int { return a.StartPosition - b.StartPosition })
+	return ranges
 }
 
 func historyPageWire(snapshot SessionSnapshot) api.SessionSnapshot[SessionState, InteractionKind, any] {
@@ -123,16 +139,7 @@ func historyPageWire(snapshot SessionSnapshot) api.SessionSnapshot[SessionState,
 		out.Presentation = append(out.Presentation, event)
 	}
 	if snapshot.History != nil {
-		ranges := historyRange(snapshot.History.OmittedPositions)
-		for _, position := range snapshot.History.OmittedResponsePositions {
-			ranges = append(ranges, sessionHistoryRange{StartPosition: position, EndPosition: position + 1, Reason: historyOmittedResponseByteLimit})
-		}
-		sort.Slice(ranges, func(i, j int) bool { return ranges[i].StartPosition < ranges[j].StartPosition })
-		apiRanges := make([]api.SessionHistoryOmittedRange, len(ranges))
-		for i, r := range ranges {
-			apiRanges[i] = api.SessionHistoryOmittedRange{StartPosition: r.StartPosition, EndPosition: r.EndPosition, Reason: r.Reason}
-		}
-		out.History = &api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, OmittedRanges: apiRanges, NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
+		out.History = &api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, OmittedRanges: snapshot.HistoryOmittedRanges(), NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
 	}
 	return out
 }
@@ -150,16 +157,7 @@ func sessionHistoryPageFits(snapshot SessionSnapshot, limit int) bool {
 	if snapshot.History == nil || snapshot.Session == nil {
 		return false
 	}
-	history := api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
-	for _, position := range snapshot.History.OmittedPositions {
-		history.OmittedRanges = append(history.OmittedRanges, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_item_byte_limit"})
-	}
-	for _, position := range snapshot.History.OmittedResponsePositions {
-		history.OmittedRanges = append(history.OmittedRanges, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: historyOmittedResponseByteLimit})
-	}
-	sort.Slice(history.OmittedRanges, func(i, j int) bool {
-		return history.OmittedRanges[i].StartPosition < history.OmittedRanges[j].StartPosition
-	})
+	history := api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, OmittedRanges: snapshot.HistoryOmittedRanges(), NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
 	page := api.SessionHistoryPage{Projection: "tail", SessionID: snapshot.Session.ID, Epoch: snapshot.Epoch, Cursor: snapshot.Cursor, TranscriptPosition: snapshot.TranscriptPosition, History: history, TurnTimings: snapshot.History.TurnTimings, TurnOutcomes: snapshot.History.TurnOutcomes, Items: make([]api.SessionHistoryItem, len(snapshot.Items))}
 	for i, item := range snapshot.Items {
 		page.Items[i] = api.SessionHistoryItem{Position: item.Position, Item: item.Item}
@@ -167,19 +165,17 @@ func sessionHistoryPageFits(snapshot SessionSnapshot, limit int) bool {
 	return session.BoundedJSONSize(page, limit) <= limit
 }
 
-const historyOmittedResponseByteLimit = "item_exceeds_response_byte_limit"
-
-type sessionHistoryRange struct {
-	StartPosition int    `json:"start_position"`
-	EndPosition   int    `json:"end_position"`
-	Reason        string `json:"reason"`
-}
-
 func snapshotFromHistoryPage(sessionID string, epoch string, anchorCursor uint64, anchorPosition int, page session.BoundedItemPage, revision uint64) SessionSnapshot {
 	out := SessionSnapshot{Projection: "tail", Items: page.Items, Epoch: epoch, Cursor: anchorCursor, TranscriptPosition: anchorPosition}
 	out.History = &page
 	if page.HasMore {
-		out.HistoryCursor = encodeHistoryCursor(historyCursor{Version: 1, SessionID: sessionID, Epoch: epoch, AnchorCursor: anchorCursor, AnchorPosition: anchorPosition, BeforePosition: page.NextBeforePosition, HistoryRevision: revision, StorageBefore: page.NextStoragePosition})
+		out.HistoryCursor = encodeHistoryCursor(historyCursor{Version: historyPageCursorVersion, SessionID: sessionID, Epoch: epoch, AnchorCursor: anchorCursor, AnchorPosition: anchorPosition, BeforePosition: page.NextBeforePosition, HistoryRevision: revision, StorageBefore: page.NextStoragePosition})
+	}
+	if len(page.OmittedStoragePositions) > 0 {
+		out.HistoryItemCursors = make(map[int]string, len(page.OmittedStoragePositions))
+		for pos, key := range page.OmittedStoragePositions {
+			out.HistoryItemCursors[pos] = encodeHistoryCursor(historyCursor{Version: historyItemCursorVersion, SessionID: sessionID, Epoch: epoch, AnchorCursor: anchorCursor, AnchorPosition: anchorPosition, HistoryRevision: revision, ItemPosition: pos, ItemStorageKey: key})
+		}
 	}
 	return out
 }
@@ -202,7 +198,7 @@ func (h *sessionHandle) ReadHistoryPageBounded(ctx context.Context, sessionID, r
 	if accept == nil {
 		return errors.New("history page acceptance callback is required")
 	}
-	cursor, err := decodeHistoryCursor(rawCursor)
+	cursor, err := decodeHistoryCursor(rawCursor, historyPageCursorVersion)
 	if err != nil {
 		return err
 	}
@@ -241,4 +237,50 @@ func (h *sessionHandle) ReadHistoryPageBounded(ctx context.Context, sessionID, r
 	return nil
 }
 
+func readHistoryItemCursor(rawCursor, sessionID, handleID string) (historyCursor, error) {
+	cursor, err := decodeHistoryCursor(rawCursor, historyItemCursorVersion)
+	if err != nil || sessionID != handleID || cursor.SessionID != handleID || cursor.ItemPosition < 0 || cursor.ItemPosition >= cursor.AnchorPosition || cursor.ItemStorageKey < 0 {
+		return historyCursor{}, ErrHistoryCursorInvalid
+	}
+	return cursor, nil
+}
+
+func historyItemPage(cursor historyCursor, item session.Item, err error) (api.SessionHistoryItemPage, error) {
+	if errors.Is(err, session.ErrNotFound) {
+		return api.SessionHistoryItemPage{}, ErrHistoryCursorStale
+	}
+	if err != nil {
+		return api.SessionHistoryItemPage{}, err
+	}
+	return api.SessionHistoryItemPage{SessionID: cursor.SessionID, Epoch: cursor.Epoch, Cursor: cursor.AnchorCursor, TranscriptPosition: cursor.AnchorPosition, Position: cursor.ItemPosition, Item: item}, nil
+}
+
+func (h *sessionHandle) ReadHistoryItem(ctx context.Context, sessionID, rawCursor string) (api.SessionHistoryItemPage, error) {
+	cursor, err := readHistoryItemCursor(rawCursor, sessionID, h.sessionID)
+	if err != nil {
+		return api.SessionHistoryItemPage{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return api.SessionHistoryItemPage{}, err
+	}
+	d := h.driver
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sess == nil {
+		return api.SessionHistoryItemPage{}, ErrHistoryCursorStale
+	}
+	epoch, _ := d.events.CurrentCursor(h.sessionID)
+	if epoch != cursor.Epoch || d.sess.HistoryRevisionSnapshot() != cursor.HistoryRevision || cursor.AnchorPosition > d.historyPositionLocked() {
+		return api.SessionHistoryItemPage{}, ErrHistoryCursorStale
+	}
+	var item session.Item
+	if d.history != nil {
+		item, err = d.history.store.ReadViewHistoryItem(ctx, h.sessionID, d.history.total, cursor.ItemPosition, cursor.ItemStorageKey, api.SessionHistoryItemMaxBytes)
+	} else {
+		item, err = d.sess.ReadHistoryItem(cursor.ItemPosition)
+	}
+	return historyItemPage(cursor, item, err)
+}
+
 var _ SessionHistoryReader = (*sessionHandle)(nil)
+var _ SessionHistoryItemReader = (*sessionHandle)(nil)

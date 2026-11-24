@@ -38,7 +38,8 @@ type BoundedItemPage struct {
 	ScannedPositions         int
 	TurnTimings              map[string]TurnTiming
 	TurnOutcomes             map[string]string
-	NextStoragePosition      int64 // optional store-specific keyset boundary
+	NextStoragePosition      int64         // optional store-specific keyset boundary
+	OmittedStoragePositions  map[int]int64 // keys for indexed item fetches
 }
 
 func (s *Session) ReadBoundedItems(beforePosition, maxScan, maxItemBytes, maxPageItemBytes int) (BoundedItemPage, error) {
@@ -76,6 +77,7 @@ func readBoundedItemWindow(beforePosition, total, maxScan, maxItemBytes int, fit
 		if oversized || conservativeJSONUpperBound(reflect.ValueOf(item), maxItemBytes, 0) > maxItemBytes {
 			trial := page
 			trial.OmittedPositions = append(slices.Clone(page.OmittedPositions), pos)
+			trial.recordOmittedStoragePosition(pos, storagePosition)
 			trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions, trial.NextStoragePosition = pos, pos, scanned+1, storagePosition
 			trial.HasMore = pos > 0
 			if !fits(trial) {
@@ -115,6 +117,7 @@ func readBoundedItemWindow(beforePosition, total, maxScan, maxItemBytes int, fit
 		if scanned == 0 {
 			trial = page
 			trial.OmittedResponsePositions = append(slices.Clone(page.OmittedResponsePositions), pos)
+			trial.recordOmittedStoragePosition(pos, storagePosition)
 			trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions, trial.NextStoragePosition = pos, pos, 1, storagePosition
 			trial.HasMore = pos > 0
 			if !fits(trial) {
@@ -137,6 +140,24 @@ func readBoundedItemWindow(beforePosition, total, maxScan, maxItemBytes int, fit
 		page.Items[left], page.Items[right] = page.Items[right], page.Items[left]
 	}
 	return page, nil
+}
+
+func (p *BoundedItemPage) recordOmittedStoragePosition(pos int, key int64) {
+	p.OmittedStoragePositions = maps.Clone(p.OmittedStoragePositions)
+	if p.OmittedStoragePositions == nil {
+		p.OmittedStoragePositions = make(map[int]int64)
+	}
+	p.OmittedStoragePositions[pos] = key
+}
+
+// ReadHistoryItem detaches just the selected item, retaining immutable strings.
+func (s *Session) ReadHistoryItem(position int) (Item, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if position < 0 || position >= len(s.Messages) {
+		return Item{}, ErrNotFound
+	}
+	return snapshotItem(s.Messages[position], false, s.ID), nil
 }
 
 func conservativeJSONUpperBound(v reflect.Value, limit, depth int) int {

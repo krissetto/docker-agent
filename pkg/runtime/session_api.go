@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/session"
@@ -225,6 +226,11 @@ type SessionHistoryLimits struct {
 type SessionHistoryReader interface {
 	ReadHistoryPage(context.Context, string, string, SessionHistoryLimits) (SessionSnapshot, error)
 	ReadHistoryPageBounded(context.Context, string, string, SessionHistoryLimits, func(SessionSnapshot) bool) error
+}
+
+// SessionHistoryItemReader resolves a signed cursor for one omitted transcript item.
+type SessionHistoryItemReader interface {
+	ReadHistoryItem(ctx context.Context, sessionID, cursor string) (api.SessionHistoryItemPage, error)
 }
 
 // PreparedSessionView owns only unpublished preparation resources. Commit runs
@@ -740,6 +746,7 @@ type SessionSnapshot struct {
 	Items               []session.BoundedItem
 	History             *session.BoundedItemPage
 	HistoryCursor       string
+	HistoryItemCursors  map[int]string
 	Epoch               string
 	Session             *session.Session
 	Status              SessionStatus

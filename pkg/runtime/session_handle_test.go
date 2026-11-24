@@ -702,3 +702,74 @@ func TestTailHistoryUsesResponseByteOmissionWhenHeaderConsumesBudget(t *testing.
 	require.Equal(t, []int{0}, page.History.OmittedResponsePositions)
 	require.False(t, page.History.HasMore)
 }
+
+func TestHistoryItemCursorValidation(t *testing.T) {
+	rt, sess := newSessionFixture(t)
+	sess.AddMessage(session.UserMessage("earliest"))
+	content := strings.Repeat("omitted", 100)
+	sess.AddMessage(session.UserMessage(content))
+	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
+	require.NoError(t, err)
+	obs, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &SessionHistoryLimits{MaxItems: 1, MaxItemBytes: 128}})
+	require.NoError(t, err)
+	defer obs.Cancel()
+	anchor := obs.Primary()
+	cursor := anchor.HistoryItemCursors[1]
+	require.NotEmpty(t, cursor)
+	reader := handle.(SessionHistoryItemReader)
+
+	sess.AddMessage(session.UserMessage("later"))
+	page, err := reader.ReadHistoryItem(t.Context(), sess.ID, cursor)
+	require.NoError(t, err)
+	assert.Equal(t, content, page.Item.Message.Message.Content)
+	assert.Equal(t, anchor.TranscriptPosition, page.TranscriptPosition)
+	assert.Equal(t, anchor.Cursor, page.Cursor)
+	assert.Equal(t, anchor.Epoch, page.Epoch)
+	assert.Equal(t, 1, page.Position)
+
+	_, err = reader.ReadHistoryItem(t.Context(), "wrong-session", cursor)
+	require.ErrorIs(t, err, ErrHistoryCursorInvalid)
+	altered := "A"
+	if strings.HasPrefix(cursor, altered) {
+		altered = "B"
+	}
+	_, err = reader.ReadHistoryItem(t.Context(), sess.ID, altered+cursor[1:])
+	require.ErrorIs(t, err, ErrHistoryCursorInvalid)
+	_, err = reader.ReadHistoryItem(t.Context(), sess.ID, anchor.HistoryCursor)
+	require.ErrorIs(t, err, ErrHistoryCursorInvalid)
+	_, err = handle.(SessionHistoryReader).ReadHistoryPage(t.Context(), sess.ID, cursor, SessionHistoryLimits{})
+	require.ErrorIs(t, err, ErrHistoryCursorInvalid)
+
+	claim, err := readHistoryItemCursor(cursor, sess.ID, sess.ID)
+	require.NoError(t, err)
+	claim.SessionID = "wrong-session"
+	_, err = reader.ReadHistoryItem(t.Context(), sess.ID, encodeHistoryCursor(claim))
+	require.ErrorIs(t, err, ErrHistoryCursorInvalid)
+	claim.SessionID, claim.Epoch = sess.ID, "previous-epoch"
+	_, err = reader.ReadHistoryItem(t.Context(), sess.ID, encodeHistoryCursor(claim))
+	require.ErrorIs(t, err, ErrHistoryCursorStale)
+
+	driver := handle.(*sessionHandle).driver
+	require.NoError(t, driver.ownerCall(t.Context(), func() error { driver.sess.MarkHistoryChanged(); return nil }))
+	_, err = reader.ReadHistoryItem(t.Context(), sess.ID, cursor)
+	require.ErrorIs(t, err, ErrHistoryCursorStale)
+}
+
+func TestHistoricalSnapshotHistoryItemCursor(t *testing.T) {
+	sess := session.New()
+	sess.MarkHistoryChanged()
+	message := strings.Repeat("historical", 100)
+	sess.AddMessage(session.UserMessage(message))
+	handle := newHistoricalSessionHandle(sess.ID, sess, SessionMetadata{}, nil)
+	observation, err := handle.Observe(t.Context(), ObserveOptions{HistoryTail: &SessionHistoryLimits{MaxItemBytes: 128}})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	cursor := observation.Primary().HistoryItemCursors[0]
+	require.NotEmpty(t, cursor)
+	item, err := handle.ReadHistoryItem(t.Context(), sess.ID, cursor)
+	require.NoError(t, err)
+	assert.Equal(t, message, item.Item.Message.Message.Content)
+	handle.snapshot.MarkHistoryChanged()
+	_, err = handle.ReadHistoryItem(t.Context(), sess.ID, cursor)
+	require.ErrorIs(t, err, ErrHistoryCursorStale)
+}

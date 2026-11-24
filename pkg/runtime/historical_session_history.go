@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -41,7 +42,7 @@ func (h *historicalSessionHandle) tailSnapshot(ctx context.Context, rawLimits Se
 		return SessionSnapshot{}, ErrHistoryMetadataTooLarge
 	}
 	project := func(page session.BoundedItemPage) SessionSnapshot {
-		out := snapshotFromHistoryPage(h.id, "historical", 0, total, page, 0)
+		out := snapshotFromHistoryPage(h.id, "historical", 0, total, page, h.snapshot.HistoryRevisionSnapshot())
 		out.Session = header
 		out.Session.TurnTimings, out.Session.TurnOutcomes = page.TurnTimings, page.TurnOutcomes
 		out.Status = SessionStatus{SessionID: h.id, AgentName: h.metadata.AgentName, State: SessionStateSettled}
@@ -79,7 +80,7 @@ func (h *historicalSessionHandle) ReadHistoryPageBounded(ctx context.Context, se
 	if accept == nil {
 		return errors.New("history page acceptance callback is required")
 	}
-	cursor, err := decodeHistoryCursor(rawCursor)
+	cursor, err := decodeHistoryCursor(rawCursor, historyPageCursorVersion)
 	if err != nil || sessionID != h.id || cursor.SessionID != h.id {
 		return ErrHistoryCursorInvalid
 	}
@@ -87,7 +88,7 @@ func (h *historicalSessionHandle) ReadHistoryPageBounded(ctx context.Context, se
 	if err != nil {
 		return err
 	}
-	if cursor.Epoch != "historical" || cursor.AnchorPosition != total {
+	if cursor.Epoch != "historical" || cursor.AnchorPosition != total || cursor.HistoryRevision != h.snapshot.HistoryRevisionSnapshot() {
 		return ErrHistoryCursorStale
 	}
 	project := func(page session.BoundedItemPage) SessionSnapshot {
@@ -105,4 +106,28 @@ func (h *historicalSessionHandle) ReadHistoryPageBounded(ctx context.Context, se
 	return nil
 }
 
+func (h *historicalSessionHandle) ReadHistoryItem(ctx context.Context, sessionID, rawCursor string) (api.SessionHistoryItemPage, error) {
+	cursor, err := readHistoryItemCursor(rawCursor, sessionID, h.id)
+	if err != nil {
+		return api.SessionHistoryItemPage{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return api.SessionHistoryItemPage{}, err
+	}
+	if cursor.Epoch != "historical" || cursor.HistoryRevision != h.snapshot.HistoryRevisionSnapshot() {
+		return api.SessionHistoryItemPage{}, ErrHistoryCursorStale
+	}
+	var item session.Item
+	if h.history != nil {
+		item, err = h.history.ReadViewHistoryItem(ctx, h.id, cursor.AnchorPosition, cursor.ItemPosition, cursor.ItemStorageKey, api.SessionHistoryItemMaxBytes)
+	} else {
+		if cursor.AnchorPosition != h.snapshot.ItemCount() {
+			return api.SessionHistoryItemPage{}, ErrHistoryCursorStale
+		}
+		item, err = h.snapshot.ReadHistoryItem(cursor.ItemPosition)
+	}
+	return historyItemPage(cursor, item, err)
+}
+
 var _ SessionHistoryReader = (*historicalSessionHandle)(nil)
+var _ SessionHistoryItemReader = (*historicalSessionHandle)(nil)

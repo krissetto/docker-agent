@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -260,4 +261,68 @@ func BenchmarkSQLiteSelectedAttach(b *testing.B) {
 			}
 		})
 	}
+}
+
+func TestSQLiteHistoryOmissionsCanBeFetchedWithoutHydration(t *testing.T) {
+	store := openFastAttachStore(t)
+	root := session.New(session.WithID("cold-oversize"), session.WithWorkingDir(t.TempDir()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root", sessionSourceAttribute: "agent"}))
+	older := strings.Repeat("o", 32<<10)
+	recent := strings.Repeat("r", (16<<20)+1)
+	root.AddMessage(session.UserMessage("start"))
+	root.AddMessage(session.UserMessage(older))
+	root.AddMessage(session.UserMessage(recent))
+	require.NoError(t, store.AddSession(t.Context(), root))
+	manager := fastAttachManager(t, t.Context(), store)
+	t.Cleanup(func() { require.NoError(t, manager.Shutdown(context.WithoutCancel(t.Context()))) })
+	srv := NewWithManager(manager, "")
+	base := api.SessionAPIPath + "/" + root.ID
+	httpServer := httptest.NewServer(srv.e)
+	defer httpServer.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	scanner, closeTail := fastAttachStream(t, ctx, httpServer, base+"/events?projection=tail&max_items=1&max_bytes=16384")
+	defer closeTail()
+	frame := readFastAttachFrame(t, scanner)
+	require.Equal(t, "snapshot", frame.Type)
+	require.Equal(t, "ready", readFastAttachFrame(t, scanner).Type)
+	require.NotNil(t, frame.Snapshot)
+	anchor := frame.Snapshot
+	require.NotNil(t, anchor.History)
+	require.Empty(t, anchor.Items)
+
+	checkOmission := func(history api.SessionHistory, position int, reason, content string) {
+		t.Helper()
+		require.Len(t, history.OmittedRanges, 1)
+		r := history.OmittedRanges[0]
+		assert.Equal(t, position, r.StartPosition)
+		assert.Equal(t, position+1, r.EndPosition)
+		assert.Equal(t, reason, r.Reason)
+		require.Len(t, r.Items, 1)
+		assert.Equal(t, position, r.Items[0].Position)
+		require.NotEmpty(t, r.Items[0].Cursor)
+		response := sessionRequest(t, srv, http.MethodGet, base+"/history/item?cursor="+url.QueryEscape(r.Items[0].Cursor), "", "")
+		require.Equal(t, http.StatusOK, response.Code)
+		var page api.SessionHistoryItemPage
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&page))
+		assert.Equal(t, root.ID, page.SessionID)
+		assert.Equal(t, anchor.Epoch, page.Epoch)
+		assert.Equal(t, anchor.Cursor, page.Cursor)
+		assert.Equal(t, anchor.TranscriptPosition, page.TranscriptPosition)
+		assert.Equal(t, position, page.Position)
+		require.NotNil(t, page.Item.Message)
+		require.Equal(t, sha256.Sum256([]byte(content)), sha256.Sum256([]byte(page.Item.Message.Message.Content)), "returned item content must match exactly")
+	}
+	invalid := sessionRequest(t, srv, http.MethodGet, base+"/history/item?cursor="+url.QueryEscape(anchor.History.NextCursor), "", "")
+	require.Equal(t, http.StatusBadRequest, invalid.Code)
+	assert.JSONEq(t, `{"error":"invalid_history_cursor"}`, invalid.Body.String())
+	checkOmission(*anchor.History, 2, "item_exceeds_item_byte_limit", recent)
+
+	response := sessionRequest(t, srv, http.MethodGet, base+"/history?projection=tail&max_items=1&max_bytes=16384&cursor="+url.QueryEscape(anchor.History.NextCursor), "", "")
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	assert.LessOrEqual(t, response.Body.Len(), 16384)
+	var olderPage api.SessionHistoryPage
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &olderPage))
+	require.Empty(t, olderPage.Items)
+	checkOmission(olderPage.History, 1, "item_exceeds_response_byte_limit", older)
+	require.Zero(t, store.fullReads.Load(), "tail, older pages and item fetches cannot hydrate history")
 }

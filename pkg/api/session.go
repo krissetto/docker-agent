@@ -23,6 +23,7 @@ const (
 	SessionCatalogMaxLimit                      = 200
 	SessionViewMetadataProjection               = "metadata"
 	SessionHistoryProjection                    = "tail"
+	SessionHistoryItemMaxBytes                  = 128 << 20
 )
 
 type SessionCatalog[State ~string] struct {
@@ -256,10 +257,16 @@ type SessionHistoryItem struct {
 	Item     session.Item `json:"item"`
 }
 
+type SessionHistoryOmittedItem struct {
+	Position int    `json:"position"`
+	Cursor   string `json:"cursor"`
+}
+
 type SessionHistoryOmittedRange struct {
-	StartPosition int    `json:"start_position"`
-	EndPosition   int    `json:"end_position"`
-	Reason        string `json:"reason"`
+	StartPosition int                         `json:"start_position"`
+	EndPosition   int                         `json:"end_position"`
+	Reason        string                      `json:"reason"`
+	Items         []SessionHistoryOmittedItem `json:"items,omitempty"`
 }
 
 type SessionHistory struct {
@@ -281,6 +288,15 @@ type SessionHistoryPage struct {
 	History            SessionHistory                `json:"history"`
 	TurnTimings        map[string]session.TurnTiming `json:"turn_timings,omitempty"`
 	TurnOutcomes       map[string]string             `json:"turn_outcomes,omitempty"`
+}
+
+type SessionHistoryItemPage struct {
+	SessionID          string       `json:"session_id"`
+	Epoch              string       `json:"epoch"`
+	Cursor             uint64       `json:"cursor"`
+	TranscriptPosition int          `json:"transcript_position"`
+	Position           int          `json:"position"`
+	Item               session.Item `json:"item"`
 }
 
 type SessionStreamMessage[State ~string, Kind ~string, Event any] struct {

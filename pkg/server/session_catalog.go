@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -298,13 +297,7 @@ func (s *Server) canonicalSessionHistory(c echo.Context) error {
 		for i, item := range page.Items {
 			out.Items[i] = api.SessionHistoryItem{Position: item.Position, Item: item.Item}
 		}
-		out.History.OmittedRanges = historyOmittedRanges(page.History.OmittedPositions)
-		for _, position := range page.History.OmittedResponsePositions {
-			out.History.OmittedRanges = append(out.History.OmittedRanges, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_response_byte_limit"})
-		}
-		sort.Slice(out.History.OmittedRanges, func(i, j int) bool {
-			return out.History.OmittedRanges[i].StartPosition < out.History.OmittedRanges[j].StartPosition
-		})
+		out.History.OmittedRanges = page.HistoryOmittedRanges()
 		if session.BoundedJSONSize(out, limits.MaxBytes) > limits.MaxBytes {
 			return false
 		}
@@ -373,15 +366,6 @@ func parseHistoryProjection(c echo.Context, allowCursor, allowStream bool) (stri
 		return "", limits, err
 	}
 	return projection, limits, nil
-}
-
-func historyOmittedRanges(positions []int) []api.SessionHistoryOmittedRange {
-	out := make([]api.SessionHistoryOmittedRange, 0, len(positions))
-	for _, position := range positions {
-		out = append(out, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_item_byte_limit"})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].StartPosition < out[j].StartPosition })
-	return out
 }
 
 func (s *Server) sessionTodos(c echo.Context) error {

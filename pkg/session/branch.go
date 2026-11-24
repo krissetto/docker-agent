@@ -155,32 +155,37 @@ func (s *Session) clone(referencesOnly bool) *Session {
 	// helper, which mints fresh IDs and resets metadata).
 	clone.Messages = make([]Item, len(s.Messages))
 	for i, item := range s.Messages {
-		clone.Messages[i] = item
-		if item.Message != nil {
-			clone.Messages[i].Message = cloneMessage(item.Message)
-		}
-		if item.SubSession != nil {
-			if referencesOnly {
-				clone.Messages[i].SubSession = &Session{ID: item.SubSession.ID, ParentID: s.ID}
-			} else {
-				clone.Messages[i].SubSession = item.SubSession.Clone()
-			}
-		}
-		if item.Error != nil {
-			errCopy := *item.Error
-			clone.Messages[i].Error = &errCopy
-		}
-		if item.Termination != nil {
-			termCopy := *item.Termination
-			clone.Messages[i].Termination = &termCopy
-		}
-		if item.Usage != nil {
-			usageCopy := *item.Usage
-			clone.Messages[i].Usage = &usageCopy
-		}
-		clone.Messages[i].Compaction = item.Compaction.Clone()
+		clone.Messages[i] = snapshotItem(item, referencesOnly, s.ID)
 	}
 	return clone
+}
+
+func snapshotItem(item Item, referencesOnly bool, parentID string) Item {
+	out := item
+	if item.Message != nil {
+		out.Message = cloneMessage(item.Message)
+	}
+	if item.SubSession != nil {
+		if referencesOnly {
+			out.SubSession = &Session{ID: item.SubSession.ID, ParentID: parentID}
+		} else {
+			out.SubSession = item.SubSession.Clone()
+		}
+	}
+	if item.Error != nil {
+		errCopy := *item.Error
+		out.Error = &errCopy
+	}
+	if item.Termination != nil {
+		termCopy := *item.Termination
+		out.Termination = &termCopy
+	}
+	if item.Usage != nil {
+		usageCopy := *item.Usage
+		out.Usage = &usageCopy
+	}
+	out.Compaction = item.Compaction.Clone()
+	return out
 }
 
 // CommitCompactionFrom atomically commits only the mutable conversation state

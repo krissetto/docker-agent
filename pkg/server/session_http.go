@@ -62,6 +62,7 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.GET("/:id/recent-chat", s.recentCanonicalChat)
 	group.GET("/:id/snapshot", s.canonicalSessionSnapshot)
 	group.GET("/:id/history", s.canonicalSessionHistory)
+	group.GET("/:id/history/item", s.canonicalSessionHistoryItem)
 	group.GET("/:id/events", s.sessionEventStream)
 	group.GET("/:id/background-processes/:processID/output", s.canonicalBackgroundProcessOutput)
 	group.PUT("/:id/background-output-interest", s.setBackgroundOutputInterest)
@@ -1049,11 +1050,7 @@ func sessionEnvelopeForRequest(envelope runtime.SessionEvent, includeBackgroundP
 func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
 	out := sessionSnapshotDTO{BackgroundProcesses: snapshot.BackgroundProcesses, Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, TitleStatus: snapshot.TitleStatus, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs)), Projection: snapshot.Projection}
 	if snapshot.History != nil {
-		ranges := historyOmittedRanges(snapshot.History.OmittedPositions)
-		for _, position := range snapshot.History.OmittedResponsePositions {
-			ranges = append(ranges, api.SessionHistoryOmittedRange{StartPosition: position, EndPosition: position + 1, Reason: "item_exceeds_response_byte_limit"})
-		}
-		out.History = &api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, OmittedRanges: ranges, NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
+		out.History = &api.SessionHistory{StartPosition: snapshot.History.StartPosition, EndPosition: snapshot.History.BeforePosition, TotalItems: snapshot.History.TotalItems, OmittedRanges: snapshot.HistoryOmittedRanges(), NextCursor: snapshot.HistoryCursor, Truncated: snapshot.History.HasMore}
 	}
 	if snapshot.Items != nil {
 		out.Items = make([]api.SessionHistoryItem, len(snapshot.Items))
@@ -1122,6 +1119,9 @@ func sessionHTTPError(err error) error {
 	}
 	if errors.Is(err, runtime.ErrHistoryCursorInvalid) {
 		return echo.NewHTTPError(http.StatusBadRequest, map[string]any{"error": "invalid_history_cursor"})
+	}
+	if errors.Is(err, session.ErrHistoryItemTooLarge) {
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_item_too_large"})
 	}
 	if errors.Is(err, runtime.ErrHistoryMetadataTooLarge) || errors.Is(err, session.ErrHistoryPageEnvelopeTooLarge) {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})

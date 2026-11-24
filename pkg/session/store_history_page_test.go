@@ -45,7 +45,15 @@ func TestSQLiteViewHistoryPagesAfterSparseWrites(t *testing.T) {
 		require.Equal(t, total, page.TotalItems)
 		require.Equal(t, min(2, before), page.ScannedPositions)
 		if before == 2 {
-			assert.Equal(t, []int{1}, page.OmittedPositions)
+			require.Equal(t, []int{1}, page.OmittedPositions)
+			key, ok := page.OmittedStoragePositions[1]
+			require.True(t, ok)
+			assert.NotEqualValues(t, 1, key, "dense position differs from the indexed key after promotion")
+			item, err := db.ReadViewHistoryItem(t.Context(), root.ID, total, 1, key, 8<<10)
+			require.NoError(t, err)
+			assert.Equal(t, strings.Repeat("large", 1000), item.Message.Message.Content)
+			_, err = db.ReadViewHistoryItem(t.Context(), root.ID, total, 1, key, 1<<10)
+			require.ErrorIs(t, err, ErrHistoryItemTooLarge)
 		}
 		for _, item := range page.Items {
 			positions = append(positions, item.Position)
@@ -69,4 +77,28 @@ func TestSQLiteViewHistoryRecoversSmallOpenStream(t *testing.T) {
 	require.Len(t, page.Items, 1)
 	assert.Equal(t, "partial", page.Items[0].Item.Message.Message.Content)
 	assert.Equal(t, "stream", page.Items[0].Item.Message.Message.MessageID)
+}
+
+func TestSQLiteViewHistoryItemReplaysOpenStreamOmittedByChunkCount(t *testing.T) {
+	store, err := newSQLiteStoreForTest(t, filepath.Join(t.TempDir(), "stream.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	db := store.(*SQLiteSessionStore)
+	root := New()
+	require.NoError(t, db.AddSession(t.Context(), root))
+	chunks := make([]MessageChunk, 1025)
+	for i := range chunks {
+		chunks[i] = MessageChunk{Kind: MessageChunkContent, Text: "x"}
+	}
+	_, err = db.AppendMessageChunks(t.Context(), root.ID, &StreamStart{WriteID: "open", AgentName: "root", MessageID: "stream"}, 0, 0, chunks)
+	require.NoError(t, err)
+	page, err := db.ReadViewHistoryPage(t.Context(), root.ID, 1, 1, 1, 8192, 0, func(BoundedItemPage) bool { return true })
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, page.OmittedPositions)
+	key, ok := page.OmittedStoragePositions[0]
+	require.True(t, ok)
+	item, err := db.ReadViewHistoryItem(t.Context(), root.ID, 1, 0, key, 8192)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat("x", len(chunks)), item.Message.Message.Content)
+	assert.Equal(t, "stream", item.Message.Message.MessageID)
 }

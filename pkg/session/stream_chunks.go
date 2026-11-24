@@ -69,28 +69,40 @@ type StreamingMessageStore interface {
 // It is the single reducer behind readers and close paths, and it matches the runtime's
 // presentation construction. Presentation is nil when no part was produced.
 func ReconstructStreamingMessage(agentName string, chunks []MessageChunk) Message {
-	var content, reasoning strings.Builder
-	var parts []chat.AssistantPart
-	var appender chat.AssistantTextAppender
+	var builder streamingMessageBuilder
 	for _, chunk := range chunks {
-		switch chunk.Kind {
-		case MessageChunkContent:
-			content.WriteString(chunk.Text)
-			parts = appender.Append(parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: chunk.Text})
-		case MessageChunkReasoning:
-			reasoning.WriteString(chunk.Text)
-			parts = appender.Append(parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: chunk.Text})
-		case MessageChunkTool:
-			if chunk.Op != nil {
-				parts = chat.ApplyAssistantPartOp(parts, *chunk.Op)
-			}
+		builder.add(chunk)
+	}
+	return builder.message(agentName)
+}
+
+type streamingMessageBuilder struct {
+	content, reasoning strings.Builder
+	parts              []chat.AssistantPart
+	appender           chat.AssistantTextAppender
+}
+
+func (b *streamingMessageBuilder) add(chunk MessageChunk) {
+	switch chunk.Kind {
+	case MessageChunkContent:
+		b.content.WriteString(chunk.Text)
+		b.parts = b.appender.Append(b.parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: chunk.Text})
+	case MessageChunkReasoning:
+		b.reasoning.WriteString(chunk.Text)
+		b.parts = b.appender.Append(b.parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: chunk.Text})
+	case MessageChunkTool:
+		if chunk.Op != nil {
+			b.parts = chat.ApplyAssistantPartOp(b.parts, *chunk.Op)
 		}
 	}
+}
+
+func (b *streamingMessageBuilder) message(agentName string) Message {
 	return Message{AgentName: agentName, Message: chat.Message{
 		Role:             chat.MessageRoleAssistant,
-		Content:          content.String(),
-		ReasoningContent: reasoning.String(),
-		Presentation:     parts,
+		Content:          b.content.String(),
+		ReasoningContent: b.reasoning.String(),
+		Presentation:     b.parts,
 	}}
 }
 
