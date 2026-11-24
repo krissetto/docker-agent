@@ -125,9 +125,18 @@ func (sm *SessionManager) viewRegistry(ctx context.Context, id string) (runtime.
 }
 
 func (sm *SessionManager) ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+	return sm.confirmedSessionViewInfo(ctx, id, false)
+}
+
+func (sm *SessionManager) confirmedSessionViewInfo(ctx context.Context, id string, metadataOnly bool) (runtime.PreparedSessionViewInfo, error) {
 	registry, err := sm.viewRegistry(ctx, id)
 	if err != nil {
 		return runtime.PreparedSessionViewInfo{}, err
+	}
+	if metadataOnly {
+		if reader, ok := registry.(runtime.SessionViewMetadataReader); ok {
+			return reader.ConfirmedSessionViewMetadata(ctx, id)
+		}
 	}
 	reader, ok := registry.(runtime.SessionViewInfoReader)
 	if !ok {
@@ -137,15 +146,22 @@ func (sm *SessionManager) ConfirmedSessionViewInfo(ctx context.Context, id strin
 }
 
 func (sm *SessionManager) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	return sm.prepareSessionView(ctx, id, false)
+}
+
+func (sm *SessionManager) prepareSessionView(ctx context.Context, id string, metadataOnly bool) (runtime.PreparedSessionView, error) {
 	registry, err := sm.viewRegistry(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	preparer, ok := registry.(runtime.SessionViewPreparer)
-	if !ok {
+	var prepared runtime.PreparedSessionView
+	if fast, ok := registry.(runtime.SessionViewMetadataPreparer); ok && metadataOnly {
+		prepared, err = fast.PrepareSessionViewMetadata(ctx, id)
+	} else if preparer, ok := registry.(runtime.SessionViewPreparer); ok {
+		prepared, err = preparer.PrepareSessionView(ctx, id)
+	} else {
 		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
 	}
-	prepared, err := preparer.PrepareSessionView(ctx, id)
 	if err != nil {
 		return nil, err
 	}

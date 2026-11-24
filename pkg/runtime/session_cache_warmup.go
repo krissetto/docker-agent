@@ -34,7 +34,7 @@ func (h *sessionHandle) warmSessionCache() {
 	reserved := false
 	var bindingVersion uint64
 	err := d.ownerCall(ctx, func() error {
-		if d.stopped || d.reclaiming || d.running() || d.starting() || d.settling() || d.sess == nil {
+		if d.history != nil || d.stopped || d.reclaiming || d.running() || d.starting() || d.settling() || d.sess == nil {
 			return nil
 		}
 		scoped = agent.WithContextModels(ctx, d.AgentNameLocked(), slices.Clone(d.modelProviders))

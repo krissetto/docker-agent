@@ -125,6 +125,9 @@ func (d *sessionDriver) completeTurnLocked(id string) {
 // or expired withdrawn/retry identities return not_found, never inferred success.
 func (h *sessionHandle) AwaitTurn(ctx context.Context, turnID string) error {
 	d := h.driver
+	if err := d.ensureHistory(ctx); err != nil {
+		return err
+	}
 	known := false
 	for {
 		d.mu.Lock()

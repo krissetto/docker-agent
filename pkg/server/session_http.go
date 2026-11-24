@@ -673,7 +673,7 @@ func (s *Server) editCanonicalSession(c echo.Context) error {
 		}
 		ctx := c.Request().Context()
 		started := time.Now()
-		prepared, err := s.sm.PrepareSessionView(ctx, c.Param("id"))
+		prepared, err := s.sm.prepareSessionView(ctx, c.Param("id"), metadataProjection)
 		preparedElapsed := time.Since(started)
 		if err != nil {
 			return sessionHTTPError(err)
@@ -753,10 +753,6 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	if c.QueryParam("tree") != "" && !tree {
 		return sessionRequestError("tree must be true when supplied")
 	}
-	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
-	if err != nil {
-		return sessionHTTPError(err)
-	}
 	var since *uint64
 	rawSince := c.QueryParam("since")
 	if rawSince == "" {
@@ -780,12 +776,16 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	if projectionErr != nil {
 		return sessionRequestError(projectionErr.Error())
 	}
-	options := runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree, OrderedTree: tree}
+	options := runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree, OrderedTree: tree, TreeMetadata: projection == api.SessionViewMetadataProjection}
 	if projection == "tail" {
 		if tree || since != nil {
 			return sessionRequestError("tail projection requires an initial non-tree observation")
 		}
 		options.HistoryTail = &limits
+	}
+	handle, err := s.sm.handle(c.Request().Context(), c.Param("id"), projection != "")
+	if err != nil {
+		return sessionHTTPError(err)
 	}
 	observerID, initialInterest, err := parseBackgroundOutputObserver(c.Request())
 	if err != nil {

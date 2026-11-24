@@ -52,6 +52,9 @@ type SessionEdit struct {
 
 func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Session, error) {
 	d := h.driver
+	if err := d.ensureHistory(ctx); err != nil {
+		return nil, err
+	}
 	if edit.Kind == SessionEditPendingMessage {
 		return h.editPendingMessage(ctx, edit.PendingMessage)
 	}

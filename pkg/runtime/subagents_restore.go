@@ -85,10 +85,10 @@ type restoredNode struct {
 // preflightRestore validates the complete persisted graph and resolves stored
 // sessions without publishing drivers, tree nodes, or manager records.
 func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *session.Session, snapshot subagent.Snapshot) ([]*restoredNode, error) {
-	return m.preflightRestoreForTeam(ctx, rootSess, snapshot, m.r.teamForSession(rootSess))
+	return m.preflightRestoreForTeam(ctx, rootSess, snapshot, m.r.teamForSession(rootSess), false)
 }
 
-func (m *subagentManager) preflightRestoreForTeam(ctx context.Context, rootSess *session.Session, snapshot subagent.Snapshot, tm *team.Team) ([]*restoredNode, error) {
+func (m *subagentManager) preflightRestoreForTeam(ctx context.Context, rootSess *session.Session, snapshot subagent.Snapshot, tm *team.Team, metadataOnly bool) ([]*restoredNode, error) {
 	if tm == nil {
 		return nil, errors.New("restored session has no pinned team environment")
 	}
@@ -167,7 +167,13 @@ func (m *subagentManager) preflightRestoreForTeam(ctx context.Context, rootSess 
 			node := snap.Node
 			var childSess *session.Session
 			if node.SessionID != "" && m.r.sessionStore != nil {
-				loaded, loadErr := m.r.sessionStore.GetSession(ctx, node.SessionID)
+				read := m.r.sessionStore.GetSession
+				if metadataOnly {
+					read = func(ctx context.Context, id string) (*session.Session, error) {
+						return session.ReadSessionMetadata(ctx, m.r.sessionStore, id)
+					}
+				}
+				loaded, loadErr := read(ctx, node.SessionID)
 				switch {
 				case loadErr == nil && loaded != nil:
 					if loaded.ParentID != parentSessionID {

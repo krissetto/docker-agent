@@ -272,13 +272,15 @@ type SessionHistory struct {
 }
 
 type SessionHistoryPage struct {
-	Projection         string               `json:"projection"`
-	SessionID          string               `json:"session_id"`
-	Epoch              string               `json:"epoch"`
-	Cursor             uint64               `json:"cursor"`
-	TranscriptPosition int                  `json:"transcript_position"`
-	Items              []SessionHistoryItem `json:"items"`
-	History            SessionHistory       `json:"history"`
+	Projection         string                        `json:"projection"`
+	SessionID          string                        `json:"session_id"`
+	Epoch              string                        `json:"epoch"`
+	Cursor             uint64                        `json:"cursor"`
+	TranscriptPosition int                           `json:"transcript_position"`
+	Items              []SessionHistoryItem          `json:"items"`
+	History            SessionHistory                `json:"history"`
+	TurnTimings        map[string]session.TurnTiming `json:"turn_timings,omitempty"`
+	TurnOutcomes       map[string]string             `json:"turn_outcomes,omitempty"`
 }
 
 type SessionStreamMessage[State ~string, Kind ~string, Event any] struct {

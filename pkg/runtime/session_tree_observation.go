@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 )
 
@@ -30,7 +31,11 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 		buffer = defaultEventChannelCapacity
 	}
 	buffer = min(buffer, maxSessionEventSubscriberBuffer)
-	h.runtime.subagents.ensureRoot(h.driver.session(), h.agentName)
+	header, err := h.driver.viewSnapshot(ctx, true)
+	if err != nil {
+		return Observation{}, err
+	}
+	h.runtime.subagents.ensureRoot(header, h.agentName)
 	topology, cancelTopology := h.runtime.subagents.tree.Subscribe(buffer)
 	initial, ok := <-topology
 	if !ok {
@@ -69,7 +74,7 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 		if _, exists := observations[sessionID]; exists || stopped[sessionID] {
 			return nil
 		}
-		observation, err := observe(obsCtx, sessionID, ObserveOptions{Buffer: buffer, BackgroundOutputInterest: options.BackgroundOutputInterest})
+		observation, err := observe(obsCtx, sessionID, ObserveOptions{Buffer: buffer, TreeMetadata: options.TreeMetadata, BackgroundOutputInterest: options.BackgroundOutputInterest})
 		var primary SessionSnapshot
 		live := err == nil
 		if live {
@@ -89,7 +94,7 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 				return err
 			}
 			// A failed lookup keeps the observe error, so existing handling is unchanged.
-			snapshot, settled, lookupErr := h.stoppedDescendantSnapshot(obsCtx, sessionID)
+			snapshot, settled, lookupErr := h.stoppedDescendantSnapshot(obsCtx, sessionID, options.TreeMetadata)
 			if lookupErr != nil || !settled {
 				return err
 			}
@@ -283,7 +288,7 @@ func (h *sessionHandle) attachLiveSubtree(primary *SessionSnapshot) {
 // stoppedDescendantSnapshot describes a descendant whose stop is final, from its
 // session and status, which stay readable after its live observation is gone.
 // It reports settled=false for any session that is not finally stopped.
-func (h *sessionHandle) stoppedDescendantSnapshot(ctx context.Context, sessionID string) (snapshot SessionSnapshot, settled bool, err error) {
+func (h *sessionHandle) stoppedDescendantSnapshot(ctx context.Context, sessionID string, metadataOnly bool) (snapshot SessionSnapshot, settled bool, err error) {
 	driver, ok := h.runtime.sessionDrivers.Lookup(sessionID)
 	if !ok || !driver.stoppedForObservation() {
 		return SessionSnapshot{}, false, nil
@@ -292,7 +297,16 @@ func (h *sessionHandle) stoppedDescendantSnapshot(ctx context.Context, sessionID
 	if err != nil {
 		return SessionSnapshot{}, false, err
 	}
-	sess, err := handle.Snapshot(ctx)
+	var sess *session.Session
+	if metadataOnly {
+		sess, err = driver.viewSnapshot(ctx, true)
+		snapshot.Projection = "metadata"
+		driver.mu.Lock()
+		snapshot.TranscriptPosition = driver.historyPositionLocked()
+		driver.mu.Unlock()
+	} else {
+		sess, err = handle.Snapshot(ctx)
+	}
 	if err != nil {
 		return SessionSnapshot{}, false, err
 	}
@@ -301,7 +315,7 @@ func (h *sessionHandle) stoppedDescendantSnapshot(ctx context.Context, sessionID
 		return SessionSnapshot{}, false, err
 	}
 	status.SessionID = sessionID
-	snapshot = SessionSnapshot{Session: sess, Status: status}
+	snapshot.Session, snapshot.Status = sess, status
 	snapshot.Epoch, snapshot.Cursor = driver.events.CurrentCursor(sessionID)
 	return snapshot, true, nil
 }

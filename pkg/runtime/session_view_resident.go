@@ -15,7 +15,7 @@ import (
 // held only while the persisted ancestry and live topology are read and
 // validated; it is released before the prepared view is returned, so an
 // in-flight child commit blocks this read rather than being observed half-way.
-func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, id string) (*preparedSessionView, error) {
+func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, id string, metadataOnly bool) (*preparedSessionView, error) {
 	root, ok, err := v.residentRootID(ctx, id)
 	if err != nil || !ok {
 		// A missing registry ancestor is the cold-path case; the locked body
@@ -27,7 +27,7 @@ func (v *localSessionRuntimeView) readResidentSessionView(ctx context.Context, i
 		return nil, err
 	}
 	defer transition.Unlock()
-	p, err := v.readResidentSessionViewLocked(ctx, id)
+	p, err := v.readResidentSessionViewLocked(ctx, id, metadataOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (r *LocalRuntime) loadResidentChildRecord(ctx context.Context, children ses
 
 // readResidentSessionViewLocked requires the caller to hold the root lifecycle
 // transition for id's root (see readResidentSessionView and commitResident).
-func (v *localSessionRuntimeView) readResidentSessionViewLocked(ctx context.Context, id string) (*preparedSessionView, error) {
+func (v *localSessionRuntimeView) readResidentSessionViewLocked(ctx context.Context, id string, metadataOnly bool) (*preparedSessionView, error) {
 	r := v.runtime
 	metadata, children, readersOK := r.residentReaders()
 	if !readersOK {
@@ -163,7 +163,7 @@ func (v *localSessionRuntimeView) readResidentSessionViewLocked(ctx context.Cont
 	if limit < 0 {
 		limit = DefaultSessionResourcePolicy().MaxSessions
 	}
-	p := &preparedSessionView{r: r, resident: true, existing: make(map[string]*sessionDriver)}
+	p := &preparedSessionView{r: r, resident: true, metadataOnly: metadataOnly, existing: make(map[string]*sessionDriver)}
 	var ancestry []*session.Session
 	for current := id; ; {
 		if err := ctx.Err(); err != nil {
@@ -273,7 +273,10 @@ func (v *localSessionRuntimeView) readResidentSessionViewLocked(ctx context.Cont
 	}
 	selected := ancestry[0]
 	driver := p.existing[id]
-	snapshot := driver.session()
+	snapshot, err := driver.viewSnapshot(ctx, metadataOnly)
+	if err != nil {
+		return nil, err
+	}
 	if snapshot == nil {
 		return nil, ErrSessionClosed
 	}
@@ -374,7 +377,7 @@ func (p *preparedSessionView) commitResident(ctx context.Context) (CommittedSess
 			restore.Unlock()
 		}
 	}()
-	fresh, err := (&localSessionRuntimeView{runtime: p.r}).readResidentSessionViewLocked(ctx, p.info.SessionID)
+	fresh, err := (&localSessionRuntimeView{runtime: p.r}).readResidentSessionViewLocked(ctx, p.info.SessionID, p.metadataOnly)
 	if err != nil {
 		return CommittedSessionView{}, err
 	}

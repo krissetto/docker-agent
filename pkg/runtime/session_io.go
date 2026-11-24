@@ -26,6 +26,9 @@ func (d *sessionDriver) durableIO(ctx context.Context, reserve func() (sessionIO
 }
 
 func (d *sessionDriver) durableIOContext(ctx context.Context, reserve func() (sessionIOReservation, error), waitForAcknowledgement bool) error {
+	if err := d.ensureHistory(ctx); err != nil {
+		return err
+	}
 	var lane *sessionIOLane
 	if err := d.ownerCall(ctx, func() error {
 		if d.ioLane == nil {

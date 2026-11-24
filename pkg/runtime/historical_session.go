@@ -29,6 +29,8 @@ type historicalSessionHandle struct {
 	UnsupportedSessionHandle
 	id         string
 	snapshot   *session.Session
+	store      session.Store
+	history    session.ViewHistoryStore
 	metadata   SessionMetadata
 	definition *teamdef.AgentDefinition
 }
@@ -60,11 +62,15 @@ func (h *historicalSessionHandle) AwaitTurn(ctx context.Context, turnID string) 
 		return err
 	}
 	if turnID != "" {
-		outcome := h.snapshot.TurnOutcome(turnID)
+		snapshot, err := h.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		outcome := snapshot.TurnOutcome(turnID)
 		if outcome == string(TurnCompleted) || outcome == string(TurnFailed) || outcome == string(TurnCanceled) {
 			return nil
 		}
-		for _, item := range h.snapshot.MessagesSnapshot() {
+		for _, item := range snapshot.MessagesSnapshot() {
 			if item.Message != nil && item.Message.Accepted && item.Message.TurnID == turnID && (item.Message.ReportOutcome == session.ReportOutcomeFinished || item.Message.ReportOutcome == session.ReportOutcomeFailed) {
 				return nil
 			}
@@ -77,7 +83,15 @@ func (h *historicalSessionHandle) Snapshot(ctx context.Context) (*session.Sessio
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return h.snapshot.Clone(), nil
+	snapshot := h.snapshot.Clone()
+	if h.store != nil {
+		stored, err := session.ReadSessionOwnHistory(ctx, h.store, h.id)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.Messages = stored.Messages
+	}
+	return snapshot, nil
 }
 func (h *historicalSessionHandle) Status(ctx context.Context) (SessionStatus, error) {
 	if err := ctx.Err(); err != nil {
@@ -89,19 +103,37 @@ func (h *historicalSessionHandle) Observe(ctx context.Context, options ObserveOp
 	if err := ctx.Err(); err != nil {
 		return Observation{}, err
 	}
-	snapshot := h.snapshot.Clone()
-	status := SessionStatus{SessionID: h.id, AgentName: h.metadata.AgentName, State: SessionStateSettled}
+	var snapshot SessionSnapshot
+	var err error
+	switch {
+	case options.HistoryTail != nil:
+		snapshot, err = h.tailSnapshot(ctx, *options.HistoryTail)
+	case options.TreeMetadata:
+		snapshot = SessionSnapshot{Projection: "metadata", Session: h.snapshot.MetadataSnapshot()}
+		snapshot.Session.SetSubagentTree(h.snapshot.GetSubagentTree())
+		snapshot.TranscriptPosition, err = h.historyPosition(ctx)
+	default:
+		snapshot.Session, err = h.Snapshot(ctx)
+		if err == nil {
+			snapshot.TranscriptPosition = snapshot.Session.ItemCount()
+		}
+	}
+	if err != nil {
+		return Observation{}, err
+	}
+	snapshot.Status = SessionStatus{SessionID: h.id, AgentName: h.metadata.AgentName, State: SessionStateSettled}
+	snapshot.Epoch = "historical"
 	events := make(chan SessionEvent)
 	var once sync.Once
 	cancel := func() { once.Do(func() { close(events) }) }
 	if options.Tree {
-		updates := make(chan TreeUpdate, 1)
-		updates <- TreeUpdate{Snapshot: &SessionSnapshot{Epoch: "historical", Session: snapshot, Status: status, TranscriptPosition: len(snapshot.Messages)}}
+		updates := make(chan TreeUpdate)
 		close(updates)
-		return Observation{Initial: []SessionSnapshot{{Epoch: "historical", Session: snapshot, Status: status, TranscriptPosition: len(snapshot.Messages)}}, TreeUpdates: updates, Events: events, Cancel: cancel}, nil
+		return Observation{Initial: []SessionSnapshot{snapshot}, TreeUpdates: updates, Events: events, Cancel: cancel}, nil
 	}
-	return Observation{Initial: []SessionSnapshot{{Epoch: "historical", Session: snapshot, Status: status, TranscriptPosition: len(snapshot.Messages)}}, Events: events, Cancel: cancel}, nil
+	return Observation{Initial: []SessionSnapshot{snapshot}, Events: events, Cancel: cancel}, nil
 }
+
 func (h *historicalSessionHandle) Release(context.Context) error { return nil }
 func (h *historicalSessionHandle) UpdateTitle(context.Context, string) error {
 	return historicalError(h.id, SessionOperationUpdateTitle)

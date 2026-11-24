@@ -322,4 +322,20 @@ func (v *serviceSessionRuntime) ConfirmedSessionViewInfo(ctx context.Context, id
 	return (&localSessionRuntimeView{runtime: r}).ConfirmedSessionViewInfo(ctx, id)
 }
 
+func (v *serviceSessionRuntime) PrepareSessionViewMetadata(ctx context.Context, id string) (PreparedSessionView, error) {
+	r, err := v.service.runtimeForSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return (&localSessionRuntimeView{runtime: r}).PrepareSessionViewMetadata(ctx, id)
+}
+
+func (v *serviceSessionRuntime) ConfirmedSessionViewMetadata(ctx context.Context, id string) (PreparedSessionViewInfo, error) {
+	r, err := v.service.runtimeForSession(ctx, id)
+	if err != nil {
+		return PreparedSessionViewInfo{}, err
+	}
+	return (&localSessionRuntimeView{runtime: r}).ConfirmedSessionViewMetadata(ctx, id)
+}
+
 var _ SessionRuntimeSupervisor = (*SessionService)(nil)

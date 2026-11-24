@@ -349,7 +349,7 @@ var (
 
 // cloneForBranch captures model and transcript under the same owner lock.
 func (d *sessionDriver) cloneForBranch(ctx context.Context) (*session.Session, string, string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := d.ensureHistory(ctx); err != nil {
 		return nil, "", "", err
 	}
 	d.mu.Lock()

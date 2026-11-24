@@ -195,7 +195,7 @@ func (s *Server) getCanonicalSession(c echo.Context) error {
 		}
 		ctx := c.Request().Context()
 		started := time.Now()
-		info, err := s.sm.ConfirmedSessionViewInfo(ctx, c.Param("id"))
+		info, err := s.sm.confirmedSessionViewInfo(ctx, c.Param("id"), metadataProjection)
 		s.sessionTiming.DebugContext(ctx, "Session stream timing", "phase", "prepare_view", "elapsed", time.Since(started), "metadata_only", metadataProjection, "ok", err == nil)
 		if err != nil {
 			return sessionHTTPError(err)
@@ -240,7 +240,7 @@ func (s *Server) canonicalSessionSnapshot(c echo.Context) error {
 	if err != nil {
 		return sessionRequestError(err.Error())
 	}
-	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	handle, err := s.sm.handle(c.Request().Context(), c.Param("id"), projection == "tail")
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -272,6 +272,7 @@ func (s *Server) canonicalSessionSnapshot(c echo.Context) error {
 }
 
 func (s *Server) canonicalSessionHistory(c echo.Context) error {
+	started := time.Now()
 	projection, limits, err := parseHistoryProjection(c, true, false)
 	if err != nil || projection != "tail" {
 		return sessionRequestError("history requires projection=tail")
@@ -280,7 +281,7 @@ func (s *Server) canonicalSessionHistory(c echo.Context) error {
 	if cursor == "" {
 		return sessionRequestError("cursor is required")
 	}
-	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	handle, err := s.sm.handle(c.Request().Context(), c.Param("id"), true)
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -292,6 +293,7 @@ func (s *Server) canonicalSessionHistory(c echo.Context) error {
 	var acceptedPage runtime.SessionSnapshot
 	err = reader.ReadHistoryPageBounded(c.Request().Context(), handle.ID(), cursor, limits, func(page runtime.SessionSnapshot) bool {
 		out := api.SessionHistoryPage{Projection: "tail", SessionID: handle.ID(), Epoch: page.Epoch, Cursor: page.Cursor, TranscriptPosition: page.TranscriptPosition, History: api.SessionHistory{StartPosition: page.History.StartPosition, EndPosition: page.History.BeforePosition, TotalItems: page.History.TotalItems, Truncated: page.History.HasMore, NextCursor: page.HistoryCursor}}
+		out.TurnTimings, out.TurnOutcomes = page.History.TurnTimings, page.History.TurnOutcomes
 		out.Items = make([]api.SessionHistoryItem, len(page.Items))
 		for i, item := range page.Items {
 			out.Items[i] = api.SessionHistoryItem{Position: item.Position, Item: item.Item}
@@ -320,6 +322,7 @@ func (s *Server) canonicalSessionHistory(c echo.Context) error {
 	if acceptedPage.History == nil {
 		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
 	}
+	s.sessionTiming.DebugContext(c.Request().Context(), "Session stream timing", "phase", "history_page", "elapsed", time.Since(started), "response_bytes", len(body), "items", len(acceptedPage.Items), "scanned_positions", acceptedPage.History.ScannedPositions)
 	return c.Blob(http.StatusOK, echo.MIMEApplicationJSON, body)
 }
 
@@ -339,6 +342,9 @@ func parseHistoryProjection(c echo.Context, allowCursor, allowStream bool) (stri
 			return "", runtime.SessionHistoryLimits{}, errors.New("history bounds require projection=tail")
 		}
 		return "", runtime.SessionHistoryLimits{}, nil
+	}
+	if projection == api.SessionViewMetadataProjection && allowStream && c.QueryParam("tree") == "true" && c.QueryParam("max_items") == "" && c.QueryParam("max_bytes") == "" && c.QueryParam("max_item_bytes") == "" {
+		return projection, runtime.SessionHistoryLimits{}, nil
 	}
 	if projection != "tail" {
 		return "", runtime.SessionHistoryLimits{}, errors.New("projection must be tail")
@@ -548,6 +554,10 @@ func (s *Server) sessionByID(ctx context.Context, id string) (runtime.SessionHan
 // Handle resolves a stable session handle using the same persisted source,
 // ancestry, durable-tree membership, and cold-restore validation as HTTP.
 func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.SessionHandle, error) {
+	return sm.handle(ctx, id, false)
+}
+
+func (sm *SessionManager) handle(ctx context.Context, id string, metadataOnly bool) (runtime.SessionHandle, error) {
 	if id == "" {
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "lookup"}
 	}
@@ -562,7 +572,7 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 		}
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "lookup"}
 	}
-	prepared, err := sm.PrepareSessionView(ctx, id)
+	prepared, err := sm.prepareSessionView(ctx, id, metadataOnly)
 	if err != nil {
 		return nil, err
 	}

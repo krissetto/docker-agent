@@ -4,10 +4,14 @@ import (
 	"context"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 func (h *sessionHandle) observationPresentation(ctx context.Context, observed driverObservation) []Event {
-	tm := h.runtime.teamForSession(h.driver.session())
+	return h.observationPresentationForTeam(ctx, observed, h.runtime.teamForSession(observed.session))
+}
+
+func (h *sessionHandle) observationPresentationForTeam(ctx context.Context, observed driverObservation, tm *team.Team) []Event {
 	if tm == nil {
 		return nil
 	}

@@ -1002,6 +1002,7 @@ type sessionItemRow struct {
 	messageJSON sql.NullString
 	implicit    bool
 	streamOpen  bool
+	oversized   bool
 	// openBody is the reconstructed body of an open row once reconcileOpenRow has resolved it.
 	openBody       chat.Message
 	actorPending   bool
@@ -1027,21 +1028,45 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 	return s.loadSessionItemsMode(ctx, q, sessionID, true)
 }
 
+const sessionItemColumns = `id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, ''), stream_open`
+
 func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier, sessionID string, recurseChildren bool) ([]Item, error) {
-	rows, err := q.QueryContext(ctx,
-		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, ''), stream_open
-		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
+	rows, err := q.QueryContext(ctx, `SELECT `+sessionItemColumns+` FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
 	if err != nil {
 		return nil, classifySQLiteContextError(ctx, err)
 	}
-	defer rows.Close()
+	rawRows, err := scanSessionItemRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	var items []Item
+	for _, row := range rawRows {
+		item, err := s.decodeSessionItem(ctx, q, sessionID, row, recurseChildren)
+		if err != nil {
+			return nil, err
+		}
+		if item != (Item{}) || row.itemType == "summary" {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
 
-	// First, collect all raw row data so we can close the result set
-	// before making any recursive calls (SQLite doesn't allow concurrent queries)
+func scanSessionItemRows(ctx context.Context, rows *sql.Rows) ([]sessionItemRow, error) {
+	return scanSessionItemRowsMode(ctx, rows, false)
+}
+
+func scanSessionItemRowsMode(ctx context.Context, rows *sql.Rows, checkSize bool) ([]sessionItemRow, error) {
+	defer rows.Close()
+	// Close the result set before decoding rows that need a second query.
 	var rawRows []sessionItemRow
 	for rows.Next() {
 		var row sessionItemRow
-		if err := rows.Scan(&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.reportOutcome, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON, &row.streamOpen); err != nil {
+		dest := []any{&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.reportOutcome, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON, &row.streamOpen}
+		if checkSize {
+			dest = append(dest, &row.oversized)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, classifySQLiteContextError(ctx, err)
 		}
 		rawRows = append(rawRows, row)
@@ -1050,117 +1075,111 @@ func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier
 		return nil, classifySQLiteContextError(ctx, err)
 	}
 
-	if len(rawRows) == 0 {
-		return nil, nil
-	}
+	return rawRows, nil
+}
 
-	// Now process the collected rows, making recursive calls as needed
-	var items []Item
-	for _, row := range rawRows {
-		switch row.itemType {
-		case "message":
-			var chatMsg chat.Message
-			if row.streamOpen {
-				// The scan and the chunk read are separate statements, so a settle may land
-				// in between. reconcileOpenRow re-checks the row and returns the canonical
-				// body when it has closed; a vanished row is skipped.
-				found, err := s.reconcileOpenRow(ctx, q, &row, nil, nil)
-				if err != nil {
-					return nil, fmt.Errorf("loading streaming message at position %d: %w", row.position, err)
-				}
-				if !found {
-					continue
-				}
-			}
-			var stored Message
-			if row.streamOpen {
-				chatMsg = row.openBody
-			} else if err := unmarshalStoredMessage([]byte(row.messageJSON.String), &stored); err != nil {
-				return nil, fmt.Errorf("unmarshaling message at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
-			}
-			if !row.streamOpen {
-				chatMsg = stored.Message
-			}
-			items = append(items, Item{
-				Message: &Message{
-					RequireApproval: stored.RequireApproval,
-					ID:              row.id,
-					AgentName:       row.agentName.String,
-					Message:         chatMsg,
-					Implicit:        row.implicit,
-					Pending:         row.actorPending,
-					Accepted:        row.actorAccepted,
-					TurnID:          row.actorTurnID,
-					InputMode:       row.actorInputMode,
-					InputOrigin:     row.inputOrigin,
-					SenderID:        row.senderID,
-					SenderName:      row.senderName,
-					ReportOutcome:   row.reportOutcome,
-				},
-			})
-
-		case "subsession":
-			// Skip if subsession_id is NULL (can happen if the sub-session was deleted
-			// and the foreign key set the reference to NULL)
-			if !row.subsessionID.Valid || row.subsessionID.String == "" {
-				slog.WarnContext(ctx, "Skipping subsession item with NULL reference", "session_id", sessionID, "position", row.position)
-				continue
-			}
-			if !recurseChildren {
-				items = append(items, Item{SubSession: &Session{ID: row.subsessionID.String, ParentID: sessionID}})
-				continue
-			}
-			// Recursively load sub-session
-			subSession, err := s.loadSession(ctx, q, row.subsessionID.String)
+func (s *SQLiteSessionStore) decodeSessionItem(ctx context.Context, q querier, sessionID string, row sessionItemRow, recurseChildren bool) (Item, error) {
+	switch row.itemType {
+	case "message":
+		var chatMsg chat.Message
+		if row.streamOpen {
+			// The scan and the chunk read are separate statements, so a settle may land
+			// in between. reconcileOpenRow re-checks the row and returns the canonical
+			// body when it has closed; a vanished row is skipped.
+			found, err := s.reconcileOpenRow(ctx, q, &row, nil, nil)
 			if err != nil {
-				if errors.Is(err, ErrNotFound) {
-					// Sub-session was deleted but item reference remains (orphaned reference)
-					slog.WarnContext(ctx, "Skipping orphaned subsession reference", "session_id", sessionID, "subsession_id", row.subsessionID.String)
-					continue
-				}
-				return nil, fmt.Errorf("getting sub-session %s: %w", row.subsessionID.String, classifySQLiteContextError(ctx, err))
+				return Item{}, fmt.Errorf("loading streaming message at position %d: %w", row.position, err)
 			}
-			items = append(items, Item{SubSession: subSession})
-
-		case "summary":
-			item := Item{Summary: row.summaryText.String, FirstKeptEntry: row.firstKeptEntry, Cost: row.cost, Model: row.model}
-			if row.usageJSON != "" {
-				var usage chat.Usage
-				if err := json.Unmarshal([]byte(row.usageJSON), &usage); err != nil {
-					return nil, fmt.Errorf("unmarshaling summary usage at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
-				}
-				item.Usage = &usage
+			if !found {
+				return Item{}, nil
 			}
-			if row.messageJSON.Valid && row.messageJSON.String != "" {
-				var compaction chat.CompactionResult
-				if err := json.Unmarshal([]byte(row.messageJSON.String), &compaction); err != nil {
-					return nil, fmt.Errorf("unmarshaling summary compaction at position %d: %w", row.position, err)
-				}
-				item.Compaction = &compaction
-			}
-			items = append(items, item)
-
-		case "error":
-			var e Error
-			if row.messageJSON.Valid && row.messageJSON.String != "" {
-				if err := json.Unmarshal([]byte(row.messageJSON.String), &e); err != nil {
-					return nil, fmt.Errorf("unmarshaling error at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
-				}
-			}
-			items = append(items, Item{Error: &e})
-
-		case "termination":
-			var term Termination
-			if row.messageJSON.Valid && row.messageJSON.String != "" {
-				if err := json.Unmarshal([]byte(row.messageJSON.String), &term); err != nil {
-					return nil, fmt.Errorf("unmarshaling termination at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
-				}
-			}
-			items = append(items, Item{Termination: &term})
 		}
-	}
+		var stored Message
+		if row.streamOpen {
+			chatMsg = row.openBody
+		} else if err := unmarshalStoredMessage([]byte(row.messageJSON.String), &stored); err != nil {
+			return Item{}, fmt.Errorf("unmarshaling message at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
+		}
+		if !row.streamOpen {
+			chatMsg = stored.Message
+		}
+		return Item{
+			Message: &Message{
+				RequireApproval: stored.RequireApproval,
+				ID:              row.id,
+				AgentName:       row.agentName.String,
+				Message:         chatMsg,
+				Implicit:        row.implicit,
+				Pending:         row.actorPending,
+				Accepted:        row.actorAccepted,
+				TurnID:          row.actorTurnID,
+				InputMode:       row.actorInputMode,
+				InputOrigin:     row.inputOrigin,
+				SenderID:        row.senderID,
+				SenderName:      row.senderName,
+				ReportOutcome:   row.reportOutcome,
+			},
+		}, nil
 
-	return items, nil
+	case "subsession":
+		// Skip if subsession_id is NULL (can happen if the sub-session was deleted
+		// and the foreign key set the reference to NULL)
+		if !row.subsessionID.Valid || row.subsessionID.String == "" {
+			slog.WarnContext(ctx, "Skipping subsession item with NULL reference", "session_id", sessionID, "position", row.position)
+			return Item{}, nil
+		}
+		if !recurseChildren {
+			return Item{SubSession: &Session{ID: row.subsessionID.String, ParentID: sessionID}}, nil
+		}
+		// Recursively load sub-session
+		subSession, err := s.loadSession(ctx, q, row.subsessionID.String)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				// Sub-session was deleted but item reference remains (orphaned reference)
+				slog.WarnContext(ctx, "Skipping orphaned subsession reference", "session_id", sessionID, "subsession_id", row.subsessionID.String)
+				return Item{}, nil
+			}
+			return Item{}, fmt.Errorf("getting sub-session %s: %w", row.subsessionID.String, classifySQLiteContextError(ctx, err))
+		}
+		return Item{SubSession: subSession}, nil
+
+	case "summary":
+		item := Item{Summary: row.summaryText.String, FirstKeptEntry: row.firstKeptEntry, Cost: row.cost, Model: row.model}
+		if row.usageJSON != "" {
+			var usage chat.Usage
+			if err := json.Unmarshal([]byte(row.usageJSON), &usage); err != nil {
+				return Item{}, fmt.Errorf("unmarshaling summary usage at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
+			}
+			item.Usage = &usage
+		}
+		if row.messageJSON.Valid && row.messageJSON.String != "" {
+			var compaction chat.CompactionResult
+			if err := json.Unmarshal([]byte(row.messageJSON.String), &compaction); err != nil {
+				return Item{}, fmt.Errorf("unmarshaling summary compaction at position %d: %w", row.position, err)
+			}
+			item.Compaction = &compaction
+		}
+		return item, nil
+
+	case "error":
+		var e Error
+		if row.messageJSON.Valid && row.messageJSON.String != "" {
+			if err := json.Unmarshal([]byte(row.messageJSON.String), &e); err != nil {
+				return Item{}, fmt.Errorf("unmarshaling error at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
+			}
+		}
+		return Item{Error: &e}, nil
+
+	case "termination":
+		var term Termination
+		if row.messageJSON.Valid && row.messageJSON.String != "" {
+			if err := json.Unmarshal([]byte(row.messageJSON.String), &term); err != nil {
+				return Item{}, fmt.Errorf("unmarshaling termination at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
+			}
+		}
+		return Item{Termination: &term}, nil
+	}
+	return Item{}, nil
 }
 
 func (s *SQLiteSessionStore) GetSessionByOrigin(ctx context.Context, id, origin string) (*Session, error) {

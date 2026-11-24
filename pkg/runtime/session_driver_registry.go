@@ -759,6 +759,10 @@ func (g *sessionDriverRegistry) PrepareRestore(ctx context.Context, sess *sessio
 }
 
 func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *session.Session, replaces *sessionDriver) (*restoreDriverReservation, error) {
+	return g.prepareRestoreView(ctx, sess, replaces, nil)
+}
+
+func (g *sessionDriverRegistry) prepareRestoreView(ctx context.Context, sess *session.Session, replaces *sessionDriver, history session.ViewHistoryStore) (*restoreDriverReservation, error) {
 	if sess == nil || sess.ID == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "restore_prepare"}
 	}
@@ -817,7 +821,20 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 			return nil, err
 		}
 	}
-	d := newSessionDriver(g.r, sess)
+	var stored *deferredSessionHistory
+	if history != nil {
+		total, pending, err := history.ReadViewHistoryState(ctx, sess.ID)
+		if err != nil {
+			return nil, err
+		}
+		stored = &deferredSessionHistory{store: history, total: total}
+		for _, item := range pending {
+			if item.Item.Message != nil && sess.TurnOutcome(item.Item.Message.TurnID) == "" {
+				stored.pending = append(stored.pending, queuedSessionInput(item.Item.Message, item.Position, true))
+			}
+		}
+	}
+	d := newSessionDriverWithHistory(g.r, sess, stored)
 	if initialLease != nil {
 		if err := d.ownerCall(ctx, func() error { d.teamEnvironment = initialLease; return nil }); err != nil {
 			_ = initialLease.Release(context.WithoutCancel(g.r.lifetime()))

@@ -204,6 +204,16 @@ type HistoricalViewReader interface {
 	HistoricalSessionView(ctx context.Context, sessionID string) (SessionHandle, PreparedSessionViewInfo, error)
 }
 
+// SessionViewMetadataPreparer opens a confirmed view without returning a full transcript.
+type SessionViewMetadataPreparer interface {
+	PrepareSessionViewMetadata(ctx context.Context, sessionID string) (PreparedSessionView, error)
+}
+
+// SessionViewMetadataReader confirms a view without cloning its transcript.
+type SessionViewMetadataReader interface {
+	ConfirmedSessionViewMetadata(ctx context.Context, sessionID string) (PreparedSessionViewInfo, error)
+}
+
 // SessionHistoryLimits bounds an opt-in tail/history response.
 type SessionHistoryLimits struct {
 	MaxItems     int
@@ -691,6 +701,8 @@ type ObserveOptions struct {
 	Tree        bool
 	// OrderedTree selects atomic descendant baselines and an ordered tree tail.
 	OrderedTree bool
+	// TreeMetadata keeps the topology and live events but omits transcript bodies from tree baselines.
+	TreeMetadata bool
 	// BackgroundOutputInterest seeds the observation's live background-output
 	// interest (session ID → process IDs) atomically with registration.
 	BackgroundOutputInterest map[string][]string

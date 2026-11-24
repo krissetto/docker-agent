@@ -731,6 +731,33 @@ func getAllMigrations() []Migration {
 				DROP TABLE IF EXISTS session_message_chunks;
 				ALTER TABLE session_items DROP COLUMN stream_open;`,
 		},
+		{
+			ID:          43,
+			Name:        "043_session_transcript_item_count",
+			Description: "Maintain absolute transcript positions for indexed history pages",
+			UpSQL: `
+				ALTER TABLE sessions ADD COLUMN transcript_item_count INTEGER NOT NULL DEFAULT 0;
+				UPDATE sessions SET transcript_item_count = (SELECT COUNT(*) FROM session_items WHERE session_id = sessions.id AND (item_type != 'subsession' OR subsession_id IS NOT NULL));
+				CREATE TRIGGER transcript_item_count_insert AFTER INSERT ON session_items
+				WHEN NEW.item_type != 'subsession' OR NEW.subsession_id IS NOT NULL BEGIN
+					UPDATE sessions SET transcript_item_count = transcript_item_count + 1 WHERE id = NEW.session_id;
+				END;
+				CREATE TRIGGER transcript_item_count_delete AFTER DELETE ON session_items
+				WHEN OLD.item_type != 'subsession' OR OLD.subsession_id IS NOT NULL BEGIN
+					UPDATE sessions SET transcript_item_count = transcript_item_count - 1 WHERE id = OLD.session_id;
+				END;
+				CREATE TRIGGER transcript_item_count_update AFTER UPDATE OF session_id, item_type, subsession_id ON session_items BEGIN
+					UPDATE sessions SET transcript_item_count = transcript_item_count - 1 WHERE id = OLD.session_id AND (OLD.item_type != 'subsession' OR OLD.subsession_id IS NOT NULL);
+					UPDATE sessions SET transcript_item_count = transcript_item_count + 1 WHERE id = NEW.session_id AND (NEW.item_type != 'subsession' OR NEW.subsession_id IS NOT NULL);
+				END;
+				CREATE INDEX idx_session_items_accepted_pending ON session_items(session_id, position) WHERE actor_pending = 1 AND actor_accepted = 1;
+			`,
+			DownSQL: `DROP INDEX IF EXISTS idx_session_items_accepted_pending;
+				DROP TRIGGER IF EXISTS transcript_item_count_update;
+				DROP TRIGGER IF EXISTS transcript_item_count_delete;
+				DROP TRIGGER IF EXISTS transcript_item_count_insert;
+				ALTER TABLE sessions DROP COLUMN transcript_item_count;`,
+		},
 	}
 }
 

@@ -109,6 +109,9 @@ func (d *sessionDriver) runOwner() {
 }
 
 func (d *sessionDriver) ownerSnapshot(ctx context.Context) (*session.Session, error) {
+	if err := d.ensureHistory(ctx); err != nil {
+		return nil, err
+	}
 	var snapshot *session.Session
 	err := d.ownerCall(ctx, func() error {
 		if d.sess == nil {

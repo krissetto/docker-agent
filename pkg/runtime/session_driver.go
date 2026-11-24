@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -117,6 +119,7 @@ type sessionDriver struct {
 	identityParent          string
 	identityAsync           bool
 
+	history           *deferredSessionHistory
 	viewDormant       bool
 	stoppedView       bool
 	explicitStopped   bool
@@ -285,26 +288,41 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 }
 
 func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
+	return newSessionDriverWithHistory(r, sess, nil)
+}
+
+func newSessionDriverWithHistory(r *LocalRuntime, sess *session.Session, history *deferredSessionHistory) *sessionDriver {
 	settled := make(chan struct{})
 	close(settled)
 	d := &sessionDriver{resourceOwner: tools.NewResourceOwner(), ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), treeWake: make(chan struct{}, 1), stopWake: make(chan struct{}, 1), retirementGate: make(chan struct{}, 1), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
 		d.identityID, d.identityParent, d.identityAsync = sess.ID, sess.ParentID, sess.AsyncSubagent
+		d.history = history
+		if history != nil {
+			for _, input := range history.pending {
+				d.addRestoredPending(input)
+			}
+			history.pending = nil
+		}
 		for position, item := range sess.MessagesSnapshot() {
 			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted || sess.TurnOutcome(item.Message.TurnID) != "" {
 				continue
 			}
 			queued := queuedSessionInput(item.Message, position, r.sessionStore != nil)
-			if item.Message.InputMode == "legacy_run" {
-				d.pending = append([]QueuedMessage{queued}, d.pending...)
-			} else {
-				d.pending = append(d.pending, queued)
-			}
+			d.addRestoredPending(queued)
 		}
 	}
 	d.publishRegistryStateLocked()
 	go d.runOwner()
 	return d
+}
+
+func (d *sessionDriver) addRestoredPending(queued QueuedMessage) {
+	if queued.InputMode == "legacy_run" {
+		d.pending = append([]QueuedMessage{queued}, d.pending...)
+	} else {
+		d.pending = append(d.pending, queued)
+	}
 }
 
 func (d *sessionDriver) Subscribe(buffer int) (seed []Event, events <-chan Event, cancel func()) {
@@ -781,6 +799,9 @@ func (d *sessionDriver) waitIfPaused(ctx context.Context, reached func()) (bool,
 }
 
 func (d *sessionDriver) cloneForAgentSwitch(ctx context.Context) (*session.Session, error) {
+	if err := d.ensureHistory(ctx); err != nil {
+		return nil, err
+	}
 	var snapshot *session.Session
 	err := d.ownerCall(ctx, func() error {
 		if err := d.admitLocked(SessionOperationSwitchAgent); err != nil {
@@ -1066,51 +1087,63 @@ func (d *sessionDriver) beginReclaimLocked() driverReclaimOutcome {
 	return driverReclaimed
 }
 
-func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLimits, buffer int, interest ...[]string) (driverObservation, SessionSnapshot, error) {
+func (h *sessionHandle) observeTailBaseline(ctx context.Context, limits SessionHistoryLimits, buffer int, interest []string) (driverObservation, SessionSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return driverObservation{}, SessionSnapshot{}, err
 	}
+	d := h.driver
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.reclaiming || (d.stopped && !d.stoppedView) || d.sess == nil {
 		return driverObservation{}, SessionSnapshot{}, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "observe"}
 	}
-	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), nil, buffer, interest...)
+	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), nil, buffer, interest)
 	if live == nil || cancel == nil {
 		return driverObservation{}, SessionSnapshot{}, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "observe"}
 	}
-	position := d.sess.ItemCount()
+	position := d.historyPositionLocked()
 	header, err := d.sess.HistoryHeaderSnapshot(limits.MaxBytes)
 	if err != nil {
 		cancel()
-		return driverObservation{}, SessionSnapshot{}, err
+		return driverObservation{}, SessionSnapshot{}, ErrHistoryMetadataTooLarge
 	}
 	status := d.statusLocked()
+	var tm *team.Team
+	if d.teamEnvironment != nil {
+		tm = d.teamEnvironment.Environment().Team()
+	} else if d.r.teamEnvironments == nil {
+		tm = d.r.team
+	}
+	presentation := h.observationPresentationForTeam(ctx, driverObservation{status: status, models: d.modelProviders, harness: d.harnessEffort}, tm)
 	interactions := make([]InteractionSnapshot, 0, len(d.interactions))
 	for id, interaction := range d.interactions {
-		interactions = append(interactions, InteractionSnapshot{SessionID: d.sessionIDLocked(), InteractionID: id, Kind: interaction.kind, Event: interaction.event})
+		snapshot := InteractionSnapshot{SessionID: d.sessionIDLocked(), InteractionID: id, Kind: interaction.kind, Event: interaction.event}
+		if elicitation, ok := interaction.event.(*ElicitationRequestEvent); ok {
+			snapshot.ElicitationID = elicitation.ElicitationID
+		}
+		interactions = append(interactions, snapshot)
 	}
 	pending := make([]PendingInput, 0, len(d.pending))
 	for _, q := range d.pending {
-		pending = append(pending, PendingInput{TurnID: q.ID, Content: q.Content, MultiContent: q.MultiContent, SessionPosition: q.AcceptedPosition, InputOrigin: q.InputOrigin, SenderID: q.SenderID, SenderName: q.SenderName, ReportOutcome: q.ReportOutcome, InputMode: q.InputMode})
+		pending = append(pending, PendingInput{TurnID: cmp.Or(q.RequestID, q.ID), Content: q.Content, MultiContent: q.MultiContent, SessionPosition: q.AcceptedPosition, InputOrigin: q.InputOrigin, SenderID: q.SenderID, SenderName: q.SenderName, ReportOutcome: q.ReportOutcome, InputMode: q.InputMode})
 	}
 	epoch, _ := d.events.CurrentCursor(d.sessionIDLocked())
 	historyRevision := d.sess.HistoryRevisionSnapshot()
-	base := SessionSnapshot{Projection: "tail", Session: header, Status: status, BackgroundProcesses: d.backgroundProcessesLocked(), Interactions: interactions, PendingInputs: pending, Epoch: epoch, Cursor: cursor, TranscriptPosition: position, TitleStatus: d.titleStatus}
+	base := SessionSnapshot{Projection: "tail", Session: header, Status: status, BackgroundProcesses: d.backgroundProcessesLocked(), Interactions: interactions, PendingInputs: pending, Epoch: epoch, Cursor: cursor, TranscriptPosition: position, TitleStatus: d.titleStatus, Presentation: presentation}
 	if !historyPageFits(base, limits.MaxBytes) {
 		cancel()
 		return driverObservation{}, SessionSnapshot{}, ErrHistoryMetadataTooLarge
 	}
-	page, err := d.sess.ReadBoundedItemsWithBudget(position, limits.MaxItems, limits.MaxItemBytes, func(candidate session.BoundedItemPage) bool {
-		candidate.TotalItems = position
-		candidate.BeforePosition = position
-		view := base
-		view.Items = candidate.Items
-		view.History = &candidate
-		if candidate.HasMore {
-			view.HistoryCursor = encodeHistoryCursor(historyCursor{Version: 1, SessionID: d.sessionIDLocked(), Epoch: epoch, AnchorCursor: cursor, AnchorPosition: position, BeforePosition: candidate.NextBeforePosition, HistoryRevision: historyRevision})
-		}
-		return historyPageFits(view, limits.MaxBytes)
+	project := func(page session.BoundedItemPage) SessionSnapshot {
+		view := snapshotFromHistoryPage(d.identityID, epoch, cursor, position, page, historyRevision)
+		view.Session = header
+		view.Status, view.BackgroundProcesses = base.Status, base.BackgroundProcesses
+		view.Interactions, view.PendingInputs, view.TitleStatus, view.Presentation = base.Interactions, base.PendingInputs, base.TitleStatus, base.Presentation
+		view.Session.TurnTimings, view.Session.TurnOutcomes = page.TurnTimings, page.TurnOutcomes
+		return view
+	}
+	page, err := d.readHistoryLocked(ctx, position, 0, limits, func(candidate session.BoundedItemPage) bool {
+		return session.JSONWithinBound(historyPageWire(project(candidate)), limits.MaxBytes)
 	})
 	if err != nil {
 		cancel()
@@ -1119,14 +1152,7 @@ func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLi
 		}
 		return driverObservation{}, SessionSnapshot{}, err
 	}
-	page.TotalItems = position
-	page.BeforePosition = position
-	snapshot := base
-	snapshot.Items = page.Items
-	snapshot.History = &page
-	if page.HasMore {
-		snapshot.HistoryCursor = encodeHistoryCursor(historyCursor{Version: 1, SessionID: d.sessionIDLocked(), Epoch: epoch, AnchorCursor: cursor, AnchorPosition: position, BeforePosition: page.NextBeforePosition, HistoryRevision: historyRevision})
-	}
+	snapshot := project(page)
 	if !historyPageFits(snapshot, limits.MaxBytes) {
 		cancel()
 		return driverObservation{}, SessionSnapshot{}, ErrHistoryMetadataTooLarge
@@ -1143,15 +1169,18 @@ func (d *sessionDriver) observeTail(ctx context.Context, limits SessionHistoryLi
 			return driverObservation{}, SessionSnapshot{}, ErrHistoryMetadataTooLarge
 		}
 	}
-	if page.HasMore {
-		snapshot.HistoryCursor = encodeHistoryCursor(historyCursor{Version: 1, SessionID: d.sessionIDLocked(), Epoch: epoch, AnchorCursor: cursor, AnchorPosition: position, BeforePosition: page.NextBeforePosition, HistoryRevision: historyRevision})
-	}
-	replay := make([]SessionEvent, len(seed))
-	for i, item := range seed {
-		replay[i] = sessionEnvelope(d.sessionIDLocked(), item)
-	}
 	obs := driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: header, status: status, interactions: interactions, pendingInputs: pending, position: position, harness: d.harnessEffort, titleStatus: d.titleStatus, backgroundProcesses: slices.Clone(base.BackgroundProcesses)}
 	return obs, snapshot, nil
+}
+
+func (d *sessionDriver) observeMetadata(buffer int, interest []string) driverObservation {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.reclaiming || (d.stopped && !d.stoppedView) || d.sess == nil {
+		return driverObservation{}
+	}
+	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.identityID, nil, buffer, interest)
+	return driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: d.sess.MetadataSnapshot(), status: d.statusLocked(), position: d.historyPositionLocked(), models: slices.Clone(d.modelProviders), harness: d.harnessEffort, backgroundProcesses: d.backgroundProcessesLocked()}
 }
 
 func (d *sessionDriver) observe(since *uint64, buffer int, interest ...[]string) driverObservation {
@@ -1600,6 +1629,9 @@ func (d *sessionDriver) Status() SessionStatus {
 // separate state: idle compaction summarizes only history, retaining the FIFO
 // unchanged behind the reservation until compaction releases it.
 func (d *sessionDriver) compact(ctx context.Context, additionalPrompt string, sink EventSink) error {
+	if err := d.ensureHistory(ctx); err != nil {
+		return err
+	}
 	var operation uint64
 	var running bool
 	var scratch *session.Session
@@ -1824,6 +1856,9 @@ func (d *sessionDriver) prepareStartAdmissionLocked(ctx context.Context, wake bo
 var errSessionAdmissionContended = errors.New("session admission is contended")
 
 func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, continuation bool) (context.Context, uint64, []func(), error) {
+	if err := d.ensureHistory(ctx); err != nil {
+		return nil, 0, nil, err
+	}
 	var gate sessionStartGate
 	var abort func()
 	var startDone chan struct{}
@@ -2430,6 +2465,7 @@ func (d *sessionDriver) replaceSession(sess *session.Session) error {
 		d.invalidateTitleLocked()
 		next.MarkHistoryChanged()
 		d.sess = next
+		d.history = nil
 		d.bindingVersion++
 		return nil
 	})

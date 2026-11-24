@@ -1011,7 +1011,11 @@ func (h *sessionHandle) RunSkillFork(ctx context.Context, args skillstool.RunSki
 			sink.Emit(event)
 		}
 	})
-	return h.runtime.RunSkillFork(opCtx, h.driver.session(), args, journalSink)
+	snapshot, err := h.driver.ownerSnapshot(opCtx)
+	if err != nil {
+		return nil, err
+	}
+	return h.runtime.RunSkillFork(opCtx, snapshot, args, journalSink)
 }
 
 func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, args skillstool.RunSkillArgs) error {
@@ -1167,6 +1171,9 @@ func (h *sessionHandle) sameSessionRoot(targetID string) bool {
 }
 
 func (h *sessionHandle) ContextBreakdown(ctx context.Context) (*ContextBreakdown, error) {
+	if err := h.driver.ensureHistory(ctx); err != nil {
+		return nil, err
+	}
 	return h.runtime.ContextBreakdown(h.driver.scopeModels(ctx), h.driver.session())
 }
 
@@ -1403,7 +1410,18 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	if since != nil && options.SinceEpoch != h.driver.events.epoch {
 		since = nil
 	}
-	observed := h.driver.observe(since, buffer, options.BackgroundOutputInterest[h.sessionID])
+	interest := options.BackgroundOutputInterest[h.sessionID]
+	var observed driverObservation
+	var projection string
+	if options.TreeMetadata {
+		observed = h.driver.observeMetadata(buffer, interest)
+		projection = "metadata"
+	} else {
+		if err := h.driver.ensureHistory(ctx); err != nil {
+			return Observation{}, err
+		}
+		observed = h.driver.observe(since, buffer, interest)
+	}
 	if observed.live == nil || observed.cancel == nil {
 		return Observation{}, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, Operation: "observe"}
 	}
@@ -1429,7 +1447,7 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	}
 	presentation := h.observationPresentation(ctx, observed)
 	return Observation{
-		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, BackgroundProcesses: observed.backgroundProcesses, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position, Presentation: presentation, TitleStatus: observed.titleStatus}},
+		Initial: []SessionSnapshot{{Projection: projection, Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, BackgroundProcesses: observed.backgroundProcesses, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position, Presentation: presentation, TitleStatus: observed.titleStatus}},
 		Replay:  replay, Events: observed.live, Cancel: cancel, SetBackgroundOutputInterest: h.driver.events.backgroundOutputInterestSetter(h.sessionID, observed.live),
 	}, nil
 }
@@ -1443,7 +1461,7 @@ func (h *sessionHandle) observeTail(ctx context.Context, options ObserveOptions)
 	if buffer <= 0 {
 		buffer = defaultEventChannelCapacity
 	}
-	observed, tail, err := h.driver.observeTail(ctx, limits, buffer, options.BackgroundOutputInterest[h.sessionID])
+	observed, tail, err := h.observeTailBaseline(ctx, limits, buffer, options.BackgroundOutputInterest[h.sessionID])
 	if err != nil {
 		return Observation{}, err
 	}
@@ -1461,6 +1479,12 @@ func (h *sessionHandle) observeTail(ctx context.Context, options ObserveOptions)
 	replay := make([]SessionEvent, len(observed.seed))
 	for i, item := range observed.seed {
 		replay[i] = sessionEnvelope(h.sessionID, item)
+	}
+	if tree, ok := snapshotForRoot(h.runtime.subagents.tree.Snapshot(), subagent.SessionRootID(h.sessionID)); ok && tail.Session.ParentID == "" {
+		tail.Session.SetSubagentTree(&tree)
+		if !historyPageFits(tail, limits.MaxBytes) {
+			tail.Session.SetSubagentTree(nil) // The tree metadata stream carries full topology separately.
+		}
 	}
 	return Observation{Initial: []SessionSnapshot{tail}, Replay: replay, Events: observed.live, Cancel: cancel, SetBackgroundOutputInterest: h.driver.events.backgroundOutputInterestSetter(h.sessionID, observed.live)}, nil
 }

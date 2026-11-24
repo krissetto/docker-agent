@@ -4,14 +4,14 @@ import (
 	"encoding/json"
 )
 
-// MarshalJSON omits Session.Messages only for the explicitly marked tail
-// projection. Default snapshots preserve the historic full snapshot contract.
+// MarshalJSON omits Session.Messages only for explicitly transcript-free
+// projections. Default snapshots preserve the historic full snapshot contract.
 func (s SessionSnapshot[State, Kind, Event]) MarshalJSON() ([]byte, error) {
 	type plain SessionSnapshot[State, Kind, Event]
-	if s.Projection != SessionHistoryProjection {
+	if s.Projection != SessionHistoryProjection && s.Projection != SessionViewMetadataProjection {
 		return json.Marshal(plain(s))
 	}
-	if s.Session != nil {
+	if s.Session != nil && s.Session.ItemCount() != 0 {
 		header, err := s.Session.HistoryHeaderSnapshot(4 << 20)
 		if err != nil {
 			return nil, err

@@ -36,6 +36,9 @@ type BoundedItemPage struct {
 	NextBeforePosition       int
 	SerializedItemBytes      int
 	ScannedPositions         int
+	TurnTimings              map[string]TurnTiming
+	TurnOutcomes             map[string]string
+	NextStoragePosition      int64 // optional store-specific keyset boundary
 }
 
 func (s *Session) ReadBoundedItems(beforePosition, maxScan, maxItemBytes, maxPageItemBytes int) (BoundedItemPage, error) {
@@ -56,15 +59,24 @@ func (s *Session) ReadBoundedItemsWithBudget(beforePosition, maxScan, maxItemByt
 	if beforePosition > len(s.Messages) {
 		return BoundedItemPage{}, errors.New("history position exceeds transcript")
 	}
-	page := BoundedItemPage{BeforePosition: beforePosition, TotalItems: len(s.Messages), StartPosition: beforePosition, NextBeforePosition: beforePosition, Items: make([]BoundedItem, 0, maxScan)}
+	return readBoundedItemWindow(beforePosition, len(s.Messages), maxScan, maxItemBytes, fits, func(pos int) (Item, int64, bool, error) {
+		return s.Messages[pos], 0, false, nil
+	}, s.TurnTimings, s.TurnOutcomes)
+}
+
+func readBoundedItemWindow(beforePosition, total, maxScan, maxItemBytes int, fits func(BoundedItemPage) bool, read func(int) (Item, int64, bool, error), timings map[string]TurnTiming, outcomes map[string]string) (BoundedItemPage, error) {
+	page := BoundedItemPage{BeforePosition: beforePosition, TotalItems: total, StartPosition: beforePosition, NextBeforePosition: beforePosition, Items: make([]BoundedItem, 0, maxScan)}
 	lower := max(0, beforePosition-maxScan)
 	scanned := 0
 	for pos := beforePosition - 1; pos >= lower; pos-- {
-		item := s.Messages[pos]
-		if conservativeJSONUpperBound(reflect.ValueOf(item), maxItemBytes, 0) > maxItemBytes {
+		item, storagePosition, oversized, err := read(pos)
+		if err != nil {
+			return BoundedItemPage{}, err
+		}
+		if oversized || conservativeJSONUpperBound(reflect.ValueOf(item), maxItemBytes, 0) > maxItemBytes {
 			trial := page
 			trial.OmittedPositions = append(slices.Clone(page.OmittedPositions), pos)
-			trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions = pos, pos, scanned+1
+			trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions, trial.NextStoragePosition = pos, pos, scanned+1, storagePosition
 			trial.HasMore = pos > 0
 			if !fits(trial) {
 				if scanned == 0 {
@@ -91,8 +103,9 @@ func (s *Session) ReadBoundedItemsWithBudget(beforePosition, maxScan, maxItemByt
 		}
 		trial := page
 		trial.Items = append(slices.Clone(page.Items), BoundedItem{Position: pos, Item: detached})
+		trial.addTurnMetadata(detached, timings, outcomes)
 		trial.SerializedItemBytes += len(data)
-		trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions = pos, pos, scanned+1
+		trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions, trial.NextStoragePosition = pos, pos, scanned+1, storagePosition
 		trial.HasMore = pos > 0
 		if fits(trial) {
 			page = trial
@@ -102,7 +115,7 @@ func (s *Session) ReadBoundedItemsWithBudget(beforePosition, maxScan, maxItemByt
 		if scanned == 0 {
 			trial = page
 			trial.OmittedResponsePositions = append(slices.Clone(page.OmittedResponsePositions), pos)
-			trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions = pos, pos, 1
+			trial.StartPosition, trial.NextBeforePosition, trial.ScannedPositions, trial.NextStoragePosition = pos, pos, 1, storagePosition
 			trial.HasMore = pos > 0
 			if !fits(trial) {
 				return BoundedItemPage{}, ErrHistoryPageEnvelopeTooLarge
@@ -232,29 +245,69 @@ func conservativeJSONUpperBound(v reflect.Value, limit, depth int) int {
 	}
 }
 
-// HistoryRevisionSnapshot identifies in-place transcript changes within a
-// runtime epoch. Appends do not alter the revision.
-// HistoryHeaderSnapshot copies only bounded identity metadata, never history.
+// HistoryHeaderSnapshot copies bounded presentation metadata, never transcript or per-turn records.
 func (s *Session) HistoryHeaderSnapshot(maxBytes int) (*Session, error) {
 	if s == nil || maxBytes < 1 {
 		return nil, errors.New("invalid history header limit")
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if escapedJSONStringBytes(s.ID, maxBytes) > maxBytes || escapedJSONStringBytes(s.Title, maxBytes) > maxBytes || escapedJSONStringBytes(s.WorkingDir, maxBytes) > maxBytes || len(s.Attributes) > 4096 {
+	header := &Session{
+		ID: s.ID, ParentID: s.ParentID, AgentName: s.AgentName, AgentID: s.AgentID,
+		Origin: s.Origin, InputID: s.InputID, Title: s.Title, CreatedAt: s.CreatedAt,
+		Evals: s.Evals, EvalResult: s.EvalResult, WorkingDir: s.WorkingDir,
+		SafetyPolicy: s.SafetyPolicy, PriorSafetyPolicy: s.PriorSafetyPolicy, ToolsApproved: s.ToolsApproved,
+		NonInteractive: s.NonInteractive, HideToolResults: s.HideToolResults, SendUserMessage: s.SendUserMessage,
+		MaxIterations: s.MaxIterations, MaxConsecutiveToolCalls: s.MaxConsecutiveToolCalls,
+		MaxOldToolCallTokens: s.MaxOldToolCallTokens, MaxToolResultTokens: s.MaxToolResultTokens,
+		Starred: s.Starred, InputTokens: s.InputTokens, OutputTokens: s.OutputTokens, Cost: s.Cost,
+		Permissions: s.Permissions, Attributes: s.Attributes, AgentModelOverrides: s.AgentModelOverrides,
+		AgentThinkingLevels: s.AgentThinkingLevels, CustomModelsUsed: s.CustomModelsUsed,
+		AttachedFiles: s.AttachedFiles, AsyncSubagent: s.AsyncSubagent,
+	}
+	if !JSONWithinBound(header, maxBytes) {
 		return nil, errors.New("history metadata exceeds response limit")
 	}
-	attrs := make(map[string]string, len(s.Attributes))
-	budget := maxBytes
-	for key, value := range s.Attributes {
-		kb, vb := escapedJSONStringBytes(key, budget), escapedJSONStringBytes(value, budget)
-		if kb > budget || vb > budget || kb+vb > budget {
-			return nil, errors.New("history metadata exceeds response limit")
-		}
-		budget -= kb + vb
-		attrs[key] = value
+	// Instruction context, topology and per-turn records have independent sizes.
+	return header.Clone(), nil
+}
+
+// RestoreHistoryItems materializes a previously unhydrated transcript without changing its revision.
+// The caller transfers ownership of the freshly read items.
+func (s *Session) RestoreHistoryItems(items []Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Messages = items
+}
+
+// SetHistoryTurnMetadata adds durable work metadata for a storage-backed page.
+func (s *Session) SetHistoryTurnMetadata(page *BoundedItemPage) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range page.Items {
+		page.addTurnMetadata(item.Item, s.TurnTimings, s.TurnOutcomes)
 	}
-	return &Session{ID: s.ID, ParentID: s.ParentID, Title: s.Title, WorkingDir: s.WorkingDir, AgentName: s.AgentName, AgentID: s.AgentID, Attributes: maps.Clone(attrs)}, nil
+}
+
+func (p *BoundedItemPage) addTurnMetadata(item Item, timings map[string]TurnTiming, outcomes map[string]string) {
+	if item.Message == nil || item.Message.TurnID == "" {
+		return
+	}
+	id := item.Message.TurnID
+	if timing, ok := timings[id]; ok {
+		p.TurnTimings = maps.Clone(p.TurnTimings)
+		if p.TurnTimings == nil {
+			p.TurnTimings = make(map[string]TurnTiming)
+		}
+		p.TurnTimings[id] = timing
+	}
+	if outcome, ok := outcomes[id]; ok {
+		p.TurnOutcomes = maps.Clone(p.TurnOutcomes)
+		if p.TurnOutcomes == nil {
+			p.TurnOutcomes = make(map[string]string)
+		}
+		p.TurnOutcomes[id] = outcome
+	}
 }
 
 func conservativeStruct(v reflect.Value, limit, depth int) int {
@@ -338,6 +391,8 @@ func BoundedJSONSize(value any, limit int) int {
 	return conservativeJSONUpperBound(reflect.ValueOf(value), limit, 0)
 }
 
+// HistoryRevisionSnapshot identifies in-place transcript changes within a
+// runtime epoch. Appends do not alter the revision.
 func (s *Session) HistoryRevisionSnapshot() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

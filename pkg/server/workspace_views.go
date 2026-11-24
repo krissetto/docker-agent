@@ -64,11 +64,22 @@ func (w *workspaceSessionRuntimes) acquireViewRuntime(ctx context.Context, id st
 }
 
 func (w *workspaceSessionRuntimes) ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+	return w.confirmedSessionViewInfo(ctx, id, false)
+}
+
+func (w *workspaceSessionRuntimes) ConfirmedSessionViewMetadata(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+	return w.confirmedSessionViewInfo(ctx, id, true)
+}
+
+func (w *workspaceSessionRuntimes) confirmedSessionViewInfo(ctx context.Context, id string, metadataOnly bool) (runtime.PreparedSessionViewInfo, error) {
 	rt, _, release, err := w.acquireViewRuntime(ctx, id)
 	if err != nil {
 		return runtime.PreparedSessionViewInfo{}, err
 	}
 	defer release()
+	if reader, ok := rt.(runtime.SessionViewMetadataReader); ok && metadataOnly {
+		return reader.ConfirmedSessionViewMetadata(ctx, id)
+	}
 	reader, ok := rt.(runtime.SessionViewInfoReader)
 	if !ok {
 		return runtime.PreparedSessionViewInfo{}, runtime.UnsupportedSessionOperation(id, "prepare_view")
@@ -77,16 +88,27 @@ func (w *workspaceSessionRuntimes) ConfirmedSessionViewInfo(ctx context.Context,
 }
 
 func (w *workspaceSessionRuntimes) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	return w.prepareSessionView(ctx, id, false)
+}
+
+func (w *workspaceSessionRuntimes) PrepareSessionViewMetadata(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	return w.prepareSessionView(ctx, id, true)
+}
+
+func (w *workspaceSessionRuntimes) prepareSessionView(ctx context.Context, id string, metadataOnly bool) (runtime.PreparedSessionView, error) {
 	rt, key, release, err := w.acquireViewRuntime(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	preparer, ok := rt.(runtime.SessionViewPreparer)
-	if !ok {
+	var prepared runtime.PreparedSessionView
+	if fast, ok := rt.(runtime.SessionViewMetadataPreparer); ok && metadataOnly {
+		prepared, err = fast.PrepareSessionViewMetadata(ctx, id)
+	} else if preparer, ok := rt.(runtime.SessionViewPreparer); ok {
+		prepared, err = preparer.PrepareSessionView(ctx, id)
+	} else {
 		release()
 		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
 	}
-	prepared, err := preparer.PrepareSessionView(ctx, id)
 	if err != nil {
 		release()
 		return nil, err
