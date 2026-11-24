@@ -79,7 +79,7 @@ func TestRemoteSelectedHistoryProjectionsAndLegacyFallback(t *testing.T) {
 					require.Equal(t, api.SessionAPIPath+"/s/events:", <-requests)
 				}
 			}
-			tree, err := handle.ObserveTreeMetadata(t.Context())
+			tree, err := handle.Observe(t.Context(), ObserveOptions{Tree: true, OrderedTree: true})
 			require.NoError(t, err)
 			defer tree.Cancel()
 			require.Equal(t, api.SessionAPIPath+"/s/events:metadata", <-requests)

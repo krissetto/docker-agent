@@ -664,15 +664,7 @@ func (a *App) startSubagentTreeWatch(ctx context.Context, handle runtime.Session
 	go func() {
 		attempt, rebaselines := 0, 0
 		for ctx.Err() == nil {
-			var observation runtime.Observation
-			var err error
-			if observer, ok := handle.(interface {
-				ObserveTreeMetadata(ctx context.Context) (runtime.Observation, error)
-			}); ok && a.SelectedSessionHistory() {
-				observation, err = observer.ObserveTreeMetadata(ctx)
-			} else {
-				observation, err = handle.Observe(ctx, runtime.ObserveOptions{Tree: true, OrderedTree: true})
-			}
+			observation, err := handle.Observe(ctx, runtime.ObserveOptions{Tree: true, OrderedTree: true})
 			if err == nil && observation.SessionsAdded == nil && observation.TreeUpdates == nil {
 				// A single-session observer cannot represent descendants.
 				if observation.Cancel != nil {

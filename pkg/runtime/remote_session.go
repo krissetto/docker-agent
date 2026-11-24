@@ -408,6 +408,10 @@ func (s *remoteSession) StopSubtree(ctx context.Context) error {
 
 func (s *remoteSession) Release(context.Context) error { return nil }
 func (s *remoteSession) Observe(ctx context.Context, options ObserveOptions) (Observation, error) {
+	// Both the App tree watch and the tab's background-status feed borrow this handle.
+	if s.runtime.selectedSessionHistory && options.Tree && options.OrderedTree && options.HistoryTail == nil {
+		return s.observeTreeMetadata(ctx, options)
+	}
 	observation, err := s.runtime.client.attachSession(ctx, s.ID(), options)
 	if options.HistoryTail != nil && unsupportedObservationProjection(err) {
 		options.HistoryTail = nil

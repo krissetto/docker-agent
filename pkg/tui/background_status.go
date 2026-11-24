@@ -90,7 +90,7 @@ func (m *appModel) openBackgroundStatusCmd(tabID string) tea.Cmd {
 	rt := runner.App.SessionRuntime()
 	ctx := m.ctx()
 	handle := runner.App.SessionHandle()
-	useResolved := m.savedTabEntries != nil
+	useResolved := m.savedTabEntries != nil || runner.App.SelectedSessionHistory()
 	return func() tea.Msg {
 		if useResolved && handle != nil {
 			if handle.Metadata().Historical {

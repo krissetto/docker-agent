@@ -36,11 +36,10 @@ func unsupportedObservationProjection(err error) bool {
 	return errors.Is(err, ErrUnsupported) || (errors.As(err, &httpErr) && (httpErr.status == http.StatusBadRequest || httpErr.status == http.StatusNotImplemented || httpErr.status == http.StatusRequestEntityTooLarge))
 }
 
-func (s *remoteSession) ObserveTreeMetadata(ctx context.Context) (Observation, error) {
-	options := ObserveOptions{Tree: true, OrderedTree: true}
+func (s *remoteSession) observeTreeMetadata(ctx context.Context, options ObserveOptions) (Observation, error) {
 	observation, err := s.runtime.client.attachSessionProjection(ctx, s.ID(), options, api.SessionViewMetadataProjection)
 	if unsupportedObservationProjection(err) {
-		return s.Observe(ctx, options)
+		return s.runtime.client.attachSession(ctx, s.ID(), options)
 	}
 	return observation, err
 }
