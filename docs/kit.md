@@ -258,23 +258,46 @@ attaches a TUI or headless client; session listing also attaches only. Neither
 starts/restarts an API or opens a local database. Missing hooks/dead servers
 fail clearly; restart the sandbox instead of relying on a connection fallback.
 
-To diagnose a slow reopen, pass `--debug --log-file /tmp/kit-reopen.log` as
-Kit connection arguments. For a large-session reattach, add `--session ID` and
-use a separate log file. Record the wall time from requesting the tab to the
-first usable screen; the guest log only measures after the guest process starts.
-Extract the content-free timing records from the guest log before sharing:
+To diagnose a slow reopen, add `--debug --log-file /tmp/kit-reopen.log` after
+`--` on the connection, for example `sbx run --name "$NAME" -- --debug --log-file /tmp/kit-reopen.log`
+(use your sandbox's actual name). For a large-session reattach, also pass
+`--session ID` and a separate log file. `launch.sh` forwards these to the guest
+client, so the log path is a **guest** path. Extract the content-free timing
+records from it inside the guest before sharing:
 
 ```sh
 grep -E 'msg="(Managed API|Session transport|Session presentation) timing"' /tmp/kit-reopen.log
 ```
 
-These records separate authenticated readiness, optional source registration,
-view requests, stream baseline delivery and transcript presentation. Transport
-`headers_elapsed` is time to response headers; `response_bytes` counts decoded
-HTTP body bytes read, not TCP traffic. A standalone reproduction can also pass
-`--debug --log-file /tmp/kit-server-timing.log` to `serve api --managed-api`
-and extract `msg="Session stream timing"` for server-side baseline preparation
-and writes. Do not share full debug logs, which can contain unrelated details.
+Each selected line carries only `time`, `level`, `msg`, `phase`, durations
+(`elapsed`, `headers_elapsed`, `prepare_elapsed`, `commit_elapsed`,
+`send_elapsed`), `response_bytes`, HTTP `status`, `items`, and booleans (`ok`,
+`selected`, `attach_only`, `tree`, `resumed`, `metadata_only`). No session IDs,
+paths, titles or content are emitted, so these lines need no redaction. Do not
+share the full debug log: other records in it can include session IDs, paths
+and error details.
+
+Guest timings start when the guest client process starts. Host-side time before
+that (`sbx run` itself, sandbox boot or resume, and the lifecycle API startup)
+is not in the log. Record the wall time from the host action to the first usable
+screen yourself. `connection_ready` covers the attach's authenticated readiness
+wait (up to 30 seconds when the API is not ready yet), and `register_source`
+covers an optional team registration. `startup_view`, `prepare_view`,
+`open_view`, `create_session` and `observe_baseline` cover view requests and
+stream baselines. `headers_elapsed` is time to response headers, and
+`response_bytes` counts decoded HTTP body bytes read, not TCP traffic.
+`restore_saved_tab`, `saved_tab_catalog`, `first_frame`, `hosted_view_ready`
+and `replay_ready` cover TUI presentation.
+
+The lifecycle-owned API does not emit server-side timing records: `start.sh`
+does not pass `--debug`, so its `server.log` (under the managed state directory
+described below, by default
+`/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/server.log`)
+holds info-level records only. Server timings (`msg="Session stream timing"`:
+view preparation and commit, baseline preparation and write) are available only
+from a standalone reproduction that starts
+`serve api --managed-api --debug --log-file /tmp/kit-server-timing.log`. They go
+to that `--log-file`, not to the managed `server.log`.
 
 **Client exit detaches, not cancels accepted server work.** Explicit cancellation
 remains necessary to stop work. Required `long-running@1` prevents sandbox
