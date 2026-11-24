@@ -94,11 +94,16 @@ type backgroundCap struct{ s *sessionImpl }
 // Subscribe streams out-of-turn descendant usage and subagent status, derived from
 // the ordered tree observation. Nothing else is guaranteed on this stream.
 func (c backgroundCap) Subscribe(ctx context.Context) (facade.Subscription, error) {
-	observation, err := c.s.handle.Observe(ctx, runtime.ObserveOptions{Tree: true, OrderedTree: true})
+	return SubscribeBackground(ctx, c.s.handle)
+}
+
+// SubscribeBackground borrows a resolved handle without opening the view again.
+func SubscribeBackground(ctx context.Context, handle runtime.SessionHandle) (facade.Subscription, error) {
+	observation, err := handle.Observe(ctx, runtime.ObserveOptions{Tree: true, OrderedTree: true})
 	if err != nil {
 		return facade.Subscription{}, err
 	}
-	root := c.s.handle.ID()
+	root := handle.ID()
 	tr := newTranslator(root)
 	box := newMailbox()
 	seed := func(snapshot *runtime.SessionSnapshot) {

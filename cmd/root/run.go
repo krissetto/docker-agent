@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -596,7 +597,11 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	if remote, ok := b.(*remoteBackend); ok {
 		remote.restoreInitialTab = f.shouldRestoreInitialTab(useTUI, args, userSettings)
 	}
+	openStarted := time.Now()
 	rt, sessions, sess, cleanup, err := b.CreateSession(ctx, loadResult, b.CreateSessionRequest(wd))
+	if f.managedAPI {
+		slog.DebugContext(ctx, "Managed API timing", "phase", "startup_view", "elapsed", time.Since(openStarted), "ok", err == nil)
+	}
 	if err != nil {
 		return err
 	}
@@ -647,6 +652,16 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		Restorer(app.Services, runtime.SessionRuntime) tui.SessionRestorer
 	}); ok {
 		tuiOptions = append(tuiOptions, tui.WithSessionRestorer(restorer.Restorer(rt, sessions)))
+	}
+	if remote, ok := b.(*remoteBackend); ok && f.managedAPIAttach {
+		if transport, ok := sessions.(*runtime.SessionTransport); ok {
+			tuiOptions = append(tuiOptions, tui.WithSavedTabEntries(func(ctx context.Context) ([]runtime.SessionSummaryEntry, error) {
+				rows, err := transport.ListSessionSummaries(ctx, runtime.SessionSummaryOptions{IncludeChildren: true})
+				return slices.DeleteFunc(rows, func(row runtime.SessionSummaryEntry) bool {
+					return row.Source != remote.agentFileName || (!row.Loadable && !row.RequiresConfirmation)
+				}), err
+			}))
+		}
 	}
 	if f.remoteAddress != "" && !f.managedAPI {
 		tuiOptions = append(tuiOptions, tui.WithRemoteWorkspace(sess.WorkingDir))

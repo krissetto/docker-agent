@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -39,6 +41,7 @@ func loadHostedSession(ctx context.Context, owner *supervisor.Supervisor, id str
 }
 
 type hostedLoadRequest struct {
+	started                           time.Time
 	restoringTabs                     bool
 	application                       *app.App
 	targetApp                         *app.App
@@ -65,7 +68,7 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 	generation, _ := m.supervisor.RouteGeneration(m.paneFocus())
 	lifetime := m.ctx()
 	ctx, cancel := context.WithCancel(lifetime)
-	request := &hostedLoadRequest{restoringTabs: m.restoringTabs, application: m.application, focus: m.paneFocus(), target: target, persisted: id, generation: generation, cancel: cancel, sidebar: m.chatPage.GetSidebarSettings(), send: send}
+	request := &hostedLoadRequest{started: time.Now(), restoringTabs: m.restoringTabs, application: m.application, focus: m.paneFocus(), target: target, persisted: id, generation: generation, cancel: cancel, sidebar: m.chatPage.GetSidebarSettings(), send: send}
 	if target != "" {
 		request.pending = m.pendingRestores[target]
 		request.oldPersisted = m.persistedSessionID(target)
@@ -176,6 +179,9 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 		return notification.ErrorCmd("Cannot attach loaded session: " + err.Error())
 	}
 	defer closeResult()
+	if m.savedTabEntries != nil {
+		slog.DebugContext(m.ctx(), "Session presentation timing", "phase", "hosted_view_ready", "elapsed", time.Since(request.started))
+	}
 	sess := application.Session()
 	if sess == nil || sess.ID != request.persisted {
 		application.Close()
@@ -186,7 +192,7 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 		_, cmd := m.handleSwitchTab(existing.ID)
 		return cmd
 	}
-	id, initCmd, err := m.adoptSessionView(application, sess, sess.WorkingDir, sessionViewPolicy{replaceRoute: request.target})
+	id, initCmd, err := m.adoptSessionView(application, sess, sess.WorkingDir, sessionViewPolicy{replaceRoute: request.target, asyncReplay: m.savedTabEntries != nil})
 	if err != nil {
 		application.Close()
 		return notification.ErrorCmd(err.Error())

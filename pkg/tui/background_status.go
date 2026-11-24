@@ -89,7 +89,19 @@ func (m *appModel) openBackgroundStatusCmd(tabID string) tea.Cmd {
 	rootID := runner.App.Session().ID
 	rt := runner.App.SessionRuntime()
 	ctx := m.ctx()
+	handle := runner.App.SessionHandle()
+	useResolved := m.savedTabEntries != nil
 	return func() tea.Msg {
+		if useResolved && handle != nil {
+			if handle.Metadata().Historical {
+				return backgroundStatusOpenedMsg{tabID: tabID}
+			}
+			sub, err := handlefacade.SubscribeBackground(ctx, handle)
+			if err != nil {
+				return backgroundStatusOpenedMsg{tabID: tabID}
+			}
+			return backgroundStatusOpenedMsg{tabID: tabID, feed: &backgroundStatusFeed{rootID: rootID, sub: sub}}
+		}
 		host, err := handlefacade.NewHost(rt)
 		if err != nil {
 			return backgroundStatusOpenedMsg{tabID: tabID}

@@ -3,8 +3,10 @@ package tui
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
@@ -89,6 +91,24 @@ func (m *appModel) restoreTabs(
 		return
 	}
 
+	var deferred map[string]runtime.SessionSummaryEntry
+	if m.savedTabEntries != nil && m.sessionRestorer != nil && len(savedTabs) > 1 {
+		started := time.Now()
+		entries, err := m.savedTabEntries(ctx)
+		slog.DebugContext(ctx, "Session presentation timing", "phase", "saved_tab_catalog", "elapsed", time.Since(started), "ok", err == nil)
+		if err == nil {
+			deferred = make(map[string]runtime.SessionSummaryEntry, len(entries))
+			for _, row := range entries {
+				deferred[row.SessionID] = row
+			}
+		}
+	}
+	// Multi-pane workspaces need all their members to restore split geometry.
+	// Single-view background tabs have no reason to hydrate before selection.
+	var eager map[string]bool
+	if deferred != nil {
+		eager = savedSplitTabs(ctx, ts)
+	}
 	sessionStore := initialApp.SessionStore()
 	var summaries map[string]session.Summary
 	if sessionStore != nil && m.sessionRestorer == nil {
@@ -117,37 +137,55 @@ func (m *appModel) restoreTabs(
 			}
 		}
 
-		// Remote restorers attach saved identities directly. Never allocate a
-		// placeholder server session just to replace it on first focus.
+		// Restore from saved identities, never by creating placeholder sessions
+		// on the managed server.
 		if m.sessionRestorer != nil {
 			runtimeID := initialTabID
 			if saved.SessionID != initialApp.Session().ID {
-				spawned, err := m.sessionRestorer(ctx, saved.SessionID, saved.WorkingDir)
-				if err != nil {
-					slog.WarnContext(ctx, "Failed to restore remote tab", "session_id", saved.SessionID, "error", err)
+				row, accessible := deferred[saved.SessionID]
+				if deferred != nil && !accessible {
 					continue
 				}
-				if spawned.App == nil || spawned.Session == nil || spawned.Session.ID != saved.SessionID || spawned.App.Session() == nil || spawned.App.Session().ID != saved.SessionID {
-					if spawned.App != nil {
+				if accessible && saved.SessionID != savedActiveID && !eager[saved.SessionID] {
+					header := session.New(session.WithID(row.SessionID), session.WithWorkingDir(row.WorkingDir), session.WithTitle(row.Title))
+					var err error
+					runtimeID, err = sv.AddSession(ctx, nil, header, row.WorkingDir, nil)
+					if err != nil {
+						continue
+					}
+					m.pendingRestores[runtimeID] = saved.SessionID
+				} else {
+					started := time.Now()
+					spawned, err := m.sessionRestorer(ctx, saved.SessionID, saved.WorkingDir)
+					if m.savedTabEntries != nil {
+						slog.DebugContext(ctx, "Session presentation timing", "phase", "restore_saved_tab", "elapsed", time.Since(started), "selected", saved.SessionID == savedActiveID, "ok", err == nil)
+					}
+					if err != nil {
+						slog.WarnContext(ctx, "Failed to restore remote tab", "session_id", saved.SessionID, "error", err)
+						continue
+					}
+					if spawned.App == nil || spawned.Session == nil || spawned.Session.ID != saved.SessionID || spawned.App.Session() == nil || spawned.App.Session().ID != saved.SessionID {
+						if spawned.App != nil {
+							spawned.App.Close()
+						}
+						if spawned.Ownership == RuntimeOwned && spawned.Cleanup != nil {
+							spawned.Cleanup()
+						}
+						slog.WarnContext(ctx, "Invalid restored session identity", "session_id", saved.SessionID)
+						continue
+					}
+					cleanup := spawned.Cleanup
+					if spawned.Ownership == RuntimeBorrowed {
+						cleanup = nil
+					}
+					runtimeID, err = sv.AddSession(ctx, spawned.App, spawned.Session, spawned.Session.WorkingDir, cleanup)
+					if err != nil {
 						spawned.App.Close()
+						if cleanup != nil {
+							cleanup()
+						}
+						continue
 					}
-					if spawned.Ownership == RuntimeOwned && spawned.Cleanup != nil {
-						spawned.Cleanup()
-					}
-					slog.WarnContext(ctx, "Invalid restored session identity", "session_id", saved.SessionID)
-					continue
-				}
-				cleanup := spawned.Cleanup
-				if spawned.Ownership == RuntimeBorrowed {
-					cleanup = nil
-				}
-				runtimeID, err = sv.AddSession(ctx, spawned.App, spawned.Session, spawned.Session.WorkingDir, cleanup)
-				if err != nil {
-					spawned.App.Close()
-					if cleanup != nil {
-						cleanup()
-					}
-					continue
 				}
 			}
 			if runtimeID == initialTabID {
@@ -228,6 +266,36 @@ func (m *appModel) restoreTabs(
 	}
 }
 
+func savedSplitTabs(ctx context.Context, store *tuistate.Store) map[string]bool {
+	state, err := store.GetPaneWorkspaceState(ctx)
+	if err != nil || state.Version > 1 {
+		return nil
+	}
+	tabs := make(map[string]bool)
+	for _, workspace := range state.Workspaces {
+		members := make(map[string]bool)
+		var collect func(*tuistate.PaneLayoutNode)
+		collect = func(node *tuistate.PaneLayoutNode) {
+			if node == nil {
+				return
+			}
+			if node.SessionID != "" {
+				members[node.SessionID] = true
+			}
+			collect(node.First)
+			collect(node.Second)
+		}
+		collect(workspace.Layout)
+		collect(workspace.RestoreLayout)
+		if len(members) > 1 {
+			for id := range members {
+				tabs[id] = true
+			}
+		}
+	}
+	return tabs
+}
+
 // persistedSessionID returns the session-store ID that should be used for
 // tuistate persistence for the given runtime tab ID.
 //
@@ -257,7 +325,7 @@ func (m *appModel) findTabByPersistedID(persistedID string) string {
 	// Check live sessions.
 	tabs, _ := m.supervisor.GetTabs()
 	for _, tab := range tabs {
-		if runner := m.supervisor.GetRunner(tab.SessionID); runner != nil {
+		if runner := m.supervisor.GetRunner(tab.SessionID); runner != nil && runner.App != nil {
 			if runner.App.Session().ID == persistedID {
 				return tab.SessionID
 			}

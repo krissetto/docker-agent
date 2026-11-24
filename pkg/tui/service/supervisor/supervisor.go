@@ -742,6 +742,9 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 	runner.PendingEvents = nil
 	runner.NeedsAttn = false
 	runner.title = ""
+	if spawned.Session != nil {
+		runner.title = spawned.Session.TitleSnapshot()
+	}
 	runner.App = spawned.App
 	if spawned.App != nil {
 		s.applySubagentsPolicyLocked(spawned.App.Runtime())

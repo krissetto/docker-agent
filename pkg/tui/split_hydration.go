@@ -41,7 +41,7 @@ func (m *appModel) supportsPaneCandidate(layout splitLayout, source string) bool
 	for _, id := range layout.Sessions() {
 		if id == source && m.chatPages[id] == nil {
 			runner := m.supervisor.GetRunner(id)
-			if runner != nil && runner.App != nil {
+			if runner != nil && (runner.App != nil || m.pendingRestores[id] != "") {
 				continue
 			}
 		}

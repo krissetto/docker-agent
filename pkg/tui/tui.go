@@ -96,6 +96,8 @@ type appModel struct {
 	metadataApp        *app.App
 	metadataSessionID  string
 	sessionRestorer    SessionRestorer
+	savedTabEntries    SavedTabEntries
+	firstFrameStart    time.Time
 	remoteWorkspace    bool
 
 	pendingEditorGeneration  uint64
@@ -523,6 +525,13 @@ func WithSessionRestorer(restorer SessionRestorer) Option {
 	return func(m *appModel) { m.sessionRestorer = restorer }
 }
 
+// SavedTabEntries lists accessible tab metadata without opening session views.
+type SavedTabEntries func(context.Context) ([]runtime.SessionSummaryEntry, error)
+
+func WithSavedTabEntries(entries SavedTabEntries) Option {
+	return func(m *appModel) { m.savedTabEntries = entries }
+}
+
 // WithRemoteWorkspace keeps new-session paths opaque to the client, including
 // an explicitly workspace-less server. Client filesystem checks never apply.
 func WithRemoteWorkspace(dir string) Option {
@@ -695,6 +704,7 @@ func WithSupervisor(owner *supervisor.Supervisor) Option {
 
 // New creates a new Model.
 func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initialWorkingDir string, cleanup func(), opts ...Option) tea.Model {
+	started := time.Now()
 	tuiCtx := func() context.Context { return context.WithoutCancel(ctx) }
 	themeCtx, cancelThemes := context.WithCancel(ctx)
 
@@ -796,6 +806,9 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		}
 	}
 	sv := m.supervisor
+	if m.savedTabEntries != nil {
+		m.firstFrameStart = started
+	}
 
 	m.messageBar = messagebar.NewWithRuntime(m.ar)
 
@@ -4777,6 +4790,10 @@ func (m *appModel) View() tea.View {
 	m.viewCache = view
 	m.viewCacheValid = true
 	m.viewCacheInitialized = true
+	if !m.firstFrameStart.IsZero() && m.width > 0 && m.height > 0 && !chat.Loading(m.chatPage) {
+		slog.DebugContext(m.ctx(), "Session presentation timing", "phase", "first_frame", "elapsed", time.Since(m.firstFrameStart))
+		m.firstFrameStart = time.Time{}
+	}
 	return view
 }
 

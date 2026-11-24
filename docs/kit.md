@@ -258,6 +258,24 @@ attaches a TUI or headless client; session listing also attaches only. Neither
 starts/restarts an API or opens a local database. Missing hooks/dead servers
 fail clearly; restart the sandbox instead of relying on a connection fallback.
 
+To diagnose a slow reopen, pass `--debug --log-file /tmp/kit-reopen.log` as
+Kit connection arguments. For a large-session reattach, add `--session ID` and
+use a separate log file. Record the wall time from requesting the tab to the
+first usable screen; the guest log only measures after the guest process starts.
+Extract the content-free timing records from the guest log before sharing:
+
+```sh
+grep -E 'msg="(Managed API|Session transport|Session presentation) timing"' /tmp/kit-reopen.log
+```
+
+These records separate authenticated readiness, optional source registration,
+view requests, stream baseline delivery and transcript presentation. Transport
+`headers_elapsed` is time to response headers; `response_bytes` counts decoded
+HTTP body bytes read, not TCP traffic. A standalone reproduction can also pass
+`--debug --log-file /tmp/kit-server-timing.log` to `serve api --managed-api`
+and extract `msg="Session stream timing"` for server-side baseline preparation
+and writes. Do not share full debug logs, which can contain unrelated details.
+
 **Client exit detaches, not cancels accepted server work.** Explicit cancellation
 remains necessary to stop work. Required `long-running@1` prevents sandbox
 session-based auto-stop; it is not process supervision. Optional

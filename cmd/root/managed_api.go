@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -232,11 +233,13 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 		return "", err
 	}
 	var d managedDescriptor
+	started := time.Now()
 	if f.managedAPIAttach {
 		d, err = attachManagedAPI(ctx, dir)
 	} else {
 		d, err = ensureManagedAPI(ctx, dir, manifest)
 	}
+	slog.DebugContext(ctx, "Managed API timing", "phase", "connection_ready", "elapsed", time.Since(started), "attach_only", f.managedAPIAttach, "ok", err == nil)
 	if err != nil {
 		return "", err
 	}
@@ -256,7 +259,9 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 		if relErr != nil || !filepath.IsLocal(connectionDir) {
 			return "", errors.New("connection working directory is outside the sandbox workspace")
 		}
+		started := time.Now()
 		registration, registerErr := client.RegisterSource(ctx, f.kitSourcePath, connectionDir)
+		slog.DebugContext(ctx, "Managed API timing", "phase", "register_source", "elapsed", time.Since(started), "ok", registerErr == nil)
 		if registerErr != nil {
 			return "", fmt.Errorf("register Kit team: %w", registerErr)
 		}

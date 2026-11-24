@@ -46,6 +46,7 @@ type Server struct {
 	// no id, so they never interfere with the sequenced stream or its replay.
 	heartbeatInterval time.Duration
 	cacheWarmup       bool
+	sessionTiming     *slog.Logger
 }
 
 func New(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string, maxRequestBytes int64, opts ...SessionManagerOpt) (*Server, error) {
@@ -72,12 +73,18 @@ type serverOptions struct {
 	maxRequestBytes int64
 	corsOrigin      string
 	sourceRegistrar SourceRegistrar
+	sessionTiming   *slog.Logger
 }
 
 // WithCacheWarmup controls best-effort prefix warming on initial session
 // observation. Enabled by default; scripted embedders may opt out.
 func WithCacheWarmup(enabled bool) Option {
 	return func(o *serverOptions) { o.cacheWarmup = &enabled }
+}
+
+// WithSessionTimingLogger selects the sink for debug-only session phase timings.
+func WithSessionTimingLogger(logger *slog.Logger) Option {
+	return func(o *serverOptions) { o.sessionTiming = logger }
 }
 
 // WithMaxRequestBytes sets the maximum request body size in bytes. Requests
@@ -100,6 +107,9 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 	var o serverOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if o.sessionTiming == nil {
+		o.sessionTiming = slog.Default()
 	}
 	maxBytes := o.maxRequestBytes
 	if maxBytes <= 0 {
@@ -135,7 +145,7 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 			return next(c)
 		}
 	})
-	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, sourceRegistrar: o.sourceRegistrar, heartbeatInterval: defaultEventsHeartbeatInterval, cacheWarmup: o.cacheWarmup == nil || *o.cacheWarmup}
+	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, sourceRegistrar: o.sourceRegistrar, sessionTiming: o.sessionTiming, heartbeatInterval: defaultEventsHeartbeatInterval, cacheWarmup: o.cacheWarmup == nil || *o.cacheWarmup}
 	s.registerRoutes()
 	return s
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -741,7 +742,7 @@ func (c *Client) sessionJSONWithClient(ctx context.Context, client *http.Client,
 	return c.sessionJSONWithClientFeature(ctx, client, method, endpoint, body, result, "")
 }
 
-func (c *Client) sessionJSONWithClientFeature(ctx context.Context, client *http.Client, method, endpoint string, body, result any, feature string) error {
+func (c *Client) sessionJSONWithClientFeature(ctx context.Context, client *http.Client, method, endpoint string, body, result any, feature string) (retErr error) {
 	var data []byte
 	var err error
 	if body != nil {
@@ -767,13 +768,36 @@ func (c *Client) sessionJSONWithClientFeature(ctx context.Context, client *http.
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
+	var received responseByteCounter
+	phase := sessionRequestPhase(method, endpointPath, query)
+	debug := phase != "" && slog.Default().Enabled(ctx, slog.LevelDebug)
+	var started time.Time
+	var headers time.Duration
+	var status int
+	if debug {
+		started = time.Now()
+		defer func() {
+			slog.DebugContext(ctx, "Session transport timing", "phase", phase, "elapsed", time.Since(started), "headers_elapsed", headers,
+				"response_bytes", received.bytes, "status", status, "ok", retErr == nil)
+		}()
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("session request: %w", err)
 	}
 	defer resp.Body.Close()
+	reader := io.Reader(resp.Body)
+	if debug {
+		headers, status = time.Since(started), resp.StatusCode
+		received.Reader = resp.Body
+		reader = &received
+	}
+	return decodeSessionResponse(resp, reader, result, feature)
+}
+
+func decodeSessionResponse(resp *http.Response, reader io.Reader, result any, feature string) error {
 	if resp.StatusCode >= 400 {
-		return decodeSessionHTTPError(resp)
+		return decodeSessionHTTPError(resp.StatusCode, reader)
 	}
 	if feature != "" && !slices.ContainsFunc(strings.Split(resp.Header.Get(api.SessionFeaturesHeader), ","), func(token string) bool { return strings.TrimSpace(token) == feature }) {
 		return tools.ErrBackgroundProcessOutputUnsupported
@@ -781,7 +805,7 @@ func (c *Client) sessionJSONWithClientFeature(ctx context.Context, client *http.
 	if result == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
-	dec := json.NewDecoder(resp.Body)
+	dec := json.NewDecoder(reader)
 	// Responses are versioned by required identities; tolerate additive fields
 	// so newer servers remain usable by older clients.
 	if err := dec.Decode(result); err != nil {
@@ -790,8 +814,33 @@ func (c *Client) sessionJSONWithClientFeature(ctx context.Context, client *http.
 	return nil
 }
 
-func decodeSessionHTTPError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+func sessionRequestPhase(method, endpoint, query string) string {
+	switch {
+	case method == http.MethodGet && (query == "view=prepare-info" || query == "view=prepare-info&projection="+api.SessionViewMetadataProjection):
+		return "prepare_view"
+	case method == http.MethodPatch && query == "view=open-view":
+		return "open_view"
+	case method == http.MethodGet && strings.HasSuffix(endpoint, "/snapshot"):
+		return "snapshot"
+	case method == http.MethodPost && endpoint == api.SessionAPIPath:
+		return "create_session"
+	}
+	return ""
+}
+
+type responseByteCounter struct {
+	io.Reader
+	bytes int64
+}
+
+func (r *responseByteCounter) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func decodeSessionHTTPError(status int, reader io.Reader) error {
+	body, _ := io.ReadAll(io.LimitReader(reader, 64<<10))
 	var payload struct {
 		Message   any                `json:"message"`
 		Error     string             `json:"error"`
@@ -819,7 +868,7 @@ func decodeSessionHTTPError(resp *http.Response) error {
 	if candidate := SessionErrorKind(payload.Error); validKind(candidate) {
 		kind = candidate
 	} else {
-		switch resp.StatusCode {
+		switch status {
 		case http.StatusServiceUnavailable:
 			kind = SessionErrorPersistence
 		case http.StatusNotFound:
@@ -834,10 +883,25 @@ func decodeSessionHTTPError(resp *http.Response) error {
 			kind = SessionErrorStopped
 		}
 	}
-	return &sessionHTTPError{status: resp.StatusCode, err: &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason, Detail: payload.Detail}}
+	return &sessionHTTPError{status: status, err: &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason, Detail: payload.Detail}}
 }
 
-func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (Observation, error) {
+func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (_ Observation, retErr error) {
+	started := time.Now()
+	var received responseByteCounter
+	var headers time.Duration
+	var status int
+	var baselineBytes int64
+	debug := slog.Default().Enabled(ctx, slog.LevelDebug)
+	if debug {
+		defer func() {
+			if retErr != nil {
+				baselineBytes = received.bytes
+			}
+			slog.DebugContext(ctx, "Session transport timing", "phase", "observe_baseline", "elapsed", time.Since(started), "headers_elapsed", headers,
+				"response_bytes", baselineBytes, "status", status, "tree", options.Tree, "resumed", options.Since != nil, "ok", retErr == nil)
+		}()
+	}
 	u := *c.baseURL
 	u.Path = path.Join(u.Path, api.SessionAPIPath+"/"+url.PathEscape(id)+"/events")
 	if options.Tree {
@@ -893,9 +957,15 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		cancel()
 		return Observation{}, err
 	}
+	headers, status = time.Since(started), resp.StatusCode
+	reader := io.Reader(resp.Body)
+	if debug {
+		received.Reader = resp.Body
+		reader = &received
+	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
-		err := decodeSessionHTTPError(resp)
+		err := decodeSessionHTTPError(resp.StatusCode, reader)
 		cancel()
 		return Observation{}, err
 	}
@@ -905,7 +975,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		return Observation{}, protocolError(fmt.Errorf("unexpected session stream HTTP status %d", resp.StatusCode))
 	}
 	supportsOutputInterest := slices.ContainsFunc(strings.Split(resp.Header.Get(api.SessionFeaturesHeader), ","), func(token string) bool { return strings.TrimSpace(token) == api.SessionFeatureBackgroundProcessOutput })
-	scanner := bufio.NewScanner(sessionStreamReader{Reader: resp.Body, watchdog: watchdog})
+	scanner := bufio.NewScanner(sessionStreamReader{Reader: reader, watchdog: watchdog})
 	scanner.Split(scanSessionLines)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxSSELineBytes)
 	first, err := scanSessionMessage(scanner)
@@ -1075,6 +1145,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		}
 		replay = append(replay, envelope)
 	}
+	baselineBytes = received.bytes
 	watchdog.touch(true)
 	var events chan SessionEvent
 	if !options.Tree || !options.OrderedTree {

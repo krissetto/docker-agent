@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -139,4 +140,59 @@ func TestStartupRestoreHydratesSnapshotWithoutObservationBaseline(t *testing.T) 
 			})
 		}
 	}
+}
+
+func TestSavedManagedTabsAttachOnlyWhenSelected(t *testing.T) {
+	dir := t.TempDir()
+	paths.SetDataDir(dir)
+	paths.SetConfigDir(dir)
+	t.Cleanup(func() { paths.SetDataDir(""); paths.SetConfigDir("") })
+	require.NoError(t, userconfig.Update(func(cfg *userconfig.Config) error {
+		cfg.Settings = &userconfig.Settings{RestoreTabs: new(true), ShowBanner: new(false)}
+		return nil
+	}))
+
+	store := session.NewInMemorySessionStore()
+	initial := session.New(session.WithID("initial"), session.WithAgentName("root"), session.WithWorkingDir(dir))
+	initial.AddMessage(session.UserMessage("INITIAL-TRANSCRIPT"))
+	background := session.New(session.WithID("background"), session.WithAgentName("root"), session.WithWorkingDir(dir), session.WithTitle("Background title"))
+	background.SetAttribute(runtime.SessionAgentAttribute, "root")
+	background.AddMessage(session.UserMessage("BACKGROUND-TRANSCRIPT"))
+	require.NoError(t, store.AddSession(t.Context(), background))
+	services := storeRuntime{store: store}
+	sessions := &coldRestoreSessions{lifecycleSessions: newLifecycleSessions(), store: store}
+	a := app.New(t.Context(), sessions, initial, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
+
+	tabs, err := tuistate.New(t.Context())
+	require.NoError(t, err)
+	for _, id := range []string{background.ID, "unavailable", initial.ID} {
+		require.NoError(t, tabs.AddTab(t.Context(), id, dir))
+	}
+	require.NoError(t, tabs.SetActiveTab(t.Context(), initial.ID))
+	require.NoError(t, tabs.Close())
+
+	m := New(t.Context(), nil, a, dir, nil, WithSavedTabEntries(func(context.Context) ([]runtime.SessionSummaryEntry, error) {
+		return []runtime.SessionSummaryEntry{{SessionID: background.ID, WorkingDir: dir, Title: background.Title}}, nil
+	}), WithSessionRestorer(func(context.Context, string, string) (SpawnedSession, error) {
+		t.Error("background tabs must not be restored on startup")
+		return SpawnedSession{}, runtime.ErrUnsupported
+	})).(*appModel)
+	t.Cleanup(m.cleanupManagedResources)
+	startupTabs, _ := m.supervisor.GetTabs()
+	require.Len(t, startupTabs, 2)
+	require.Equal(t, background.Title, startupTabs[0].Title)
+	require.Nil(t, m.supervisor.GetRunner(background.ID).App)
+	require.Equal(t, background.ID, m.pendingRestores[background.ID])
+	_, err = sessions.SessionByID(background.ID)
+	require.Error(t, err, "metadata-only tab must not acquire a session owner")
+
+	driver := tuitest.New(t, &lifecycleProgramModel{m}, 120, 40)
+	driver.WaitFor(tuitest.Contains("INITIAL-TRANSCRIPT"))
+	driver.Send(messages.SwitchTabMsg{SessionID: background.ID})
+	driver.WaitFor(tuitest.Contains("BACKGROUND-TRANSCRIPT"))
+	driver.Send(lifecycleProgramProbe{inspect: func(owner *appModel) {
+		require.Equal(t, background.ID, owner.supervisor.ActiveID())
+		require.NotNil(t, owner.supervisor.GetRunner(background.ID).App.SessionHandle())
+		require.Empty(t, owner.pendingRestores)
+	}})
 }

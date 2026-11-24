@@ -193,7 +193,10 @@ func (s *Server) getCanonicalSession(c echo.Context) error {
 		if len(views) != 1 || views[0] != "prepare-info" {
 			return sessionRequestError("unknown session view")
 		}
-		info, err := s.sm.ConfirmedSessionViewInfo(c.Request().Context(), c.Param("id"))
+		ctx := c.Request().Context()
+		started := time.Now()
+		info, err := s.sm.ConfirmedSessionViewInfo(ctx, c.Param("id"))
+		s.sessionTiming.DebugContext(ctx, "Session stream timing", "phase", "prepare_view", "elapsed", time.Since(started), "metadata_only", metadataProjection, "ok", err == nil)
 		if err != nil {
 			return sessionHTTPError(err)
 		}

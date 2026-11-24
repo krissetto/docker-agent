@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"log/slog"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -33,6 +34,7 @@ type (
 )
 
 type pageReplay struct {
+	started         time.Time
 	metadataApplied bool
 	generation      uint64
 	preparing       bool
@@ -54,7 +56,7 @@ func Loading(page Page) bool { p, ok := page.(*chatPage); return ok && p.replay 
 func (p *chatPage) beginReplay(snapshot runtime.SessionSnapshot) tea.Cmd {
 	p.replayGeneration++
 	generation := p.replayGeneration
-	p.replay = &pageReplay{generation: generation, preparing: true}
+	p.replay = &pageReplay{started: time.Now(), generation: generation, preparing: true}
 	canResolve := p.app.CanResolveGeneratedFiles()
 	return p.replayCommand(func() tea.Msg {
 		prepared := list.PrepareReplay(snapshot.Session)
@@ -157,6 +159,7 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 			cmds = append(cmds, p.replayCommand(func() tea.Msg { return msg }))
 			return true, tea.Batch(cmds...)
 		}
+		slog.Debug("Session presentation timing", "phase", "replay_ready", "elapsed", time.Since(r.started), "items", r.snapshot.TranscriptPosition)
 		p.replay = nil
 		cmds = append(cmds, p.continueHistoryCmd())
 		return true, tea.Batch(cmds...)

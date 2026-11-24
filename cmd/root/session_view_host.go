@@ -87,7 +87,13 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 			if !ok {
 				return viewhost.ViewOwnerIdentity{}, nil, runtime.ErrUnsupported
 			}
-			prepared, err := preparer.PrepareSessionView(ctx, id)
+			var prepared runtime.PreparedSessionView
+			var err error
+			if remote, ok := sessions.(*runtime.SessionTransport); ok && f.managedAPIAttach {
+				prepared, err = remote.PrepareSessionViewMetadata(ctx, id)
+			} else {
+				prepared, err = preparer.PrepareSessionView(ctx, id)
+			}
 			if err != nil {
 				return viewhost.ViewOwnerIdentity{}, nil, err
 			}

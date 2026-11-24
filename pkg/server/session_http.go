@@ -671,7 +671,10 @@ func (s *Server) editCanonicalSession(c echo.Context) error {
 		if view == "open-view" && edit.ViewConfirmation == nil {
 			return sessionRequestError("session opening requires confirmed binding")
 		}
-		prepared, err := s.sm.PrepareSessionView(c.Request().Context(), c.Param("id"))
+		ctx := c.Request().Context()
+		started := time.Now()
+		prepared, err := s.sm.PrepareSessionView(ctx, c.Param("id"))
+		preparedElapsed := time.Since(started)
 		if err != nil {
 			return sessionHTTPError(err)
 		}
@@ -681,7 +684,10 @@ func (s *Server) editCanonicalSession(c echo.Context) error {
 				return sessionHTTPError(err)
 			}
 		}
-		committed, err := prepared.Commit(c.Request().Context())
+		commitStarted := time.Now()
+		committed, err := prepared.Commit(ctx)
+		s.sessionTiming.DebugContext(ctx, "Session stream timing", "phase", "open_view", "prepare_elapsed", preparedElapsed,
+			"commit_elapsed", time.Since(commitStarted), "metadata_only", metadataProjection, "ok", err == nil)
 		if err != nil {
 			return sessionHTTPError(err)
 		}
@@ -742,6 +748,7 @@ func (s *Server) awaitSessionWorkflow(c echo.Context) error {
 }
 
 func (s *Server) sessionEventStream(c echo.Context) error {
+	started := time.Now()
 	tree := c.QueryParam("tree") == "true"
 	if c.QueryParam("tree") != "" && !tree {
 		return sessionRequestError("tree must be true when supplied")
@@ -812,6 +819,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, map[string]any{"error": "history_metadata_too_large"})
 		}
 	}
+	prepared := time.Now()
 	response := c.Response()
 	response.Header().Set(echo.HeaderContentType, "text/event-stream")
 	response.Header().Set(echo.HeaderCacheControl, "no-cache")
@@ -879,6 +887,8 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	} else if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "ready"}); err != nil {
 		return nil
 	}
+	s.sessionTiming.DebugContext(c.Request().Context(), "Session stream timing", "phase", "send_baseline", "prepare_elapsed", prepared.Sub(started),
+		"send_elapsed", time.Since(prepared), "response_bytes", response.Size, "tree", tree, "resumed", since != nil)
 	heartbeat := time.NewTicker(s.heartbeatInterval)
 	defer heartbeat.Stop()
 	for {

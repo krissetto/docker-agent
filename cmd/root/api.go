@@ -119,6 +119,7 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 			return err
 		}
 	}
+	timingLogger := slog.Default()
 	releaseOwner, err := f.prepareManagedDaemon()
 	if err != nil {
 		return err
@@ -130,9 +131,8 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 			return err
 		}
 		defer log.Close()
-		previousLogger := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(log, nil)))
-		defer slog.SetDefault(previousLogger)
+		defer slog.SetDefault(timingLogger)
 		defer func() {
 			if commandErr != nil {
 				slog.ErrorContext(ctx, "Managed API stopped", "error", commandErr)
@@ -297,7 +297,7 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	if f.managedAPI && f.manifest != nil {
 		registerSource = f.managedSourceRegistrar(f.managedState, f.manifest.Startup().Workspace, sm)
 	}
-	s := server.NewWithManager(sm, f.authToken, server.WithCORSOrigin(f.corsOrigin), server.WithMaxRequestBytes(f.maxRequestSize), server.WithServerInfo(identity), server.WithSourceRegistrar(registerSource))
+	s := server.NewWithManager(sm, f.authToken, server.WithCORSOrigin(f.corsOrigin), server.WithMaxRequestBytes(f.maxRequestSize), server.WithServerInfo(identity), server.WithSourceRegistrar(registerSource), server.WithSessionTimingLogger(timingLogger))
 	return f.serveManaged(ctx, s, ln, identity)
 }
 

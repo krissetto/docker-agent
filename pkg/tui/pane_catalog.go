@@ -130,13 +130,13 @@ func (m *appModel) paneCatalogRows() []paneCatalogRow {
 	}
 	tabs, _ := m.supervisor.GetTabs()
 	for _, tab := range tabs {
-		runner := m.supervisor.GetRunner(tab.SessionID)
-		if runner == nil || runner.App == nil || runner.App.Session() == nil {
-			continue
-		}
-		sessionID := runner.App.Session().ID
-		if restored := m.pendingRestores[tab.SessionID]; restored != "" {
-			sessionID = restored
+		sessionID := m.pendingRestores[tab.SessionID]
+		if sessionID == "" {
+			runner := m.supervisor.GetRunner(tab.SessionID)
+			if runner == nil || runner.App == nil || runner.App.Session() == nil {
+				continue
+			}
+			sessionID = runner.App.Session().ID
 		}
 		name, _ := m.tabAgentIdentity(tab)
 		if index, exists := bySession[sessionID]; exists {

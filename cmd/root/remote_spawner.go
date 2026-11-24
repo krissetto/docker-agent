@@ -64,6 +64,10 @@ func (b *remoteBackend) Restorer(services app.Services, sessions runtime.Session
 		if id == "" {
 			return tui.SpawnedSession{}, errors.New("cannot restore an empty remote session ID")
 		}
+		if b.flags.managedAPIAttach && b.flags.sessionViewHost != nil {
+			// The managed transport confirms source identity as part of hosted preparation.
+			return b.restoreRemoteHostedSession(ctx, id)
+		}
 		reader, ok := sessions.(runtime.SessionViewInfoReader)
 		if !ok {
 			return tui.SpawnedSession{}, runtime.UnsupportedSessionOperation(id, "prepare_view")
@@ -76,11 +80,7 @@ func (b *remoteBackend) Restorer(services app.Services, sessions runtime.Session
 			return tui.SpawnedSession{}, errors.New("remote session belongs to a different source")
 		}
 		if b.flags.sessionViewHost != nil {
-			application, err := b.flags.restoreHostedSession(ctx, id)
-			if err != nil {
-				return tui.SpawnedSession{}, err
-			}
-			return tui.SpawnedSession{App: application, Session: application.Session(), Ownership: tui.RuntimeBorrowed}, nil
+			return b.restoreRemoteHostedSession(ctx, id)
 		}
 		committed, err := runtime.RestoreSessionView(ctx, sessions, id)
 		if err != nil {
@@ -99,6 +99,14 @@ func (b *remoteBackend) Restorer(services app.Services, sessions runtime.Session
 		}
 		return tui.SpawnedSession{App: application, Session: application.Session(), Ownership: tui.RuntimeBorrowed}, nil
 	}
+}
+
+func (b *remoteBackend) restoreRemoteHostedSession(ctx context.Context, id string) (tui.SpawnedSession, error) {
+	application, err := b.flags.restoreHostedSession(ctx, id)
+	if err != nil {
+		return tui.SpawnedSession{}, err
+	}
+	return tui.SpawnedSession{App: application, Session: application.Session(), Ownership: tui.RuntimeBorrowed}, nil
 }
 
 func (b *remoteBackend) remoteCreatedApp(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, handle runtime.SessionHandle, sess *session.Session) (tui.SpawnedSession, error) {

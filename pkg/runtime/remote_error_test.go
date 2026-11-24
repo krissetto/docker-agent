@@ -12,7 +12,7 @@ import (
 
 func TestDecodeSessionHTTPErrorPreservesStructuredSessionKind(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(`{"error":"wrong_session","operation":"respond","session_id":"s"}`))}
-	err := decodeSessionHTTPError(resp)
+	err := decodeSessionHTTPError(resp.StatusCode, resp.Body)
 	var sessionErr *SessionError
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Equal(t, SessionErrorWrongSession, sessionErr.Kind)
@@ -22,7 +22,7 @@ func TestDecodeSessionHTTPErrorPreservesStructuredSessionKind(t *testing.T) {
 
 func TestDecodeSessionHTTPErrorPreservesArbitraryOperationAndReason(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"error":"capacity","operation":"future_operation","reason":"pending","session_id":"s"}`))}
-	err := decodeSessionHTTPError(resp)
+	err := decodeSessionHTTPError(resp.StatusCode, resp.Body)
 	var sessionErr *SessionError
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Equal(t, SessionOperation("future_operation"), sessionErr.Operation)
@@ -32,7 +32,7 @@ func TestDecodeSessionHTTPErrorPreservesArbitraryOperationAndReason(t *testing.T
 
 func TestDecodeSessionHTTPErrorInfersLegacyMissingReason(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"error":"capacity","operation":"compact_busy","session_id":"s"}`))}
-	err := decodeSessionHTTPError(resp)
+	err := decodeSessionHTTPError(resp.StatusCode, resp.Body)
 	var sessionErr *SessionError
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Empty(t, sessionErr.Reason)
@@ -46,7 +46,7 @@ func TestDecodeSessionHTTPErrorPreservesPersistenceDetail(t *testing.T) {
 	} {
 		resp := &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(body))}
 		var sessionErr *SessionError
-		require.ErrorAs(t, decodeSessionHTTPError(resp), &sessionErr)
+		require.ErrorAs(t, decodeSessionHTTPError(resp.StatusCode, resp.Body), &sessionErr)
 		assert.Equal(t, SessionErrorPersistence, sessionErr.Kind)
 		assert.Equal(t, "s", sessionErr.SessionID)
 		assert.Equal(t, "session writes are blocked: schema mismatch", sessionErr.Detail)
