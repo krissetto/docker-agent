@@ -595,6 +595,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		}
 	}
 	if remote, ok := b.(*remoteBackend); ok {
+		remote.selectedHistory = useTUI && !f.lean && f.managedAPIAttach
 		remote.restoreInitialTab = f.shouldRestoreInitialTab(useTUI, args, userSettings)
 	}
 	openStarted := time.Now()

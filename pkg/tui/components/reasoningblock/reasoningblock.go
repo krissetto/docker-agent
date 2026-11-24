@@ -251,6 +251,21 @@ func (m *Model) AppendReasoningSegment(content string) {
 	m.cache = nil
 }
 
+// PrependHistory joins reasoning that began on the previous history page.
+func (m *Model) PrependHistory(previous *Model) {
+	entries := make([]contentItem, len(m.contentItems))
+	copy(entries, m.contentItems)
+	for i := range entries {
+		if entries[i].kind == contentItemTool {
+			entries[i].toolIndex += len(previous.toolEntries)
+		}
+	}
+	m.contentItems = append(previous.contentItems, entries...)
+	m.toolEntries = append(previous.toolEntries, m.toolEntries...)
+	m.reasoningVersion++
+	m.cache, m.prepared = nil, nil
+}
+
 // Reasoning returns the full reasoning content (concatenated from all reasoning items).
 func (m *Model) Reasoning() string {
 	var parts []string

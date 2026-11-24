@@ -58,8 +58,14 @@ func replayToolResults(items []session.Item) map[string]string {
 }
 
 func BeginReplay(list Model, prepared PreparedReplay, media map[int][]types.AssistantMedia) {
+	BeginHistoryReplay(list, prepared, media, 0)
+}
+
+// BeginHistoryReplay installs a bounded transcript with absolute item positions.
+func BeginHistoryReplay(list Model, prepared PreparedReplay, media map[int][]types.AssistantMedia, start int) {
 	m := list.(*model)
-	m.startSessionReplay(prepared.Session, media, prepared.toolResults)
+	m.SetImagePreviewSessionID(prepared.Session.ID)
+	m.startSessionReplay(prepared.Session, media, prepared.toolResults, start)
 	m.replay.initial = true
 }
 
@@ -276,6 +282,7 @@ type ReplayRenderedMsg struct {
 }
 
 func ReplayWaiting(list Model) bool { m := list.(*model); return m.replay != nil && m.replay.waiting }
+
 func ApplyReplayRender(list Model, msg ReplayRenderedMsg) {
 	m := list.(*model)
 	if m.replay != msg.replay && m.historyReplay != msg.replay {

@@ -47,6 +47,9 @@ func (o *backgroundOutputObserver) Observe(ctx context.Context, options runtime.
 	if a.backgroundOutput != o.binding {
 		return runtime.Observation{}, runtime.ErrSessionClosed
 	}
+	if options.Since == nil && a.SelectedSessionHistory() {
+		options.HistoryTail = &selectedHistoryLimits
+	}
 	options.BackgroundOutputInterest = map[string][]string{o.binding.sessionID: slices.Clone(o.binding.desired)}
 	observation, err := o.observer.Observe(ctx, options)
 	if err != nil {

@@ -205,6 +205,7 @@ func (b *localBackend) Close() error {
 // remoteBackend talks to a docker-agent server.
 type remoteBackend struct {
 	restoreInitialTab bool
+	selectedHistory   bool
 	startupView       *runtime.CommittedSessionView
 	handle            runtime.SessionHandle
 	flags             *runExecFlags
@@ -246,7 +247,11 @@ func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadRes
 		}
 		b.agentFileName = sources[0].Name
 	}
-	transport, err := runtime.NewSessionTransport(client, runtime.WithSessionTransportSource(b.agentFileName))
+	transportOptions := []runtime.SessionTransportOption{runtime.WithSessionTransportSource(b.agentFileName)}
+	if b.selectedHistory {
+		transportOptions = append(transportOptions, runtime.WithSelectedSessionHistory())
+	}
+	transport, err := runtime.NewSessionTransport(client, transportOptions...)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

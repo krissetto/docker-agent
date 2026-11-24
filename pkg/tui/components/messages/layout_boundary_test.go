@@ -529,16 +529,15 @@ var (
 	// workRangeStructural may range over those maps: the dirty-gated projection rebuild,
 	// the status transition, the compact-off reset, the reverse-map builder, and the
 	// explicit diagnostic materializer.
-	workRangeStructural = map[string]bool{"syncWorkProjection": true, "SetWorkStatus": true, "restoreWorkPlain": true, "setWorkHeaders": true, "workRangeList": true}
+	workRangeStructural = map[string]bool{"syncWorkProjection": true, "SetWorkStatus": true, "restoreWorkPlain": true, "setWorkHeaders": true, "workRangeList": true, "PrependHistory": true}
 	// workRangeListCallers may call the full materializer. No production caller remains.
 	workRangeListCallers = map[string]bool{}
 	// identityBuilders are the full index builds. No epoch may reach them.
 	identityBuilders = []string{"setWorkHeaders", "indexProjectionOwners", "indexMessages"}
 	// epochRoots are the functions every width, theme or invalidation epoch runs.
 	epochRoots = []string{"invalidateAllItems", "InvalidateRenderCaches", "applyGeometryDelta", "dropMaterialized"}
-	// indexZeroRebuilds may rebuild the identity index from 0: the tool-call rebuild,
-	// a write path that already walks the transcript. No hot function may.
-	indexZeroRebuilds = map[string]bool{"removePendingToolCallMessages": true}
+	// indexZeroRebuilds allows structural writes that already walk or shift the transcript.
+	indexZeroRebuilds = map[string]bool{"removePendingToolCallMessages": true, "PrependHistory": true}
 	// noIndexBuild are the hot functions that may never call indexMessages directly:
 	// the identity lookup itself, and everything on the View, mouse, hover, scroll and
 	// epoch paths.
@@ -553,7 +552,7 @@ var (
 
 // messageWriteSites is the number of production assignments to m.messages. The test
 // pins it, so a new unhooked write site cannot appear without a test change.
-const messageWriteSites = 20
+const messageWriteSites = 22
 
 // workRangeGuardScan returns the hot-path violations of the package and the number of
 // production writes to m.messages it checked. It flags all-history range loops over

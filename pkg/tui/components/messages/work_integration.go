@@ -481,8 +481,12 @@ func (m *model) syncWorkProjection() {
 		blocks[identity] = block
 		headerBySource[anchor] = block
 	}
+	retainedBlocks := make(map[*workblock.Model]bool, len(blocks))
+	for _, block := range blocks {
+		retainedBlocks[block] = true
+	}
 	for identity, old := range m.workBlocks {
-		if blocks[identity] == nil {
+		if blocks[identity] == nil && !retainedBlocks[old] {
 			old.StopAnimation()
 			old.Release()
 		}

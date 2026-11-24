@@ -154,7 +154,14 @@ func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
 // --- Eval / Export / Compact / Copy ---
 
 func (m *appModel) handleEvalSession(filename string) (tea.Model, tea.Cmd) {
-	evalFile, _ := evaluation.Save(m.application.Session(), filename)
+	snapshot, err := m.application.FullSessionSnapshot(m.ctx())
+	if err != nil {
+		return m, notification.ErrorCmd("Failed to load session: " + err.Error())
+	}
+	evalFile, err := evaluation.Save(snapshot, filename)
+	if err != nil {
+		return m, notification.ErrorCmd("Failed to save eval: " + err.Error())
+	}
 	return m, notification.SuccessCmd("Eval saved to file " + evalFile)
 }
 

@@ -502,6 +502,8 @@ type model struct {
 	liveTailMsg *types.Message
 	focused     bool // Whether the messages component is focused
 
+	olderHistoryAvailable bool
+
 	// Inline editing state
 	inlineEditMsgIndex      int            // Index of message being edited (-1 = not editing)
 	inlineEditSessionPos    int            // Session position for branching
@@ -1362,11 +1364,11 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp):
 		if m.focused {
 			m.selectPreviousMessage()
-			return m, nil
 		} else {
 			m.scrollUp()
 		}
-		return m, nil
+		cmd := m.olderHistoryRequest()
+		return m, cmd
 	case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown):
 		if m.focused {
 			m.selectNextMessage()
@@ -1420,13 +1422,15 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, core.UIKeys.PageUp):
 		m.scrollPageUp()
-		return m, nil
+		cmd := m.olderHistoryRequest()
+		return m, cmd
 	case key.Matches(msg, core.UIKeys.PageDown):
 		cmd := m.scrollPageDown()
 		return m, cmd
 	case key.Matches(msg, core.UIKeys.Home, core.UIKeys.VimTop):
 		m.scrollToTop()
-		return m, nil
+		cmd := m.olderHistoryRequest()
+		return m, cmd
 	case key.Matches(msg, core.UIKeys.End, core.UIKeys.VimBottom):
 		m.cancelSentInputScroll()
 		cmd := m.scrollToBottom()
@@ -2167,6 +2171,9 @@ func (m *model) scrollByWheel(delta int) tea.Cmd {
 		cmd = m.materializeDeferredTailForRange(m.scrollOffset, requestedEnd)
 	}
 
+	if delta < 0 {
+		cmd = tea.Batch(cmd, m.olderHistoryRequestAfterWheel(delta))
+	}
 	prevOffset := m.scrollOffset
 	m.setScrollOffset(m.scrollOffset + (delta * wheelScrollAmount * defaultScrollAmount))
 	if m.scrollOffset == prevOffset {
@@ -3088,55 +3095,11 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	return m.loadFromSession(sess, generatedMedia, true)
 }
 
-func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, toolResults map[string]string) {
+func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, toolResults map[string]string, firstPosition int) {
 	m.backgroundSession = sess.ID
 	m.backgroundSource = nil
 	m.backgroundWatching, m.backgroundFetching = nil, nil
-	m.backgroundReplayCalls = make(map[string]int)
-	m.backgroundReplayHandoffs = make(map[string]int)
-	m.backgroundReplayProcesses = make(map[string]int)
-	replayHandoffs := make(map[string]string)
-	for id, text := range toolResults {
-		if processID, ok := tools.ParseShellBackgroundHandoff(text); ok {
-			replayHandoffs[id] = processID
-		}
-	}
-	for position, item := range sess.Messages {
-		if !item.IsMessage() {
-			continue
-		}
-		if item.Message.Message.Role == chat.MessageRoleTool {
-			if id, ok := tools.ParseShellBackgroundHandoff(item.Message.Message.Content); ok {
-				m.backgroundReplayHandoffs[id] = position
-			}
-		}
-		for _, part := range item.Message.Message.Presentation {
-			if part.Tool != nil {
-				listed := false
-				for _, call := range item.Message.Message.ToolCalls {
-					if call.ID == part.Tool.Call.ID {
-						listed = true
-						break
-					}
-				}
-				if !listed {
-					m.backgroundReplayCalls[part.Tool.Call.ID]++
-				}
-			}
-			if part.Tool != nil && part.Tool.Result != nil {
-				if id, ok := tools.ParseShellBackgroundHandoff(*part.Tool.Result); ok {
-					m.backgroundReplayHandoffs[id] = position
-					replayHandoffs[part.Tool.Call.ID] = id
-				}
-			}
-		}
-		for _, call := range item.Message.Message.ToolCalls {
-			m.backgroundReplayCalls[call.ID]++
-		}
-	}
-	for _, id := range replayHandoffs {
-		m.backgroundReplayProcesses[id]++
-	}
+	m.seedReplayTools(sess.Messages, toolResults, firstPosition)
 
 	m.cancelSentInputScroll()
 	m.scrollOnSend.reserve = nil
@@ -3150,44 +3113,6 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 	m.subagents.SetParent(sess.ParentID, "")
 	if snapshot := sess.GetSubagentTree(); snapshot != nil {
 		m.subagents.Reset(*snapshot)
-	}
-	appendSessionMessage := func(msg *types.Message, view layout.Model) {
-		m.messages = append(m.messages, msg)
-		m.indexMessages(len(m.messages) - 1)
-		m.views = append(m.views, view)
-		m.sessionState.SetPreviousMessage(msg)
-	}
-
-	// A block belongs to the visible run of adjacent reasoning, not to one
-	// canonical assistant record. Persisted records remain untouched.
-	newReasoningBlock := func(agentName string) *reasoningblock.Model {
-		if last := len(m.messages) - 1; last >= 0 && m.messages[last].Type == types.MessageTypeAssistantReasoningBlock && m.messages[last].Sender == agentName {
-			if block, ok := m.views[last].(*reasoningblock.Model); ok {
-				return block
-			}
-		}
-		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, m.subagents)
-		block.SetToolRenderers(m.toolRenderers)
-		block.SetSize(m.contentWidth(), 0)
-
-		blockMsg := &types.Message{
-			Type:   types.MessageTypeAssistantReasoningBlock,
-			Sender: agentName,
-		}
-		appendSessionMessage(blockMsg, block)
-		return block
-	}
-
-	// Historical calls stay inert; authoritative live seeds restore active status.
-	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
-	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]string) {
-		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
-		// Apply tool result if available
-		if result, ok := toolResults[tc.ID]; ok {
-			toolMsg.SetToolResponse(result, toolMsg.ToolStatus)
-		}
-		view := m.createToolCallView(toolMsg)
-		appendSessionMessage(toolMsg, view)
 	}
 
 	m.StopAnimations()
@@ -3233,6 +3158,98 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 	m.hoverActionAnimation.Stop()
 	m.hoverActionValues = nil
 
+	m.loadedItemCount = firstPosition + len(sess.Messages)
+	m.replay = m.buildSessionReplay(sess, generatedMedia, toolResults, firstPosition)
+}
+
+func (m *model) seedReplayTools(items []session.Item, toolResults map[string]string, firstPosition int) {
+	m.backgroundReplayCalls = make(map[string]int)
+	m.backgroundReplayHandoffs = make(map[string]int)
+	m.backgroundReplayProcesses = make(map[string]int)
+	replayHandoffs := make(map[string]string)
+	for id, text := range toolResults {
+		if processID, ok := tools.ParseShellBackgroundHandoff(text); ok {
+			replayHandoffs[id] = processID
+		}
+	}
+	for position, item := range items {
+		if !item.IsMessage() {
+			continue
+		}
+		if item.Message.Message.Role == chat.MessageRoleTool {
+			if id, ok := tools.ParseShellBackgroundHandoff(item.Message.Message.Content); ok {
+				m.backgroundReplayHandoffs[id] = firstPosition + position
+			}
+		}
+		for _, part := range item.Message.Message.Presentation {
+			if part.Tool != nil {
+				listed := false
+				for _, call := range item.Message.Message.ToolCalls {
+					if call.ID == part.Tool.Call.ID {
+						listed = true
+						break
+					}
+				}
+				if !listed {
+					m.backgroundReplayCalls[part.Tool.Call.ID]++
+				}
+			}
+			if part.Tool != nil && part.Tool.Result != nil {
+				if id, ok := tools.ParseShellBackgroundHandoff(*part.Tool.Result); ok {
+					m.backgroundReplayHandoffs[id] = firstPosition + position
+					replayHandoffs[part.Tool.Call.ID] = id
+				}
+			}
+		}
+		for _, call := range item.Message.Message.ToolCalls {
+			m.backgroundReplayCalls[call.ID]++
+		}
+	}
+	for _, id := range replayHandoffs {
+		m.backgroundReplayProcesses[id]++
+	}
+}
+
+func (m *model) buildSessionReplay(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, toolResults map[string]string, firstPosition int) *sessionReplay {
+	appendSessionMessage := func(msg *types.Message, view layout.Model) {
+		m.messages = append(m.messages, msg)
+		m.indexMessages(len(m.messages) - 1)
+		m.views = append(m.views, view)
+		m.sessionState.SetPreviousMessage(msg)
+	}
+
+	// A block belongs to the visible run of adjacent reasoning, not to one
+	// canonical assistant record. Persisted records remain untouched.
+	newReasoningBlock := func(agentName string) *reasoningblock.Model {
+		if last := len(m.messages) - 1; last >= 0 && m.messages[last].Type == types.MessageTypeAssistantReasoningBlock && m.messages[last].Sender == agentName {
+			if block, ok := m.views[last].(*reasoningblock.Model); ok {
+				return block
+			}
+		}
+		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, m.subagents)
+		block.SetToolRenderers(m.toolRenderers)
+		block.SetSize(m.contentWidth(), 0)
+
+		blockMsg := &types.Message{
+			Type:   types.MessageTypeAssistantReasoningBlock,
+			Sender: agentName,
+		}
+		appendSessionMessage(blockMsg, block)
+		return block
+	}
+
+	// Historical calls stay inert; authoritative live seeds restore active status.
+	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
+	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]string) {
+		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
+		// Apply tool result if available
+		if result, ok := toolResults[tc.ID]; ok {
+			toolMsg.SetToolResponse(result, toolMsg.ToolStatus)
+		}
+		view := m.createToolCallView(toolMsg)
+		appendSessionMessage(toolMsg, view)
+	}
+
 	var replayResponseGroup uint64
 	apply := func(pos int, item session.Item) {
 		if item.IsError() {
@@ -3251,7 +3268,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 
 		switch smsg.Message.Role {
 		case chat.MessageRoleUser:
-			if m.applyShellCompletion(smsg, pos) {
+			if m.applyShellCompletion(smsg, firstPosition+pos) {
 				return
 			}
 			if !lifecycle.IsUserInput(smsg.InputOrigin) {
@@ -3260,7 +3277,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 				return
 			}
 			msg := types.Input(smsg)
-			msgPos := pos
+			msgPos := firstPosition + pos
 			msg.SessionPosition = &msgPos
 			appendSessionMessage(msg, m.createMessageView(msg))
 		case chat.MessageRoleAssistant:
@@ -3418,13 +3435,12 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 		}
 	}
 
-	m.loadedItemCount = len(sess.Messages)
-	m.replay = &sessionReplay{items: sess.Messages, apply: apply}
+	return &sessionReplay{items: sess.Messages, apply: apply}
 }
 
 func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, scroll bool) tea.Cmd {
 	snapshot := sess.Clone()
-	m.startSessionReplay(snapshot, generatedMedia, replayToolResults(snapshot.Messages))
+	m.startSessionReplay(snapshot, generatedMedia, replayToolResults(snapshot.Messages), 0)
 	var cmds []tea.Cmd
 	for m.replay != nil {
 		_, cmd := m.applySessionReplay(false)
@@ -4727,8 +4743,12 @@ func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// transcript to the scrollview before the thumb geometry is read.
 	m.updateScrollState()
 	m.syncScrollviewContent()
+	before := m.scrollOffset
 	_, cmd := m.scrollview.UpdateMouse(msg)
 	m.scrollOffset = m.scrollview.ScrollOffset()
+	if m.scrollOffset < before {
+		cmd = tea.Batch(cmd, m.olderHistoryRequest())
+	}
 	if m.isAtBottom() {
 		m.userHasScrolled = false
 	} else {

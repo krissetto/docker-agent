@@ -80,6 +80,9 @@ func (s *appProjectionSink) Reset(snapshot runtime.SessionSnapshot) {
 	if snapshot.Status.SessionID == "" {
 		snapshot.Status.SessionID = s.sessionID
 	}
+	if snapshot.History != nil && snapshot.Session != nil {
+		snapshot.Session.Messages = HistoryItems(snapshot, snapshot.History.BeforePosition)
+	}
 	snapshot.BackgroundProcesses = slices.Clone(snapshot.BackgroundProcesses)
 	s.position = snapshot.TranscriptPosition
 	s.setConnection(ConnectionConnected, nil)
@@ -183,6 +186,10 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 				view.SetSubagentTree(current.GetSubagentTree())
 			}
 			a.currentState.session = view
+			a.currentState.transcriptStart = 0
+			if e.Snapshot.History != nil {
+				a.currentState.transcriptStart = e.Snapshot.History.StartPosition
+			}
 			a.stateMu.Unlock()
 		}
 		a.presentation.Store(head)
@@ -260,10 +267,12 @@ func (s *appProjectionSink) OnError(err error) {
 // The App view is detached from the runtime's mutable session. Commit positions
 // make replay idempotent while avoiding transcript cloning on streamed tokens.
 func (a *App) projectTranscript(event runtime.Event) {
-	sess := a.Session()
+	state := a.state()
+	sess := state.session
 	if sess == nil {
 		return
 	}
+	end := func() int { return state.transcriptStart + sess.ItemCount() }
 	switch e := event.(type) {
 	case *runtime.SessionTitleEvent:
 		if (e.SessionID == "" || e.SessionID == sess.ID) && (e.Status == "" || e.Title != "") {
@@ -282,12 +291,12 @@ func (a *App) projectTranscript(event runtime.Event) {
 			}
 		}
 	case *runtime.MessageAddedEvent:
-		if e.Message != nil && (e.SessionPosition < 0 || e.SessionPosition >= sess.ItemCount()) {
+		if e.Message != nil && (e.SessionPosition < 0 || e.SessionPosition >= end()) {
 			message := *e.Message
 			sess.AddMessage(&message)
 		}
 	case *runtime.UserMessageEvent:
-		if e.SessionPosition < 0 || e.SessionPosition >= sess.ItemCount() {
+		if e.SessionPosition < 0 || e.SessionPosition >= end() {
 			msg := session.UserMessage(e.Message, e.MultiContent...)
 			msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode = e.InputOrigin, e.SenderID, e.SenderName, e.InputMode
 			msg.ReportOutcome = e.ReportOutcome
@@ -296,7 +305,7 @@ func (a *App) projectTranscript(event runtime.Event) {
 			sess.AddMessage(msg)
 		}
 	case *runtime.PendingUserMessageAcceptedEvent:
-		if e.SessionPosition >= sess.ItemCount() {
+		if e.SessionPosition >= end() {
 			msg := session.UserMessage(e.Message, e.MultiContent...)
 			msg.TurnID, msg.Pending, msg.Accepted = e.TurnID, !e.Immediate, true
 			msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode = e.InputOrigin, e.SenderID, e.SenderName, e.InputMode
@@ -313,7 +322,11 @@ func (a *App) projectTranscript(event runtime.Event) {
 			sess.ReplacePendingUserMessagePayload(e.TurnID, e.Message, e.MultiContent)
 		}
 	case *runtime.PendingUserMessageCanceledEvent:
-		sess.RemovePendingUserMessageByTurnID(e.TurnID)
+		if !sess.RemovePendingUserMessageByTurnID(e.TurnID) && e.SessionPosition >= 0 && e.SessionPosition < state.transcriptStart {
+			a.stateMu.Lock()
+			a.currentState.transcriptStart--
+			a.stateMu.Unlock()
+		}
 	}
 }
 
@@ -351,6 +364,7 @@ func (a *App) installSessionView(ctx context.Context, handle runtime.SessionHand
 		return
 	}
 	a.currentState.session = snapshot
+	a.currentState.transcriptStart = 0
 	a.stateMu.Unlock()
 	epoch := a.bridgeEpoch.Load()
 	a.projectionMu.Unlock()

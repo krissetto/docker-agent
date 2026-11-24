@@ -132,7 +132,9 @@ type InputReplay struct {
 	positions map[int]bool
 }
 
-func (r *InputReplay) Reset(sess *session.Session) {
+func (r *InputReplay) Reset(sess *session.Session) { r.ResetFromPosition(sess, 0) }
+
+func (r *InputReplay) ResetFromPosition(sess *session.Session, start int) {
 	*r = InputReplay{turns: make(map[string]bool), positions: make(map[int]bool)}
 	if sess == nil {
 		return
@@ -141,7 +143,7 @@ func (r *InputReplay) Reset(sess *session.Session) {
 		if item.Message == nil || item.Message.Pending {
 			continue
 		}
-		r.positions[pos] = true
+		r.positions[start+pos] = true
 		if item.Message.TurnID != "" {
 			r.turns[item.Message.TurnID] = true
 		}

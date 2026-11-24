@@ -291,10 +291,12 @@ type chatPage struct {
 	// message arrives as seed events from the session event hub (captured
 	// atomically with the subscription), so nothing needs repairing after
 	// the fact — and no scroll-disturbing rebuild is needed.
-	snapshotEnd      int
-	replay           *pageReplay
-	replayGeneration uint64
-	asyncReplay      bool
+	snapshotEnd           int
+	replay                *pageReplay
+	replayGeneration      uint64
+	asyncReplay           bool
+	waitingInitialHistory bool
+	olderHistory          *olderHistory
 
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
@@ -631,6 +633,11 @@ func agentInfoMode(mode msgtypes.SidebarInfoMode) sidebar.AgentInfoMode {
 // Init initializes the chat page
 func (p *chatPage) Init() tea.Cmd {
 	p.contentSessionID = ""
+	if p.app.SelectedSessionHistory() {
+		// Wait for the canonical observation barrier, not the open-view header.
+		p.waitingInitialHistory = true
+		return p.messages.Init()
+	}
 	if p.asyncReplay && p.app.Session() != nil {
 		return tea.Batch(p.messages.Init(), p.beginReplay(runtime.SessionSnapshot{Session: p.app.Session(), TranscriptPosition: p.app.Session().ItemCount()}))
 	}
@@ -1537,19 +1544,44 @@ func (p *chatPage) handleEditUserMessage(msg msgtypes.EditUserMessageMsg) (layou
 		return p, nil
 	}
 
+	if p.app.SelectedSessionHistory() {
+		application, ctx := p.app, p.ctx()
+		cmd := p.replayCommand(func() tea.Msg {
+			snapshot, err := application.FullSessionSnapshot(ctx)
+			if err != nil {
+				return editHistoryReadyMsg{msg: msg, err: err}
+			}
+			return editHistoryReadyMsg{msg: msg, sessionID: snapshot.ID, proof: runtime.SnapshotProof(snapshot), attachments: extractAttachmentsFromSnapshot(snapshot, msg.SessionPosition)}
+		})
+		return p, cmd
+	}
+	snapshot := p.app.Session()
+	cmd := p.startEditUserMessage(msg, runtime.SnapshotProof(snapshot), extractAttachmentsFromSnapshot(snapshot, msg.SessionPosition))
+	return p, cmd
+}
+
+type editHistoryReadyMsg struct {
+	msg         msgtypes.EditUserMessageMsg
+	sessionID   string
+	proof       string
+	attachments []msgtypes.Attachment
+	err         error
+}
+
+func (p *chatPage) startEditUserMessage(msg msgtypes.EditUserMessageMsg, proof string, attachments []msgtypes.Attachment) tea.Cmd {
 	p.editing = true
 	p.branchAtPosition = msg.SessionPosition
-	p.branchSnapshotProof = runtime.SnapshotProof(p.app.Session())
+	p.branchSnapshotProof = proof
 
 	// Extract any attachments from the original session message
-	p.editAttachments = p.extractAttachmentsFromSession(msg.SessionPosition)
+	p.editAttachments = attachments
 
 	// Start inline editing in the messages component.
 	// Request focus switch to messages panel so the parent blurs the editor.
 	editCmd := p.messages.StartInlineEdit(msg.MsgIndex, msg.SessionPosition, msg.OriginalContent)
 	focusCmd := core.CmdHandler(msgtypes.RequestFocusMsg{Target: msgtypes.PanelMessages})
 
-	return p, tea.Batch(editCmd, focusCmd)
+	return tea.Batch(editCmd, focusCmd)
 }
 
 // handleInlineEditCommitted handles the commit of an inline edit, triggering a branch.
@@ -1604,7 +1636,10 @@ func (p *chatPage) handleInlineEditCancelled(msg messages.InlineEditCancelledMsg
 // Legacy attachments are stored as text parts in MultiContent with format "Contents of <filename>: <dataURL>".
 // New attachments are stored as Document parts.
 func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attachment {
-	sess := p.app.Session()
+	return extractAttachmentsFromSnapshot(p.app.Session(), position)
+}
+
+func extractAttachmentsFromSnapshot(sess *session.Session, position int) []msgtypes.Attachment {
 	if sess == nil || position < 0 || position >= len(sess.Messages) {
 		return nil
 	}

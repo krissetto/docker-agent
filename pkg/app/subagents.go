@@ -89,6 +89,7 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 	a.initBus(ctx)
 	a.bridgeMu.Lock()
 	defer a.bridgeMu.Unlock()
+	a.startTreeWatch = nil
 	if a.stopBridge != nil {
 		a.stopBridge()
 		a.stopBridge = nil
@@ -110,7 +111,11 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 		a.sendEvent(ctx, runtime.Error(err.Error()))
 		return false
 	}
-	a.startSubagentTreeWatch(bridgeCtx, session, sess.ID, epoch)
+	if a.SelectedSessionHistory() {
+		a.startTreeWatch = sync.OnceFunc(func() { a.startSubagentTreeWatch(bridgeCtx, session, sess.ID, epoch) })
+	} else {
+		a.startSubagentTreeWatch(bridgeCtx, session, sess.ID, epoch)
+	}
 	var stopOnce sync.Once
 	a.stopBridge = func() {
 		stopOnce.Do(func() {

@@ -34,8 +34,9 @@ const sessionWireVersion = api.SessionAPIVersion
 // SessionTransport is the first-party session-v2 HTTP transport. It is a
 // borrowed registry: closing an observation never stops server-side execution.
 type SessionTransport struct {
-	client *Client
-	source string
+	client                 *Client
+	source                 string
+	selectedSessionHistory bool
 }
 
 // SessionTransportOption fixes transport identity at construction.
@@ -407,7 +408,12 @@ func (s *remoteSession) StopSubtree(ctx context.Context) error {
 
 func (s *remoteSession) Release(context.Context) error { return nil }
 func (s *remoteSession) Observe(ctx context.Context, options ObserveOptions) (Observation, error) {
-	return s.runtime.client.attachSession(ctx, s.ID(), options)
+	observation, err := s.runtime.client.attachSession(ctx, s.ID(), options)
+	if options.HistoryTail != nil && unsupportedObservationProjection(err) {
+		options.HistoryTail = nil
+		return s.runtime.client.attachSession(ctx, s.ID(), options)
+	}
+	return observation, err
 }
 
 func (s *remoteSession) Compact(ctx context.Context, additionalPrompt string, _ EventSink) error {
@@ -818,8 +824,10 @@ func sessionRequestPhase(method, endpoint, query string) string {
 	switch {
 	case method == http.MethodGet && (query == "view=prepare-info" || query == "view=prepare-info&projection="+api.SessionViewMetadataProjection):
 		return "prepare_view"
-	case method == http.MethodPatch && query == "view=open-view":
+	case method == http.MethodPatch && (query == "view=open-view" || query == "view=open-view&projection="+api.SessionViewMetadataProjection):
 		return "open_view"
+	case method == http.MethodGet && strings.HasSuffix(endpoint, "/history"):
+		return "older_history"
 	case method == http.MethodGet && strings.HasSuffix(endpoint, "/snapshot"):
 		return "snapshot"
 	case method == http.MethodPost && endpoint == api.SessionAPIPath:
@@ -850,6 +858,9 @@ func decodeSessionHTTPError(status int, reader io.Reader) error {
 		Detail    string             `json:"detail,omitempty"`
 	}
 	_ = json.Unmarshal(body, &payload)
+	if payload.Error == "history_cursor_stale" {
+		return ErrHistoryCursorStale
+	}
 	if payload.Error == "background_process_not_found" {
 		return tools.ErrBackgroundProcessNotFound
 	}
@@ -886,7 +897,15 @@ func decodeSessionHTTPError(status int, reader io.Reader) error {
 	return &sessionHTTPError{status: status, err: &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason, Detail: payload.Detail}}
 }
 
-func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (_ Observation, retErr error) {
+func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (Observation, error) {
+	projection := ""
+	if options.HistoryTail != nil {
+		projection = api.SessionHistoryProjection
+	}
+	return c.attachSessionProjection(ctx, id, options, projection)
+}
+
+func (c *Client) attachSessionProjection(ctx context.Context, id string, options ObserveOptions, projection string) (_ Observation, retErr error) {
 	started := time.Now()
 	var received responseByteCounter
 	var headers time.Duration
@@ -904,6 +923,20 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	}
 	u := *c.baseURL
 	u.Path = path.Join(u.Path, api.SessionAPIPath+"/"+url.PathEscape(id)+"/events")
+	if options.HistoryTail != nil {
+		if options.Tree || options.Since != nil {
+			return Observation{}, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: SessionOperationObserve}
+		}
+		q, err := historyQuery(*options.HistoryTail)
+		if err != nil {
+			return Observation{}, err
+		}
+		u.RawQuery = q.Encode()
+	} else if projection != "" {
+		q := u.Query()
+		q.Set("projection", projection)
+		u.RawQuery = q.Encode()
+	}
 	if options.Tree {
 		q := u.Query()
 		q.Set("tree", "true")
@@ -998,6 +1031,15 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		cancel()
 		return Observation{}, protocolError(err)
 	}
+	if projection != "" && snapshot.Projection != projection {
+		if snapshot.Projection != "" {
+			resp.Body.Close()
+			cancel()
+			return Observation{}, protocolError(errors.New("unexpected session observation projection"))
+		}
+		// An older peer may ignore the query and already provide the full baseline.
+		projection = ""
+	}
 	snapshots := []SessionSnapshot{snapshot}
 	witnessParents := map[string]string{}
 	if options.Tree && snapshot.Session.SubagentTree != nil {
@@ -1064,6 +1106,9 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		if options.Tree && message.Type == "snapshot" && message.Snapshot != nil {
 			additional, decodeErr := c.decodeSessionSnapshot(*message.Snapshot)
 			if decodeErr == nil {
+				if additional.Projection != projection {
+					decodeErr = errors.New("inconsistent tree snapshot projection")
+				}
 				_, duplicate := replaySequences[additional.Status.SessionID]
 				witnessParent, witnessed := witnessParents[additional.Session.ID]
 				if additional.Session.ParentID == "" {
@@ -1201,6 +1246,10 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				additional, decodeErr := c.decodeSessionSnapshot(*m.Snapshot)
 				if decodeErr != nil {
 					errorsCh <- protocolError(decodeErr)
+					return
+				}
+				if additional.Projection != projection {
+					errorsCh <- protocolError(errors.New("inconsistent dynamic tree snapshot projection"))
 					return
 				}
 				if additional.Session.ParentID == "" {
@@ -1426,7 +1475,21 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 		return SessionSnapshot{}, errors.New("invalid session snapshot identity")
 	}
 	in.Session.ParentID = in.ParentSessionID
-	out := SessionSnapshot{BackgroundProcesses: in.BackgroundProcesses, Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition, TitleStatus: in.TitleStatus}
+	out := SessionSnapshot{Projection: in.Projection, BackgroundProcesses: in.BackgroundProcesses, Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition, TitleStatus: in.TitleStatus}
+	switch in.Projection {
+	case api.SessionHistoryProjection:
+		if err := decodeHistoryPage(&out, in.History, in.Items); err != nil {
+			return SessionSnapshot{}, err
+		}
+		width := out.History.BeforePosition - out.History.StartPosition
+		if width > maxHistoryItems || width != out.History.ScannedPositions || out.History.BeforePosition != out.TranscriptPosition || out.Session.ItemCount() != 0 {
+			return SessionSnapshot{}, errors.New("invalid initial history page")
+		}
+	case api.SessionViewMetadataProjection:
+		if out.Session.ItemCount() != 0 || in.History != nil || len(in.Items) != 0 {
+			return SessionSnapshot{}, errors.New("invalid metadata-only observation")
+		}
+	}
 	seenProcesses := make(map[string]struct{}, len(out.BackgroundProcesses))
 	for _, process := range out.BackgroundProcesses {
 		if process.SessionID != in.Session.ID || !validBackgroundProcess(process) {
@@ -1645,28 +1708,33 @@ func (r *SessionTransport) PrepareSessionView(ctx context.Context, id string) (P
 }
 
 // PrepareSessionViewMetadata confirms identity without transferring transcript
-// data during preparation. Commit still returns the full canonical view.
+// data during preparation. Opted-in selected views commit with metadata as well.
 func (r *SessionTransport) PrepareSessionViewMetadata(ctx context.Context, id string) (PreparedSessionView, error) {
 	return r.prepareSessionView(ctx, id, api.SessionViewMetadataProjection)
 }
 
 func (r *SessionTransport) prepareSessionView(ctx context.Context, id, projection string) (PreparedSessionView, error) {
 	info, err := r.confirmedSessionViewInfo(ctx, id, projection)
+	if projection != "" && r.selectedSessionHistory && unsupportedObservationProjection(err) {
+		projection = ""
+		info, err = r.confirmedSessionViewInfo(ctx, id, projection)
+	}
 	if err != nil {
 		return nil, err
 	}
 	child, cancel := context.WithCancel(ctx)
-	return &remotePreparedView{runtime: r, info: info, ctx: func() context.Context { return child }, cancel: cancel}, nil
+	return &remotePreparedView{runtime: r, info: info, metadataOnly: r.selectedSessionHistory && projection != "", ctx: func() context.Context { return child }, cancel: cancel}, nil
 }
 
 type remotePreparedView struct {
-	mu        sync.Mutex
-	runtime   *SessionTransport
-	info      PreparedSessionViewInfo
-	ctx       func() context.Context // immutable confirmed preparation lifetime
-	cancel    context.CancelFunc
-	terminal  bool
-	committed *CommittedSessionView
+	mu           sync.Mutex
+	runtime      *SessionTransport
+	info         PreparedSessionViewInfo
+	ctx          func() context.Context // immutable confirmed preparation lifetime
+	cancel       context.CancelFunc
+	terminal     bool
+	metadataOnly bool
+	committed    *CommittedSessionView
 }
 
 func (p *remotePreparedView) Info() PreparedSessionViewInfo {
@@ -1696,13 +1764,37 @@ func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, 
 	defer stop()
 	defer cancel()
 	defer p.cancel()
-	var response api.SessionOpened[PreparedSessionViewInfo, SessionState]
+	var response struct {
+		api.SessionOpened[PreparedSessionViewInfo, SessionState]
+
+		Projection string `json:"projection"`
+	}
 	confirmation := p.info.Confirmation()
-	if err := p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, api.SessionAPIPath+"/"+url.PathEscape(p.info.SessionID)+"?view=open-view", SessionEdit{Kind: SessionEditOpenView, ViewConfirmation: &confirmation}, &response); err != nil {
+	endpoint := api.SessionAPIPath + "/" + url.PathEscape(p.info.SessionID) + "?view=open-view"
+	edit := SessionEdit{Kind: SessionEditOpenView, ViewConfirmation: &confirmation}
+	var err error
+	if p.metadataOnly {
+		err = p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, endpoint+"&projection="+api.SessionViewMetadataProjection, edit, &response)
+	}
+	if !p.metadataOnly || unsupportedObservationProjection(err) {
+		err = p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, endpoint, edit, &response)
+	}
+	if err != nil {
 		return CommittedSessionView{}, err
 	}
 	if response.Version != sessionWireVersion || response.View != "open-view" {
 		return CommittedSessionView{}, UnsupportedSessionOperation(p.info.SessionID, "open_view")
+	}
+	if response.Projection != "" && response.Projection != api.SessionViewMetadataProjection {
+		return CommittedSessionView{}, errors.New("invalid open-view projection")
+	}
+	if response.Projection == api.SessionViewMetadataProjection && response.Info.Session != nil {
+		if !p.metadataOnly || response.Info.Session.ItemCount() != 0 {
+			return CommittedSessionView{}, errors.New("invalid metadata-only open-view")
+		}
+		if response.Info.Attach != nil {
+			response.Info.Attach.Session = response.Info.Session.Clone()
+		}
 	}
 	info, err := p.runtime.validateSessionViewInfo(p.info.SessionID, response.Info)
 	if err != nil {

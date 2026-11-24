@@ -112,6 +112,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, errCmd
 		}
 	case *runtime.ErrorEvent:
+		p.waitingInitialHistory = false
 		if userconfig.Get().GetSound() {
 			sound.Play(p.ctx(), sound.Failure)
 		}
@@ -285,6 +286,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.handleToolCallOutput(msg)
 
 	case *runtime.ToolCallResponseEvent:
+		if history := p.olderHistory; history != nil {
+			history.toolResults[msg.ToolCallID] = msg.Response
+		}
 		return true, p.handleToolCallResponse(msg)
 
 	// ===== Sidebar Info Events (forwarded) =====
@@ -912,7 +916,8 @@ func (p *chatPage) applyLifecycle(event runtime.Event) {
 
 func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
 	p.backgroundRemoteToolCalls = nil
-	if p.asyncReplay && snapshot.Session != nil {
+	if (p.asyncReplay || snapshot.History != nil || (p.app != nil && p.app.SelectedSessionHistory())) && snapshot.Session != nil {
+		p.setOlderHistory(runtime.SessionSnapshot{})
 		return p.beginReplay(snapshot)
 	}
 	return p.applyProjection(snapshot, true)

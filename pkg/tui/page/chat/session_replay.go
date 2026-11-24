@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
 	list "github.com/docker/docker-agent/pkg/tui/components/messages"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -51,9 +52,13 @@ func EnableAsyncReplay(page Page) {
 }
 
 // Loading reports whether the authoritative recent transcript is still being installed.
-func Loading(page Page) bool { p, ok := page.(*chatPage); return ok && p.replay != nil }
+func Loading(page Page) bool {
+	p, ok := page.(*chatPage)
+	return ok && (p.waitingInitialHistory || p.replay != nil)
+}
 
 func (p *chatPage) beginReplay(snapshot runtime.SessionSnapshot) tea.Cmd {
+	p.waitingInitialHistory = false
 	p.replayGeneration++
 	generation := p.replayGeneration
 	p.replay = &pageReplay{started: time.Now(), generation: generation, preparing: true}
@@ -61,7 +66,11 @@ func (p *chatPage) beginReplay(snapshot runtime.SessionSnapshot) tea.Cmd {
 	return p.replayCommand(func() tea.Msg {
 		prepared := list.PrepareReplay(snapshot.Session)
 		var inputReplay lifecycle.InputReplay
-		inputReplay.Reset(prepared.Session)
+		start := 0
+		if snapshot.History != nil {
+			start = snapshot.History.StartPosition
+		}
+		inputReplay.ResetFromPosition(prepared.Session, start)
 		snapshot.Session = prepared.Session
 		var media map[int][]types.AssistantMedia
 		var requests []generatedMediaRequest
@@ -95,6 +104,19 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 		msg = owned.inner
 	}
 	switch msg := msg.(type) {
+	case list.OlderHistoryRequestedMsg:
+		return true, p.loadOlderHistory()
+	case olderHistoryPageMsg:
+		return true, p.applyOlderHistory(msg)
+	case editHistoryReadyMsg:
+		if msg.err != nil {
+			return true, notification.ErrorCmd("Could not load the message: " + msg.err.Error())
+		}
+		if p.editing || msg.proof == "" || p.app.Session() == nil || msg.sessionID != p.app.Session().ID ||
+			!list.MatchesUserMessage(p.messages, msg.msg.MsgIndex, msg.msg.SessionPosition, msg.msg.OriginalContent) {
+			return true, nil
+		}
+		return true, p.startEditUserMessage(msg.msg, msg.proof, msg.attachments)
 	case list.ReplayRenderedMsg:
 		list.ApplyReplayRender(p.messages, msg)
 		if p.replay == nil {
@@ -124,8 +146,13 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 		p.replay.snapshot = msg.snapshot
 		p.replay.requests = msg.requests
 		p.inputReplay = msg.inputReplay
+		p.setOlderHistory(msg.snapshot)
 		p.snapshotEnd = msg.snapshot.TranscriptPosition
-		list.BeginReplay(p.messages, msg.prepared, msg.media)
+		if msg.snapshot.History != nil {
+			list.BeginHistoryReplay(p.messages, msg.prepared, msg.media, msg.snapshot.History.StartPosition)
+		} else {
+			list.BeginReplay(p.messages, msg.prepared, msg.media)
+		}
 		return true, p.replayCommand(func() tea.Msg { return replayContinueMsg{generation: msg.generation} })
 	case replayContinueMsg:
 		if p.replay == nil || p.replay.generation != msg.generation || p.replay.preparing {
@@ -159,8 +186,11 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 			cmds = append(cmds, p.replayCommand(func() tea.Msg { return msg }))
 			return true, tea.Batch(cmds...)
 		}
-		slog.Debug("Session presentation timing", "phase", "replay_ready", "elapsed", time.Since(r.started), "items", r.snapshot.TranscriptPosition)
+		slog.Debug("Session presentation timing", "phase", "replay_ready", "elapsed", time.Since(r.started), "items", r.snapshot.Session.ItemCount())
 		p.replay = nil
+		if p.app != nil && p.app.SelectedSessionHistory() {
+			p.app.StartSessionTreeWatch()
+		}
 		cmds = append(cmds, p.continueHistoryCmd())
 		return true, tea.Batch(cmds...)
 	}

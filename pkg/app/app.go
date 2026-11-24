@@ -56,10 +56,11 @@ type Services interface {
 }
 
 type sessionState struct {
-	session *session.Session
-	handle  runtime.SessionHandle
-	binding runtime.SessionBinding
-	err     error
+	transcriptStart int
+	session         *session.Session
+	handle          runtime.SessionHandle
+	binding         runtime.SessionBinding
+	err             error
 }
 
 type App struct {
@@ -98,6 +99,7 @@ type App struct {
 	backgroundOutput   *backgroundOutputObservation
 	bridgeMu           sync.Mutex
 	stopBridge         func()
+	startTreeWatch     func()
 	hubBridged         bool
 	bridgeEpoch        atomic.Uint64
 	presentation       atomic.Pointer[PresentationState]
@@ -2261,7 +2263,11 @@ func (a *App) ExportHTML(ctx context.Context, filename string) (string, error) {
 	} else if a.runtime != nil {
 		description = a.runtime.CurrentAgentInfo(ctx).Description
 	}
-	return export.SessionToFile(state.session, description, filename)
+	snapshot, err := fullSessionSnapshot(ctx, state, a.SelectedSessionHistory())
+	if err != nil {
+		return "", err
+	}
+	return export.SessionToFile(snapshot, description, filename)
 }
 
 // ErrTitleGenerating is returned when attempting to set a title while generation is in progress.
@@ -2349,8 +2355,12 @@ func (a *App) RegenerateSessionTitle(ctx context.Context) error {
 	}
 
 	if owner, ok := state.handle.(runtime.SessionTitleGenerator); ok {
+		snapshot, err := fullSessionSnapshot(ctx, state, a.SelectedSessionHistory())
+		if err != nil {
+			return err
+		}
 		var userMessages []string
-		for _, msg := range state.session.GetAllMessages() {
+		for _, msg := range snapshot.GetAllMessages() {
 			if msg.Message.Role == chat.MessageRoleUser {
 				userMessages = append(userMessages, msg.Message.Content)
 			}
