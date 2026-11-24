@@ -22,6 +22,7 @@ type olderHistory struct {
 	anchor, before         int
 	loading                bool
 	toolResults            map[string]string
+	items                  historyItems
 }
 
 type olderHistoryPageMsg struct {
@@ -36,7 +37,7 @@ type olderHistoryPageMsg struct {
 func (p *chatPage) setOlderHistory(snapshot runtime.SessionSnapshot) {
 	p.olderHistory = nil
 	list.SetOlderHistoryAvailable(p.messages, false)
-	if snapshot.History == nil || snapshot.HistoryCursor == "" || snapshot.Session == nil {
+	if snapshot.History == nil || snapshot.Session == nil {
 		return
 	}
 	p.olderHistory = &olderHistory{
@@ -44,7 +45,8 @@ func (p *chatPage) setOlderHistory(snapshot runtime.SessionSnapshot) {
 		cursor: snapshot.Cursor, anchor: snapshot.TranscriptPosition, before: snapshot.History.StartPosition, toolResults: make(map[string]string),
 	}
 	list.AddHistoryToolResults(p.olderHistory.toolResults, snapshot.Session.Messages)
-	list.SetOlderHistoryAvailable(p.messages, true)
+	p.olderHistory.addOmissions(snapshot)
+	list.SetOlderHistoryAvailable(p.messages, snapshot.HistoryCursor != "")
 }
 
 func (p *chatPage) loadOlderHistory() tea.Cmd {
@@ -83,6 +85,9 @@ func (p *chatPage) applyOlderHistory(msg olderHistoryPageMsg) tea.Cmd {
 		return nil
 	}
 	h.loading = false
+	if len(h.items.removed) != 0 {
+		msg.err = runtime.ErrHistoryCursorStale
+	}
 	if msg.err != nil {
 		if errors.Is(msg.err, runtime.ErrHistoryCursorStale) {
 			p.olderHistory = nil
@@ -98,7 +103,7 @@ func (p *chatPage) applyOlderHistory(msg olderHistoryPageMsg) tea.Cmd {
 		(page.History.BeforePosition != h.before && page.History.BeforePosition != h.anchor) || page.History.StartPosition >= h.before ||
 		len(msg.prefix.Messages) != h.before-page.History.StartPosition || page.History.ScannedPositions != len(msg.prefix.Messages) || page.HistoryCursor == h.next ||
 		slices.ContainsFunc(page.Items, func(item session.BoundedItem) bool { return item.Position >= h.before }) {
-		p.olderHistory = nil
+		h.next = ""
 		list.SetOlderHistoryAvailable(p.messages, false)
 		return notification.ErrorCmd("Could not load older history: invalid history boundary")
 	}
@@ -111,7 +116,8 @@ func (p *chatPage) applyOlderHistory(msg olderHistoryPageMsg) tea.Cmd {
 	cmd := list.PrependHistory(p.messages, msg.prefix, h.before, h.toolResults, msg.media)
 	list.AddHistoryToolResults(h.toolResults, msg.prefix.Messages)
 	list.SetOlderHistoryAvailable(p.messages, h.next != "")
-	return tea.Batch(cmd, p.resolveGeneratedMediaCmd(msg.requests))
+	h.addOmissions(page)
+	return tea.Batch(cmd, p.resolveGeneratedMediaCmd(msg.requests), p.loadHistoryItem())
 }
 
 func (p *chatPage) refreshHistory() tea.Cmd {

@@ -67,6 +67,50 @@ func (r *SessionTransport) ReadOlderHistory(ctx context.Context, id, cursor stri
 	return out, nil
 }
 
+// ReadHistoryItem retrieves the canonical item named by an omission cursor.
+func (r *SessionTransport) ReadHistoryItem(ctx context.Context, id, cursor string, anchor SessionSnapshot, position int) (session.Item, error) {
+	if cursor == "" {
+		return session.Item{}, ErrUnsupported
+	}
+	var out api.SessionHistoryItemPage
+	query := url.Values{"cursor": {cursor}}
+	endpoint := api.SessionAPIPath + "/" + url.PathEscape(id) + "/history/item?" + query.Encode()
+	if err := r.client.sessionWaitJSON(ctx, http.MethodGet, endpoint, nil, &out); err != nil {
+		var httpErr *sessionHTTPError
+		if errors.As(err, &httpErr) {
+			switch httpErr.status {
+			case http.StatusNotFound, http.StatusMethodNotAllowed:
+				return session.Item{}, ErrUnsupported
+			case http.StatusRequestEntityTooLarge:
+				return session.Item{}, session.ErrHistoryItemTooLarge
+			}
+		}
+		return session.Item{}, err
+	}
+	if out.SessionID != id || out.Epoch != anchor.Epoch || out.Cursor != anchor.Cursor || out.TranscriptPosition != anchor.TranscriptPosition || out.Position != position {
+		return session.Item{}, protocolError(errors.New("invalid session history item identity"))
+	}
+	return out.Item, nil
+}
+
+// ReadHistoryFallback reads one full snapshot only for omissions a peer cannot
+// serve individually; like legacy attach, the caller controls cancellation.
+func (r *SessionTransport) ReadHistoryFallback(ctx context.Context, id string) (SessionSnapshot, error) {
+	var raw remoteSessionSnapshot
+	endpoint := api.SessionAPIPath + "/" + url.PathEscape(id) + "/snapshot"
+	if err := r.client.sessionWaitJSON(ctx, http.MethodGet, endpoint, nil, &raw); err != nil {
+		return SessionSnapshot{}, err
+	}
+	decoded, err := r.client.decodeSessionSnapshot(raw)
+	if err != nil {
+		return SessionSnapshot{}, protocolError(err)
+	}
+	if decoded.Session.ID != id || decoded.Projection != "" {
+		return SessionSnapshot{}, protocolError(errors.New("invalid full session history snapshot"))
+	}
+	return decoded, nil
+}
+
 func decodeHistoryPage(out *SessionSnapshot, history *api.SessionHistory, items []api.SessionHistoryItem) error {
 	if history == nil || out.Epoch == "" || history.StartPosition < 0 || history.EndPosition < history.StartPosition || history.EndPosition > out.TranscriptPosition || history.TotalItems != out.TranscriptPosition || history.Truncated != (history.StartPosition > 0) || history.Truncated != (history.NextCursor != "") || len(items) > maxHistoryItems {
 		return errors.New("invalid session history bounds")
@@ -85,6 +129,15 @@ func decodeHistoryPage(out *SessionSnapshot, history *api.SessionHistory, items 
 	for _, omitted := range history.OmittedRanges {
 		if omitted.StartPosition < history.StartPosition || omitted.EndPosition <= omitted.StartPosition || omitted.EndPosition > history.EndPosition || omitted.EndPosition-omitted.StartPosition > maxHistoryItems {
 			return errors.New("invalid session history omission")
+		}
+		for _, item := range omitted.Items {
+			if item.Position < omitted.StartPosition || item.Position >= omitted.EndPosition || item.Cursor == "" || out.HistoryItemCursors[item.Position] != "" || len(out.HistoryItemCursors) >= maxHistoryItems {
+				return errors.New("invalid session history item cursor")
+			}
+			if out.HistoryItemCursors == nil {
+				out.HistoryItemCursors = make(map[int]string)
+			}
+			out.HistoryItemCursors[item.Position] = item.Cursor
 		}
 		for pos := omitted.StartPosition; pos < omitted.EndPosition; pos++ {
 			if seen[pos] || len(seen) >= maxHistoryItems {

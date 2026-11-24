@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -33,6 +34,20 @@ func (a *App) ReadOlderSessionHistory(ctx context.Context, id, cursor string) (r
 	return runtime.SessionSnapshot{}, runtime.ErrUnsupported
 }
 
+func (a *App) ReadSessionHistoryItem(ctx context.Context, id, cursor string, anchor runtime.SessionSnapshot, position int) (session.Item, error) {
+	if transport, ok := a.sessions.(*runtime.SessionTransport); ok && transport.SelectedSessionHistory() {
+		return transport.ReadHistoryItem(ctx, id, cursor, anchor, position)
+	}
+	return session.Item{}, runtime.ErrUnsupported
+}
+
+func (a *App) ReadSessionHistoryFallback(ctx context.Context, id string) (runtime.SessionSnapshot, error) {
+	if transport, ok := a.sessions.(*runtime.SessionTransport); ok && transport.SelectedSessionHistory() {
+		return transport.ReadHistoryFallback(ctx, id)
+	}
+	return runtime.SessionSnapshot{}, runtime.ErrUnsupported
+}
+
 // HistoryItems translates absolute history positions into a bounded contiguous
 // presentation slice, with explicit placeholders for oversized items. Older
 // peers reported the anchor as end_position even for pages ending before it.
@@ -50,7 +65,7 @@ func HistoryItems(snapshot runtime.SessionSnapshot, before int) []session.Item {
 	for _, positions := range [][]int{snapshot.History.OmittedPositions, snapshot.History.OmittedResponsePositions} {
 		for _, pos := range positions {
 			if pos >= start && pos < before {
-				items[pos-start] = session.Item{Error: &session.Error{Code: "history_omitted", Message: "A transcript item exceeds the history page size limit."}}
+				items[pos-start] = session.Item{Error: &session.Error{Code: lifecycle.HistoryPlaceholderCode, Message: "Loading large transcript item…"}}
 			}
 		}
 	}

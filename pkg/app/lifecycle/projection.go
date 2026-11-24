@@ -91,6 +91,9 @@ func InteractionSnapshotKey(i runtime.InteractionSnapshot) InteractionKey {
 	return key
 }
 
+// HistoryPlaceholderCode marks a detached presentation item, not a runtime failure.
+const HistoryPlaceholderCode = "history_omitted"
+
 // IsUserInput deliberately leaves untyped and unknown origins unprivileged and visible.
 func IsUserInput(origin session.InputOrigin) bool {
 	return origin != session.InputOriginAgent && origin != session.InputOriginRuntime

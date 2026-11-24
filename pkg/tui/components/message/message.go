@@ -964,6 +964,8 @@ func (mv *messageModel) render(width int) string {
 		retryHint := styles.MutedStyle.Render(types.ErrorRetryLabel)
 		content := msg.Content + "\n\n" + retryHint
 		return styles.ErrorMessageStyle.Width(width - 1).Render(content)
+	case types.MessageTypeHistoryPlaceholder:
+		return styles.MutedStyle.Width(max(1, width)).Render(msg.Content)
 	case types.MessageTypeLoading:
 		// Show spinner with the loading description, truncated to fit width
 		spinnerView := mv.ensureSpinner().View()

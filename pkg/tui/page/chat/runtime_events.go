@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tools"
+	list "github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -210,12 +211,17 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		}
 		p.inputReplay.Cancel(msg.TurnID, msg.SessionPosition)
 		p.messages.RemovePendingInput(msg.TurnID)
-		p.messages.RemovePendingSessionPosition(msg.SessionPosition)
+		var removedCmd tea.Cmd
 		if msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
+			if h := p.olderHistory; h != nil {
+				h.items.removed = append(h.items.removed, msg.SessionPosition)
+				removedCmd = list.ReplaceHistoryItem(p.messages, msg.SessionPosition, nil, nil, nil, "Large transcript item withdrawn")
+			}
 			p.snapshotEnd--
 		}
+		p.messages.RemovePendingSessionPosition(msg.SessionPosition)
 		p.messageQueue = slices.DeleteFunc(p.messageQueue, func(queued queuedMessage) bool { return queued.turnID == msg.TurnID })
-		return true, p.syncQueueToSidebar()
+		return true, tea.Batch(removedCmd, p.syncQueueToSidebar())
 
 	case *runtime.PendingUserMessagePromotedEvent:
 		p.applyLifecycle(msg)

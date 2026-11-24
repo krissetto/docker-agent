@@ -3253,6 +3253,12 @@ func (m *model) buildSessionReplay(sess *session.Session, generatedMedia map[int
 	var replayResponseGroup uint64
 	apply := func(pos int, item session.Item) {
 		if item.IsError() {
+			if item.Error.Code == lifecycle.HistoryPlaceholderCode {
+				position := firstPosition + pos
+				placeholder := &types.Message{Type: types.MessageTypeHistoryPlaceholder, Content: item.Error.Message, SessionPosition: &position}
+				appendSessionMessage(placeholder, m.createMessageView(placeholder))
+				return
+			}
 			errMsg := types.Error(item.Error.Message)
 			appendSessionMessage(errMsg, m.createMessageView(errMsg))
 			return
@@ -5003,6 +5009,9 @@ func (m *model) RemovePendingSessionPosition(position int) {
 		return
 	}
 	for _, msg := range m.messages {
+		if msg.Type == types.MessageTypeHistoryPlaceholder && msg.SessionPosition != nil && *msg.SessionPosition == position {
+			msg.SessionPosition = nil
+		}
 		if msg.SessionPosition != nil && *msg.SessionPosition > position {
 			*msg.SessionPosition--
 		}

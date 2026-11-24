@@ -832,6 +832,8 @@ func sessionRequestPhase(method, endpoint, query string) string {
 		return "open_view"
 	case method == http.MethodGet && strings.HasSuffix(endpoint, "/history"):
 		return "older_history"
+	case method == http.MethodGet && strings.HasSuffix(endpoint, "/history/item"):
+		return "history_item"
 	case method == http.MethodGet && strings.HasSuffix(endpoint, "/snapshot"):
 		return "snapshot"
 	case method == http.MethodPost && endpoint == api.SessionAPIPath:

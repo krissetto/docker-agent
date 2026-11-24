@@ -32,6 +32,7 @@ const (
 	MessageTypeAgentReturn
 	MessageTypeAgentInput
 	MessageTypeRuntimeNotice
+	MessageTypeHistoryPlaceholder
 )
 
 const (

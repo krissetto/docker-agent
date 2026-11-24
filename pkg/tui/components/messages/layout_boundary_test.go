@@ -529,7 +529,7 @@ var (
 	// workRangeStructural may range over those maps: the dirty-gated projection rebuild,
 	// the status transition, the compact-off reset, the reverse-map builder, and the
 	// explicit diagnostic materializer.
-	workRangeStructural = map[string]bool{"syncWorkProjection": true, "SetWorkStatus": true, "restoreWorkPlain": true, "setWorkHeaders": true, "workRangeList": true, "PrependHistory": true}
+	workRangeStructural = map[string]bool{"syncWorkProjection": true, "SetWorkStatus": true, "restoreWorkPlain": true, "setWorkHeaders": true, "workRangeList": true, "PrependHistory": true, "ReplaceHistoryItem": true}
 	// workRangeListCallers may call the full materializer. No production caller remains.
 	workRangeListCallers = map[string]bool{}
 	// identityBuilders are the full index builds. No epoch may reach them.
@@ -552,7 +552,7 @@ var (
 
 // messageWriteSites is the number of production assignments to m.messages. The test
 // pins it, so a new unhooked write site cannot appear without a test change.
-const messageWriteSites = 22
+const messageWriteSites = 24
 
 // workRangeGuardScan returns the hot-path violations of the package and the number of
 // production writes to m.messages it checked. It flags all-history range loops over

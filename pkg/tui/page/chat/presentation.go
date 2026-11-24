@@ -287,7 +287,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 		layoutCmd = p.applySplitPresentation()
 	}
 	p.applyScrollbarVisibility()
-	return tea.Batch(interestCmd, resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden), p.continueHistoryCmd())
+	return tea.Batch(interestCmd, resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden), p.continueHistoryCmd(), p.loadHistoryItem())
 }
 
 func (p *chatPage) stopHiddenPresentation() {

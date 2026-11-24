@@ -108,6 +108,13 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.loadOlderHistory()
 	case olderHistoryPageMsg:
 		return true, p.applyOlderHistory(msg)
+	case historyItemStartMsg:
+		if p.olderHistory != msg.history {
+			return true, nil
+		}
+		return true, p.replayCommand(msg.run)
+	case historyItemMsg:
+		return true, p.applyHistoryItem(msg)
 	case editHistoryReadyMsg:
 		if msg.err != nil {
 			return true, notification.ErrorCmd("Could not load the message: " + msg.err.Error())
@@ -191,7 +198,7 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 		if p.app != nil && p.app.SelectedSessionHistory() {
 			p.app.StartSessionTreeWatch()
 		}
-		cmds = append(cmds, p.continueHistoryCmd())
+		cmds = append(cmds, p.continueHistoryCmd(), p.loadHistoryItem())
 		return true, tea.Batch(cmds...)
 	}
 	if p.replay != nil {
