@@ -1,10 +1,12 @@
 package chat
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // newLayoutTestPage builds a chatPage large enough for the vertical sidebar
@@ -433,4 +436,29 @@ func TestViewPlacesBandAtConfiguredEdge(t *testing.T) {
 	bottomIdx := sidebarTitleLine(bottom.View())
 	require.GreaterOrEqual(t, bottomIdx, 0)
 	assert.GreaterOrEqual(t, bottomIdx, bottom.computeSidebarLayout().chatHeight, "bottom band renders below the chat")
+}
+
+func TestSidebarBackgroundStaysInsidePane(t *testing.T) {
+	for _, dock := range []msgtypes.SidebarPosition{msgtypes.SidebarLeft, msgtypes.SidebarRight, msgtypes.SidebarTop, msgtypes.SidebarBottom} {
+		t.Run(string(dock), func(t *testing.T) {
+			p := newLayoutTestPage(t, dock)
+			p.SetSize(p.width, p.height)
+			sl := p.appliedLayout
+			buf := uv.NewScreenBuffer(p.width, p.height)
+			uv.NewStyledString(p.View()).Draw(&buf, buf.Bounds())
+			x, y := styles.AppPadding, sl.bandY()
+			chatX, chatY := x, 0
+			if sl.mode == sidebarVertical {
+				x += sl.handleX
+				chatX += sl.chatStartX
+			} else if !sl.bandAtBottom {
+				chatY = sl.sidebarHeight
+			}
+			bg := buf.CellAt(x, y).Style.Bg
+			require.NotNil(t, bg)
+			want := lipgloss.Darken(styles.Background, 0.12)
+			require.Equal(t, color.RGBAModel.Convert(want), color.RGBAModel.Convert(bg))
+			require.Nil(t, buf.CellAt(chatX, chatY).Style.Bg)
+		})
+	}
 }

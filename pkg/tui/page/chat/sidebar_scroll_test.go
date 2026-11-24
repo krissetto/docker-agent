@@ -126,8 +126,8 @@ func (m *countingMessages) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func uncachedVerticalView(p *chatPage) string {
 	sl := p.computeSidebarLayout()
 	chatView := styles.ChatStyle.Height(sl.chatHeight).Width(sl.chatWidth).Render(p.messagesView(sl))
-	toggle := p.renderSidebarHandle(sl.chatHeight)
-	sidebarView := lipgloss.NewStyle().Width(sl.sidebarWidth-toggleColumnWidth).Height(sl.chatHeight).Align(lipgloss.Left, lipgloss.Top).Render(p.sidebar.View())
+	toggle := styles.ShadeSidebar(p.renderSidebarHandle(sl.chatHeight))
+	sidebarView := styles.ShadeSidebar(lipgloss.NewStyle().Width(sl.sidebarWidth-toggleColumnWidth).Height(sl.chatHeight).Align(lipgloss.Left, lipgloss.Top).Render(p.sidebar.View()))
 	var body string
 	if sl.sidebarOnLeft {
 		body = lipgloss.JoinHorizontal(lipgloss.Left, sidebarView, toggle, chatView)

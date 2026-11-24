@@ -16,11 +16,25 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/goccy/go-yaml"
 
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
+
+var (
+	sidebarBackground string
+	sidebarResets     *strings.Replacer
+)
+
+// ShadeSidebar restores the pane background after nested styles reset it.
+func ShadeSidebar(content string) string {
+	if content == "" {
+		return ""
+	}
+	return sidebarBackground + sidebarResets.Replace(content) + ansi.ResetStyle
+}
 
 //go:embed themes/*.yaml
 var builtinThemes embed.FS
@@ -1049,6 +1063,8 @@ func ApplyTheme(theme *Theme) {
 	c := theme.Colors
 	// Background colors
 	Background = lipgloss.Color(c.Background)
+	sidebarBackground = ansi.NewStyle().BackgroundColor(lipgloss.Darken(Background, 0.12)).String()
+	sidebarResets = strings.NewReplacer(ansi.ResetStyle, ansi.ResetStyle+sidebarBackground, "\x1b[0m", "\x1b[0m"+sidebarBackground, "\x1b[49m", sidebarBackground, "\n", ansi.ResetStyle+"\n"+sidebarBackground)
 	BackgroundAlt = lipgloss.Color(c.BackgroundAlt)
 	// Text colors
 	White = lipgloss.Color(c.SelectedFg)

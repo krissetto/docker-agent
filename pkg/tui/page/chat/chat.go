@@ -865,11 +865,11 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 
 	sidebarWithDivider := strings.Join(sidebarLines, "\n")
 
-	return lipgloss.NewStyle().
+	return styles.ShadeSidebar(lipgloss.NewStyle().
 		Width(width).
 		Height(height).
 		Align(lipgloss.Left, lipgloss.Top).
-		Render(sidebarWithDivider)
+		Render(sidebarWithDivider))
 }
 
 func (p *chatPage) messagesView(sl sidebarLayout) string {
@@ -907,13 +907,13 @@ func (p *chatPage) View() string {
 	case sidebarVertical:
 		chatView := p.renderChatPane(messagesView, sl.chatWidth, sl.chatHeight)
 
-		toggleCol := p.renderSidebarHandle(sl.chatHeight)
+		toggleCol := styles.ShadeSidebar(p.renderSidebarHandle(sl.chatHeight))
 
-		sidebarView := lipgloss.NewStyle().
+		sidebarView := styles.ShadeSidebar(lipgloss.NewStyle().
 			Width(sl.sidebarWidth-toggleColumnWidth).
 			Height(sl.chatHeight).
 			Align(lipgloss.Left, lipgloss.Top).
-			Render(p.sidebar.View())
+			Render(p.sidebar.View()))
 
 		if sl.sidebarOnLeft {
 			bodyContent = lipgloss.JoinHorizontal(lipgloss.Left, sidebarView, toggleCol, chatView)
