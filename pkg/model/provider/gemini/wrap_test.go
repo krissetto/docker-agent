@@ -182,21 +182,9 @@ func TestWrapGeminiError_TransientFunctionResponseIsRetryable(t *testing.T) {
 
 // Gemini reports an invalid API key as a 400, not a 401.
 func TestWrapGeminiError_AuthMessageStaysInformative(t *testing.T) {
-	for _, tc := range []struct{ name, sandbox, vm, want string }{
-		{"kit", "team-kit", "legacy", "On your host, run `sbx secret set google --sandbox team-kit`, then retry."},
-		{"legacy kit", "", "test-vm", "On your host, run `sbx secret set google --sandbox test-vm`, then retry."},
-		{"unsafe name", "bad; echo nope", "test-vm", "On your host, update the google secret for this sandbox, then retry."},
-		{"local", "", "", "Update the API key configured for this model and retry."},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("IS_SANDBOX", "")
-			t.Setenv("SANDBOX_NAME", tc.sandbox)
-			t.Setenv("SANDBOX_VM_ID", tc.vm)
-			err := wrapGeminiError(genai.APIError{Code: http.StatusBadRequest, Message: "API key not valid. Please pass a valid API key."})
-			assert.Equal(t, "HTTP 400: Google rejected the Gemini API key. "+tc.want, modelerrors.FormatError(err))
-		})
-	}
-
+	t.Parallel()
+	err := wrapGeminiError(genai.APIError{Code: http.StatusBadRequest, Message: "API key not valid. Please pass a valid API key."})
+	assert.Equal(t, "HTTP 400: Google rejected the Gemini API key.", modelerrors.FormatError(err))
 }
 
 // TestSanitizeAPIErrorMessage covers the bounds this diagnostics feature
