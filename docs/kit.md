@@ -445,7 +445,7 @@ its token through `sbx secret set github --sandbox "$NAME" --command 'gh auth to
 SBX captures the output on the host. Do not print tokens or expose host CLI config
 to sandbox writes. Secret storage and approval of exact domain bindings are
 separate steps; noninteractive creation is not automatic approval. Successful
-startup does not prove provider authentication. If Gemini reports `invalid_api_key`,
+startup does not prove provider authentication. If the kit reports “Google rejected the Gemini API key,”
 check the sandbox-scoped `google` secret on the host and its binding to
 `generativelanguage.googleapis.com`. Changing the model or thinking level does
 not repair an invalid credential. Actual startup sentinel delivery

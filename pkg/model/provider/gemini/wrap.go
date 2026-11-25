@@ -4,12 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 
 	"github.com/docker/portcullis"
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 )
 
@@ -62,12 +65,29 @@ type APIRejectionError struct {
 func (e *APIRejectionError) Unwrap() error { return e.APIError }
 
 func (e *APIRejectionError) Error() string {
+	if e.Category == RejectionInvalidAPIKey {
+		const problem = "Google rejected the Gemini API key. "
+		if !environment.InSandbox() {
+			return problem + "Update the API key configured for this model and retry."
+		}
+		name := os.Getenv("SANDBOX_NAME")
+		if name == "" {
+			name = os.Getenv("SANDBOX_VM_ID")
+		}
+		if safeSandboxName.MatchString(name) {
+			return problem + "On your host, run `sbx secret set google --sandbox " + name + "`, then retry."
+		}
+		return problem + "On your host, update the google secret for this sandbox, then retry."
+	}
 	msg := fmt.Sprintf("provider rejected the request (%s): %s", e.Category, categoryHint(e.Category))
 	if detail := sanitizeAPIErrorMessage(e.Message); detail != "" {
 		msg += " — provider message: " + detail
 	}
 	return msg
 }
+
+// Only interpolate a sandbox name that is safe as an unquoted shell argument.
+var safeSandboxName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // maxSanitizedAPIErrorMessageBytes bounds the provider message preserved in
 // [APIRejectionError.Error], independent of the unrelated field-length bound
@@ -117,8 +137,6 @@ func sanitizeAPIErrorMessage(message string) string {
 // [RequestRejectionCategory]. It never echoes provider-supplied text.
 func categoryHint(c RequestRejectionCategory) string {
 	switch c {
-	case RejectionInvalidAPIKey:
-		return "Google rejected the API key; check the Google credential configured for this runtime"
 	case RejectionMissingResponseModalities:
 		return "the response may need an explicit output modality (e.g. image) that this request didn't set"
 	case RejectionIncompatibleFunctionOrBuiltinTools:
