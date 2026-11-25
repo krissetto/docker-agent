@@ -129,6 +129,18 @@ func TestSSEFilter_ContentTypeMatching(t *testing.T) {
 	}
 }
 
+func TestSSEFilter_PreservesProviderErrorBody(t *testing.T) {
+	t.Parallel()
+	const body = `{"error":{"code":400,"message":"API key not valid.","status":"INVALID_ARGUMENT"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	assert.Equal(t, body, fetchThroughFilter(t, srv.URL))
+}
+
 // TestSSEFilter_NoOpOnNonSSEResponse confirms the wrapper is transparent
 // for responses that are not SSE: the body is passed through verbatim,
 // including bytes that would have been stripped from an SSE stream.

@@ -117,6 +117,8 @@ func sanitizeAPIErrorMessage(message string) string {
 // [RequestRejectionCategory]. It never echoes provider-supplied text.
 func categoryHint(c RequestRejectionCategory) string {
 	switch c {
+	case RejectionInvalidAPIKey:
+		return "Google rejected the API key; check the Google credential configured for this runtime"
 	case RejectionMissingResponseModalities:
 		return "the response may need an explicit output modality (e.g. image) that this request didn't set"
 	case RejectionIncompatibleFunctionOrBuiltinTools:

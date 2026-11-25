@@ -48,6 +48,10 @@ func (t *sseFilterTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if err != nil || res == nil || res.Body == nil {
 		return res, err
 	}
+	// Streaming endpoints can label JSON error bodies as SSE. Leave them intact for the SDK.
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+		return res, nil
+	}
 	// Match the prefix so charset suffixes (e.g. "text/event-stream;
 	// charset=utf-8") still trigger filtering.
 	if strings.HasPrefix(strings.ToLower(res.Header.Get("Content-Type")), "text/event-stream") {

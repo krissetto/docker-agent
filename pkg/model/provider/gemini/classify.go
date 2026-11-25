@@ -25,6 +25,8 @@ const (
 	// (e.g. thinking configuration) the target model or API surface
 	// doesn't support at all.
 	RejectionModelOrAPICapabilityMismatch RequestRejectionCategory = "model_or_api_capability_mismatch"
+	// RejectionInvalidAPIKey means Google explicitly rejected the supplied API key.
+	RejectionInvalidAPIKey RequestRejectionCategory = "invalid_api_key"
 	// RejectionOther covers any other provider rejection, including ones
 	// with no message to classify against (Gemini sometimes returns a 400
 	// with an empty body).
@@ -38,6 +40,7 @@ var rejectionKeywords = []struct {
 	category RequestRejectionCategory
 	keywords []string
 }{
+	{RejectionInvalidAPIKey, []string{"api key not valid", "api_key_invalid"}},
 	{RejectionMissingResponseModalities, []string{"response_modalities", "responsemodalities"}},
 	{RejectionStructuredOutputConflict, []string{
 		"response_schema", "response_json_schema", "response_mime_type",

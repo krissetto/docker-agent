@@ -433,7 +433,8 @@ using the **host** SBX CLI, preferably sandbox-scoped:
 NAME=async-agent-trial-2
 sbx secret set openai --sandbox "$NAME"
 sbx secret set anthropic --sandbox "$NAME"
-# Optional:
+# Optional (Google is needed to use Gemini):
+sbx secret set google --sandbox "$NAME"
 sbx secret set github --sandbox "$NAME"
 sbx create --name "$NAME" "$KIT_REF" /path/to/workspace
 sbx run --name "$NAME"
@@ -444,7 +445,10 @@ its token through `sbx secret set github --sandbox "$NAME" --command 'gh auth to
 SBX captures the output on the host. Do not print tokens or expose host CLI config
 to sandbox writes. Secret storage and approval of exact domain bindings are
 separate steps; noninteractive creation is not automatic approval. Successful
-startup does not prove provider authentication. Actual startup sentinel delivery
+startup does not prove provider authentication. If Gemini reports `invalid_api_key`,
+check the sandbox-scoped `google` secret on the host and its binding to
+`generativelanguage.googleapis.com`. Changing the model or thinking level does
+not repair an invalid credential. Actual startup sentinel delivery
 and proxy enforcement are unverified; conforming consumers must reject missing
 required bindings and withhold unapproved credentials.
 

@@ -180,16 +180,7 @@ func TestWrapGeminiError_TransientFunctionResponseIsRetryable(t *testing.T) {
 	assert.False(t, rateLimited)
 }
 
-// TestWrapGeminiError_AuthMessageStaysInformative is the blocking regression
-// for auth-shaped 400s: Gemini reports an invalid/missing API key as an HTTP
-// 400 with an informative message rather than a 401. No documented request
-// field keyword matches it, so it classifies as [RejectionOther]. The
-// regression here is loss of visible context, not a broken classifier —
-// modelerrors never runs auth-phrase classification on this error at all,
-// since its *StatusError short-circuits that fallback — so the requirement
-// is simply that the visible error keeps surfacing the provider's own "API
-// key not valid" text instead of a generic, uninformative "request shape"
-// hint.
+// Gemini reports an invalid API key as a 400, not a 401.
 func TestWrapGeminiError_AuthMessageStaysInformative(t *testing.T) {
 	t.Parallel()
 
@@ -204,7 +195,8 @@ func TestWrapGeminiError_AuthMessageStaysInformative(t *testing.T) {
 
 	assert.Contains(t, visible, "API key not valid",
 		"an auth-shaped 400 must stay informative instead of being replaced by a generic request-shape hint")
-	assert.Contains(t, visible, string(RejectionOther), "no documented field keyword matches an auth message")
+	assert.Contains(t, visible, string(RejectionInvalidAPIKey))
+	assert.NotContains(t, visible, "request shape")
 }
 
 // TestSanitizeAPIErrorMessage covers the bounds this diagnostics feature
