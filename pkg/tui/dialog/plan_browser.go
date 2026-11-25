@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -668,9 +669,7 @@ func newPlanStatusDialog(name, currentStatus string, version int) Dialog {
 
 func (d *planStatusDialog) planDialog() {}
 
-func (d *planStatusDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *planStatusDialog) Init() tea.Cmd { return nil }
 
 func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if preparesDialogBody(msg) {
@@ -868,9 +867,7 @@ func newPlanNameDialog() Dialog {
 
 func (d *planNameDialog) planDialog() {}
 
-func (d *planNameDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *planNameDialog) Init() tea.Cmd { return nil }
 
 func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if preparesDialogBody(msg) {
@@ -965,4 +962,31 @@ func (d *planDeleteConfirmDialog) SetSize(width, height int) tea.Cmd {
 	cmd := d.BaseDialog.SetSize(width, height)
 	d.renderBody(true)
 	return cmd
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *planBrowserDialog) CursorInput() cursor.Input {
+	if d.filterInput.Focused() {
+		return &d.filterInput
+	}
+	return nil
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *planStatusDialog) CursorInput() cursor.Input {
+	if d.input.Focused() {
+		return &d.input
+	}
+	return nil
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *planNameDialog) CursorInput() cursor.Input {
+	if d.input.Focused() {
+		return &d.input
+	}
+	return nil
 }

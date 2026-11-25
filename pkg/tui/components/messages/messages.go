@@ -39,6 +39,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/help"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
@@ -783,6 +784,7 @@ func (m *model) Update(msg tea.Msg) (result layout.Model, command tea.Cmd) {
 		// Insert paste content into the inline edit textarea
 		if m.inlineEditMsgIndex >= 0 {
 			m.inlineEditTextarea.InsertString(msg.Content)
+			m.inlineEditTextarea.WakeCursor()
 			m.invalidateItem(m.inlineEditMsgIndex)
 			m.renderDirty = true
 		}
@@ -4825,7 +4827,6 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	// Create and configure the textarea
 	ta := textarea.New()
 	ta.SetValue(content)
-	ta.Focus()
 
 	// Configure appearance - use a style similar to user message
 	innerWidth := m.contentWidth() - styles.UserMessageStyle.GetHorizontalFrameSize()
@@ -4854,7 +4855,7 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	m.invalidateItem(msgIndex)
 	m.renderDirty = true
 
-	return ta.Focus()
+	return m.inlineEditTextarea.Focus()
 }
 
 func inlineEditStyles() textarea.Styles {
@@ -4868,7 +4869,9 @@ func inlineEditStyles() textarea.Styles {
 			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
 		},
 		Cursor: textarea.CursorStyle{
-			Color: styles.Accent,
+			Color:       styles.Accent,
+			Blink:       true,
+			HostManaged: true,
 		},
 	}
 }
@@ -4903,6 +4906,21 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 	m.renderDirty = true
 
 	return core.CmdHandler(InlineEditCancelledMsg{WasInSelectionMode: prevSelection >= 0})
+}
+
+// CursorInput returns the currently edited message, if any.
+func (m *model) CursorInput() cursor.Input {
+	if !m.IsInlineEditing() {
+		return nil
+	}
+	return &m.inlineEditTextarea
+}
+
+// InvalidateCursorView repaints only the edited slot, preserving its geometry.
+func (m *model) InvalidateCursorView() {
+	if m.IsInlineEditing() {
+		m.invalidateItemPaint(m.inlineEditMsgIndex)
+	}
 }
 
 // IsInlineEditing returns true if inline editing is currently active.

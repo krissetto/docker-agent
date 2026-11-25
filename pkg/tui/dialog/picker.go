@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -391,4 +392,13 @@ func (p *pickerCore) renderPicker(prepare bool, width int, header string, lines 
 		return ""
 	}
 	return p.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (p *pickerCore) CursorInput() cursor.Input {
+	if p.textInput.Focused() {
+		return &p.textInput
+	}
+	return nil
 }

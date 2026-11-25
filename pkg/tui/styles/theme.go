@@ -1494,7 +1494,9 @@ func rebuildStyles() {
 			Placeholder: BaseStyle.Foreground(PlaceholderColor),
 		},
 		Cursor: textarea.CursorStyle{
-			Color: Accent,
+			Color:       Accent,
+			Blink:       true,
+			HostManaged: true,
 		},
 	}
 
@@ -1508,7 +1510,9 @@ func rebuildStyles() {
 			Placeholder: BaseStyle.Foreground(PlaceholderColor),
 		},
 		Cursor: textinput.CursorStyle{
-			Color: Accent,
+			Color:       Accent,
+			Blink:       true,
+			HostManaged: true,
 		},
 	}
 

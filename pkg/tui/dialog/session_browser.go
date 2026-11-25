@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -256,9 +257,9 @@ func newSessionBrowserDialog(sessions []session.Summary, workspaceDir string, lo
 
 func (d *sessionBrowserDialog) Init() tea.Cmd {
 	if d.loader != nil {
-		return tea.Batch(textinput.Blink, d.startLoad())
+		return d.startLoad()
 	}
-	return textinput.Blink
+	return nil
 }
 
 func (d *sessionBrowserDialog) startLoad() tea.Cmd {
@@ -765,4 +766,13 @@ func (d *sessionBrowserDialog) timeAgo(t time.Time) string {
 
 func (d *sessionBrowserDialog) Position() (row, col int) {
 	return d.CenterDialog(d.View())
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *sessionBrowserDialog) CursorInput() cursor.Input {
+	if d.textInput.Focused() {
+		return &d.textInput
+	}
+	return nil
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 )
 
 type tuiModelProvider struct{ cfg latest.ModelConfig }
@@ -108,6 +109,9 @@ func filterMetadataRefresh(t *testing.T, m *appModel, gen uint64, msgs []tea.Msg
 	var semantic []tea.Msg
 	refreshes := 0
 	for _, msg := range msgs {
+		if _, blink := msg.(cursor.BlinkMsg); blink {
+			continue
+		}
 		meta, ok := msg.(capabilityResult)
 		if !ok || !meta.refresh {
 			semantic = append(semantic, msg)

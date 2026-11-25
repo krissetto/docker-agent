@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
@@ -41,7 +42,7 @@ func NewTodoEditDialog(scope messages.TodoScope, id, content string, editorID ui
 	return &todoEditDialog{scope: scope, id: id, expected: content, latest: content, editorID: editorID, save: save, input: input}
 }
 
-func (d *todoEditDialog) Init() tea.Cmd { return d.input.Init() }
+func (d *todoEditDialog) Init() tea.Cmd { return nil }
 
 // TodoEditID identifies this editor across asynchronous save results.
 func (d *todoEditDialog) TodoEditID() uint64 { return d.editorID }
@@ -281,4 +282,12 @@ func (d *todoEditDialog) scrollInput(x, y, delta int) {
 	}
 	d.input.ScrollByWheel(delta)
 	d.prepareLayout()
+}
+
+// CursorInput exposes the editor's cursor to the root blink driver while it is focused.
+func (d *todoEditDialog) CursorInput() cursor.Input {
+	if d.input.Focused() {
+		return d.input
+	}
+	return nil
 }

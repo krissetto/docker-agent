@@ -14,7 +14,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // commandPaletteDialog implements Dialog for the command palette.
@@ -66,7 +65,7 @@ func IsCommandPalette(d Dialog) bool {
 	return ok
 }
 
-func (d *commandPaletteDialog) Init() tea.Cmd { return textinput.Blink }
+func (d *commandPaletteDialog) Init() tea.Cmd { return nil }
 
 func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {

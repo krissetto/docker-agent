@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
@@ -457,6 +458,21 @@ func (m *Model) MouseSelecting() bool { return m.dragging }
 
 // StartComment opens an inline editor for the current diff selection.
 func (m *Model) StartComment() tea.Cmd { return m.startComment() }
+
+// CursorInput selects the focused virtual field; inline review comments keep
+// their native cursor so it can be positioned and clipped by the review host.
+func (m *Model) CursorInput() cursor.Input {
+	if m == nil || !m.focused || m.commentInput != nil {
+		return nil
+	}
+	if m.filterActive {
+		return &m.filter
+	}
+	if m.searchOn {
+		return &m.search
+	}
+	return nil
+}
 
 // CommentInputActive reports whether the inline comment editor owns keyboard input.
 func (m *Model) CommentInputActive() bool { return m.commentInput != nil }

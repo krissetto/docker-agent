@@ -20,7 +20,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // modelPickerDialog is a dialog for selecting a model for the current agent.
@@ -135,7 +134,7 @@ func modelSortKeys(m runtime.ModelChoice) pickerSortKeys {
 	}
 }
 
-func (d *modelPickerDialog) Init() tea.Cmd { return textinput.Blink }
+func (d *modelPickerDialog) Init() tea.Cmd { return nil }
 
 func (d *modelPickerDialog) setQuery(query string) {
 	d.textInput.SetValue(query)

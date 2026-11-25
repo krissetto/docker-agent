@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -98,9 +99,7 @@ func NewMCPPromptInputDialog(promptName string, promptInfo mcptools.PromptInfo) 
 }
 
 // Init initializes the MCP prompt input dialog
-func (d *MCPPromptInputDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *MCPPromptInputDialog) Init() tea.Cmd { return nil }
 
 // Update handles messages for the MCP prompt input dialog
 func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
@@ -359,4 +358,13 @@ func (d *MCPPromptInputDialog) canExecute() bool {
 		}
 	}
 	return true
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *MCPPromptInputDialog) CursorInput() cursor.Input {
+	if i := d.currentInput; i >= 0 && i < len(d.inputs) && d.inputs[i].Focused() {
+		return &d.inputs[i]
+	}
+	return nil
 }

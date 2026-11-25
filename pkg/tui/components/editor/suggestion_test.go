@@ -3,11 +3,14 @@ package editor
 import (
 	"strings"
 	"testing"
+	"testing/synctest"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 )
 
 func TestApplySuggestionOverlay(t *testing.T) {
@@ -534,4 +537,21 @@ func TestSuggestionCursorPreservesGrapheme(t *testing.T) {
 		require.Equal(t, value, first)
 		require.Equal(t, "tail", rest)
 	}
+}
+
+func TestSuggestionKeepsGhostTextDuringCursorBlink(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := New(&history.History{}).(*editor)
+		e.SetSize(80, 6)
+		e.SetValue("hello ")
+		e.suggestion, e.hasSuggestion = "world", true
+		cmd, _ := e.textarea.SetCursorExposed(true)
+		shown := e.View()
+		_, changed := e.textarea.ApplyCursorBlink(cmd().(cursor.BlinkMsg))
+		require.True(t, changed)
+		hidden := e.View()
+		require.NotEqual(t, shown, hidden)
+		require.Equal(t, ansi.Strip(shown), ansi.Strip(hidden))
+		require.Contains(t, ansi.Strip(hidden), "hello world")
+	})
 }

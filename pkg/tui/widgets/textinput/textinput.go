@@ -133,11 +133,48 @@ func (m *Model) Focus() tea.Cmd {
 	m.normalize()
 	return m.blink.Reset(m.styles.Cursor)
 }
-func (m *Model) Blur()                         { m.focused = false; m.generation++; m.blink.Stop() }
+func (m *Model) Blur()                         { m.focused = false; m.generation++; m.blink.Blur() }
 func (m *Model) Styles() Styles                { return m.styles }
 func (m *Model) SetStyles(styles Styles)       { m.styles = styles; m.generation++ }
 func (m *Model) VirtualCursor() bool           { return m.virtual }
 func (m *Model) SetVirtualCursor(enabled bool) { m.virtual = enabled; m.generation++ }
+
+// CursorVisible reports the virtual cursor phase, also used by overlays
+// such as the composer's inline suggestion.
+func (m *Model) CursorVisible() bool {
+	return m.focused && m.virtual && m.blink.Visible(m.styles.Cursor)
+}
+
+func (m *Model) cursorChange(before bool) bool {
+	changed := before != m.CursorVisible()
+	if changed {
+		m.generation++
+	}
+	return changed
+}
+
+func (m *Model) SetCursorExposed(exposed bool) (tea.Cmd, bool) {
+	before := m.CursorVisible()
+	style := m.styles.Cursor
+	style.Blink = style.Blink && m.virtual
+	cmd := m.blink.Expose(exposed && m.focused, style)
+	return cmd, m.cursorChange(before)
+}
+
+func (m *Model) ApplyCursorBlink(msg cursor.BlinkMsg) (tea.Cmd, bool) {
+	if !m.focused || !m.virtual {
+		return nil, false
+	}
+	before := m.CursorVisible()
+	cmd := m.blink.Update(msg, m.styles.Cursor)
+	return cmd, m.cursorChange(before)
+}
+
+func (m *Model) WakeCursor() bool {
+	before := m.CursorVisible()
+	m.blink.Wake(m.styles.Cursor)
+	return m.cursorChange(before)
+}
 
 // Revision covers mutation methods; direct exported-field assignments must also
 // invalidate an owning presentation cache.
@@ -167,6 +204,10 @@ func Paste() tea.Msg {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if !m.focused {
 		return m, nil
+	}
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, pasteMsg:
+		m.WakeCursor()
 	}
 	switch v := msg.(type) {
 	case tea.PasteMsg:
@@ -222,11 +263,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		before := m.blink.Visible(m.styles.Cursor)
+		before := m.CursorVisible()
 		cmd := m.blink.Update(msg, m.styles.Cursor)
-		if before != m.blink.Visible(m.styles.Cursor) {
-			m.generation++
-		}
+		m.cursorChange(before)
 		return m, cmd
 	}
 }
@@ -249,7 +288,7 @@ func (m Model) View() string {
 	if placeholder {
 		style = s.Placeholder
 	}
-	visible := m.focused && m.virtual && m.blink.Visible(m.styles.Cursor)
+	visible := m.CursorVisible()
 	cursorDrawn := false
 	cells := 0
 	for _, run := range l.Rows[0].Runs {

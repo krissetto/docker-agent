@@ -44,11 +44,7 @@ func TestConcreteDialogOpeningCadence(t *testing.T) {
 			r := newDialogRuntime()
 			mgr := &manager{runtime: r, width: width, height: height}
 			_, cmd := mgr.handleOpen(OpenDialogMsg{Model: fixture.new(r)})
-			if fixture.name == "commands" || fixture.name == "model" {
-				require.NotNil(t, cmd, "text input retains its cursor initialization")
-			} else {
-				require.Nil(t, cmd, "opening only registers animation")
-			}
+			require.Nil(t, cmd, "opening only registers animation; the root drives the cursor")
 			require.Len(t, mgr.stack, 1)
 			e := &mgr.stack[0]
 			wantWidth, wantHeight := e.targetWidth, e.targetHeight

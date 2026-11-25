@@ -49,11 +49,7 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 				runtime := animation.NewRuntime()
 				mgr := &manager{runtime: runtime, width: 81, height: 31}
 				_, cmd := mgr.handleOpen(OpenDialogMsg{Model: fixture.new()})
-				if fixture.name == "commands" {
-					require.NotNil(t, cmd, "command palette retains its cursor initialization")
-				} else {
-					require.Nil(t, cmd, "opening only registers animation")
-				}
+				require.Nil(t, cmd, "opening only registers animation; the root drives the cursor")
 				tick := runtime.Continue()
 				require.NotNil(t, tick)
 				assert.Equal(t, int32(1), runtime.ActiveCount())

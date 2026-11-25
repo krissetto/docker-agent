@@ -90,6 +90,9 @@ type Manager interface {
 	// and resets the manager. Call it before replacing a manager instance.
 	Cleanup()
 	TopIsExitConfirmation() bool
+	// InvalidateCursorView drops cached dialog renders so the next View shows a
+	// cursor that gained or lost focus or visibility.
+	InvalidateCursorView()
 	// TopIsBackground reports whether the topmost dialog is a background
 	// dialog (i.e. it should not block tab navigation).
 	TopIsBackground() bool
@@ -338,6 +341,15 @@ func (d *manager) View() string {
 		return ""
 	}
 	return d.entryView(&d.stack[len(d.stack)-1])
+}
+
+// InvalidateCursorView drops cached renders of every retained stack entry, so
+// the next View reflects a cursor gaining or losing focus or visibility.
+func (d *manager) InvalidateCursorView() {
+	for i := range d.stack {
+		d.stack[i].invalidateView()
+	}
+	d.visualDirty = true
 }
 
 // broadcastToAll sends a message to every dialog in the stack and batches the resulting commands.

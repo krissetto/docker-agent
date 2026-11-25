@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -253,9 +254,7 @@ func (d *multiChoiceDialog) computeDialogWidth() int {
 }
 
 // Init initializes the dialog.
-func (d *multiChoiceDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *multiChoiceDialog) Init() tea.Cmd { return nil }
 
 // Update handles messages.
 func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
@@ -819,4 +818,13 @@ func (d *multiChoiceDialog) prepareLayout() {
 		d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
 	}
 	d.contentAbsCol, d.contentAbsRow, _, _ = d.BodyScrollBounds()
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *multiChoiceDialog) CursorInput() cursor.Input {
+	if d.customInput.Focused() {
+		return &d.customInput
+	}
+	return nil
 }

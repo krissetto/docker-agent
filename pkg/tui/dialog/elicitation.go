@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -165,12 +166,7 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, ref E
 	return d
 }
 
-func (d *ElicitationDialog) Init() tea.Cmd {
-	if d.hasFreeFormInput() || len(d.inputs) > 0 {
-		return textinput.Blink
-	}
-	return nil
-}
+func (d *ElicitationDialog) Init() tea.Cmd { return nil }
 
 // OutsideClickDismissCmd cancels exactly like Escape, atomically closing the
 // dialog and answering the runtime waiter.
@@ -896,4 +892,19 @@ func (d *ElicitationDialog) prepareLayout() {
 		d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
 	}
 	d.scrollableCol, d.scrollableRow, _, _ = d.BodyScrollBounds()
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *ElicitationDialog) CursorInput() cursor.Input {
+	if d.hasFreeFormInput() {
+		if d.responseInput.Focused() {
+			return &d.responseInput
+		}
+		return nil
+	}
+	if i := d.currentField; i >= 0 && i < len(d.inputs) && d.inputs[i].Focused() {
+		return &d.inputs[i]
+	}
+	return nil
 }

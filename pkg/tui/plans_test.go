@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 )
 
 // newPlansTestModel wires an appModel around a temp-backed plans service and
@@ -101,6 +102,9 @@ func collectPlanMessages(t *testing.T, m *appModel, cmd tea.Cmd) []tea.Msg {
 		if meta, ok := next.(capabilityResult); ok && meta.refresh {
 			continue
 		}
+		if _, blink := next.(cursor.BlinkMsg); blink {
+			continue
+		}
 		if _, ok := next.(animation.TickMsg); ok {
 			ticks++
 			require.LessOrEqual(t, ticks, 240, "finite plan-dialog owner ticks must settle")
@@ -127,6 +131,8 @@ func drainPlanFlowBeforeFrames(t *testing.T, m *appModel, cmd tea.Cmd) ([]tea.Ms
 		switch next := next.(type) {
 		case animation.TickMsg:
 			pending = append(pending, next)
+		case cursor.BlinkMsg:
+			// Caret timing is independent of finite dialog frames.
 		case planStatusResultMsg, planDeleteResultMsg, planWriteResultMsg,
 			planBrowserLoadedMsg, planRefreshedMsg, planDetailLoadedMsg,
 			planEditReadyMsg, planExportResultMsg:

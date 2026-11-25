@@ -14,7 +14,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // ThemeChoice represents a selectable theme option.
@@ -118,7 +117,7 @@ func (d *themePickerDialog) Cleanup()         { d.disposed = true }
 func (d *themePickerDialog) Disposed() bool   { return d.disposed }
 func (d *themePickerDialog) Revision() uint64 { return d.revision }
 
-func (d *themePickerDialog) Init() tea.Cmd { return textinput.Blink }
+func (d *themePickerDialog) Init() tea.Cmd { return nil }
 
 func (d *themePickerDialog) CancelDialogCmd() tea.Cmd {
 	if d.settingsID != 0 {

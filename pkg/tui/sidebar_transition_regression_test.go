@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 )
 
 // Keep the real owner's returned command chain. Timer allocation alone is not
@@ -33,7 +34,12 @@ type sidebarTransitionDriver struct {
 
 func (d *sidebarTransitionDriver) update(msg tea.Msg) {
 	_, cmd := d.root.Update(msg)
-	d.pending = append(d.pending, collectMsgs(cmd)...)
+	for _, next := range collectMsgs(cmd) {
+		// The blinking caret never settles; this driver advances finite sidebar leases.
+		if _, blink := next.(cursor.BlinkMsg); !blink {
+			d.pending = append(d.pending, next)
+		}
+	}
 }
 
 func (d *sidebarTransitionDriver) step(t *testing.T) {

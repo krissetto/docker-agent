@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/text"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 )
@@ -140,18 +141,22 @@ func (w *Textarea) SetCharLimit(v int) {
 		w.model.CharLimit = v
 	}
 }
-func (w *Textarea) Blur()                       { w.changed(); w.model.Blur() }
-func (w *Textarea) Reset()                      { w.changed(); w.model.Reset() }
-func (w *Textarea) MoveToBegin()                { w.changed(); w.model.MoveToBegin() }
-func (w *Textarea) MoveToEnd()                  { w.changed(); w.model.MoveToEnd() }
-func (w *Textarea) CursorUp()                   { w.changed(); w.model.CursorUp() }
-func (w *Textarea) CursorDown()                 { w.changed(); w.model.CursorDown() }
-func (w *Textarea) CursorEnd()                  { w.changed(); w.model.CursorEnd() }
-func (w *Textarea) SetValue(v string)           { w.changed(); w.model.SetValue(v) }
-func (w *Textarea) InsertString(v string)       { w.changed(); w.model.InsertString(v) }
-func (w *Textarea) SetWidth(v int)              { w.changed(); w.model.SetWidth(v) }
-func (w *Textarea) SetHeight(v int)             { w.changed(); w.model.SetHeight(v) }
-func (w *Textarea) SetCursorColumn(v int)       { w.changed(); w.model.SetCursorColumn(v) }
+func (w *Textarea) Blur()                 { w.changed(); w.model.Blur() }
+func (w *Textarea) Reset()                { w.changed(); w.model.Reset(); w.model.WakeCursor() }
+func (w *Textarea) MoveToBegin()          { w.changed(); w.model.MoveToBegin(); w.model.WakeCursor() }
+func (w *Textarea) MoveToEnd()            { w.changed(); w.model.MoveToEnd(); w.model.WakeCursor() }
+func (w *Textarea) CursorUp()             { w.changed(); w.model.CursorUp(); w.model.WakeCursor() }
+func (w *Textarea) CursorDown()           { w.changed(); w.model.CursorDown(); w.model.WakeCursor() }
+func (w *Textarea) CursorEnd()            { w.changed(); w.model.CursorEnd(); w.model.WakeCursor() }
+func (w *Textarea) SetValue(v string)     { w.changed(); w.model.SetValue(v); w.model.WakeCursor() }
+func (w *Textarea) InsertString(v string) { w.changed(); w.model.InsertString(v); w.model.WakeCursor() }
+func (w *Textarea) SetWidth(v int)        { w.changed(); w.model.SetWidth(v) }
+func (w *Textarea) SetHeight(v int)       { w.changed(); w.model.SetHeight(v) }
+func (w *Textarea) SetCursorColumn(v int) {
+	w.changed()
+	w.model.SetCursorColumn(v)
+	w.model.WakeCursor()
+}
 func (w *Textarea) SetStyles(v textarea.Styles) { w.changed(); w.model.SetStyles(v) }
 func (w *Textarea) SetVirtualCursor(v bool)     { w.changed(); w.model.SetVirtualCursor(v) }
 
@@ -169,4 +174,25 @@ func (w *Textarea) SetMaxWidth(v int) {
 func (w *Textarea) PlaceCursor(cell, row int) {
 	w.changed()
 	w.model.SetCursorPosition(w.model.PositionAtCell(row, cell))
+	w.model.WakeCursor()
 }
+
+func (w *Textarea) SetCursorExposed(exposed bool) (tea.Cmd, bool) {
+	cmd, changed := w.model.SetCursorExposed(exposed)
+	w.valid = w.valid && !changed
+	return cmd, changed
+}
+
+func (w *Textarea) ApplyCursorBlink(msg cursor.BlinkMsg) (tea.Cmd, bool) {
+	cmd, changed := w.model.ApplyCursorBlink(msg)
+	w.valid = w.valid && !changed
+	return cmd, changed
+}
+
+func (w *Textarea) WakeCursor() bool {
+	changed := w.model.WakeCursor()
+	w.valid = w.valid && !changed
+	return changed
+}
+
+func (w *Textarea) CursorVisible() bool { return w.model.CursorVisible() }

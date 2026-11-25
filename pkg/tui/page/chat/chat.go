@@ -35,6 +35,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
 	"github.com/docker/docker-agent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/help"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
@@ -2114,6 +2115,26 @@ func (p *chatPage) BlurMessages() {
 	p.messages.Blur()
 	if owner, ok := p.messages.(interface{ CancelImagePreviewClick() }); ok {
 		owner.CancelImagePreviewClick()
+	}
+}
+
+// CursorInput selects the text edit currently owned by the chat pane.
+func (p *chatPage) CursorInput() cursor.Input {
+	if p.IsTitleEditing() {
+		return cursor.Of(p.sidebar)
+	}
+	return cursor.Of(p.messages)
+}
+
+// InvalidateCursorView invalidates the cache that owns the affected cursor.
+func (p *chatPage) InvalidateCursorView() {
+	if p.IsTitleEditing() {
+		if sidebar, ok := p.sidebar.(interface{ InvalidateCursorView() }); ok {
+			sidebar.InvalidateCursorView()
+		}
+	}
+	if messages, ok := p.messages.(interface{ InvalidateCursorView() }); ok && p.IsInlineEditing() {
+		messages.InvalidateCursorView()
 	}
 }
 

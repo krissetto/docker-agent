@@ -33,8 +33,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	textcore "github.com/docker/docker-agent/pkg/tui/text"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
@@ -287,9 +287,7 @@ func New(hist *history.History, opts ...Option) Editor {
 }
 
 // Init initializes the component
-func (e *editor) Init() tea.Cmd {
-	return textarea.Blink
-}
+func (e *editor) Init() tea.Cmd { return nil }
 
 // stripANSI removes ANSI escape sequences from the provided string so width
 // calculations can be performed on plain text.
@@ -369,7 +367,11 @@ func (e *editor) applySuggestionOverlay(view string, originX, originY int) strin
 		if i == 0 {
 			// First line: first character gets cursor styling, rest gets ghost styling
 			firstRune, restOfLine := splitFirstGrapheme(suggLine)
-			cursorChar := styles.SuggestionCursorStyle.Render(firstRune)
+			cursorStyle := styles.SuggestionGhostStyle
+			if e.textarea.CursorVisible() {
+				cursorStyle = styles.SuggestionCursorStyle
+			}
+			cursorChar := cursorStyle.Render(firstRune)
 
 			overlays = append(overlays, overlay{x: xOffset, y: currentY, content: cursorChar})
 
@@ -616,6 +618,12 @@ func (e *editor) updateCommentInput(msg tea.Msg) tea.Cmd {
 
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg:
+		if input := e.CursorInput(); input != nil {
+			input.WakeCursor()
+		}
+	}
 	if e.commentInput != nil {
 		switch msg.(type) {
 		case tea.PasteMsg, tea.KeyPressMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
@@ -958,7 +966,7 @@ func (e *editor) handleClipboardPaste() (layout.Model, tea.Cmd) {
 	if !handled {
 		e.textarea.InsertString(normalized)
 	}
-	return e, textarea.Blink
+	return e, nil
 }
 
 // handleGraphemeBackspace delegates one deletion to the shared editing model.
@@ -1410,13 +1418,33 @@ func (e *editor) AttachmentAtPosition(x, y int) (AttachmentPreview, bool) {
 	return AttachmentPreview{}, false
 }
 
-// Focus gives focus to the component
+// CursorInput exposes the rendered search field or the composer.
+func (e *editor) CursorInput() cursor.Input {
+	if e.historySearch.active {
+		if e.height > 1 && e.searchInput.Focused() {
+			return e.searchInput
+		}
+		return nil
+	}
+	if e.textarea != nil && e.textarea.Focused() && !e.recording && !e.IsContextBarFocused() {
+		return e.textarea
+	}
+	return nil
+}
+
+// Focus gives focus to the component.
 func (e *editor) Focus() tea.Cmd {
+	if e.historySearch.active {
+		return e.searchInput.Focus()
+	}
 	return e.textarea.Focus()
 }
 
 // Blur removes focus from the component
 func (e *editor) Blur() tea.Cmd {
+	if e.historySearch.active {
+		e.searchInput.Blur()
+	}
 	e.textarea.Blur()
 	e.clearSuggestion()
 	return nil
@@ -2000,6 +2028,7 @@ func (e *editor) historySearchComputeMatch() {
 }
 
 func (e *editor) exitHistorySearch() tea.Cmd {
+	e.searchInput.Blur()
 	e.textarea.SetValue(e.historySearch.origTextValue)
 	e.textarea.SetPlaceholder(e.historySearch.origTextPlaceholderValue)
 	e.historySearch = historySearchState{matchIndex: -1}

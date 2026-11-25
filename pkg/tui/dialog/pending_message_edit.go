@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 )
 
 // PendingMessageSaveResultMsg answers one queued-message editor's save request.
@@ -46,7 +47,7 @@ func NewPendingMessageEditDialog(sessionID, turnID, content string, editorID uin
 	return &pendingMessageEditDialog{sessionID: sessionID, turnID: turnID, editorID: editorID, save: save, input: input}
 }
 
-func (d *pendingMessageEditDialog) Init() tea.Cmd { return d.input.Init() }
+func (d *pendingMessageEditDialog) Init() tea.Cmd { return nil }
 
 // PendingEditID identifies this editor across asynchronous save results.
 func (d *pendingMessageEditDialog) PendingEditID() uint64 { return d.editorID }
@@ -259,4 +260,12 @@ func (d *pendingMessageEditDialog) scrollInput(x, y, delta int) {
 	}
 	d.input.ScrollByWheel(delta)
 	d.prepareLayout()
+}
+
+// CursorInput exposes the editor's cursor to the root blink driver while it is focused.
+func (d *pendingMessageEditDialog) CursorInput() cursor.Input {
+	if d.input.Focused() {
+		return d.input
+	}
+	return nil
 }

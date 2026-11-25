@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
@@ -91,7 +92,7 @@ func NewReviewTargetDialog(config ReviewTargetConfig) Dialog {
 	return d
 }
 
-func (d *reviewTargetDialog) Init() tea.Cmd { return textinput.Blink }
+func (d *reviewTargetDialog) Init() tea.Cmd { return nil }
 
 func (d *reviewTargetDialog) refilter() {
 	q := strings.ToLower(strings.TrimSpace(d.filter.Value()))
@@ -283,4 +284,13 @@ func (d *reviewTargetDialog) SetSize(width, height int) tea.Cmd {
 	cmd := d.BaseDialog.SetSize(width, height)
 	d.renderBody(true)
 	return cmd
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *reviewTargetDialog) CursorInput() cursor.Input {
+	if d.filter.Focused() {
+		return &d.filter
+	}
+	return nil
 }

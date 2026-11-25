@@ -3,6 +3,7 @@ package widget
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -50,3 +51,25 @@ func (w *Textinput) SetWidth(v int) {
 func (w *Textinput) SetStyles(v textinput.Styles) { w.valid = false; w.model.SetStyles(v) }
 func (w *Textinput) SetPrompt(v string)           { w.valid = false; w.model.Prompt = v }
 func (w *Textinput) SetPlaceholder(v string)      { w.valid = false; w.model.Placeholder = v }
+
+func (w *Textinput) SetCursorExposed(exposed bool) (tea.Cmd, bool) {
+	cmd, changed := w.model.SetCursorExposed(exposed)
+	w.valid = w.valid && !changed
+	return cmd, changed
+}
+
+func (w *Textinput) ApplyCursorBlink(msg cursor.BlinkMsg) (tea.Cmd, bool) {
+	cmd, changed := w.model.ApplyCursorBlink(msg)
+	w.valid = w.valid && !changed
+	return cmd, changed
+}
+
+func (w *Textinput) WakeCursor() bool {
+	changed := w.model.WakeCursor()
+	w.valid = w.valid && !changed
+	return changed
+}
+
+func (w *Textinput) CursorVisible() bool { return w.model.CursorVisible() }
+func (w *Textinput) Focused() bool       { return w.model.Focused() }
+func (w *Textinput) Blur()               { w.valid = false; w.model.Blur() }

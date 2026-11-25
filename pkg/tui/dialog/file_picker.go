@@ -15,7 +15,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 type fileEntry struct {
@@ -208,7 +207,7 @@ func (d *filePickerDialog) loadDirectory() {
 	d.filtered = d.entries
 }
 
-func (d *filePickerDialog) Init() tea.Cmd { return textinput.Blink }
+func (d *filePickerDialog) Init() tea.Cmd { return nil }
 
 func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {

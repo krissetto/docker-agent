@@ -136,6 +136,20 @@ func expandAll(m *Model) {
 	m.syncScrollviews()
 }
 
+func TestReviewCursorInputFollowsKeyboardCapture(t *testing.T) {
+	m := newModel(t, 80, 20)
+	require.Nil(t, m.CursorInput())
+	m.startFilter()
+	require.Same(t, &m.filter, m.CursorInput())
+	m.Blur()
+	require.Nil(t, m.CursorInput())
+	m.Focus()
+	m.filterActive = false
+	m.searchOn = true
+	m.search.Focus()
+	require.Same(t, &m.search, m.CursorInput())
+}
+
 func assertFrame(t *testing.T, view string, w, h int) {
 	t.Helper()
 	lines := strings.Split(view, "\n")

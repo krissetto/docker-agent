@@ -39,6 +39,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
@@ -4347,6 +4348,15 @@ func (m *model) BeginTitleEdit() {
 	m.titleInput.CursorEnd()
 	m.invalidateCache()
 }
+
+func (m *model) CursorInput() cursor.Input {
+	if m.editingTitle {
+		return &m.titleInput
+	}
+	return nil
+}
+
+func (m *model) InvalidateCursorView() { m.invalidateCache() }
 
 // IsEditingTitle returns true if the title is being edited
 func (m *model) IsEditingTitle() bool {

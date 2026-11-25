@@ -457,7 +457,9 @@ var (
 			Placeholder: BaseStyle.Foreground(PlaceholderColor),
 		},
 		Cursor: textarea.CursorStyle{
-			Color: Accent,
+			Color:       Accent,
+			Blink:       true,
+			HostManaged: true,
 		},
 	}
 
@@ -473,7 +475,9 @@ var (
 			Placeholder: BaseStyle.Foreground(PlaceholderColor),
 		},
 		Cursor: textinput.CursorStyle{
-			Color: Accent,
+			Color:       Accent,
+			Blink:       true,
+			HostManaged: true,
 		},
 	}
 	EditorStyle = BaseStyle.Margin(0, EditorHMargin).Padding(1, AppPadding, 1, AppPadding).Background(EditorBg)

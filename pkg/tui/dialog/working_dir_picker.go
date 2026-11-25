@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
@@ -314,9 +315,7 @@ func (d *workingDirPickerDialog) loadBrowseDirectory() {
 	d.browseFiltered = d.browseEntries
 }
 
-func (d *workingDirPickerDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *workingDirPickerDialog) Init() tea.Cmd { return nil }
 
 func (d *workingDirPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
@@ -987,4 +986,13 @@ func (d *workingDirPickerDialog) Position() (row, col int) {
 	}
 	dialogWidth, maxHeight, _ := d.dialogSize()
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
+}
+
+// CursorInput exposes the focused text field's cursor to the root blink driver.
+// It returns nil when no text field in this dialog has focus.
+func (d *workingDirPickerDialog) CursorInput() cursor.Input {
+	if d.textInput.Focused() {
+		return &d.textInput
+	}
+	return nil
 }

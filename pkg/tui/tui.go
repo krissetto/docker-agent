@@ -54,6 +54,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 	"github.com/docker/docker-agent/pkg/tui/widgets/help"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -343,6 +344,9 @@ type appModel struct {
 	// blurred is true between BlurMsg and the next FocusMsg. It occludes
 	// scrollbar hover and capture, but never pauses animation.
 	blurred bool
+
+	exposedInput cursor.Input
+	repaintInput func()
 
 	scrollbarPointer scrollbarPointerState
 
@@ -1133,13 +1137,13 @@ func (m *appModel) init() tea.Cmd {
 		tabID := m.pendingActiveTab
 		m.pendingActiveTab = ""
 		_, switchCmd := m.handleSwitchTab(tabID)
-		return tea.Batch(m.dialogMgr.Init(), switchCmd, shutdownCmd)
+		return tea.Batch(m.dialogMgr.Init(), switchCmd, m.syncInputCursor(), shutdownCmd)
 	}
 
 	m.pendingActiveTab = ""
 	activeID := m.supervisor.ActiveID()
 	if persisted := m.pendingRestores[activeID]; persisted != "" {
-		return tea.Batch(m.dialogMgr.Init(), m.beginHostedLoad(persisted, activeID, nil), shutdownCmd)
+		return tea.Batch(m.dialogMgr.Init(), m.beginHostedLoad(persisted, activeID, nil), m.syncInputCursor(), shutdownCmd)
 	}
 
 	return tea.Batch(
@@ -1150,6 +1154,7 @@ func (m *appModel) init() tea.Cmd {
 		chat.WatchGitBranch(m.chatPage),
 		m.editor.Init(),
 		m.editor.Focus(),
+		m.syncInputCursor(),
 		m.refreshPlanSidebarCmd(),
 		tea.Sequence(teaInitialCommands...),
 	)
@@ -1161,11 +1166,14 @@ func (m *appModel) init() tea.Cmd {
 // registrations only after all lifecycle postprocessing and preserve the command
 // even on pointer-wrapper and other early returns.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if tick, ok := msg.(cursor.BlinkMsg); ok {
+		return m, m.advanceInputCursor(tick)
+	}
 	model, cmd := m.updateWithLifecycle(msg)
 	if notices := m.takeOpeningNotices(); len(notices) > 0 {
 		cmd = tea.Batch(append([]tea.Cmd{cmd}, notices...)...)
 	}
-	cmd = tea.Batch(cmd, m.preparePanel(), m.prepareCommandMetadata())
+	cmd = tea.Batch(cmd, m.preparePanel(), m.prepareCommandMetadata(), m.syncInputCursor())
 	m.syncNotificationAvoidance()
 	if m.ar != nil {
 		cmd = tea.Batch(cmd, m.ar.Continue())
@@ -4758,9 +4766,7 @@ func (m *appModel) View() tea.View {
 		m.viewTabGeneration == tabVisualGeneration(m.tabBar) &&
 		m.viewChatGeneration == chatVisualGeneration(m.chatPage) &&
 		m.viewSidebarGeneration == sidebarVisualGeneration(m.chatPage) && m.visiblePaneCacheValid() && m.paneStatusesMatch(m.viewPaneStatuses) {
-		if model := m.reviewModel(); model != nil && model.CommentInputActive() {
-			m.viewCache.Cursor = model.Cursor()
-		}
+		m.viewCache.Cursor = m.nativeInputCursor()
 		return m.viewCache
 	}
 	if m.paneHidden && m.viewCacheInitialized && m.err == nil {
@@ -4768,6 +4774,7 @@ func (m *appModel) View() tea.View {
 		view := m.viewCache
 		view.WindowTitle = m.windowTitle()
 		view.ProgressBar = nil
+		view.Cursor = nil
 		if m.chatPage.IsWorking() {
 			view.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
 		}
@@ -4776,9 +4783,7 @@ func (m *appModel) View() tea.View {
 	statuses := m.visiblePaneStatuses()
 	m.composingPaneStatuses = statuses
 	view := m.composeView()
-	if model := m.reviewModel(); model != nil && model.CommentInputActive() {
-		view.Cursor = model.Cursor()
-	}
+	view.Cursor = m.nativeInputCursor()
 	m.composingPaneStatuses = nil
 	m.viewThemeGeneration = styles.ThemeGeneration()
 	m.viewAgentColorGeneration = styles.AgentColorGeneration()

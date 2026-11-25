@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // panesDialog is the local action/source/divider chooser for /panes. The root
@@ -45,7 +44,7 @@ func NewPanesDialog(title string, items []commands.Item) Dialog {
 	return d
 }
 
-func (d *panesDialog) Init() tea.Cmd { return textinput.Blink }
+func (d *panesDialog) Init() tea.Cmd { return nil }
 
 // CancelDialogCmd makes Escape, the close control and manager dismissal share
 // one terminal result. Cancellation never invokes an item callback.
