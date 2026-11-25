@@ -1,0 +1,11 @@
+# syntax=docker/sandbox-kit:d841dec@sha256:f5116e23e492215c8dcb1fcba8f43bb49f465adc7251d128e4c64a3af2eeb4f3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: Host session database
+requires: [async-agent-kit]
+capabilities:
+  - type: com.docker.sandbox/host-mount@1
+    config:
+      path: /home/agent/async-agent-sessions
+      mode: "0700"

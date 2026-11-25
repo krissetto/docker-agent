@@ -18,6 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 )
 
 func TestForegroundManagedAPIAndAttach(t *testing.T) {
@@ -219,4 +221,40 @@ func TestManagedAPIListenHostRequiresManagedMode(t *testing.T) {
 		err := cmd.Execute()
 		require.ErrorContains(t, err, "require --managed-api")
 	}
+}
+
+func TestManagedHostSessions(t *testing.T) {
+	private, manifest := managedFixture(t)
+	shared := filepath.Join(t.TempDir(), "sessions")
+	second, err := managedStateDir(filepath.Join(t.TempDir(), "private"), manifest.Startup().Workspace)
+	require.NoError(t, err)
+	for _, dir := range []string{private, second} {
+		require.NoError(t, managedAtomicWrite(filepath.Join(dir, "token"), []byte("test-only")))
+	}
+	first := &apiFlags{managedState: private, manifest: manifest, managedSessionDir: shared}
+	next := &apiFlags{managedState: second, manifest: manifest, managedSessionDir: shared}
+	release, err := first.prepareManagedDaemon()
+	require.NoError(t, err)
+	_, err = next.prepareManagedDaemon()
+	require.ErrorContains(t, err, "exclusively lock")
+	ctx := t.Context()
+	store, err := sqlitestore.New(ctx, first.sessionDB)
+	require.NoError(t, err)
+	conversation := session.New()
+	require.NoError(t, store.AddSession(ctx, conversation))
+	require.NoError(t, store.Close())
+	release()
+	release, err = next.prepareManagedDaemon()
+	require.NoError(t, err)
+	defer release()
+	store, err = sqlitestore.New(ctx, next.sessionDB)
+	require.NoError(t, err)
+	_, err = store.GetSession(ctx, conversation.ID)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	files, err := filepath.Glob(filepath.Join(shared, "*", "*"))
+	require.NoError(t, err)
+	require.Equal(t, []string{next.sessionDB}, files)
+	require.NoFileExists(t, filepath.Join(private, "session.db"))
+	require.NoFileExists(t, filepath.Join(second, "session.db"))
 }

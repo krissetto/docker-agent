@@ -43,6 +43,7 @@ type apiFlags struct {
 	managedAPIListenHost  string
 	managedAPIListenPort  int
 	managedAPIStateDir    string
+	managedSessionDir     string
 	modelOverrides        []string
 	managedState          string
 	managedManifest       string
@@ -78,6 +79,7 @@ func newAPICmd() *cobra.Command {
 	_ = cmd.PersistentFlags().MarkHidden("managed-api-listen-host")
 	_ = cmd.PersistentFlags().MarkHidden("managed-api-listen-port")
 	cmd.PersistentFlags().StringVar(&flags.managedAPIStateDir, "managed-api-state-dir", "", "Private managed API state base")
+	cmd.PersistentFlags().StringVar(&flags.managedSessionDir, "managed-session-dir", "", "Separate private base for workspace session databases")
 	cmd.PersistentFlags().StringArrayVar(&flags.modelOverrides, "model", nil, "Override managed team models")
 	_ = cmd.PersistentFlags().MarkHidden("managed-api")
 	_ = cmd.PersistentFlags().MarkHidden("managed-api-state-dir")
@@ -108,6 +110,9 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	}
 	if err := f.runConfig.ValidateTeamEditGrant(); err != nil {
 		return err
+	}
+	if f.managedSessionDir != "" && (!f.managedAPI || !filepath.IsAbs(f.managedSessionDir)) {
+		return errors.New("--managed-session-dir requires --managed-api and an absolute path")
 	}
 	if !f.managedAPI && (f.managedAPIStateDir != "" || len(f.modelOverrides) != 0) {
 		return errors.New("API --model and --managed-api-state-dir require --managed-api")

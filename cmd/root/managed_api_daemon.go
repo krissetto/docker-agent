@@ -137,7 +137,19 @@ func (f *apiFlags) prepareManagedDaemon() (func(), error) {
 	if err = managedCheckFile(f.authTokenFile); err != nil {
 		return fail(err)
 	}
-	f.sessionDB = filepath.Join(f.managedState, "session.db")
+	dbDir := f.managedState
+	if f.managedSessionDir != "" {
+		dbDir, err = managedStateDir(f.managedSessionDir, startup.Workspace)
+		if err != nil {
+			return fail(err)
+		}
+		unlock, err := managedLockSessionDir(dbDir)
+		if err != nil {
+			return fail(err)
+		}
+		release = func() { _ = unlock.Close(); _ = owner.Close() }
+	}
+	f.sessionDB = filepath.Join(dbDir, "session.db")
 	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		if err = managedCheckFile(f.sessionDB + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fail(err)

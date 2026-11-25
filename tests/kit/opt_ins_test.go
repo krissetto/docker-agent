@@ -151,3 +151,17 @@ func TestKitManagedACP(t *testing.T) {
 	require.NoError(t, err, string(out))
 	assert.Equal(t, []string{workspace, "serve", "acp", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", home + "/private", "--working-dir", workspace, home + "/hackerspace.yaml"}, strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"))
 }
+
+func TestKitHostSessions(t *testing.T) {
+	const path = "/home/agent/async-agent-sessions"
+	assert.Equal(t, []any{map[string]any{"type": "com.docker.sandbox/host-mount@1", "config": map[string]any{"path": path, "mode": "0700"}}}, optIn(t, "host-sessions")["capabilities"])
+	home, workspace := kitScriptFixture(t, "start.sh")
+	require.NoError(t, os.WriteFile(filepath.Join(home, "hackerspace.yaml"), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "mountpoint"), []byte("#!/bin/sh\n[ \"$*\" = '-q "+path+"' ]\n"), 0o700))
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "auto", home+"/private", "", "off")
+	cmd.Dir = workspace
+	cmd.Env = append(os.Environ(), "WORKSPACE_DIR="+workspace, "PATH="+home+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "--managed-session-dir\x00"+path+"\x00")
+}

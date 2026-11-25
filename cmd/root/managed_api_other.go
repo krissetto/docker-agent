@@ -11,9 +11,10 @@ import (
 func managedPlatformSupported() error {
 	return errors.New("managed API is supported only on Linux and macOS; use serve api and run --remote on this platform")
 }
-func managedOwned(os.FileInfo) bool                 { return false }
-func managedTryLock(string) (*os.File, bool, error) { return nil, false, managedPlatformSupported() }
-func managedDetach(*exec.Cmd)                       {}
+func managedOwned(os.FileInfo) bool                  { return false }
+func managedTryLock(string) (*os.File, bool, error)  { return nil, false, managedPlatformSupported() }
+func managedLockSessionDir(string) (*os.File, error) { return nil, managedPlatformSupported() }
+func managedDetach(*exec.Cmd)                        {}
 
 func managedOpenPrivate(string, int) (*os.File, error) { return nil, managedPlatformSupported() }
 

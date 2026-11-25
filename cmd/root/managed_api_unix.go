@@ -41,6 +41,19 @@ func managedTryLock(path string) (*os.File, bool, error) {
 	return f, true, nil
 }
 
+// Lock the directory, not the SQLite inode: recovery can rename the database.
+func managedLockSessionDir(path string) (*os.File, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(dir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = dir.Close()
+		return nil, fmt.Errorf("cannot exclusively lock shared session directory: %w", err)
+	}
+	return dir, nil
+}
+
 func managedDetach(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} }
 
 func managedOpenPrivate(path string, flags int) (*os.File, error) {
