@@ -38,6 +38,10 @@ args:
     env: ASYNC_AGENT_KIT_DIAGNOSTICS
     description: Opt in to local install and startup markers; no provider calls.
 capabilities:
+  - type: com.docker.sandbox/host-mount@1
+    config:
+      path: /home/agent/async-agent-sessions
+      mode: "0700"
   - type: com.docker.sandbox/sbx@1
   - type: com.docker.sandbox/network-policy@1
     config:

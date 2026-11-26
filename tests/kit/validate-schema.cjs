@@ -26,6 +26,9 @@ function valid(descriptor) {
 }
 function read(file) { return valid(yaml.load(fs.readFileSync(file, 'utf8'))); }
 const workload = read('kit/async-agent.yaml');
+assert.deepEqual(workload.capabilities.filter(c => c.type === 'com.docker.sandbox/host-mount@1'), [
+  {type: 'com.docker.sandbox/host-mount@1', config: {path: '/home/agent/async-agent-sessions', mode: '0700'}},
+]);
 const contextType = 'com.docker.sandbox/agent-context@2';
 const context = workload.capabilities.filter(c => c.type === contextType);
 assert.deepEqual(context, [{type: contextType, optional: true, config: {filename: 'ASYNC_AGENT_KIT.md'}}]);
@@ -48,7 +51,7 @@ if (contextSchema.properties.delivery) {
 const names = fs.readdirSync('kit/opt-ins');
 const mixins = Object.fromEntries(names.map(name => [name, read(`kit/opt-ins/${name}/${name}.yaml`)]));
 if (process.argv.includes('--context-only')) {
-  console.log('Schema ' + schema + ': seven authored descriptors and inline workload context compatibility passed');
+  console.log('Schema ' + schema + ': six authored descriptors and inline workload context compatibility passed');
   process.exit(0);
 }
 // Structural expansion mirrors the documented whole-scalar integer/boolean adoption,
@@ -164,4 +167,4 @@ for (let mask = 0; mask < (1 << names.length); mask++) {
   assert.equal(combined.capabilities.filter(c => c.type === 'com.docker.sandbox/agent-context@2').length, 1);
   assert.equal(combined.capabilities.filter(c => c.type === 'com.docker.sandbox/agent-context@1').length, 0);
 }
-console.log('Schema ' + schema + ': seven authored descriptors, inline workload context compatibility, effective inputs, rejection cases, Docker merge rules, and 64 reconciled selection subsets passed');
+console.log('Schema ' + schema + ': six authored descriptors, inline workload context compatibility, effective inputs, rejection cases, Docker merge rules, and 32 reconciled selection subsets passed');

@@ -30,12 +30,10 @@ set -- --team-edit "$team_edit" "$@"
 if [ -n "$model" ]; then
     set -- --model "$model" "$@"
 fi
-if mountpoint -q /home/agent/async-agent-sessions; then
-    set -- --managed-session-dir /home/agent/async-agent-sessions "$@"
-fi
 exec /opt/async-agent/docker-agent serve api --managed-api \
     --managed-api-listen-host 0.0.0.0 \
     --managed-api-listen-port 9182 \
     --working-dir "$PWD" \
+    --managed-session-dir /home/agent/async-agent-sessions \
     --managed-api-state-dir "$state" \
     "$@" -- "$team"

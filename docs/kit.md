@@ -310,7 +310,7 @@ supervision of an in-guest API crash. After an API failure, explicit sandbox
 stop/start runs startup again. Durable session state and the
 stable token/endpoint survive on retained sandbox disk, but in-memory execution,
 interrupted tools and side effects are not automatically replayed. Deleting the
-sandbox deletes its writable-layer state unless the separate retained-state
+sandbox leaves host session history intact. It deletes its writable-layer state unless the separate retained-state
 opt-in below was selected. Retained volumes have a different lifetime.
 
 Frozen team/model/startup changes fail rather than silently reconfiguring or
@@ -365,7 +365,7 @@ Default managed state is under
 `/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/`. Creation-time
 `stateDir=BASE` changes the base, not the workspace hash suffix.
 The directory is agent-owned `0700`; private `0600` files include `token`,
-`manifest.json`, `server.json`, `server.log` and `session.db`. The manifest contains
+`manifest.json`, `server.json` and `server.log`. The database is on the separate Kit mount. The manifest contains
 frozen configuration; logs and the database can contain sensitive session data.
 Keep them out of the mounted workspace, transcripts and bug reports. Never print
 or share the token. The daemon alone owns its database and locking; do not start
@@ -519,16 +519,12 @@ provide filesystem isolation.
   but the approved agent is absent, the commit should fail rather than silently
   become unsigned. Never import private keys, copy host `~/.ssh` or Git
   configuration, or load private key files into the guest.
-- **State:** managed sessions/data use
-  `/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/` on the sandbox's
-  own disk, not a host mount, workspace directory or separate volume. The image
-  precreates `/home/agent/.cagent` agent-owned `0700`; settings are separate.
-  Without the retained-state opt-in, state persists while that sandbox's disk
-  is retained, not after deletion or in a fresh sandbox. Runtime controls
-  retention and capacity. There is no live
-  migration or automatic repair of existing mounts; an older sandbox with a state
-  mount may need to be replaced with a fresh sandbox. Keep SQLite WAL/FULL
-  durability on sandbox-local Linux storage, not shared or network filesystems.
+- **State:** only SQLite session data is host-shared by default, at
+  `/home/agent/async-agent-sessions/<canonical-workspace-sha256>/session.db`
+  inside the guest. The runtime chooses a host directory specific to this Kit,
+  separate from native Docker Agent. Stop the old sandbox before resuming at
+  the same workspace path. Existing sandbox-local history is not migrated.
+  Tokens, settings, logs and endpoint metadata are not on the host mount.
   Reusing old custom-branch databases is not guaranteed.
 - **Detached lifetime:** the lifecycle-owned foreground API survives TUI exit;
   required long-running support prevents session-based auto-stop, but does not
@@ -569,7 +565,7 @@ leaves the standalone workload usable without Docker. **`optional: true` is
 not an off switch**: it is a request that a host may omit. Browser opening,
 retained state, registry authentication and host-port access remain default-off.
 The workload alone requests none of `open-url`, `docker-auth`, `host-port`,
-`volume`, `host-mount` or standalone `privileged`. Installing tooling is not an
+`volume` or standalone `privileged`. Installing tooling is not an
 access grant. The mixins remain absent until explicitly included using `--kit`;
 once selected their requests are required and fail closed if unsupported or
 unapproved. The Docker mixin makes the base's optional request required for
@@ -684,7 +680,7 @@ A runtime unable to provide private, agent-writable storage must refuse or fail
 the install hook, not silently fall back. The hook does not chown/chmod existing
 retained data or request additional privilege.
 
-Settings and managed history then survive sandbox deletion and recreation under
+Settings and private API state then survive sandbox deletion and recreation under
 the **same owner scope and sandbox name**, when these paths are selected again.
 A new name starts empty. Omitting the mixin leaves retained volumes unmounted,
 not deleted; selecting it later may reveal that name's previous private data to
@@ -701,8 +697,7 @@ state volume. An override remains retained only when it lies beneath
 `/home/agent/.cagent` (outside the workspace); an arbitrary other base is not
 magically covered. Workspace canonical hashes still partition managed state:
 a different canonical workspace path does not automatically discover old history.
-Managed tokens, endpoint/owner metadata, frozen source snapshots, logs and
-SQLite history are retained too. They remain private and sensitive: replacing
+Managed tokens, endpoint/owner metadata, frozen source snapshots, and logs are retained too; session history uses the separate host mount. They remain private and sensitive: replacing
 this workload under the same name can expose those data to the newly approved
 composition. Stable auth does not imply active execution survives recreation,
 nor that stale/frozen configuration incompatibilities can be bypassed. Never

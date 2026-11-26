@@ -243,10 +243,10 @@ func TestNativeKit(t *testing.T) {
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
 	}
-	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "agent-interactive-sessions", "lifecycle", "agent-skills", "git-identity", "ssh-agent", "long-running", "dockerd"} {
+	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "agent-interactive-sessions", "lifecycle", "agent-skills", "git-identity", "ssh-agent", "long-running", "dockerd", "host-mount"} {
 		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
 	}
-	require.Len(t, kit.Capabilities, 17)
+	require.Len(t, kit.Capabilities, 18)
 	require.Len(t, byType["com.docker.sandbox/agent-context@2"], 1)
 	assert.Equal(t, map[string]any{"filename": "ASYNC_AGENT_KIT.md"}, kit.Capabilities[byType["com.docker.sandbox/agent-context@2"][0]].Config)
 	assert.NotContains(t, byType, "com.docker.sandbox/agent-context@1")
@@ -257,7 +257,7 @@ func TestNativeKit(t *testing.T) {
 		switch capability.Type {
 		case "com.docker.sandbox/credential@1":
 			// Per-service requiredness and exact grants are checked in providers_test.go.
-		case "com.docker.sandbox/network-policy@1", "com.docker.sandbox/sbx@1", "com.docker.sandbox/lifecycle@1", "com.docker.sandbox/long-running@1":
+		case "com.docker.sandbox/host-mount@1", "com.docker.sandbox/network-policy@1", "com.docker.sandbox/sbx@1", "com.docker.sandbox/lifecycle@1", "com.docker.sandbox/long-running@1":
 			assert.False(t, capability.Optional)
 		default:
 			assert.True(t, capability.Optional, capability.Type)
