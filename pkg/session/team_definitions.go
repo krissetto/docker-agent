@@ -303,3 +303,22 @@ func scanTeamRevision(row interface{ Scan(...any) error }) (TeamRevision, error)
 
 var _ TeamRevisionStore = (*InMemorySessionStore)(nil)
 var _ TeamRevisionStore = (*SQLiteSessionStore)(nil)
+
+// TeamEditRecord contains authored field paths, never their values or the replacement YAML.
+type TeamEditRecord struct {
+	Revision, ParentRevision, TeamID, SessionID, Actor, Operation string
+	ChangedFields                                                 []string
+}
+
+type TeamEditRecorder interface {
+	RecordTeamEdit(ctx context.Context, edit TeamEditRecord) error
+}
+
+func (s *SQLiteSessionStore) RecordTeamEdit(ctx context.Context, edit TeamEditRecord) error {
+	fields, err := json.Marshal(edit.ChangedFields)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO team_edit_history(revision,parent_revision,team_id,session_id,actor,operation,changed_fields) VALUES (?,?,?,?,?,?,?)`, edit.Revision, edit.ParentRevision, edit.TeamID, edit.SessionID, edit.Actor, edit.Operation, string(fields))
+	return err
+}

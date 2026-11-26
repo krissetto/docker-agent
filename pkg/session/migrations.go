@@ -758,6 +758,10 @@ func getAllMigrations() []Migration {
 				DROP TRIGGER IF EXISTS transcript_item_count_insert;
 				ALTER TABLE sessions DROP COLUMN transcript_item_count;`,
 		},
+		{ID: 44, Name: "044_team_edit_history", Description: "Record published team edits independently of conversation retention", UpSQL: `CREATE TABLE team_edit_history (
+          revision TEXT PRIMARY KEY NOT NULL, parent_revision TEXT NOT NULL, team_id TEXT NOT NULL,
+          session_id TEXT NOT NULL, actor TEXT NOT NULL, operation TEXT NOT NULL, changed_fields TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));`, DownSQL: `DROP TABLE team_edit_history;`},
 	}
 }
 

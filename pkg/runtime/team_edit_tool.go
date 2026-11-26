@@ -2,8 +2,14 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"reflect"
+	"slices"
+
+	"github.com/goccy/go-yaml"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
@@ -127,6 +133,19 @@ func (r *LocalRuntime) handleTeamEdit(ctx context.Context, sourceID string, call
 
 func (r *LocalRuntime) buildAndPublishEditedEnvironment(ctx context.Context, identity executionIdentity, result teamdef.EditResult, candidate config.Source, commitSource func() error) error {
 	old := identity.environment.Environment()
+	recorder, ok := r.sessionStore.(session.TeamEditRecorder)
+	if !ok {
+		return errors.New("team edit requires durable session history")
+	}
+	previous, err := r.teamEdit.editor.Source().SourceForLoad(result.BaseRevision)
+	if err != nil {
+		return err
+	}
+	fields, err := changedTeamFields(ctx, previous, candidate)
+	if err != nil {
+		return err
+	}
+	sessionID := identity.driver.sessionID()
 	loaderOptions := append([]teamloader.Opt(nil), r.teamEdit.loaderOptions...)
 	if r.teamEdit.toolsetPool != nil {
 		loaderOptions = append(loaderOptions, teamloader.WithToolsetLeasePool(r.teamEdit.toolsetPool, r.teamEdit.poolScope))
@@ -142,7 +161,14 @@ func (r *LocalRuntime) buildAndPublishEditedEnvironment(ctx context.Context, ide
 		_ = next.Discard(context.WithoutCancel(ctx))
 		return fmt.Errorf("prepared team environment identity does not match the edit receipt")
 	}
-	if err := r.teamEnvironments.PublishWithCommit(old.SourceID(), old.RevisionID(), next, commitSource); err != nil {
+	publish := func() error {
+		err := recorder.RecordTeamEdit(ctx, session.TeamEditRecord{Revision: result.Revision.ID, ParentRevision: result.BaseRevision.ID, TeamID: result.TeamID, SessionID: sessionID, Actor: result.ActorStableID, Operation: string(result.Operation), ChangedFields: fields})
+		if err != nil {
+			return fmt.Errorf("recording team edit: %w", err)
+		}
+		return commitSource()
+	}
+	if err := r.teamEnvironments.PublishWithCommit(old.SourceID(), old.RevisionID(), next, publish); err != nil {
 		_ = next.Discard(context.WithoutCancel(ctx))
 		return err
 	}
@@ -275,4 +301,52 @@ func revisionGeneration(id string) uint64 {
 	var generation uint64
 	_, _ = fmt.Sscanf(id, "%d:", &generation)
 	return generation
+}
+
+// Compare authored fields, stopping before values (especially env, tools and credentials).
+func changedTeamFields(ctx context.Context, before, after config.Source) ([]string, error) {
+	fields := func(src config.Source) (map[string]any, error) {
+		raw, err := src.Read(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			return nil, errors.New("cannot inspect edited team fields")
+		}
+		agents, _ := doc["agents"].(map[string]any)
+		delete(doc, "agents")
+		for name, entry := range agents {
+			key := "agents." + name
+			doc[key] = true
+			if agent, ok := entry.(map[string]any); ok {
+				for k, v := range agent {
+					doc[key+"."+k] = v
+				}
+			} else {
+				doc[key] = entry
+			}
+		}
+		return doc, nil
+	}
+	old, err := fields(before)
+	if err != nil {
+		return nil, err
+	}
+	next, err := fields(after)
+	if err != nil {
+		return nil, err
+	}
+	changed := map[string]bool{}
+	for k, v := range old {
+		if n, ok := next[k]; !ok || !reflect.DeepEqual(v, n) {
+			changed[k] = true
+		}
+	}
+	for k := range next {
+		if _, ok := old[k]; !ok {
+			changed[k] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(changed)), nil
 }

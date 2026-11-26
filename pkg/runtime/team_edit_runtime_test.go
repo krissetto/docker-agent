@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamdef"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -73,8 +76,33 @@ func (p *teamEditTurnProvider) CreateChatCompletionStream(_ context.Context, mes
 	return newStreamBuilder().AddContent("third turn completed").AddStopWithUsage(2, 2).Build(), nil
 }
 
+func teamEditTestDB(t *testing.T) (session.Store, *sql.DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.db")
+	store, err := sqlitestore.New(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	return store, db
+}
+
 func TestTeamEditNormalDispatchAdoptsPublishedEnvironmentOnNextTurn(t *testing.T) {
-	store := session.NewInMemorySessionStore()
+	testTeamEditDispatch(t, false)
+}
+
+func TestTeamEditHistoryWriteFailurePreventsPublication(t *testing.T) {
+	testTeamEditDispatch(t, true)
+}
+
+func testTeamEditDispatch(t *testing.T, rejectHistory bool) {
+	t.Helper()
+	store, db := teamEditTestDB(t)
+	if rejectHistory {
+		_, err := db.ExecContext(t.Context(), `CREATE TRIGGER reject_history BEFORE INSERT ON team_edit_history BEGIN SELECT RAISE(ABORT,'history unavailable'); END`)
+		require.NoError(t, err)
+	}
 	source := config.NewBytesSource("team.yaml", []byte(liveTeamEditYAML))
 	editor, err := teamdef.NewEditor(t.Context(), teamdef.EditableSourceOptions{
 		Source:    source,
@@ -135,6 +163,15 @@ func TestTeamEditNormalDispatchAdoptsPublishedEnvironmentOnNextTurn(t *testing.T
 	current, err := environments.AcquireCurrent()
 	require.NoError(t, err)
 	publishedRevision := current.Environment().RevisionID()
+	if rejectHistory {
+		require.Equal(t, initialRevision.ID, publishedRevision)
+		require.Equal(t, initialRevision, editor.CurrentRevision())
+		require.NoError(t, current.Release(t.Context()))
+		var count int
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM team_edit_history`).Scan(&count))
+		require.Zero(t, count)
+		return
+	}
 	require.NotEqual(t, initialRevision.ID, publishedRevision)
 	require.Equal(t, publishedRevision, editor.CurrentRevision().ID)
 	require.NoError(t, current.Release(t.Context()))
@@ -150,6 +187,9 @@ func TestTeamEditNormalDispatchAdoptsPublishedEnvironmentOnNextTurn(t *testing.T
 	require.NoError(t, handle.AwaitTurn(t.Context(), second.TurnID))
 	secondPublished := editor.CurrentRevision().ID
 	require.NotEqual(t, publishedRevision, secondPublished, "a baseline actor can edit the current source head again")
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM team_edit_history WHERE actor='root-stable' AND session_id=? AND changed_fields LIKE '%agents.root.instruction%'`, handle.ID()).Scan(&count))
+	require.Equal(t, 1, count)
 	third, err := handle.Submit(t.Context(), TurnInput{Content: "continue after the second edit"})
 	require.NoError(t, err)
 	require.NoError(t, handle.AwaitTurn(t.Context(), third.TurnID))
@@ -168,7 +208,7 @@ func TestTeamEditNormalDispatchAdoptsPublishedEnvironmentOnNextTurn(t *testing.T
 }
 
 func TestTeamEditBuilderFailureLeavesSourceAndEnvironmentUnchanged(t *testing.T) {
-	store := session.NewInMemorySessionStore()
+	store, _ := teamEditTestDB(t)
 	source := config.NewBytesSource("team.yaml", []byte(liveTeamEditYAML))
 	editor, err := teamdef.NewEditor(t.Context(), teamdef.EditableSourceOptions{Source: source, Authority: teamdef.EditAuthorityRestricted, BuildValidator: func(ctx context.Context, candidate config.Source) error {
 		_, err := config.Load(ctx, candidate)
@@ -317,7 +357,8 @@ agents:
 	require.NoError(t, err)
 	environments, err := NewTeamEnvironmentStore(initial)
 	require.NoError(t, err)
-	rt, err := NewLocalRuntime(t.Context(), initial.Team(), WithSessionStore(session.NewInMemorySessionStore()), WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithTeamEditor(editor, environments, build, config.TeamEditGrant{Mode: "full"}))
+	store, db := teamEditTestDB(t)
+	rt, err := NewLocalRuntime(t.Context(), initial.Team(), WithSessionStore(store), WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithTeamEditor(editor, environments, build, config.TeamEditGrant{Mode: "full"}))
 	require.NoError(t, err)
 	owner := NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
@@ -328,6 +369,9 @@ agents:
 	require.NoError(t, handle.AwaitTurn(t.Context(), first.TurnID))
 	current, err := environments.AcquireCurrent()
 	require.NoError(t, err)
+	var changed string
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT changed_fields FROM team_edit_history WHERE operation='replace'`).Scan(&changed))
+	require.JSONEq(t, `["budget"]`, changed)
 	budget := current.Environment().BudgetPolicy().Run
 	require.NotNil(t, budget)
 	require.EqualValues(t, 1, budget.MaxTokens)

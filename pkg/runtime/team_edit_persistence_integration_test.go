@@ -140,7 +140,8 @@ agents:
 					return "managed-r2", nil
 				}
 			}
-			rt, err := NewLocalRuntime(t.Context(), initial.Team(), WithSessionStore(session.NewInMemorySessionStore()), WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithTeamEditor(editor, environments, builder, config.TeamEditGrant{Mode: "restricted"}), WithTeamEditPersistence(persistence, dir))
+			store, _ := teamEditTestDB(t)
+			rt, err := NewLocalRuntime(t.Context(), initial.Team(), WithSessionStore(store), WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithTeamEditor(editor, environments, builder, config.TeamEditGrant{Mode: "restricted"}), WithTeamEditPersistence(persistence, dir))
 			require.NoError(t, err)
 			owner := NewSessionRuntimeSupervisor(rt)
 			t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })

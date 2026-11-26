@@ -604,7 +604,7 @@ func TestMigration042FreshDatabase(t *testing.T) {
 	require.NoError(t, NewMigrationManager(db).InitializeMigrations(t.Context()))
 	var maxVersion int
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT MAX(id) FROM migrations`).Scan(&maxVersion))
-	assert.Equal(t, 43, maxVersion)
+	assert.Equal(t, 44, maxVersion)
 	assertStreamSchema(t, db, true)
 }
 
