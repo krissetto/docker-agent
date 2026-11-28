@@ -448,6 +448,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	agentsByName := make(map[string]*agent.Agent)
 
 	expander := loadOpts.newExpander(env)
+	globalThreshold := userconfig.Get().CompactionThreshold
 
 	for _, agentConfig := range cfg.Agents {
 		// Merge CLI prompt files with agent config prompt files, deduplicating
@@ -562,7 +563,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 				opts = append(opts, agent.WithCompactionModel(compactionModel))
 			}
 
-			if threshold := compactionThresholdForAgent(cfg, &agentConfig); threshold != nil {
+			if threshold := cmp.Or(compactionThresholdForAgent(cfg, &agentConfig), globalThreshold); threshold != nil {
 				opts = append(opts, agent.WithCompactionThreshold(*threshold))
 			}
 		}
@@ -871,8 +872,7 @@ func getCompactionModelForAgent(ctx context.Context, cfg *latest.Config, a *late
 }
 
 // compactionThresholdForAgent resolves the proactive-compaction threshold for
-// an agent, or nil when neither the agent nor its models set one (the
-// compaction package default then applies). The `compaction_threshold` of the
+// an agent, or nil when neither the agent nor its models set one. The `compaction_threshold` of the
 // first of the agent's configured models that sets it wins; the agent-level
 // value is the fallback.
 func compactionThresholdForAgent(cfg *latest.Config, a *latest.AgentConfig) *float64 {

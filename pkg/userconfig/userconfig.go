@@ -123,6 +123,8 @@ type Settings struct {
 	// CacheStablePrompts keeps changing trusted context out of the frozen system
 	// prefix and appends chronological updates instead. Defaults to false.
 	CacheStablePrompts *bool `yaml:"cache_stable_prompts,omitempty"`
+	// CompactionThreshold is the default fraction of the context window (0, 1] for proactive compaction.
+	CompactionThreshold *float64 `yaml:"compaction_threshold,omitempty"`
 	// BackgroundCompaction overlaps automatic summarization with agent work.
 	BackgroundCompaction bool `yaml:"background_compaction,omitempty"`
 	// BackgroundCompactionThreshold is a context-window percentage (1–99).

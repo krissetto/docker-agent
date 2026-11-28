@@ -30,6 +30,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	providerdefaults "github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
 	"github.com/docker/docker-agent/pkg/tools/codemode"
@@ -603,6 +604,12 @@ func TestCompactionThresholdResolution(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
 	t.Setenv("ANTHROPIC_API_KEY", "dummy")
 
+	dir := t.TempDir()
+	paths.SetConfigDir(dir)
+	t.Cleanup(func() { paths.SetConfigDir("") })
+	configPath := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("settings:\n  compaction_threshold: 0.5\n"), 0o600))
+
 	t.Run("agent-level threshold", func(t *testing.T) {
 		data := []byte(`agents:
   root:
@@ -663,20 +670,30 @@ agents:
 		assert.InEpsilon(t, 0.6, root.CompactionThreshold(), 1e-9)
 	})
 
-	t.Run("unset threshold reports zero so the default applies", func(t *testing.T) {
+	t.Run("user threshold is the fallback", func(t *testing.T) {
 		data := []byte(`agents:
   root:
     model: openai/gpt-4o
     instruction: test
 `)
 
-		team, err := Load(t.Context(), config.NewBytesSource("threshold.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
-		require.NoError(t, err)
-
-		root, err := team.Agent("root")
-		require.NoError(t, err)
-
-		assert.Zero(t, root.CompactionThreshold())
+		for _, tc := range []struct {
+			settings string
+			want     float64
+		}{
+			{"{compaction_threshold: 0.5}", 0.5},
+			{"{compaction_threshold: 1}", 1},
+			{"{}", 0},
+			{"{compaction_threshold: 0}", 0},
+			{"{compaction_threshold: 1.1}", 0},
+		} {
+			require.NoError(t, os.WriteFile(configPath, []byte("settings: "+tc.settings+"\n"), 0o600))
+			team, err := Load(t.Context(), config.NewBytesSource("threshold.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
+			require.NoError(t, err)
+			root, err := team.Agent("root")
+			require.NoError(t, err)
+			assert.InDelta(t, tc.want, root.CompactionThreshold(), 1e-9, tc.settings)
+		}
 	})
 }
 
